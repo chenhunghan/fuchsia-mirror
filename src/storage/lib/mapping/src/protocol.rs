@@ -180,27 +180,19 @@ pub const DELIVERY_REGISTER_BLOB_COMMAND: u32 = 2;
 // Layout:  | Header |  Cmd Slots  |  Padding to 4KB page  | Payload (Data & Merkle leaves)|
 // Sizes:   |  64 B  |  8,192 B    |       4,032 B         |         8,376,320 B           |
 //
-// At an 8MB VMO size, the payload space allows for an average of ~32KB per chunk/leaf block
-// in-flight for 256 outstanding commands.
+// Payload slices are variable-sized (`RegisterBlob` leaf hashes, or page-aligned `Data` chunks up
+// to the blob's `read_alignment`). At an 8MB VMO size, the 8,376,320 B payload region can hold an
+// average of ~32KB per command if all 256 command slots are occupied, or e.g. up to 63 full
+// 128KB (`TARGET_READ_AHEAD_SIZE`) data chunks before the payload buffer fills.
 pub const DELIVERY_VMO_SIZE: u64 = 8 * 1024 * 1024;
 pub const PENDING_DELIVERY_COMMANDS_CAPACITY: u32 = 256;
-
-/// The chunk size requirement for delivering payloads from the block driver across the delivery
-/// queue. The driver must supply [`DeliveryCommand::Data`] chunks where the `target_offset` and
-/// `length` align to `DELIVERY_DATA_SIZE` boundaries (unless representing the final chunk of the
-/// blob).
-///
-/// This chunk size is set as 128 KiB size, matching Fxfs's target read-ahead size. This is used to
-/// set the read size of `fuchsia_merkle::ReadSizedMerkleVerifier`, which optimizes memory usage
-/// when verifying reads. See `fuchsia_merkle::ReadSizedMerkleVerifier` for more information.
-pub const DELIVERY_DATA_SIZE: usize = 128 * 1024;
 
 /// A command packet used by the driver to deliver merkle leaves and data chunks for verification.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 pub struct RawDeliveryCommand {
     pub opcode: u32,
-    pub _padding: u32,
+    pub read_alignment: u32,
     pub key: u64,
     pub target_offset: u64,
     pub length: u32,
@@ -216,7 +208,8 @@ pub enum DeliveryCommand {
         key: u64,
         /// The logical byte offset of this data chunk in the target VMO.
         target_offset: u64,
-        /// The length of the data chunk.
+        /// The length of the data chunk in bytes. Must be a multiple of the blob's
+        /// `read_alignment` (or page-aligned for the final chunk of the blob).
         length: u32,
         /// The offset in this delivery queue where this data chunk resides.
         offset: u32,
@@ -229,6 +222,13 @@ pub enum DeliveryCommand {
         offset: u32,
         /// The length of the Merkle leaf data in bytes.
         length: u32,
+        /// The byte alignment (a multiple of the 8 KiB Merkle leaf size) used to configure
+        /// `ReadSizedMerkleVerifier` for this blob.
+        // This is needed per blob because compressed blobs adjust their read-ahead size to a
+        // multiple of their compression chunk size, and the verifier requires incoming
+        // `DeliveryCommand::Data` chunks to align to multiples of this value (except for the final
+        // chunk at EOF).
+        read_alignment: u32,
     },
 }
 
@@ -237,20 +237,22 @@ impl From<DeliveryCommand> for RawDeliveryCommand {
         match cmd {
             DeliveryCommand::Data { key, target_offset, length, offset } => RawDeliveryCommand {
                 opcode: DELIVERY_DATA_COMMAND,
-                _padding: 0,
+                read_alignment: 0,
                 key,
                 target_offset,
                 length,
                 offset,
             },
-            DeliveryCommand::RegisterBlob { key, offset, length } => RawDeliveryCommand {
-                opcode: DELIVERY_REGISTER_BLOB_COMMAND,
-                _padding: 0,
-                key,
-                target_offset: 0,
-                length,
-                offset,
-            },
+            DeliveryCommand::RegisterBlob { key, offset, length, read_alignment } => {
+                RawDeliveryCommand {
+                    opcode: DELIVERY_REGISTER_BLOB_COMMAND,
+                    read_alignment,
+                    key,
+                    target_offset: 0,
+                    length,
+                    offset,
+                }
+            }
         }
     }
 }
@@ -270,6 +272,7 @@ impl TryFrom<RawDeliveryCommand> for DeliveryCommand {
                 key: cmd.key,
                 offset: cmd.offset,
                 length: cmd.length,
+                read_alignment: cmd.read_alignment,
             }),
             _ => Err(anyhow!("Unknown opcode: {}", cmd.opcode)),
         }

@@ -5,22 +5,11 @@
 # https://opensource.org/licenses/MIT
 
 source_set("arm64") {
-  if (current_os == "win" || toolchain_variant.tags + [ "strict-align" ] -
-                             [ "strict-align" ] != toolchain_variant.tags) {
-    # This environment can't handled unaligned accesses, which the
-    # optimized assembly routines do.
-    sources = [
-      "//zircon/kernel/lib/libc/string/memcpy.c",
-      "//zircon/kernel/lib/libc/string/memset.c",
-    ]
-    deps = [ "//zircon/kernel/lib/libc:headers" ]
-  } else {
-    # These use '#include "third_party/lib/cortex-strings/src/aarch64/..."'.
-    # and '#include "third_party/lib/cortex-strings/no-neon/src/aarch64/..."'.
-    include_dirs = [ "//zircon/" ]
-    sources = [
-      "memcpy.S",
-      "memset.S",
-    ]
-  }
+  # These use '#include "third_party/lib/cortex-strings/src/aarch64/..."'.
+  # and '#include "third_party/lib/cortex-strings/no-neon/src/aarch64/..."'.
+  include_dirs = [ "//zircon/" ]
+  sources = [
+    "memcpy.S",
+    "memset.S",
+  ]
 }

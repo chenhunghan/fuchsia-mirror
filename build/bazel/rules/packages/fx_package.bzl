@@ -34,7 +34,7 @@ def _build_fuchsia_package_impl(ctx):
         ctx,
         ffx_package = ctx.executable._package_tool,
         ffx_package_is_ffx = False,
-        cmc_tool = ctx.file._cmc_tool,
+        cmc_tool = ctx.executable._cmc_tool,
         fuchsia_debug_symbol_info = fuchsia_debug_symbol_info,
         api_level = ctx.attr._current_api_level[BuildSettingInfo].value,
     )
@@ -55,9 +55,9 @@ _build_fuchsia_package = rule(
             cfg = "exec",
         ),
         "_cmc_tool": attr.label(
-            # TODO(b/519243783): Replace with a Bazel label once `cmc` is migrated to Bazel.
-            default = "@gn_targets//toolchain_host_x64/tools/cmc",
-            allow_single_file = True,
+            default = "//tools/cmc:cmc",
+            executable = True,
+            cfg = "exec",
         ),
         "_current_api_level": attr.label(
             default = "@//build/bazel/versioning:api_level",
@@ -70,9 +70,11 @@ def _fx_package_impl(
         package_name,
         archive_name,
         components,
+        test_components,
         resources,
         tools,
         subpackages,
+        testonly,
         tags,
         visibility,
         **kwargs):
@@ -80,13 +82,20 @@ def _fx_package_impl(
     # regardless of the original attribute definition's default value.
     #
     # See https://bazel.build/extending/macros#attribute-inheritance.
+    if test_components:
+        if testonly != None and not testonly:
+            fail("`fx_package()` targets with `test_components` are always testonly.")
+        testonly = True
     tags = tags or []
-    _deps_to_search = (components or []) + (resources or []) + (tools or [])
+    _deps_to_search = (
+        (components or []) + (test_components or []) + (resources or []) + (tools or [])
+    )
 
     processed_binaries = "%s_fuchsia_package.elf_binaries" % name
     find_and_process_unstripped_binaries(
         name = processed_binaries,
         deps = _deps_to_search,
+        testonly = testonly,
         tags = tags + ["manual"],
     )
 
@@ -94,12 +103,14 @@ def _fx_package_impl(
     fuchsia_find_all_package_resources(
         name = collected_resources,
         deps = _deps_to_search,
+        testonly = testonly,
         tags = tags + ["manual"],
     )
 
     _build_fuchsia_package(
         name = name,
         components = components,
+        test_components = test_components,
         resources = resources,
         processed_binaries = processed_binaries,
         collected_resources = collected_resources,
@@ -107,6 +118,7 @@ def _fx_package_impl(
         subpackages = subpackages,
         package_name = package_name or name,
         archive_name = archive_name,
+        testonly = testonly,
         tags = tags,
         visibility = visibility,
         **kwargs

@@ -375,9 +375,9 @@ TEST_F(ClockTest, HandleDuplicates) {
 
   // Suffixes added for duplicate entries.
   zx::result clk2_0_client_end =
-      driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-2_1");
+      driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-2-0");
   zx::result clk2_1_client_end =
-      driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-2_3");
+      driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-2-1");
   EXPECT_TRUE(clk2_0_client_end.is_ok());
   EXPECT_TRUE(clk2_1_client_end.is_ok());
 
@@ -426,10 +426,10 @@ TEST_F(ClockTest, GenericMetadataTest) {
 
   InitGeneric(std::move(nodes));
 
-  zx::result clk1 = driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-1_10");
+  zx::result clk1 = driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-1");
   EXPECT_TRUE(clk1.is_ok());
 
-  zx::result clk2 = driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-2_20");
+  zx::result clk2 = driver_test().Connect<fuchsia_hardware_clock::Service::Clock>("clock-2");
   EXPECT_TRUE(clk2.is_ok());
 }
 

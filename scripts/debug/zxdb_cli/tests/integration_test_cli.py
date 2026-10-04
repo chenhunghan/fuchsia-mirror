@@ -29,10 +29,12 @@ async def _cleanup_process_group(proc: subprocess.Popen[Any] | None) -> None:
     if proc is None:
         return
 
-    if getattr(proc, "stdout_file", None) and not proc.stdout_file.closed:  # type: ignore
-        proc.stdout_file.close()  # type: ignore
-    if getattr(proc, "stderr_file", None) and not proc.stderr_file.closed:  # type: ignore
-        proc.stderr_file.close()  # type: ignore
+    stdout_file = getattr(proc, "stdout_file", None)
+    if stdout_file and not stdout_file.closed:
+        stdout_file.close()
+    stderr_file = getattr(proc, "stderr_file", None)
+    if stderr_file and not stderr_file.closed:
+        stderr_file.close()
 
     if proc.poll() is None:
         try:
@@ -49,12 +51,17 @@ async def _cleanup_process_group(proc: subprocess.Popen[Any] | None) -> None:
             pass
 
 
-class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
+class FakeDapServerMixin(unittest.IsolatedAsyncioTestCase):
+    """Mixin providing fake DAP server and daemon setup for CLI tests."""
+
+    fake_dap_server: asyncio.AbstractServer | None
+    received_dap_requests: list[dict[str, Any]]
+
     async def asyncSetUp(self) -> None:
         if UDS_PATH.exists():
             UDS_PATH.unlink()
-        self.fake_dap_server: asyncio.AbstractServer | None = None
-        self.received_dap_requests: list[dict[str, Any]] = []
+        self.fake_dap_server = None
+        self.received_dap_requests = []
 
     async def asyncTearDown(self) -> None:
         if self.fake_dap_server:
@@ -62,6 +69,14 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
             await self.fake_dap_server.wait_closed()
         if UDS_PATH.exists():
             UDS_PATH.unlink()
+
+    def get_daemon_path(self, current_dir: str) -> str:
+        """Returns the filesystem path to the daemon binary under test."""
+        return os.path.join(current_dir, "zxdb-daemon")
+
+    def get_daemon_cmd(self, args: list[str]) -> list[str]:
+        """Returns the command line invocation used to launch the daemon."""
+        return [sys.executable] + args
 
     async def start_fake_dap_server(self, port: int) -> asyncio.AbstractServer:
         async def handle_client(
@@ -314,9 +329,9 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
             os.set_inheritable(write_fd, True)
 
             # Start Daemon manually
-            # Tests are always run as a .pyz file, so sys.path[0] is the path to the .pyz archive.
+            # Tests are run as a .pyz file, so sys.path[0] is the .pyz archive.
             current_dir = os.path.dirname(sys.path[0])
-            daemon_path = os.path.join(current_dir, "zxdb-daemon")
+            daemon_path = self.get_daemon_path(current_dir)
             args = [
                 daemon_path,
                 "--port",
@@ -327,7 +342,7 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
             # zxdb-daemon expects to be executed from the context of fuchsia-vendored-python, which is
             # also how this test is always invoked. So it's safe for us to use our own interpreter to
             # invoke the zxdb-daemon as well.
-            cmd = [sys.executable] + args
+            cmd = self.get_daemon_cmd(args)
             stdout_file = tempfile.TemporaryFile()
             stderr_file = tempfile.TemporaryFile()
 
@@ -442,9 +457,11 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
                 )
             raise
 
+
+class TestCLIIntegration(FakeDapServerMixin):
     async def test_daemon_lifecycle(self) -> None:
         """Tests that the daemon starts and stops correctly."""
-        proc, port = await self._setup_daemon_and_server()
+        proc, _port = await self._setup_daemon_and_server()
 
         try:
             # Stop via CLI
@@ -548,7 +565,7 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
         """Tests the versioned hello handshake."""
 
         async def run_test() -> None:
-            proc, port = await self._setup_daemon_and_server()
+            proc, _port = await self._setup_daemon_and_server()
 
             try:
                 # Test valid version
@@ -615,7 +632,7 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
             self.fail("Test timed out")
 
     async def test_pause_continue(self) -> None:
-        proc, port = await self._setup_daemon_and_server()
+        proc, _port = await self._setup_daemon_and_server()
 
         try:
             # Test Pause
@@ -634,7 +651,7 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
             await _cleanup_process_group(proc)
 
     async def test_stack_trace(self) -> None:
-        proc, port = await self._setup_daemon_and_server()
+        proc, _port = await self._setup_daemon_and_server()
 
         try:
             f = StringIO()
@@ -898,7 +915,7 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_stop_detaches_existing_session(self) -> None:
         """Tests that stopping the daemon detaches from all processes if connected to existing."""
         # _setup_daemon_and_server starts fake DAP, starts daemon, and connects
-        proc, port = await self._setup_daemon_and_server()
+        proc, _port = await self._setup_daemon_and_server()
 
         try:
             # Stop via CLI
@@ -928,7 +945,7 @@ class TestCLIIntegration(unittest.IsolatedAsyncioTestCase):
             await _cleanup_process_group(proc)
 
     async def test_evaluate_command(self) -> None:
-        proc, port = await self._setup_daemon_and_server()
+        proc, _port = await self._setup_daemon_and_server()
 
         try:
             exit_code = await main(["pause", "-t", "1"])

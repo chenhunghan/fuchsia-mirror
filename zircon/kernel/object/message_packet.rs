@@ -344,11 +344,6 @@ impl MessagePacket {
         cmp::min(CONTIGUOUS_SIZE - self.payload_offset(), self.data_size as usize)
     }
 
-    #[inline]
-    fn in_container(&self) -> bool {
-        self.node.in_container()
-    }
-
     /// Returns a const pointer to the array of handle pointers attached to this message packet.
     #[inline]
     pub fn handles(&self) -> *const *mut c_void {
@@ -423,8 +418,6 @@ impl MessagePacket {
 impl Drop for MessagePacket {
     #[inline]
     fn drop(&mut self) {
-        debug_assert!(!self.in_container());
-
         if self.owns_handles {
             self.drop_handles();
         }
@@ -460,12 +453,6 @@ impl MessagePacketPtr {
         let ptr = self.ptr.as_ptr();
         mem::forget(self);
         ptr
-    }
-
-    /// Returns the underlying raw pointer.
-    #[inline]
-    pub fn as_ptr(&self) -> *mut MessagePacket {
-        self.ptr.as_ptr()
     }
 }
 
@@ -520,43 +507,6 @@ impl Drop for MessagePacketPtr {
     }
 }
 
-/// Creates a `MessagePacket` with userspace payload data and space for `num_handles` handles.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_create_user(
-    data_uaddr: usize,
-    data_size: usize,
-    num_handles: usize,
-    out: &mut *mut MessagePacket,
-) -> zx_types::zx_status_t {
-    let user_in = UserInPtr::new(ptr::with_exposed_provenance::<u8>(data_uaddr));
-    match MessagePacket::create_from_user(user_in, data_size, num_handles) {
-        Ok(packet) => {
-            *out = packet.into_raw();
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// Creates a `MessagePacket` from userspace iovecs and space for `num_handles` handles.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_create_iovecs(
-    iovecs_uaddr: usize,
-    num_iovecs: usize,
-    num_handles: usize,
-    out: &mut *mut MessagePacket,
-) -> zx_types::zx_status_t {
-    let user_iovecs =
-        UserInPtr::new(ptr::with_exposed_provenance::<zx_channel_iovec_t>(iovecs_uaddr));
-    match MessagePacket::create_from_iovecs(user_iovecs, num_iovecs, num_handles) {
-        Ok(packet) => {
-            *out = packet.into_raw();
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
 /// Creates a `MessagePacket` with kernel payload data and space for `num_handles` handles.
 ///
 /// # Safety
@@ -589,7 +539,7 @@ pub unsafe extern "C" fn rust_message_packet_create_kernel(
 /// # Safety
 ///
 /// `packet` must be null or a valid, uniquely owned pointer returned by
-/// one of the `rust_message_packet_create_*` functions.
+/// `rust_message_packet_create_kernel`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_message_packet_delete(packet: *mut MessagePacket) {
     if !packet.is_null() {
@@ -600,35 +550,10 @@ pub unsafe extern "C" fn rust_message_packet_delete(packet: *mut MessagePacket) 
     }
 }
 
-/// Copies payload data to userspace memory.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_copy_data_to(
-    packet: &MessagePacket,
-    buf_uaddr: usize,
-) -> zx_types::zx_status_t {
-    let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(buf_uaddr));
-    match packet.copy_data_to(user_out) {
-        Ok(()) => zx_types::ZX_OK,
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// Returns the size of the payload in bytes.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_get_data_size(packet: &MessagePacket) -> usize {
-    packet.data_size()
-}
-
 /// Returns the number of handles attached to the packet.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_message_packet_get_num_handles(packet: &MessagePacket) -> usize {
     packet.num_handles()
-}
-
-/// Returns a const pointer to the attached handle pointers.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_get_handles(packet: &MessagePacket) -> *const *mut c_void {
-    packet.handles()
 }
 
 /// Returns a mutable pointer to the attached handle pointers.
@@ -648,30 +573,6 @@ pub extern "C" fn rust_message_packet_set_owns_handles(
     packet.set_owns_handles(owns_handles);
 }
 
-/// Returns the transaction ID from the packet payload.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_get_txid(packet: &MessagePacket) -> zx_txid_t {
-    packet.get_txid()
-}
-
-/// Sets the transaction ID in the packet payload.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_set_txid(packet: &mut MessagePacket, txid: zx_txid_t) {
-    packet.set_txid(txid);
-}
-
-/// Returns the first contiguous chunk of the payload.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_get_start_of_payload(
-    packet: &MessagePacket,
-    out_ptr: &mut *const u8,
-    out_len: &mut usize,
-) {
-    let slice = packet.start_of_payload();
-    *out_ptr = slice.as_ptr();
-    *out_len = slice.len();
-}
-
 /// In-tree kernel unit tests for `MessagePacket`.
 #[cfg(ktest)]
 #[unittest::suite(name = "message_packet_rust")]
@@ -688,19 +589,7 @@ mod tests {
     use unittest::{expect_eq, expect_false, expect_ok, expect_true, unwrap_ok};
     use zerocopy::IntoBytes;
     use zx_status::Status;
-    use zx_types::{
-        ZX_CHANNEL_MAX_MSG_BYTES, ZX_CHANNEL_MAX_MSG_HANDLES, zx_channel_iovec_t, zx_txid_t,
-    };
-
-    /// FIDL wire format header structure.
-    #[repr(C)]
-    #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
-    struct FidlHeader {
-        txid: zx_txid_t,
-        flags: [u8; 3],
-        magic: u8,
-        ordinal: u64,
-    }
+    use zx_types::{ZX_CHANNEL_MAX_MSG_BYTES, ZX_CHANNEL_MAX_MSG_HANDLES, zx_channel_iovec_t};
 
     fn create_user_memory(size: usize) -> Result<UserMemory, Status> {
         let mem = UserMemory::create(size).ok_or(Status::NO_MEMORY)?;
@@ -1094,25 +983,14 @@ mod tests {
         expect_true!(start == payload);
     }
 
-    /// Tests FidlHeader layout and defaults.
-    #[test]
-    fn test_fidl_header() {
-        let header = FidlHeader::default();
-        expect_eq!(header.txid, 0);
-        expect_true!(header.flags == [0, 0, 0]);
-        expect_eq!(header.magic, 0);
-        expect_eq!(header.ordinal, 0);
-        expect_eq!(size_of::<FidlHeader>(), 16);
-    }
-
     /// Tests MessagePacket with DoublyLinkedList and in_container check.
     #[test]
     fn test_message_packet_doubly_linked_list() {
         let packet1 = unwrap_ok!(MessagePacket::create_from_kernel(b"first", 0));
         let packet2 = unwrap_ok!(MessagePacket::create_from_kernel(b"second", 0));
 
-        expect_false!(packet1.in_container());
-        expect_false!(packet2.in_container());
+        expect_false!(packet1.node.in_container());
+        expect_false!(packet2.node.in_container());
 
         stack_pin_init!(let list = DoublyLinkedList::<MessagePacketPtr>::new());
         let list = unsafe { list.get_unchecked_mut() };
@@ -1124,11 +1002,11 @@ mod tests {
 
         let popped1 = list.pop_front().expect("expected packet1");
         expect_eq!(popped1.data_size(), 5);
-        expect_false!(popped1.in_container());
+        expect_false!(popped1.node.in_container());
 
         let popped2 = list.pop_front().expect("expected packet2");
         expect_eq!(popped2.data_size(), 6);
-        expect_false!(popped2.in_container());
+        expect_false!(popped2.node.in_container());
 
         expect_true!(list.is_empty());
     }

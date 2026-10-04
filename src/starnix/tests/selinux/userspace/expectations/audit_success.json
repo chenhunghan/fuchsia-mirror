@@ -253,6 +253,33 @@
             ]
         },
         {
+            "name": "CapabilitiesTest.ChmodSgidChecksFsgid",
+            "audit_expectations": [
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0",
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "CapabilitiesTest.ChmodSgidDifferentOwnerAndGroup",
+            "audit_expectations": [
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0",
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "CapabilitiesTest.ChmodSgidSameOwnerDifferentGroup",
+            "audit_expectations": [
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0",
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "CapabilitiesTest.CreateFileInSgidDirRequiresFsetid",
+            "audit_expectations": [
+                "avc:  denied  { fsetid } for capability=4  scontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tcontext=test_u:test_r:test_fowner_without_fsetid_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
             "name": "CapabilitiesTest.GetCapDenied",
             "audit_expectations": [
                 "avc:  denied  { getcap } for scontext=test_u:test_r:test_deny_getcap_self_t:s0 tcontext=test_u:test_r:test_deny_getcap_self_t:s0 tclass=process permissive=0"
@@ -1872,6 +1899,32 @@
             "name": "PtraceTest.PtraceAttachThenExecDenied",
             "audit_expectations": [
                 "avc:  denied  { ptrace } for scontext=test_u:test_r:test_ptrace_parent_deny_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0"
+            ]
+        },
+        {
+            "name": "PtraceTest.PtraceExecProcessCheckUsesCurrentCreds",
+            "audit_expectations": [
+                "avc:  denied  { ptrace } for scontext=test_u:test_r:test_ptrace_parent_deny_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { rlimitinh } for scontext=test_u:test_r:test_ptrace_parent_deny_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { siginh } for scontext=test_u:test_r:test_ptrace_parent_deny_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0"
+            ]
+        },
+        {
+            "name": "PtraceTest.PtraceExecSelinuxCapCheckUsesCachedCreds",
+            "audit_expectations": [
+                "avc:  denied  { rlimitinh } for scontext=test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { siginh } for scontext=test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { rlimitinh } for scontext=test_u:test_r:test_ptrace_parent_allow_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { siginh } for scontext=test_u:test_r:test_ptrace_parent_allow_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0"
+            ]
+        },
+        {
+            "name": "PtraceTest.PtraceExecVanillaCapCheckUsesCachedCreds",
+            "audit_expectations": [
+                "avc:  denied  { rlimitinh } for scontext=test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { siginh } for scontext=test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { rlimitinh } for scontext=test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
+                "avc:  denied  { siginh } for scontext=test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0"
             ]
         },
         {

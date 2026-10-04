@@ -28,6 +28,8 @@ const LOCAL_TRACE: u32 = 0;
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch_rs::x86::registers::{X86_MSR_IA32_FS_BASE, X86_MSR_IA32_KERNEL_GS_BASE};
+#[cfg(target_arch = "x86_64")]
+use crate::arch_rs::x86::vm::is_vaddr_canonical;
 
 #[cfg(target_arch = "x86_64")]
 use zx_types::{ZX_PROP_REGISTER_FS, ZX_PROP_REGISTER_GS};
@@ -206,7 +208,7 @@ pub fn sys_object_set_property(
         ZX_PROP_REGISTER_FS | ZX_PROP_REGISTER_GS => {
             require_current_thread(&dispatcher)?;
             let addr = copy_scalar_from_user::<usize>(value, size)?;
-            if !crate::arch_rs::x86::is_vaddr_canonical(addr as u64) {
+            if !is_vaddr_canonical(addr) {
                 return Err(Status::INVALID_ARGS);
             }
             // SAFETY: Writing canonical virtual address to valid MSR on current thread.

@@ -35,34 +35,13 @@ if (is_host) {
 
 fidl("fuchsia.ui.gfx") {
   sources = [
-    "commands.fidl",
-    "display_info.fidl",
-    "events.fidl",
-    "nodes.fidl",
     "overview.fidl",
-    "pose_buffer_provider.fidl",
-    "renderer.fidl",
-    "resources.fidl",
-    "shapes.fidl",
-    "tokens.fidl",
     "types.fidl",
   ]
   sdk_area = "Graphics"
   sdk_category = "partner"
   enable_hlcpp = true
-  excluded_checks = [
-    "invalid-case-for-constant",
-    "invalid-case-for-decl-name",
-    "string-bounds-not-specified",
-    "vector-bounds-not-specified",
-  ]
+  excluded_checks = [ "invalid-case-for-decl-name" ]
   stable = true
   visibility = [ "*" ]
-  public_deps = [
-    "//sdk/fidl/fuchsia.images",
-    "//sdk/fidl/fuchsia.mem",
-    "//sdk/fidl/fuchsia.ui.composition",
-    "//sdk/fidl/fuchsia.ui.views",
-    "//zircon/vdso/zx",
-  ]
 }

@@ -5,7 +5,7 @@
 use anyhow::Result;
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_driver_development::ManagerProxy;
-use fidl_fuchsia_driver_framework::{NodePropertyKey, NodePropertyValue};
+use fidl_fuchsia_driver_framework::NodePropertyValue;
 use fidl_fuchsia_driver_test::RealmArgs;
 use fidl_fuchsia_hardware_i2c as i2c;
 use fuchsia_component::client::Service;
@@ -46,7 +46,7 @@ async fn test_sample_driver() -> Result<()> {
     let Some(node) = nodes.into_iter().next() else {
         panic!("could not find the 'transport-child' node");
     };
-    let expected_key = NodePropertyKey::StringValue("fuchsia.test.TEST_CHILD".to_owned());
+    let expected_key = "fuchsia.test.TEST_CHILD";
     let expected_value = NodePropertyValue::StringValue(device_name);
     let prop_found = node
         .node_property_list

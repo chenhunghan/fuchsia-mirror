@@ -29,9 +29,8 @@ class ExamplePowerSystemIntegrationTest : public system_integration_utils::TestL
         .properties =
             {
                 {
-                    fuchsia_driver_framework::NodeProperty{
-                        fuchsia_driver_framework::NodePropertyKey::WithStringValue(
-                            "fuchsia.test.TEST_CHILD"),
+                    fuchsia_driver_framework::NodeProperty2{
+                        "fuchsia.test.TEST_CHILD",
                         fuchsia_driver_framework::NodePropertyValue::WithStringValue(
                             "power-system-integration-example-test-driver")},
                 },

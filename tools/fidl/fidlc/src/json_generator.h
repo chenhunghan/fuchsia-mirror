@@ -70,6 +70,7 @@ class JSONGenerator : public JsonWriter<JSONGenerator> {
 
   void Generate(HandleSubtype value);
   void Generate(Nullability value);
+  void Generate(Zeroability value);
   void Generate(Strictness value);
   void Generate(Openness value);
   void Generate(TransportSide value);

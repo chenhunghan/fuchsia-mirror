@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 import typing as T
 from pathlib import Path
@@ -221,14 +220,12 @@ class DebugSymbolsManifestParser(object):
         if debug:
             if self._resolve_build_id and "elf_build_id" not in entry:
                 # Resolve build-id value, and skip entries for which this is
-                # not possible, e.g. Go host tools, and some special Zircon
-                # binaries.
+                # not possible. This is expected and not worth logging since
+                # it covers hundreds of entries in a typical build, e.g. Go
+                # binaries and special Zircon binaries like hermetic code
+                # blobs.
                 build_id = self._resolve_entry_build_id(entry)
                 if not build_id:
-                    print(
-                        f"MISSING build-id FOR {entry}",
-                        file=sys.stderr,
-                    )
                     return
                 entry["elf_build_id"] = build_id
 
@@ -328,6 +325,8 @@ class DebugSymbolsManifestParser(object):
 
         Deduplication verifies that there are no conflicts between entries pointing
         to the same "debug" path, and merges the keys to keep all information.
+        Differing "label" values are not considered conflicts, and the first
+        one is kept.
 
         This updates self._entries and should be called after a call to
         parse_manifest_json() or parse_manifest_file().
@@ -336,7 +335,7 @@ class DebugSymbolsManifestParser(object):
             ValueError when duplicates are found. The exception string contains
             a newline-separated list of error messages.
         """
-        debug_to_entries: dict[str, T.Any] = {}
+        debug_to_entries: dict[str, DebugSymbolEntryType] = {}
         errors: list[str] = []
         new_entries = []
         for entry in self._entries:
@@ -363,7 +362,11 @@ class DebugSymbolsManifestParser(object):
                     continue
                 if cur_value == "":
                     cur_entry[key] = new_value
-                elif new_value != "":
+                elif new_value != "" and key != "label":
+                    # A single binary can legitimately be referenced by
+                    # multiple targets, e.g. a Bazel cc_binary used as the
+                    # `binary` of several host_test() targets, so differing
+                    # labels are not a conflict. Keep the first one.
                     errors.append(
                         f"Incompatible '{key}' value between {cur_entry} and {entry}"
                     )
@@ -372,7 +375,7 @@ class DebugSymbolsManifestParser(object):
             if cur_entry.get("elf_build_id") and cur_entry.get(
                 "elf_build_id_file"
             ):
-                cur_entry.drop("elf_build_id_file", None)
+                cur_entry.pop("elf_build_id_file", None)
 
         if errors:
             raise ValueError("\n".join(errors))

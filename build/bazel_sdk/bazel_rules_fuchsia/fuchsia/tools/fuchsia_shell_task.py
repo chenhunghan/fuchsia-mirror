@@ -5,9 +5,14 @@
 
 import os
 import subprocess
+from pathlib import Path
 from shutil import which
 
-from fuchsia.tools.fuchsia_task_lib import *
+from fuchsia.tools.fuchsia_task_lib import (
+    FuchsiaTask,
+    ScopedArgumentParser,
+    TaskExecutionException,
+)
 
 
 class FuchsiaShellTask(FuchsiaTask):

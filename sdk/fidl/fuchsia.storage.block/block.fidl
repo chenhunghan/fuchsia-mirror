@@ -164,6 +164,21 @@ closed protocol Session {
             id uint16;
         };
     }) error zx.Status;
+
+    /// Registers an inline encryption key handle (`key_token` returned by
+    /// `fuchsia.hardware.inlineencryption/Device.ProgramKey`) with this session.
+    ///
+    /// Returns a session-scoped `slot` token that can be passed in
+    /// `BlockFifoRequest.slot` when `BlockIoFlag.INLINE_ENCRYPTION_ENABLED` is set.
+    ///
+    /// * error `ZX_ERR_ACCESS_DENIED` if `key_token` is not a valid inline encryption key token
+    ///   for this block device, or if the key has been evicted.
+    /// * error `ZX_ERR_NOT_SUPPORTED` if the device does not support inline encryption.
+    strict RegisterKey(resource struct {
+        key_token zx.Handle:EVENTPAIR;
+    }) -> (struct {
+        slot uint8;
+    }) error zx.Status;
 };
 
 type DeviceFlag = strict bits : uint32 {
@@ -304,7 +319,7 @@ closed protocol VolumeManager {
         name string:NAME_LENGTH;
         flags uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Gets the VolumeManagerInfo describing this instance of the `VolumeManager`.
@@ -315,7 +330,7 @@ closed protocol VolumeManager {
     ///
     /// See https://fxbug.dev/42077585 for more information.
     strict GetInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         info box<VolumeManagerInfo>;
     });
 
@@ -338,7 +353,7 @@ closed protocol VolumeManager {
         old_guid Guid;
         new_guid Guid;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Retrieves the allocation limit for the partition. A return value of 0 indicates that there
@@ -353,7 +368,7 @@ closed protocol VolumeManager {
     strict GetPartitionLimit(struct {
         guid Guid;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         slice_count uint64;
     });
 
@@ -372,7 +387,7 @@ closed protocol VolumeManager {
         guid Guid;
         slice_count uint64;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Renames the specified partition. Any existing devices that include the name of the partition
@@ -458,21 +473,21 @@ closed protocol Block {
     /// Gets the type GUID of the partition (if one exists).
     /// If the partition has no type GUID, ZX_ERR_NOT_SUPPORTED is returned.
     strict GetTypeGuid() -> (struct {
-        status zx.Status;
+        status zx.Result;
         guid box<Guid>;
     });
 
     /// Gets the instance GUID of the partition (if one exists).
     /// If the partition has no instance GUID, ZX_ERR_NOT_SUPPORTED is returned.
     strict GetInstanceGuid() -> (struct {
-        status zx.Status;
+        status zx.Result;
         guid box<Guid>;
     });
 
     /// Gets the name of the partition (if one exists).
     /// If the partition has no name, ZX_ERR_NOT_SUPPORTED is returned.
     strict GetName() -> (struct {
-        status zx.Status;
+        status zx.Result;
         name string:<NAME_LENGTH, optional>;
     });
 
@@ -490,7 +505,7 @@ closed protocol Block {
     strict QuerySlices(struct {
         start_slices vector<uint64>:MAX_SLICE_REQUESTS;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         response array<VsliceRange, MAX_SLICE_REQUESTS>;
         response_count uint64;
     });
@@ -499,7 +514,7 @@ closed protocol Block {
     ///
     /// Returns ZX_ERR_NOT_SUPPORTED if the device is not a volume.
     strict GetVolumeInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         manager box<VolumeManagerInfo>;
         volume box<VolumeInfo>;
     });
@@ -515,7 +530,7 @@ closed protocol Block {
         start_slice uint64;
         slice_count uint64;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Shrinks a virtual partition. Returns `ZX_OK` if ANY slices are
@@ -526,7 +541,7 @@ closed protocol Block {
         start_slice uint64;
         slice_count uint64;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Destroys the current volume, removing it from the VolumeManager, and
@@ -534,7 +549,7 @@ closed protocol Block {
     ///
     /// Returns ZX_ERR_NOT_SUPPORTED if the device is not a volume.
     strict Destroy() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

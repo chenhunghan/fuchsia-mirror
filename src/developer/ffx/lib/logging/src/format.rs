@@ -14,8 +14,7 @@ impl LogTimer {
     }
 }
 
-/// Implements a compact formatter which also knows about tags.
-#[allow(dead_code)]
+/// Implements a compact formatter.
 #[derive(Default)]
 pub struct FormatOpts {
     pub(crate) id: u64,
@@ -23,7 +22,6 @@ pub struct FormatOpts {
     pub(crate) display_filename: bool,
     pub(crate) display_line_number: bool,
     display_target: bool,
-    tags: Vec<String>,
     pub(crate) timer: LogTimer,
 }
 

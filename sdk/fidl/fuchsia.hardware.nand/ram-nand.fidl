@@ -76,7 +76,7 @@ closed protocol RamNandCtl {
     strict CreateDevice(resource struct {
         info RamNandInfo;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         name string:NAME_LEN;
     });
 };
@@ -84,6 +84,6 @@ closed protocol RamNandCtl {
 closed protocol RamNand {
     /// Removes the device.
     strict Unlink() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

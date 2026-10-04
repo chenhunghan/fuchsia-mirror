@@ -126,7 +126,7 @@ fn no_loopback_addrs_on_the_wire<I: IpLayerIpExt + TestIpExt>() {
         &MultipleDevicesId::A,
         IpPacketDestination::Neighbor(I::TEST_ADDRS.remote_ip),
         frame,
-        IpLayerPacketMetadata::default(),
+        IpLayerPacketMetadata::new_empty(),
         Mtu::no_limit(),
     )
     .map_err(|e| e.into_err());
@@ -459,7 +459,7 @@ fn send_respects_device_mtu<I: IpLayerIpExt + TestIpExt>() {
         &mut bindings_ctx,
         meta.clone(),
         body.clone(),
-        IpLayerPacketMetadata::default(),
+        IpLayerPacketMetadata::new_empty(),
     )
     .expect("send ip packet");
     let [((), frame)] = core_ctx.frames.take_frames().try_into().expect("more than one frame sent");
@@ -474,7 +474,7 @@ fn send_respects_device_mtu<I: IpLayerIpExt + TestIpExt>() {
             &mut bindings_ctx,
             meta.clone(),
             body.clone(),
-            IpLayerPacketMetadata::default(),
+            IpLayerPacketMetadata::new_empty(),
         )
         .map_err(|ErrorAndSerializer { error, serializer: _ }| error),
         Err(IpSendFrameErrorReason::Device(SendFrameErrorReason::SizeConstraintsViolation))
@@ -487,7 +487,7 @@ fn send_respects_device_mtu<I: IpLayerIpExt + TestIpExt>() {
         &mut bindings_ctx,
         meta,
         body,
-        IpLayerPacketMetadata::default(),
+        IpLayerPacketMetadata::new_empty(),
     )
     .expect("send ip packet")
 }
@@ -569,4 +569,23 @@ fn test_ip_layer_packet_metadata_multicast_and_device_conversion<
     assert_eq!(marks_rem, marks);
     assert_eq!(sock_rem, Some(socket_info));
     assert_eq!(gso_rem, Some(gso_info));
+}
+
+#[test]
+fn test_device_ip_layer_metadata_split_for_multiple_frames() {
+    let marks = Marks::new([(MarkDomain::Mark1, 100), (MarkDomain::Mark2, 200)]);
+    let meta = DeviceIpLayerMetadata::<FakeBindingsCtx>::with_marks(marks);
+
+    // Verify `split_for_multiple_frames` preserves shareable metadata across
+    // multiple splits.
+    let SplitDeviceIpLayerMetadata { primary: meta, secondary: split1 } =
+        meta.split_for_multiple_frames();
+    let SplitDeviceIpLayerMetadata { primary: meta, secondary: split2 } =
+        meta.split_for_multiple_frames();
+
+    for m in [split1, split2, meta] {
+        let DeviceIpLayerMetadata { conntrack_entry, tx_metadata: _, marks: split_marks } = m;
+        assert_eq!(split_marks, marks);
+        assert_matches!(conntrack_entry, None);
+    }
 }

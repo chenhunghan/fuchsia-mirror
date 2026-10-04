@@ -278,13 +278,6 @@ func genArgs(
 		vars["disable_xattr_for_rbe"] = staticSpec.DisableXattrForRbe
 	}
 
-	if staticSpec.BuildEventService != "" {
-		vars["bazel_upload_build_events"] = staticSpec.BuildEventService
-	}
-	if staticSpec.BuildEventServiceNinja != "" {
-		vars["ninja_upload_build_events"] = staticSpec.BuildEventServiceNinja
-	}
-
 	if staticSpec.Product != "" {
 		basename := filepath.Base(staticSpec.Product)
 		vars["build_info_product"] = strings.Split(basename, ".")[0]

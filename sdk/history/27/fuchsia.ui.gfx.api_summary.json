@@ -17,22 +17,6 @@
     },
     {
         "kind": "struct/member",
-        "name": "fuchsia.ui.gfx/DisplayInfo.height_in_px",
-        "ordinal": "2",
-        "type": "uint32"
-    },
-    {
-        "kind": "struct/member",
-        "name": "fuchsia.ui.gfx/DisplayInfo.width_in_px",
-        "ordinal": "1",
-        "type": "uint32"
-    },
-    {
-        "kind": "struct",
-        "name": "fuchsia.ui.gfx/DisplayInfo"
-    },
-    {
-        "kind": "struct/member",
         "name": "fuchsia.ui.gfx/mat4.matrix",
         "ordinal": "1",
         "type": "array<float32,16>"

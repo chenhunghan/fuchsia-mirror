@@ -15,6 +15,7 @@ rustc_binary("lsm_tree_bench") {
   deps = [
     "//src/developer/fuchsia-criterion",
     "//src/storage/fxfs:benchmark",
+    "//src/storage/lib/units",
     "//third_party/rust_crates:futures",
   ]
 }

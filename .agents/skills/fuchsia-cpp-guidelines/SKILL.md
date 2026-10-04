@@ -1,13 +1,14 @@
 ---
 name: fuchsia-cpp-guidelines
-description: How to do a code review of Fuchsia C++ code
+description: >
+  Fuchsia C++ code quality, safety, and style guidelines. Use when evaluating
+  Fuchsia C++ code for undefined behavior (UB), lifetime/nullability flaws,
+  atomic/memory ordering issues, or compliance with Fuchsia C++ and Zircon
+  container guidelines. Intended for use by review agents and orchestrators.
+  Do NOT use as a standalone review orchestrator (use /review instead).
 ---
 
 # Fuchsia C++ Review Guidelines
-
-## When to use this skill
-
-Use this skill when you are asked to do a code review of Fuchsia C++ code.
 
 ## Persona
 
@@ -18,10 +19,10 @@ for an operating system.
 
 You need to review the provided inputs from several angles. You are looking for:
 
-1. Ways the user may have made mistakes in their code.
-1. Ways the user could have matched the surrounding code style and conventions
-   more closely.
-1. Teaching opportunities for the user's command of C++ to improve.
+1.  Ways the user may have made mistakes in their code.
+1.  Ways the user could have matched the surrounding code style and conventions
+    more closely.
+1.  Teaching opportunities for the user's command of C++ to improve.
 
 ### 1. Looking for mistakes
 

@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
+import("//build/rust/rustc_library.gni")
+
+group("tests") {
+  testonly = true
+  deps = [ ":fdomain-uart-driver-tests" ]
+}
+
+rustc_library("lib") {
+  name = "fdomain_uart_driver_lib"
+  edition = "2024"
+  with_unit_tests = true
+
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
+    "//src/developer/lib/uart_fpl",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:thiserror",
+  ]
+
+  test_deps = [ "//src/lib/fuchsia" ]
+
+  sources = [
+    "src/error.rs",
+    "src/lib.rs",
+    "src/receiver.rs",
+    "src/sender.rs",
+    "src/serial.rs",
+  ]
+}
+
+rustc_binary("bin") {
+  output_name = "fdomain_uart_driver"
+  edition = "2024"
+
+  deps = [
+    ":lib",
+    "//src/lib/fuchsia",
+  ]
+
+  sources = [ "src/main.rs" ]
+}
+
+fuchsia_component("component") {
+  component_name = "fdomain-uart-driver"
+  manifest = "meta/fdomain_uart_driver.cml"
+  deps = [ ":bin" ]
+}
+
+fuchsia_unittest_package("fdomain-uart-driver-tests") {
+  deps = [ ":lib_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}

@@ -7,6 +7,8 @@
 from .client import DapClient, DapError
 from .dap_types import (
     DapBaseModel,
+    DataBreakpoint,
+    DataBreakpointAccessType,
     Scope,
     StackFrame,
     SteppingGranularity,
@@ -17,6 +19,9 @@ from .models import (
     ContinueArguments,
     ContinueResponse,
     ContinueResponseBody,
+    DataBreakpointInfoArguments,
+    DataBreakpointInfoResponse,
+    DataBreakpointInfoResponseBody,
     DisconnectArguments,
     Event,
     InitializeArguments,
@@ -27,6 +32,9 @@ from .models import (
     Response,
     ScopesArguments,
     ScopesResponse,
+    SetDataBreakpointsArguments,
+    SetDataBreakpointsResponse,
+    SetDataBreakpointsResponseBody,
     StackTraceArguments,
     StackTraceResponse,
     StepInArguments,

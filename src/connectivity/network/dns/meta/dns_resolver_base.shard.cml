@@ -15,6 +15,7 @@
                 "fuchsia.net.name.Lookup",
                 "fuchsia.net.name.LookupAdmin",
             ],
+            delivery: "on_readable",
         },
     ],
     use: [

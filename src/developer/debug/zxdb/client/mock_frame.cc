@@ -17,6 +17,7 @@
 #include "src/developer/debug/zxdb/symbols/function.h"
 #include "src/developer/debug/zxdb/symbols/mock_symbol_data_provider.h"
 #include "src/developer/debug/zxdb/symbols/namespace.h"
+#include "src/developer/debug/zxdb/symbols/process_symbols.h"
 #include "src/developer/debug/zxdb/symbols/source_file_provider.h"
 
 namespace zxdb {
@@ -151,8 +152,12 @@ fxl::RefPtr<SymbolDataProvider> MockFrame::GetSymbolDataProvider() const {
 
 fxl::RefPtr<EvalContext> MockFrame::GetEvalContext() const {
   if (!eval_context_) {
+    fxl::WeakPtr<const ProcessSymbols> process_symbols;
+    if (thread_ && thread_->GetProcess() && thread_->GetProcess()->GetSymbols()) {
+      process_symbols = thread_->GetProcess()->GetSymbols()->GetWeakPtr();
+    }
     eval_context_ = fxl::MakeRefCounted<EvalContextImpl>(session()->arch_info().abi(),
-                                                         fxl::WeakPtr<const ProcessSymbols>(),
+                                                         std::move(process_symbols),
                                                          GetSymbolDataProvider(), location_);
   }
   return eval_context_;

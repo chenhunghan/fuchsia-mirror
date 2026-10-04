@@ -10,8 +10,6 @@
 #include <stddef.h>
 #include <zircon/types.h>
 
-constexpr uint32_t kVmCachePolicyMask = ZX_CACHE_POLICY_MASK;
-
 // Size and alignment constants for Rust VM states stored in C++ OpaqueStorage.
 // These values must match the exact size and alignment of their corresponding Rust structs,
 // which is enforced by static_asserts in both Rust and C++.
@@ -44,6 +42,14 @@ constexpr size_t kVmObjectPhysicalStateOffset = 152;
 #else
 constexpr size_t kVmObjectPhysicalStateOffset = 136;
 #endif
+
+// Size and alignment for VmDebugCompressor state stored in C++ OpaqueStorage.
+#if WITH_LOCK_DEP
+constexpr size_t kVmDebugCompressorStorageSize = 144;
+#else
+constexpr size_t kVmDebugCompressorStorageSize = 136;
+#endif
+constexpr size_t kVmDebugCompressorStorageAlign = 8;
 
 // VM Page List Constants
 constexpr uint32_t kPmmNodeIndexZeroBits = 3;

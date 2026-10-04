@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -36,7 +36,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def run(*command):
+def run(*command: str) -> str:
     try:
         # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
         # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE
@@ -55,7 +55,7 @@ def run(*command):
         raise e
 
 
-def get_exported_symbols(args):
+def get_exported_symbols(args: argparse.Namespace) -> list[str]:
     # The output from objdump will contain a few lines before a line
     # with "DYNAMIC SYMBOL TABLE:"
     # We look for that line and then take the 5th column which is the symbol
@@ -81,7 +81,9 @@ def get_exported_symbols(args):
     return symbols
 
 
-def verify_exported_symbols(symbols, args):
+def verify_exported_symbols(
+    symbols: list[str], args: argparse.Namespace
+) -> None:
     with open(args.restricted_symbols_file) as f:
         restricted_symbols = [s.strip() for s in f.readlines()]
 
@@ -100,7 +102,7 @@ def verify_exported_symbols(symbols, args):
         sys.exit(1)
 
 
-def main():
+def main() -> int:
     args = parse_args()
     symbols = get_exported_symbols(args)
     verify_exported_symbols(symbols, args)
@@ -108,6 +110,7 @@ def main():
     # Copy the binary so that we can ensure this action
     # always runs.
     shutil.copy2(args.binary, args.output)
+    return 0
 
 
 if __name__ == "__main__":

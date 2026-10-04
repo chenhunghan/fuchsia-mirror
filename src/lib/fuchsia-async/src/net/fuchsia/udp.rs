@@ -13,7 +13,7 @@ use std::net::{self, SocketAddr};
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, RawFd};
 use std::pin::Pin;
-use zx_status_ext::StatusExt;
+use zx::StatusExt;
 
 fn new_socket_address_conversion_error() -> std::io::Error {
     io::Error::other("socket address is not IPv4 or IPv6")

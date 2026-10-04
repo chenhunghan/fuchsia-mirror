@@ -9,7 +9,7 @@ import dataclasses
 import shutil
 import sys
 
-from fuchsia.tools.licenses.common_types import *
+from fuchsia.tools.licenses.common_types import DictReader, trim_long_str_list
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,7 +43,7 @@ class UnlicensedTargetInfo:
         else:
             return f"{self.label} in {self.build_file_path} (rule={self.rule_kind})"
 
-    def example_for_fix(self, root_target) -> str:
+    def example_for_fix(self, root_target: str) -> str:
         target_local_name = self.label
         if ":" in target_local_name:
             target_local_name = target_local_name.split(":")[-1]
@@ -122,7 +122,7 @@ bazel cquery 'somepath({root_target},{self.label})'
 """
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--licenses_collection_input",

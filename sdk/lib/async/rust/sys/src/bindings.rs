@@ -313,7 +313,7 @@ unsafe extern "C" {
     ) -> zx_status_t;
 }
 unsafe extern "C" {
-    #[doc = " Unbinds the IRQ associated with |irq|.\n\n If successful, the IRQ will be unbound from the async loop and no further\n handler callbacks will be called.\n\n Returns |ZX_OK| if the IRQ has been successfully unbound.\n Returns |ZX_ERR_BAD_STATE| if the dispatcher is shutting down.\n Returns |ZX_ERR_NOT_SUPPORTED| if not supported by the dispatcher.\n\n This operation is thread-safe."]
+    #[doc = " Unbinds the IRQ associated with |irq|.\n\n If successful, the IRQ will be unbound from the async loop and no further\n handler callbacks will be called.\n\n Thread safety note: Since callbacks can be called any time while the irq\n is bound to the dispatcher, and a callback may be in flight when unbind is\n called, care must be taken when this API is used in a multithreaded\n dispatcher not to free the |async_irq_t| struct until after all callbacks\n have settled and unbind has been called. This is unlike the |async_wait| api,\n where |async_cancel_wait| will return |ZX_ERR_NOT_FOUND| if the callback\n has already been started. This can be avoided by using only a single threaded\n or otherwise synchronized dispatcher.\n\n Returns |ZX_OK| if the IRQ has been successfully unbound. |irq| can be\n destroyed as soon as there are no more callbacks in progress.\n Returns |ZX_ERR_BAD_STATE| if the dispatcher is shutting down.\n Returns |ZX_ERR_NOT_SUPPORTED| if not supported by the dispatcher.\n\n This operation is thread-safe."]
     pub fn async_unbind_irq(
         dispatcher: *mut async_dispatcher_t,
         irq: *mut async_irq_t,

@@ -7,8 +7,10 @@ import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
 
 if (is_host) {
-  # Attempting to put these in a shared `python_library` target
-  # confuses IDEs and python3 command line usage.
+  # These modules import each other as top-level modules (e.g.
+  # `from gn_label import GnLabel`) so they can be run directly with
+  # python3. A python_library() would only expose them as
+  # `<library_name>.gn_label`, so each target lists them as sources instead.
   common_sources = [
     "collector.py",
     "file_access.py",
@@ -19,13 +21,26 @@ if (is_host) {
     "spdx_writer.py",
   ]
 
+  common_libraries = [
+    "//build/bazel_sdk/bazel_rules_fuchsia/fuchsia/tools/licenses:spdx_types",
+    "//build/python/modules/depfile",
+  ]
+
   python_binary("generated_licenses_spdx_tool") {
     main_source = "generated_licenses_spdx_tool.py"
-    sources = common_sources
-    deps = [
-      "//build/bazel_sdk/bazel_rules_fuchsia/fuchsia/tools/licenses:spdx_types",
-      "//build/python/modules/depfile",
+
+    # Listed literally rather than as `common_sources` so that the type
+    # checking coverage check in //build/shac.star can see them.
+    sources = [
+      "collector.py",
+      "file_access.py",
+      "gn_label.py",
+      "gn_license_metadata.py",
+      "readme_fuchsia.py",
+      "spdx_comparator.py",
+      "spdx_writer.py",
     ]
+    deps = common_libraries
   }
 
   # The following tests can be run conveniently also via:
@@ -38,31 +53,51 @@ if (is_host) {
   # but may require `fx set ... --with-host //build/licenses:tests`
   # on user/userdebug builds.
 
-  host_test_deps = []
+  python_host_test("gn_label_test") {
+    main_source = "gn_label_test.py"
+    sources = common_sources
+    libraries = common_libraries
+  }
 
-  foreach(test_name,
-          [
-            "gn_label_test",
-            "gn_license_metadata_test",
-            "spdx_writer_test",
-            "file_access_test",
-            "readme_fuchsia_test",
-            "collector_test",
-          ]) {
-    python_host_test(test_name) {
-      main_source = "${test_name}.py"
-      sources = common_sources
-      libraries = [
-        "//build/bazel_sdk/bazel_rules_fuchsia/fuchsia/tools/licenses:spdx_types",
-        "//build/python/modules/depfile",
-      ]
-    }
+  python_host_test("gn_license_metadata_test") {
+    main_source = "gn_license_metadata_test.py"
+    sources = common_sources
+    libraries = common_libraries
+  }
 
-    host_test_deps += [ ":${test_name}" ]
+  python_host_test("spdx_writer_test") {
+    main_source = "spdx_writer_test.py"
+    sources = common_sources
+    libraries = common_libraries
+  }
+
+  python_host_test("file_access_test") {
+    main_source = "file_access_test.py"
+    sources = common_sources
+    libraries = common_libraries
+  }
+
+  python_host_test("readme_fuchsia_test") {
+    main_source = "readme_fuchsia_test.py"
+    sources = common_sources
+    libraries = common_libraries
+  }
+
+  python_host_test("collector_test") {
+    main_source = "collector_test.py"
+    sources = common_sources
+    libraries = common_libraries
   }
 
   group("host_tests") {
     testonly = true
-    deps = host_test_deps
+    deps = [
+      ":collector_test",
+      ":file_access_test",
+      ":gn_label_test",
+      ":gn_license_metadata_test",
+      ":readme_fuchsia_test",
+      ":spdx_writer_test",
+    ]
   }
 }

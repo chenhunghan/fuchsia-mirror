@@ -13,6 +13,12 @@
     ],
     offer: [
         {
+            protocol: "fuchsia.feedback.CrashReporter",
+            from: "parent",
+            to: "#system-updater",
+            dependency: "weak",
+        },
+        {
             protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
             from: "parent",
             to: "#system-updater",
@@ -64,9 +70,13 @@
             to: "#system-updater",
         },
         {
-            config: "fuchsia.system-updater.ManifestPublicKeys",
+            config: [
+                "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+                "fuchsia.system-updater.ManifestPublicKeys",
+            ],
             from: "parent",
             to: "#system-updater",
+            availability: "same_as_target",
         },
         {
             config: [

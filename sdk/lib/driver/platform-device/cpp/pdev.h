@@ -49,9 +49,7 @@ class PDev {
   // it into |FidlType|. |FidlType| must be persistable. Assumes that the metadata from the platform
   // device is a persisted |FidlType|.
   template <typename FidlType>
-#if __cplusplus >= 202002l
     requires(fidl::IsFidlTypeV<FidlType> && !fidl::IsResourceV<FidlType>)
-#endif
   zx::result<FidlType> GetFidlMetadata(
       std::string_view metadata_id = FidlType::kSerializableName) const {
     fidl::WireResult<fuchsia_hardware_platform_device::Device::GetMetadata> persisted_metadata =

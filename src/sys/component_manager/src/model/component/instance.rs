@@ -30,10 +30,7 @@ use ::routing::bedrock::sandbox_construction::{
     ComponentSandbox, build_component_sandbox, extend_dict_with_offers,
 };
 use ::routing::bedrock::structured_dict::{ComponentInput, StructuredDictMap};
-use ::routing::component_instance::{
-    ComponentInstanceInterface, ResolvedInstanceInterface, ResolvedInstanceInterfaceExt,
-    WeakComponentInstanceInterface,
-};
+use ::routing::component_instance::{ComponentInstanceInterface, WeakComponentInstanceInterface};
 use ::routing::error::{ComponentInstanceError, RoutingError};
 use ::routing::error_logging_router::ErrorLoggingRouter;
 use ::routing::resolving::{ComponentAddress, ComponentResolutionContext, ResolverError};
@@ -48,7 +45,7 @@ use capability_source::{
 use clonable_error::ClonableError;
 use cm_fidl_validator::error::{DeclType, Error as ValidatorError};
 use cm_graph::DependencyNode;
-use cm_rust::offer::{OfferDecl, OfferDeclCommon};
+use cm_rust::offer::{OfferDecl, OfferDeclCommon, OfferSource};
 use cm_rust::{
     CapabilityDecl, CapabilityTypeName, ChildDecl, CollectionDecl, ComponentDecl, DeliveryType,
     FidlIntoNative, NativeIntoFidl, UseDecl, UseProtocolDecl,
@@ -457,6 +454,10 @@ pub struct ResolvedInstanceState {
 
     /// The declaration of the logger capability used by this component.
     pub logger_decl: Option<UseProtocolDecl>,
+
+    /// True if restarts are disabled for this instance (e.g. after an unclean exit with
+    /// `on_terminate: "reboot"`).
+    pub restarts_disabled: bool,
 }
 
 /// Abbreviated equivalent to [ComponentAddress] that omits the actual url string.
@@ -604,6 +605,7 @@ impl ResolvedInstanceState {
             storage_service_use_decls,
             offer_decls,
             logger_decl,
+            restarts_disabled: false,
         };
         state.add_static_children(component).await?;
 
@@ -1383,44 +1385,32 @@ impl ResolvedInstanceState {
     ) -> HashMap<ChildName, Arc<Router<Dictionary>>> {
         self.children.iter().map(|(name, child)| (name.clone(), child.component_output())).collect()
     }
-}
 
-#[async_trait]
-impl ResolvedInstanceInterface for ResolvedInstanceState {
-    type Component = ComponentInstance;
-
-    fn try_uses(&self) -> Option<Box<[UseDecl]>> {
-        self.resolved_component.decl.as_ref().map(|d| d.uses.clone())
+    fn try_offer_source_exists(&self, source: &OfferSource) -> Option<bool> {
+        let decl = self.resolved_component.decl.as_ref()?;
+        Some(match source {
+            OfferSource::Framework | OfferSource::Parent | OfferSource::Void => true,
+            OfferSource::Child(child) => {
+                let child_name = match ChildName::try_new(
+                    child.name.as_str(),
+                    child.collection.as_ref().map(|c| c.as_str()),
+                ) {
+                    Ok(child_name) => child_name,
+                    Err(_) => return Some(false),
+                };
+                self.get_child(&child_name).is_some()
+            }
+            OfferSource::Self_ => true,
+            OfferSource::Capability(capability_name) => {
+                decl.capabilities.iter().any(|capability| capability.name() == capability_name)
+            }
+            OfferSource::Collection(collection_name) => {
+                decl.collections.iter().any(|collection| &collection.name == collection_name)
+            }
+        })
     }
 
-    fn try_exposes(&self) -> Option<Box<[cm_rust::ExposeDecl]>> {
-        self.resolved_component.decl.as_ref().map(|d| d.exposes.clone())
-    }
-
-    fn try_offers(&self) -> Option<Box<[OfferDecl]>> {
-        self.resolved_component.decl.as_ref().map(|d| d.offers.clone())
-    }
-
-    fn try_capabilities(&self) -> Option<Box<[cm_rust::CapabilityDecl]>> {
-        self.resolved_component.decl.as_ref().map(|d| d.capabilities.clone())
-    }
-
-    fn try_collections(&self) -> Option<Box<[cm_rust::CollectionDecl]>> {
-        self.resolved_component.decl.as_ref().map(|d| d.collections.clone())
-    }
-
-    fn get_child(&self, moniker: &BorrowedChildName) -> Option<Arc<ComponentInstance>> {
-        ResolvedInstanceState::get_child(self, moniker).map(Arc::clone)
-    }
-
-    fn children_in_collection(
-        &self,
-        collection: &Name,
-    ) -> Vec<(ChildName, Arc<ComponentInstance>)> {
-        ResolvedInstanceState::children_in_collection(self, collection)
-    }
-
-    async fn address(&self) -> Result<ComponentAddress, ResolverError> {
+    pub async fn address(&self) -> Result<ComponentAddress, ResolverError> {
         let component = self.weak_component.upgrade()?;
         match &self.address {
             ComponentDomain::Absolute => {
@@ -1437,7 +1427,7 @@ impl ResolvedInstanceInterface for ResolvedInstanceState {
         }
     }
 
-    fn context_to_resolve_children(&self) -> Option<ComponentResolutionContext> {
+    pub fn context_to_resolve_children(&self) -> Option<ComponentResolutionContext> {
         self.resolved_component.context_to_resolve_children.clone()
     }
 }

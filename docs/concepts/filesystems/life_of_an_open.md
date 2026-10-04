@@ -123,7 +123,7 @@ By designing the protocol so FIDL clients provide handles, rather than servers,
 the communication is better suited to pipelining. Access to FIDL objects can be
 asynchronous; requests to the FIDL object can be transmitted before the object
 is actually opened. This behavior is critical for interacting with
-[capabilities][glossary.capabilities] hosted by
+[capabilities][glossary.capability] hosted by
 [components][glossary.component] - components are (by default) launched lazily,
 when a capability is requested, which is done via an open call. Instead of
 blocking open on the component finishing it's launch procedure and starting to
@@ -412,6 +412,6 @@ Zircon Channels, speaking FIDL |                  Client recognizes that â€˜fooâ
 +-------------------+
 ```
 
+[glossary.capability]: /docs/glossary/README.md#capability
 [glossary.component]: /docs/glossary/README.md#component
-[glossary.capabilities]: /docs/glossary/README.md#capability
 [life-of-a-protocol-open]: /docs/concepts/components/v2/capabilities/life_of_a_protocol_open.md

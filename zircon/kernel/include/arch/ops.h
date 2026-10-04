@@ -31,7 +31,7 @@ uint arch_cpu_features();
 extern "C" uint8_t arch_get_hw_breakpoint_count();
 extern "C" uint8_t arch_get_hw_watchpoint_count();
 
-uint32_t arch_address_tagging_features();
+extern "C" uint32_t arch_address_tagging_features();
 
 // Usually implemented in or called from assembly.
 extern "C" {

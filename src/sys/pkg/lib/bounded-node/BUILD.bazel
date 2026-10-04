@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "bounded-node",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+    ],
+    visibility = [
+        "//src/sys/pkg/bin/omaha-client:__pkg__",
+        "//src/sys/pkg/bin/system-updater:__pkg__",
+        "//src/sys/pkg/lib:__pkg__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+    ],
+)

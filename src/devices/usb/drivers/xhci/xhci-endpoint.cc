@@ -8,6 +8,8 @@
 
 #include "src/devices/usb/drivers/xhci/usb-xhci.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_xhci {
 
 Endpoint::Endpoint(UsbXhci* hci, uint32_t device_id, uint8_t address)
@@ -17,7 +19,7 @@ Endpoint::Endpoint(UsbXhci* hci, uint32_t device_id, uint8_t address)
 
 namespace {
 
-inline usb_setup_t ToBanjo(fuchsia_hardware_usb_descriptor::UsbSetup setup) {
+inline usb_setup_t ToBanjo(fdescriptor::UsbSetup setup) {
   return usb_setup_t{
       .bm_request_type = setup.bm_request_type(),
       .b_request = setup.b_request(),
@@ -202,7 +204,7 @@ zx_status_t Endpoint::ControlRequestStatusPhase(UsbRequestState* state) {
                 ->control()
                 ->setup()
                 ->bm_request_type();
-  if (state->first_trb && (bm_request_type & USB_DIR_IN)) {
+  if (state->first_trb && usb_request_is_in(bm_request_type)) {
     status_in = false;
   }
   zx_status_t status = transfer_ring_.AllocateTRB(&state->status_trb_ptr, nullptr);
@@ -253,7 +255,7 @@ zx_status_t Endpoint::ControlRequestDataPhase(UsbRequestState* state) {
           // TODO(https://fxbug.dev/42109334): Change bus snooping options based on input from
           // higher-level drivers.
           data->set_CHAIN(next != nullptr)
-              .set_DIRECTION((bm_request_type & USB_DIR_IN) != 0)
+              .set_DIRECTION(usb_request_is_in(bm_request_type))
               .set_INTERRUPTER(0)
               .set_LENGTH(len)
               .set_SIZE(state->packet_count)
@@ -299,7 +301,7 @@ void Endpoint::ControlRequestSetupPhase(UsbRequestState* state) {
   setup_trb->set_INTERRUPTER(state->interrupter)
       .set_length(8)
       .set_IDT(1)
-      .set_TRT(((bm_request_type & USB_DIR_IN) != 0) ? Setup::IN : Setup::OUT);
+      .set_TRT(usb_request_is_in(bm_request_type) ? Setup::IN : Setup::OUT);
   hw_mb();
 }
 

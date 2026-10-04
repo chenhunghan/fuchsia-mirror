@@ -11,7 +11,7 @@ mod spmi;
 
 use anyhow::Result;
 use argh::FromArgs;
-use spmi::PowerSource;
+use charger::{ChargerModeArg, ModeArg};
 
 #[derive(FromArgs, Debug, PartialEq)]
 /// Inspect battery telemetry and control power/charging.
@@ -30,52 +30,26 @@ pub struct Args {
 pub enum Subcommand {
     Get(GetCommand),
     Watch(WatchCommand),
-    Enable(EnableCommand),
-    Power(PowerCommand),
+    Mode(ModeCommand),
 }
 
 #[derive(FromArgs, Debug, PartialEq)]
 #[argh(subcommand, name = "get")]
-/// inspect battery telemetry
+/// inspect battery and charger telemetry
 pub struct GetCommand {}
 
 #[derive(FromArgs, Debug, PartialEq)]
 #[argh(subcommand, name = "watch")]
-/// stream real-time battery status updates via hanging-get
+/// stream real-time battery and charger status updates via hanging-get
 pub struct WatchCommand {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnableArg(pub bool);
-
-impl std::str::FromStr for EnableArg {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "1" | "true" | "on" | "enable" => Ok(Self(true)),
-            "0" | "false" | "off" | "disable" => Ok(Self(false)),
-            _ => Err(format!(
-                "Invalid enable argument '{s}'. Use 1/true/on/enable or 0/false/off/disable."
-            )),
-        }
-    }
-}
-
 #[derive(FromArgs, Debug, PartialEq)]
-#[argh(subcommand, name = "enable")]
-/// enable or disable battery charging (e.g. 'batteryutil enable 1' or 'batteryutil enable on')
-pub struct EnableCommand {
+#[argh(subcommand, name = "mode")]
+/// set charger operating mode (charging/usb, passthrough, discharging/battery, otg, auto)
+pub struct ModeCommand {
     #[argh(positional)]
-    /// set to 1/true/on to enable charging, 0/false/off to disable charging
-    pub enable: EnableArg,
-}
-
-#[derive(FromArgs, Debug, PartialEq)]
-#[argh(subcommand, name = "power")]
-/// low-level SPMI test override for power source (Sorrel only: battery or usb)
-pub struct PowerCommand {
-    #[argh(positional)]
-    /// source: battery or usb
-    pub source: PowerSource,
+    /// mode: charging/usb, passthrough, discharging/battery, otg, or auto (clear overrides)
+    pub mode: ModeArg,
 }
 
 #[fuchsia::main]
@@ -86,51 +60,45 @@ async fn main() -> Result<()> {
     match args.command {
         None | Some(Subcommand::Get(_)) => battery::get_battery_info(path).await,
         Some(Subcommand::Watch(_)) => battery::watch_battery(path).await,
-        Some(Subcommand::Enable(EnableCommand { enable })) => {
-            charger::enable_charger(path, enable.0).await
-        }
-        Some(Subcommand::Power(PowerCommand { source })) => {
-            spmi::set_spmi_power_source(source).await
-        }
+        Some(Subcommand::Mode(ModeCommand { mode })) => match mode {
+            ModeArg::Set(ChargerModeArg(mode)) => charger::set_charger_mode(path, mode).await,
+            ModeArg::Auto => charger::clear_charger_overrides(path).await,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fidl_fuchsia_hardware_power_charger as fcharger;
 
     #[test]
     fn test_argh_args_parsing() {
         let args = Args::from_args(&["batteryutil"], &["get"]).unwrap();
         assert_eq!(args.command, Some(Subcommand::Get(GetCommand {})));
 
-        let args = Args::from_args(&["batteryutil"], &["-p", "/svc/test", "enable", "1"]).unwrap();
+        let args =
+            Args::from_args(&["batteryutil"], &["-p", "/svc/test", "mode", "charging"]).unwrap();
         assert_eq!(args.path, Some("/svc/test".to_string()));
         assert_eq!(
             args.command,
-            Some(Subcommand::Enable(EnableCommand { enable: EnableArg(true) }))
+            Some(Subcommand::Mode(ModeCommand {
+                mode: ModeArg::Set(ChargerModeArg(fcharger::OperatingMode::Charging))
+            }))
         );
 
         let args = Args::from_args(&["batteryutil"], &["watch"]).unwrap();
         assert_eq!(args.command, Some(Subcommand::Watch(WatchCommand {})));
 
-        let args = Args::from_args(&["batteryutil"], &["power", "battery"]).unwrap();
+        let args = Args::from_args(&["batteryutil"], &["mode", "battery"]).unwrap();
         assert_eq!(
             args.command,
-            Some(Subcommand::Power(PowerCommand { source: PowerSource::Battery }))
+            Some(Subcommand::Mode(ModeCommand {
+                mode: ModeArg::Set(ChargerModeArg(fcharger::OperatingMode::Discharging))
+            }))
         );
-    }
 
-    #[test]
-    fn test_parse_enable_arg() {
-        assert_eq!("1".parse::<EnableArg>(), Ok(EnableArg(true)));
-        assert_eq!("true".parse::<EnableArg>(), Ok(EnableArg(true)));
-        assert_eq!("on".parse::<EnableArg>(), Ok(EnableArg(true)));
-        assert_eq!("enable".parse::<EnableArg>(), Ok(EnableArg(true)));
-        assert_eq!("0".parse::<EnableArg>(), Ok(EnableArg(false)));
-        assert_eq!("false".parse::<EnableArg>(), Ok(EnableArg(false)));
-        assert_eq!("off".parse::<EnableArg>(), Ok(EnableArg(false)));
-        assert_eq!("disable".parse::<EnableArg>(), Ok(EnableArg(false)));
-        assert!("invalid".parse::<EnableArg>().is_err());
+        let args = Args::from_args(&["batteryutil"], &["mode", "auto"]).unwrap();
+        assert_eq!(args.command, Some(Subcommand::Mode(ModeCommand { mode: ModeArg::Auto })));
     }
 }

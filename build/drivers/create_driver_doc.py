@@ -8,7 +8,7 @@ import argparse
 import json
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--name", required=True, help="A name for the driver.")
     parser.add_argument(

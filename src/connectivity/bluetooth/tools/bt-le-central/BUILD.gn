@@ -25,7 +25,7 @@ rustc_binary("bin") {
     "//third_party/rust_crates:bt-vcs",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:getopts",
-    "//third_party/rust_crates:num",
+    "//third_party/rust_crates:num-traits",
     "//third_party/rust_crates:rustyline",
   ]
 

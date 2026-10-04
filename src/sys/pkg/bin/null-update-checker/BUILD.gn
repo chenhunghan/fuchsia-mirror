@@ -36,7 +36,6 @@ rustc_binary("bin") {
 fuchsia_component_manifest("manifest") {
   component_name = "null-update-checker"
   manifest = "meta/null-update-checker.cml"
-  restricted_features = [ "delivery_type" ]
 }
 
 fuchsia_structured_config_rust_lib("null_update_checker_config") {

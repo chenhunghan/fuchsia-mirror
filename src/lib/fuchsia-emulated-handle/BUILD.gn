@@ -3,26 +3,18 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
 import("//build/rust/rustc_library.gni")
-import("//build/testing/host_test.gni")
+import("//build/rust/rustc_test.gni")
 
 if (is_host) {
-  rustc_binary("fuchsia-emulated-handle-shutdown-test-bin") {
+  rustc_test("fuchsia-emulated-handle-shutdown-test") {
     edition = "2024"
-    with_unit_tests = false
     deps = [
       ":fuchsia-emulated-handle",
-      "//sdk/rust/zx-status",
-      "//third_party/rust_crates:futures",
+      "//sdk/rust/zx",
     ]
     source_root = "src/shutdown_test.rs"
     sources = [ "src/shutdown_test.rs" ]
-  }
-
-  host_test("fuchsia-emulated-handle-shutdown-test") {
-    binary_path = "$root_out_dir/fuchsia-emulated-handle-shutdown-test-bin"
-    deps = [ ":fuchsia-emulated-handle-shutdown-test-bin" ]
   }
 }
 
@@ -76,8 +68,7 @@ rustc_library("fuchsia-emulated-handle") {
   version = "0.1.0"
   with_unit_tests = true
   deps = [
-    "//sdk/rust/zx-status",
-    "//sdk/rust/zx-status-ext",
+    "//sdk/rust/zx",
     "//sdk/rust/zx-types",
     "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:bitflags",

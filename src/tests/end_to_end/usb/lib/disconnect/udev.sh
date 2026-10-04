@@ -80,6 +80,12 @@ is_target_pid() {
   return 1
 }
 
+# Allow other scripts to source
+# TARGET_VID, TARGET_PIDS, and is_target_pid() without running udev steps.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 # The user whose access actually matters. The point of the udev rules is to let
 # an unprivileged user toggle `authorized`; root can write it regardless, so
 # testing root's access under `sudo ./udev.sh` would always report success and

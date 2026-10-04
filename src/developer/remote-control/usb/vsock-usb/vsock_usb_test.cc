@@ -39,6 +39,8 @@
 
 #include "src/devices/usb/lib/usb-endpoint/testing/fake-usb-endpoint-server.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 // NOLINTBEGIN(misc-use-anonymous-namespace)
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
 // NOLINTBEGIN(readability-container-data-pointer)
@@ -54,6 +56,12 @@ class VsockUsbTestHelper {
   }
 
   static bool Online(VsockUsb& driver) { return driver.Online(); }
+
+  static size_t RxInFlightCount(VsockUsb& driver) { return driver.bulk_out_ep_.GetInFlightCount(); }
+
+  static bool CancelAllCompleted(VsockUsb& driver) {
+    return driver.bulk_out_cancelled_ && driver.bulk_in_cancelled_ && !driver.HasPendingRequests();
+  }
 };
 
 static constexpr uint8_t kBulkOutEndpoint = 1;
@@ -123,33 +131,46 @@ class FakeEndpoint : public fake_usb_endpoint::FakeEndpoint {
   }
 
   void CancelAll(CancelAllCompleter::Sync& completer) override {
+    std::optional<zx_status_t> cancel_status;
     std::deque<fuchsia_hardware_usb_request::Request> reqs_to_cancel;
     std::optional<fidl::ServerBindingRef<fuchsia_hardware_usb_endpoint::Endpoint>> binding;
     {
       fbl::AutoLock _(&lock_);
+      cancel_status = cancel_all_status_;
       reqs_to_cancel.swap(requests_);
       binding = binding_ref_;
     }
     if (!reqs_to_cancel.empty()) {
       if (!binding.has_value()) {
         ADD_FAILURE() << "CancelAll: endpoint has requests to cancel but no active binding";
-        completer.Reply(fit::ok());
-        return;
+      } else {
+        std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
+        completions.reserve(reqs_to_cancel.size());
+        for (auto& req : reqs_to_cancel) {
+          fuchsia_hardware_usb_endpoint::Completion completion;
+          completion.request(std::move(req));
+          completion.status(ZX_ERR_CANCELED);
+          completion.transfer_size(0);
+          completions.push_back(std::move(completion));
+        }
+        auto event_result = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
+        EXPECT_TRUE(event_result.is_ok() ||
+                    event_result.error_value().status() == ZX_ERR_PEER_CLOSED)
+            << "SendEvent failed: " << zx_status_get_string(event_result.error_value().status());
       }
-      std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
-      completions.reserve(reqs_to_cancel.size());
-      for (auto& req : reqs_to_cancel) {
-        fuchsia_hardware_usb_endpoint::Completion completion;
-        completion.request(std::move(req));
-        completion.status(ZX_ERR_CANCELED);
-        completion.transfer_size(0);
-        completions.push_back(std::move(completion));
-      }
-      auto event_result = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
-      EXPECT_TRUE(event_result.is_ok() || event_result.error_value().status() == ZX_ERR_PEER_CLOSED)
-          << "SendEvent failed: " << zx_status_get_string(event_result.error_value().status());
+    }
+    if (cancel_status.has_value()) {
+      completer.Reply(fit::error(*cancel_status));
+      return;
     }
     completer.Reply(fit::ok());
+  }
+
+  void set_cancel_all_status(std::optional<zx_status_t> status) {
+    fbl::AutoLock _(&lock_);
+    ZX_ASSERT_MSG(!status.has_value() || *status != ZX_OK,
+                  "cancel_all_status cannot be set to ZX_OK");
+    cancel_all_status_ = status;
   }
 
   // Non-blocking atomic request poll for assertions.
@@ -244,6 +265,7 @@ class FakeEndpoint : public fake_usb_endpoint::FakeEndpoint {
   bool enabled_ __TA_GUARDED(lock_) = true;
   std::deque<fuchsia_hardware_usb_request::Request> requests_ __TA_GUARDED(lock_);
   std::unordered_map<uint64_t, zx::vmo> vmos_ __TA_GUARDED(lock_);
+  std::optional<zx_status_t> cancel_all_status_ __TA_GUARDED(lock_);
 };
 
 class TestCallback : public fidl::WireServer<fuchsia_hardware_vsockbridge::Callback> {
@@ -367,16 +389,35 @@ class FakeUsb
       fidl::internal::NaturalCompleter<
           fuchsia_hardware_usb_function::UsbFunction::ConfigureEndpoint>::Sync& completer)
       override {
-    fake_endpoint(request.endpoint_address()).SetEnabled(true);
-    completer.Reply(fit::ok());
-    fbl::AutoLock _(&lock_);
-    if (expect_configure_ep_.empty()) {
-      ADD_FAILURE() << "received ConfigureEndpoint "
-                    << static_cast<uint32_t>(request.endpoint_address()) << " without expectation";
+    bool should_fail = false;
+    {
+      fbl::AutoLock _(&lock_);
+      if (expect_configure_ep_.empty()) {
+        ADD_FAILURE() << "received ConfigureEndpoint "
+                      << static_cast<uint32_t>(request.endpoint_address())
+                      << " without expectation";
+        completer.Reply(fit::error(ZX_ERR_BAD_STATE));
+        return;
+      }
+      EXPECT_EQ(request.endpoint_address(), expect_configure_ep_.front());
+      // Always pop the consumed call expectation: ~FakeUsb() asserts that all
+      // expected ConfigureEndpoint calls were made, and a failed ConfigureEndpoints()
+      // rolls back kBulkInEndpoint so any subsequent retry starts again at kBulkInEndpoint.
+      expect_configure_ep_.pop();
+      should_fail =
+          fail_configure_ep_.has_value() && *fail_configure_ep_ == request.endpoint_address();
+    }
+    if (should_fail) {
+      completer.Reply(fit::error(ZX_ERR_IO));
       return;
     }
-    EXPECT_EQ(request.endpoint_address(), expect_configure_ep_.front());
-    expect_configure_ep_.pop();
+    fake_endpoint(request.endpoint_address()).SetEnabled(true);
+    completer.Reply(fit::ok());
+  }
+
+  void set_fail_configure_ep(std::optional<uint8_t> ep_addr) {
+    fbl::AutoLock _(&lock_);
+    fail_configure_ep_ = ep_addr;
   }
 
   void DisableEndpoint(
@@ -439,6 +480,7 @@ class FakeUsb
   std::optional<zx_status_t> disable_ep_status_ __TA_GUARDED(lock_);
   std::queue<uint8_t> expect_configure_ep_ __TA_GUARDED(lock_);
   std::queue<uint8_t> expect_disable_ep_ __TA_GUARDED(lock_);
+  std::optional<uint8_t> fail_configure_ep_ __TA_GUARDED(lock_);
   fidl::ClientEnd<fuchsia_hardware_usb_function::UsbFunctionInterface> interface_
       __TA_GUARDED(lock_);
 };
@@ -758,7 +800,7 @@ class VsockUsbTest : public ::testing::Test {
     ExpectConfigureEndpoints();
     fidl::Result result = function_client_->SetConfigured({{
         .configured = true,
-        .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+        .speed = fdescriptor::UsbSpeed::kHigh,
     }});
     ASSERT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
   }
@@ -789,8 +831,8 @@ class VsockUsbTest : public ::testing::Test {
 
   void ExpectDisableEndpoints() {
     driver_test().RunInEnvironmentTypeContext([](VsockUsbEnvironment& env) {
-      env.fake_usb_->ExpectDisableEndpoint(kBulkInEndpoint);
       env.fake_usb_->ExpectDisableEndpoint(kBulkOutEndpoint);
+      env.fake_usb_->ExpectDisableEndpoint(kBulkInEndpoint);
     });
   }
 
@@ -1145,14 +1187,14 @@ TEST_F(VsockUsbTest, UnconfigureAlreadyUnconfigured) {
   });
 }
 
-TEST_F(VsockUsbTest, DISABLED_UnconfigureEndpointsDisableBadStateError) {
+// Tests error propagation when DisableEndpoint() returns ZX_ERR_BAD_STATE.
+TEST_F(VsockUsbTest, UnconfigureEndpointsDisableBadStateError) {
   ConfigureDevice();
 
   driver_test().RunInEnvironmentTypeContext(
       [](VsockUsbEnvironment& env) { env.fake_usb_->set_disable_ep_status(ZX_ERR_BAD_STATE); });
 
-  driver_test().RunInEnvironmentTypeContext(
-      [](VsockUsbEnvironment& env) { env.fake_usb_->ExpectDisableEndpoint(kBulkInEndpoint); });
+  ExpectDisableEndpoints();
   driver_test().RunInDriverContext([](VsockUsb& driver) {
     zx_status_t status = VsockUsbTestHelper::UnconfigureEndpoints(driver);
     EXPECT_EQ(status, ZX_ERR_BAD_STATE);
@@ -1162,14 +1204,14 @@ TEST_F(VsockUsbTest, DISABLED_UnconfigureEndpointsDisableBadStateError) {
       [](VsockUsbEnvironment& env) { env.fake_usb_->set_disable_ep_status(std::nullopt); });
 }
 
-TEST_F(VsockUsbTest, DISABLED_UnconfigureEndpointsDisableOtherError) {
+// Tests error propagation when DisableEndpoint() returns generic internal errors.
+TEST_F(VsockUsbTest, UnconfigureEndpointsDisableOtherError) {
   ConfigureDevice();
 
   driver_test().RunInEnvironmentTypeContext(
       [](VsockUsbEnvironment& env) { env.fake_usb_->set_disable_ep_status(ZX_ERR_INTERNAL); });
 
-  driver_test().RunInEnvironmentTypeContext(
-      [](VsockUsbEnvironment& env) { env.fake_usb_->ExpectDisableEndpoint(kBulkInEndpoint); });
+  ExpectDisableEndpoints();
   driver_test().RunInDriverContext([](VsockUsb& driver) {
     zx_status_t status = VsockUsbTestHelper::UnconfigureEndpoints(driver);
     EXPECT_EQ(status, ZX_ERR_INTERNAL);
@@ -1177,6 +1219,55 @@ TEST_F(VsockUsbTest, DISABLED_UnconfigureEndpointsDisableOtherError) {
 
   driver_test().RunInEnvironmentTypeContext(
       [](VsockUsbEnvironment& env) { env.fake_usb_->set_disable_ep_status(std::nullopt); });
+}
+
+// Tests that expected disconnect errors (e.g. ZX_ERR_PEER_CLOSED, ZX_ERR_IO_NOT_PRESENT)
+// during DisableEndpoint are treated as clean unconfiguration and return ZX_OK.
+TEST_F(VsockUsbTest, UnconfigureEndpointsDisableExpectedDisconnectSucceeds) {
+  ConfigureDevice();
+
+  driver_test().RunInEnvironmentTypeContext([](VsockUsbEnvironment& env) {
+    env.fake_usb_->set_disable_ep_status(ZX_ERR_IO_NOT_PRESENT);
+  });
+
+  ExpectDisableEndpoints();
+  driver_test().RunInDriverContext([](VsockUsb& driver) {
+    zx_status_t status = VsockUsbTestHelper::UnconfigureEndpoints(driver);
+    EXPECT_EQ(status, ZX_OK);
+  });
+
+  driver_test().RunInEnvironmentTypeContext(
+      [](VsockUsbEnvironment& env) { env.fake_usb_->set_disable_ep_status(std::nullopt); });
+}
+
+// Tests that expected disconnect errors (e.g. ZX_ERR_PEER_CLOSED, ZX_ERR_IO_NOT_PRESENT,
+// ZX_ERR_CANCELED) during CancelAll are handled gracefully as expected teardown events.
+TEST_F(VsockUsbTest, UnconfigureEndpointsCancelAllExpectedDisconnectSucceeds) {
+  ConfigureDevice();
+
+  driver_test().RunInEnvironmentTypeContext([](VsockUsbEnvironment& env) {
+    env.fake_usb_->fake_endpoint(kBulkOutEndpoint).set_cancel_all_status(ZX_ERR_IO_NOT_PRESENT);
+    env.fake_usb_->fake_endpoint(kBulkInEndpoint).set_cancel_all_status(ZX_ERR_PEER_CLOSED);
+  });
+
+  ExpectDisableEndpoints();
+  driver_test().RunInDriverContext([](VsockUsb& driver) {
+    zx_status_t status = VsockUsbTestHelper::UnconfigureEndpoints(driver);
+    EXPECT_EQ(status, ZX_OK);
+  });
+
+  // Wait for async CancelAll callbacks and in-flight completions to finish on the driver.
+  driver_test().runtime().RunUntil([&]() {
+    bool completed = false;
+    driver_test().RunInDriverContext(
+        [&](VsockUsb& driver) { completed = VsockUsbTestHelper::CancelAllCompleted(driver); });
+    return completed;
+  });
+
+  driver_test().RunInEnvironmentTypeContext([](VsockUsbEnvironment& env) {
+    env.fake_usb_->fake_endpoint(kBulkOutEndpoint).set_cancel_all_status(std::nullopt);
+    env.fake_usb_->fake_endpoint(kBulkInEndpoint).set_cancel_all_status(std::nullopt);
+  });
 }
 
 TEST_F(VsockUsbTest, DISABLED_ReadErrorUnconfiguresEndpoints) {
@@ -1409,6 +1500,101 @@ TEST_F(VsockUsbTest, ReconfigurationDeliversSocketWithoutResettingCallback) {
   ASSERT_TRUE(SocketReadExpect(&socket1, reinterpret_cast<const uint8_t*>(test_data.data()),
                                test_data.size()));
 
+  UnconfigureDevice();
+}
+
+TEST_F(VsockUsbTest, ClientSocketReconnectWhileConfigured) {
+  ConfigureDevice();
+  auto callback0 = SetupCallback(1);
+  zx::socket socket0 = WaitForSocket(*callback0);
+  ASSERT_TRUE(socket0.is_valid());
+
+  // Simulate client component (e.g. /core/vsock) stopping and closing its socket while
+  // USB endpoints remain configured.
+  socket0.reset();
+  driver_test().runtime().RunUntil([&]() {
+    bool online = true;
+    driver_test().RunInDriverContext(
+        [&](VsockUsb& driver) { online = VsockUsbTestHelper::Online(driver); });
+    return !online;
+  });
+
+  // Incoming packets while no client is connected are safely dropped and returned to pool.
+  std::string_view dropped_data = "dropped_while_client_stopped";
+  ASSERT_TRUE(SendTx(reinterpret_cast<const uint8_t*>(dropped_data.data()), dropped_data.size()));
+  driver_test().runtime().RunUntil([&]() {
+    size_t rx_in_flight = 8;
+    driver_test().RunInDriverContext(
+        [&](VsockUsb& driver) { rx_in_flight = VsockUsbTestHelper::RxInFlightCount(driver); });
+    return rx_in_flight < 8;
+  });
+
+  // Simulate client component restarting and registering a new SetCallback while USB remains
+  // configured. VsockUsb must start a fresh socket session, re-queue RX requests, and deliver
+  // NewLink immediately.
+  auto callback1 = SetupCallback(1);
+  zx::socket socket1 = WaitForSocket(*callback1);
+  ASSERT_TRUE(socket1.is_valid());
+
+  std::string_view test_data = "reconnected_client_socket_data";
+  ASSERT_TRUE(SendTx(reinterpret_cast<const uint8_t*>(test_data.data()), test_data.size()));
+  ASSERT_TRUE(SocketReadExpect(&socket1, reinterpret_cast<const uint8_t*>(test_data.data()),
+                               test_data.size()));
+
+  UnconfigureDevice();
+}
+
+TEST_F(VsockUsbTest, SetInterfaceRestartsSessionAfterSocketCloseWhileEndpointsConfigured) {
+  ConfigureDevice();
+  auto callback = SetupCallback(2);
+  zx::socket socket0 = WaitForSocket(*callback);
+  ASSERT_TRUE(socket0.is_valid());
+
+  // Close client socket so VsockUsb transitions to Unconfigured while endpoints_configured_
+  // remains true.
+  socket0.reset();
+  driver_test().runtime().RunUntil([&]() {
+    bool online = true;
+    driver_test().RunInDriverContext(
+        [&](VsockUsb& driver) { online = VsockUsbTestHelper::Online(driver); });
+    return !online;
+  });
+
+  // Host sends SetInterface(kInterfaceNum, 0), invoking ConfigureEndpoints() while
+  // endpoints_configured_ is already true. It must start a new socket session.
+  fidl::Result res = function_client_->SetInterface({{
+      .interface = kInterfaceNum,
+      .alt_setting = 0,
+  }});
+  ASSERT_TRUE(res.is_ok()) << res.error_value().FormatDescription();
+
+  zx::socket socket1 = WaitForSocket(*callback);
+  ASSERT_TRUE(socket1.is_valid());
+
+  UnconfigureDevice();
+}
+
+TEST_F(VsockUsbTest, ConfigureEndpointsRollsBackInEpOnOutEpFailure) {
+  driver_test().RunInEnvironmentTypeContext([](VsockUsbEnvironment& env) {
+    env.fake_usb_->ExpectConfigureEndpoint(kBulkInEndpoint);
+    env.fake_usb_->ExpectConfigureEndpoint(kBulkOutEndpoint);
+    env.fake_usb_->ExpectDisableEndpoint(kBulkInEndpoint);
+    env.fake_usb_->set_fail_configure_ep(kBulkOutEndpoint);
+  });
+
+  fidl::Result res = function_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+  }});
+  ASSERT_TRUE(res.is_error());
+  ASSERT_TRUE(res.error_value().is_domain_error());
+  EXPECT_EQ(res.error_value().domain_error(), ZX_ERR_IO);
+
+  driver_test().RunInEnvironmentTypeContext(
+      [](VsockUsbEnvironment& env) { env.fake_usb_->set_fail_configure_ep(std::nullopt); });
+
+  // Verify that an immediate retry after rollback succeeds cleanly.
+  ConfigureDevice();
   UnconfigureDevice();
 }
 // NOLINTEND(readability-container-data-pointer)

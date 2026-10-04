@@ -434,8 +434,8 @@ void ConnectTest::OnDisassocInd(
 void ConnectTest::OnSignalReport(
     const fuchsia_wlan_fullmac::WlanFullmacImplIfcSignalReportRequest* req) {
   context_.signal_ind_count++;
-  context_.signal_ind_rssi = req->ind().rssi_dbm();
-  context_.signal_ind_snr = req->ind().snr_db();
+  context_.signal_ind_rssi = req->ind().rssi_dbm().value_or(0);
+  context_.signal_ind_snr = req->ind().snr_db().value_or(0);
 }
 
 void ConnectTest::StartConnect() {

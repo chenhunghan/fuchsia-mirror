@@ -7,6 +7,7 @@
 
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
 #include <lib/zx/channel.h>
+#include <lib/zx/eventpair.h>
 #include <lib/zx/fifo.h>
 #include <lib/zx/vmo.h>
 
@@ -42,6 +43,8 @@ class RemoteBlockDevice final : public BlockDevice {
                                 size_t* out_ranges_count) const final;
   zx_status_t VolumeExtend(uint64_t offset, uint64_t length) final;
   zx_status_t VolumeShrink(uint64_t offset, uint64_t length) final;
+
+  zx::result<uint8_t> RegisterKey(zx::eventpair key_token);
 
   fidl::ClientEnd<fuchsia_storage_block::Block> TakeDevice();
 

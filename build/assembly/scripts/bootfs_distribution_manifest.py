@@ -16,7 +16,7 @@ import json
 import os
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Prepare a distribution manifest for bootfs files"
     )

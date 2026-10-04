@@ -8,6 +8,7 @@
 
 #include <lib/linux-boot-config/linux-boot-config.h>
 
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -216,6 +217,76 @@ TEST(BootPropertiesTest, EnumeratePropertyBootconfigFallback) {
   ASSERT_EQ(visited.size(), 1);
   EXPECT_EQ(visited[0].first, "cmdline_fallback");
   EXPECT_EQ(visited[0].second, linux_boot_config::Value::Action::kDefine);
+}
+
+TEST(BootPropertiesTest, JoinPropertyMissing) {
+  boot_shim::BootProperties props("other.key=val");
+  std::array<char, 32> buffer;
+  EXPECT_NOT_OK(props.JoinProperty("test.key", buffer));
+}
+
+TEST(BootPropertiesTest, JoinPropertyBootconfigUnquotedArray) {
+  constexpr std::string_view kBootconfigData = "test.key := a,b,c\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+  std::array<char, 32> buffer;
+  auto res = props.JoinProperty("test.key", buffer);
+  ASSERT_OK(res);
+  EXPECT_EQ(res.value(), "a,b,c");
+}
+
+TEST(BootPropertiesTest, JoinPropertyAppendOnly) {
+  constexpr std::string_view kBootconfigData = "test.key += a\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+  std::array<char, 32> buffer;
+  auto res = props.JoinProperty("test.key", buffer);
+  ASSERT_OK(res);
+  EXPECT_EQ(res.value(), "a");
+}
+
+TEST(BootPropertiesTest, JoinPropertyOverrideResets) {
+  constexpr std::string_view kBootconfigData =
+      "test.key = a, b\n"
+      "test.key := c, d\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+  std::array<char, 32> buffer;
+  auto res = props.JoinProperty("test.key", buffer);
+  ASSERT_OK(res);
+  EXPECT_EQ(res.value(), "c,d");
+}
+
+TEST(BootPropertiesTest, JoinPropertyEmptyFirstElement) {
+  constexpr std::string_view kBootconfigData = "test.key = \"\", b\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+  std::array<char, 32> buffer;
+  auto res = props.JoinProperty("test.key", buffer);
+  ASSERT_OK(res);
+  EXPECT_EQ(res.value(), ",b");
+}
+
+TEST(BootPropertiesTest, JoinPropertyTruncates) {
+  constexpr std::string_view kBootconfigData = "test.key = abc, def\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+
+  std::array<char, 5> buffer;
+  auto res = props.JoinProperty("test.key", buffer);
+  ASSERT_OK(res);
+  EXPECT_EQ(res.value(), "abc,d");
+
+  // The separator is dropped too if there's no room for it.
+  std::array<char, 3> small_buffer;
+  auto small_res = props.JoinProperty("test.key", small_buffer);
+  ASSERT_OK(small_res);
+  EXPECT_EQ(small_res.value(), "abc");
 }
 
 }  // namespace

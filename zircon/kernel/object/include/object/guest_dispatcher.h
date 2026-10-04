@@ -7,33 +7,57 @@
 #ifndef ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_GUEST_DISPATCHER_H_
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_GUEST_DISPATCHER_H_
 
+#include <lib/object-constants.h>
+#include <zircon/rights.h>
 #include <zircon/syscalls/hypervisor.h>
 #include <zircon/types.h>
 
+#include <kernel/ffi.h>
+#include <object/dispatcher.h>
 #include <object/handle.h>
-#include <object/port_dispatcher.h>
+#include <object/opaque_storage.h>
 
 class Guest;
-class VmObject;
+class GuestDispatcher;
 
-class GuestDispatcher final : public SoloDispatcher<GuestDispatcher, ZX_DEFAULT_GUEST_RIGHTS> {
+extern "C" {
+zx_status_t cpp_guest_dispatcher_create(
+    Guest* guest_raw, ffi::Uninitialized<KernelHandle<GuestDispatcher>>* guest_handle_out);
+
+void rust_guest_dispatcher_state_init(void* state, void* disp, Guest* guest);
+void rust_guest_dispatcher_state_destroy(void* state);
+Lock<CriticalMutex>* rust_guest_dispatcher_state_get_lock(const void* state);
+Guest* rust_guest_dispatcher_get_guest(const GuestDispatcher* disp);
+}
+
+class GuestDispatcher final : public Dispatcher {
  public:
-  static zx_status_t Create(uint32_t options, KernelHandle<GuestDispatcher>* guest_handle,
-                            zx_rights_t* guest_rights,
-                            KernelHandle<VmAddressRegionDispatcher>* vmar_handle,
-                            zx_rights_t* vmar_rights);
-  ~GuestDispatcher();
+  static constexpr zx_rights_t default_rights() { return ZX_DEFAULT_GUEST_RIGHTS; }
 
-  zx_obj_type_t get_type() const { return ZX_OBJ_TYPE_GUEST; }
-  Guest& guest() const { return *guest_; }
+  ~GuestDispatcher() final;
 
-  zx_status_t SetTrap(uint32_t kind, zx_vaddr_t addr, size_t len, fbl::RefPtr<PortDispatcher> port,
-                      uint64_t key);
+  zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_GUEST; }
+  zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
+  bool is_waitable() const final { return ZX_DEFAULT_GUEST_RIGHTS & ZX_RIGHT_WAIT; }
+
+  zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
+    return UserSignalSelfSolo(this, clear_mask, set_mask, 0);
+  }
+  zx_status_t user_signal_peer(uint32_t clear_mask, uint32_t set_mask) final {
+    return ZX_ERR_NOT_SUPPORTED;
+  }
+
+  Guest& guest() const;
+
+ protected:
+  Lock<CriticalMutex>* get_lock() const final;
 
  private:
-  ktl::unique_ptr<Guest> guest_;
-
+  friend zx_status_t cpp_guest_dispatcher_create(
+      Guest* guest_raw, ffi::Uninitialized<KernelHandle<GuestDispatcher>>* guest_handle_out);
   explicit GuestDispatcher(ktl::unique_ptr<Guest> guest);
+
+  OpaqueStorage<kGuestDispatcherStateSize, kGuestDispatcherStateAlign> opaque_storage_;
 };
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_GUEST_DISPATCHER_H_

@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load(
+    "//build/bazel/rules/rust:defs.bzl",
+    "rustc_library",
+    "rustc_proc_macro",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "bitrs",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    proc_macro_deps = [":bitrs-macro"],
+    visibility = [
+        "//src/lib/bitrs/examples:__pkg__",
+        "//src/performance/lib/fxt/rust:__pkg__",
+        "//zircon/kernel/lib/arch:__pkg__",
+        "//zircon/kernel/object:__pkg__",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_proc_macro(
+    name = "bitrs-macro",
+    srcs = ["bitrs-macro/src/lib.rs"],
+    crate_root = "bitrs-macro/src/lib.rs",
+    edition = "2024",
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:proc-macro2",
+        "//third_party/rust_crates/vendor:quote",
+        "//third_party/rust_crates/vendor:syn",
+    ],
+)

@@ -56,6 +56,7 @@
         },
         {
             protocol: [
+                "fuchsia.memory.attribution.PageRefaultSink",
                 "fuchsia.power.system.ActivityGovernor",
                 "fuchsia.power.system.BootControl",
                 "fuchsia.settings.Privacy",
@@ -157,6 +158,7 @@
                 "fuchsia.ui.composition.FlatlandFactory",
                 "fuchsia.ui.display.singleton.DisplayPower",
                 "fuchsia.ui.display.singleton.Info",
+                "fuchsia.ui.input.DeviceListenerRegistry",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.policy.DeviceListenerRegistry",
                 "fuchsia.ui.test.input.Registry",
@@ -205,6 +207,7 @@
                 "fuchsia.hardware.adb.Service",
                 "fuchsia.hardware.cpu.ctrl.Service",
                 "fuchsia.hardware.google.nanohub.StarnixDataChannelService",
+                "fuchsia.hardware.power.stats.Service",
                 "fuchsia.hardware.power.suspend.SuspendService",
                 "fuchsia.hardware.qcom.hvdcpopti.Service",
                 "fuchsia.hardware.qualcomm.fastrpc.SecureService",

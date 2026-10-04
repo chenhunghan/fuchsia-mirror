@@ -1,0 +1,70 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+/// Power state residency reported by hardware power entities.
+@available(added=HEAD)
+library fuchsia.hardware.power.stats;
+
+const MAX_NAME_LEN uint8 = 64;
+
+type StateResidency = struct {
+    /// Unique id of the State.
+    id int32;
+
+    /// Unique name of the state.
+    name string:MAX_NAME_LEN;
+    /// Total time in milliseconds that the corresponding PowerEntity resided
+    /// in this state since boot.
+    total_time_ms uint64;
+
+    ///  Total number of times that the state was entered since boot.
+    entry_count uint32;
+
+    /// Last time this state was entered, in milliseconds on the boot timeline
+    /// (see `zx_clock_get_boot`), or 0 if the provider does not track it.
+    last_entry_timestamp_ms uint64;
+};
+
+/// A state residencies result for a power entity.
+type Stats = struct {
+    /// Name of the PowerEntity.
+    entity string:MAX_NAME_LEN;
+
+    // Vector of StateResidencies.
+    state_residency_data vector<StateResidency>:MAX;
+};
+
+/// A representation that a power entity may reside in.
+type State = struct {
+    /// Unique id internally created by the server.
+    id int32;
+
+    /// Unique name.
+    name string:MAX_NAME_LEN;
+};
+
+/// A representation of a platform subsystem, peripheral or power domain that impacts the total device power consumption.
+type Entity = struct {
+    /// Unique name.
+    name string:MAX_NAME_LEN;
+
+    /// All possible states.
+    states vector<State>:MAX;
+};
+
+open protocol Device {
+    /// Report the currently accumulated state residency for all power entities.
+    GetStats() -> (resource struct {
+        reports vector<Stats>:MAX;
+    });
+
+    /// Get all supported Entities with all states for each entity.
+    GetEntities() -> (resource struct {
+        entities vector<Entity>:MAX;
+    });
+};
+
+service Service {
+    device client_end:Device;
+};

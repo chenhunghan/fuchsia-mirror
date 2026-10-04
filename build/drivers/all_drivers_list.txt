@@ -140,6 +140,9 @@
 //src/devices/gpio/drivers/aml-gpio:bazel_package.bazel_build
 //src/devices/gpio/drivers/gpio:gpio-driver
 //src/devices/gpio/drivers/ti-tca6408a:ti-tca6408a-driver
+//src/devices/driver-lab/testing:driver
+//src/devices/driver-lab/testing:sample_driver
+//src/devices/driver-lab:driver
 //src/devices/hrtimer/drivers/aml-hrtimer:aml-hrtimer-driver
 //src/devices/i2c/drivers/aml-i2c:bazel_package.bazel_build
 //src/devices/i2c/drivers/i2c:i2c-driver
@@ -160,7 +163,6 @@
 //src/devices/misc/drivers/virtio-rng:virtio_rng-driver
 //src/devices/misc/drivers/virtio-socket:virtio_socket-driver
 //src/devices/ml/drivers/aml-nna:aml-nna-driver
-//src/devices/ml/drivers/usb-harriet:usb-harriet-driver
 //src/devices/nand/drivers/aml-rawnand:aml-rawnand-driver
 //src/devices/nand/drivers/aml-spinand:aml-spinand-driver
 //src/devices/nand/drivers/intel-spi-flash:fuchsia_driver
@@ -169,7 +171,6 @@
 //src/devices/nand/drivers/ram-nand:ram-nand-driver
 //src/devices/nand/drivers/skip-block:driver
 //src/devices/pci/drivers/pci/test:pci_fake-driver
-//src/devices/pci/drivers/pci/test:pci_protocol_test_driver-driver
 //src/devices/pci/drivers/pci:bus-pci-driver
 //src/devices/power/drivers/aml-meson-power:aml-meson-power-driver
 //src/devices/power/drivers/aml-pwm-regulator:aml-pwm-regulator-driver

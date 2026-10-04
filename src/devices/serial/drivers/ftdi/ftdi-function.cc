@@ -18,6 +18,7 @@
 
 #include <bind/fuchsia/cpp/bind.h>
 #include <usb-endpoint/usb-endpoint-client.h>
+#include <usb/descriptors.h>
 #include <usb/hid.h>
 #include <usb/peripheral.h>
 #include <usb/request-cpp.h>
@@ -216,7 +217,7 @@ zx::result<> FakeFtdiFunction::Start(fdf::DriverContext context) {
   descriptor_size_ = sizeof(descriptor_);
   descriptor_.interface = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = 0,
       .b_alternate_setting = 0,
       .b_num_endpoints = 2,
@@ -227,17 +228,17 @@ zx::result<> FakeFtdiFunction::Start(fdf::DriverContext context) {
   };
   descriptor_.bulk_in = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
-      .b_endpoint_address = USB_ENDPOINT_IN,  // set later
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+      .b_endpoint_address = fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn),  // set later
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = htole16(BULK_MAX_PACKET),
       .b_interval = 0,
   };
   descriptor_.bulk_out = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
-      .b_endpoint_address = USB_ENDPOINT_OUT,  // set later
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+      .b_endpoint_address = fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut),  // set later
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = htole16(BULK_MAX_PACKET),
       .b_interval = 0,
   };
@@ -265,10 +266,10 @@ zx::result<> FakeFtdiFunction::Start(fdf::DriverContext context) {
 
   std::vector<fuchsia_hardware_usb_function::EndpointResource> endpoints;
   endpoints.push_back(fuchsia_hardware_usb_function::EndpointResource(
-      fuchsia_hardware_usb_descriptor::EndpointDirection::kIn, std::move(server_in),
+      fdescriptor::EndpointDirection::kIn, std::move(server_in),
       fuchsia_hardware_usb_endpoint::EndpointInfo::WithBulk({}), BULK_MAX_PACKET));
   endpoints.push_back(fuchsia_hardware_usb_function::EndpointResource(
-      fuchsia_hardware_usb_descriptor::EndpointDirection::kOut, std::move(server_out),
+      fdescriptor::EndpointDirection::kOut, std::move(server_out),
       fuchsia_hardware_usb_endpoint::EndpointInfo::WithBulk({}), BULK_MAX_PACKET));
 
   fuchsia_hardware_usb_function::UsbFunctionAllocResourcesRequest alloc_req;

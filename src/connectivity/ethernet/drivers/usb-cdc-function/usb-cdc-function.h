@@ -19,6 +19,8 @@
 #include <zircon/listnode.h>
 
 #include <array>
+#include <deque>
+#include <optional>
 
 #include <usb-endpoint/usb-endpoint-client.h>
 #include <usb-inspect/usb-inspect.h>
@@ -215,9 +217,10 @@ class UsbCdcFunction : public fdf::DriverBase2,
   usb::EndpointClient<UsbCdcFunction> bulk_in_ep_{usb::EndpointType::BULK, this,
                                                   std::mem_fn(&UsbCdcFunction::CdcTxComplete)};
 
-  // Queue of buffer IDs that were sent to USB hardware and are awaiting
-  // completion. This mirrors the order of requests submitted to bulk_in_ep_.
-  std::queue<uint32_t> tx_completion_queue_;
+  // Queue of netdevice buffer IDs corresponding 1-to-1 with in-flight USB
+  // requests on bulk_in_ep_. An entry is std::nullopt if its netdevice buffer
+  // ID was already returned early by DiscardPendingTxBuffers().
+  std::deque<std::optional<uint32_t>> tx_completion_queue_;
   std::vector<fuchsia_hardware_usb_endpoint::Completion> rx_completion_queue_;
   void DiscardPendingTxBuffers(zx_status_t status);
   void ReturnPendingRxSpace();
@@ -239,10 +242,10 @@ class UsbCdcFunction : public fdf::DriverBase2,
   std::array<uint8_t, ETH_MAC_SIZE> mac_addr_;
   // Guarded by the synchronized driver dispatcher.
   bool online_ = false;
+  bool netdevice_started_ = false;
   bool configured_ = false;
   bool pending_notification_ = false;
-  fuchsia_hardware_usb_descriptor::UsbSpeed speed_ =
-      fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined;
+  fdescriptor::UsbSpeed speed_ = fdescriptor::UsbSpeed::kUndefined;
 
   using VmoStore = vmo_store::VmoStore<vmo_store::SlabStorage<uint8_t>>;
   VmoStore vmo_store_;
@@ -264,35 +267,36 @@ class UsbCdcFunction : public fdf::DriverBase2,
       .comm_intf =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,  // set later
               .b_alternate_setting = 0,
               .b_num_endpoints = 1,
-              .b_interface_class = USB_CLASS_COMM,
-              .b_interface_sub_class = USB_CDC_SUBCLASS_ETHERNET,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+              .b_interface_sub_class = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
               .b_interface_protocol = 0,
               .i_interface = 0,
           },
       .cdc_header =
           {
               .bLength = sizeof(usb_cs_header_interface_descriptor_t),
-              .bDescriptorType = USB_DT_CS_INTERFACE,
-              .bDescriptorSubType = USB_CDC_DST_HEADER,
+              .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+              .bDescriptorSubType = fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kHeader),
               .bcdCDC = 0x120,
           },
       .cdc_union =
           {
               .bLength = sizeof(usb_cs_union_interface_descriptor_1_t),
-              .bDescriptorType = USB_DT_CS_INTERFACE,
-              .bDescriptorSubType = USB_CDC_DST_UNION,
+              .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+              .bDescriptorSubType = fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kUnion),
               .bControlInterface = 0,      // set later
               .bSubordinateInterface = 0,  // set later
           },
       .cdc_eth =
           {
               .bLength = sizeof(usb_cs_ethernet_interface_descriptor_t),
-              .bDescriptorType = USB_DT_CS_INTERFACE,
-              .bDescriptorSubType = USB_CDC_DST_ETHERNET,
+              .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+              .bDescriptorSubType =
+                  fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kEthernet),
               .iMACAddress = 0,  // set later
               .bmEthernetStatistics = 0,
               .wMaxSegmentSize = ETH_MTU,
@@ -302,20 +306,20 @@ class UsbCdcFunction : public fdf::DriverBase2,
       .intr_ep =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = 0,  // set later
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kInterrupt),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kInterrupt),
               .w_max_packet_size = htole16(INTR_MAX_PACKET),
               .b_interval = 8,
           },
       .cdc_intf_0 =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,  // set later
               .b_alternate_setting = 0,
               .b_num_endpoints = 0,
-              .b_interface_class = USB_CLASS_CDC,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kCdc),
               .b_interface_sub_class = 0,
               .b_interface_protocol = 0,
               .i_interface = 0,
@@ -323,11 +327,11 @@ class UsbCdcFunction : public fdf::DriverBase2,
       .cdc_intf_1 =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,  // set later
               .b_alternate_setting = 1,
               .b_num_endpoints = 2,
-              .b_interface_class = USB_CLASS_CDC,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kCdc),
               .b_interface_sub_class = 0,
               .b_interface_protocol = 0,
               .i_interface = 0,
@@ -335,18 +339,18 @@ class UsbCdcFunction : public fdf::DriverBase2,
       .bulk_out_ep =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = 0,  // set later
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(BULK_MAX_PACKET),
               .b_interval = 0,
           },
       .bulk_in_ep =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = 0,  // set later
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(BULK_MAX_PACKET),
               .b_interval = 0,
           },

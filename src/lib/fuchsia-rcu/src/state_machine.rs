@@ -12,6 +12,8 @@ use std::time::Duration;
 
 #[cfg(feature = "rseq_backend")]
 use crate::read_counters::RcuReadCounters;
+#[cfg(feature = "rseq_backend")]
+use std::cell::Cell;
 
 type RcuCallback = Box<dyn FnOnce() + Send + Sync + 'static>;
 
@@ -86,12 +88,21 @@ struct RcuThreadBlock {
     /// The index of the read counter that the thread incremented when it entered its outermost read
     /// lock.
     counter_index: AtomicU8,
+
+    /// The restartable sequence for the current thread.
+    #[cfg(feature = "rseq_backend")]
+    rseq: Cell<Option<fuchsia_rseq::Rseq>>,
 }
 
 impl RcuThreadBlock {
     /// Creates a new `RcuThreadBlock`.
     const fn new() -> Self {
-        Self { nesting_level: AtomicUsize::new(0), counter_index: AtomicU8::new(0) }
+        Self {
+            nesting_level: AtomicUsize::new(0),
+            counter_index: AtomicU8::new(0),
+            #[cfg(feature = "rseq_backend")]
+            rseq: Cell::new(None),
+        }
     }
 
     /// Returns true if the thread is holding a read lock.
@@ -131,17 +142,48 @@ impl Drop for RcuThreadRegistration {
 }
 
 /// Registers the current thread for RCU and RSEQ.
+///
+/// With RSEQ enabled, RCU requires registration of its RSEQ critical section. By default, it
+/// registers and unregisters on each `rcu_read_lock`. To avoid this overhead, if a thread knows the only
+/// RSEQ it needs is for RCU, it may create an [`RcuThreadRegistration`] which will keep the
+/// registration alive for as long as the [`RcuThreadRegistration`] exists. This avoids the overhead of
+/// registration on each read lock, but no other RSEQs may be used by the thread until dropped.
 pub fn register_thread() -> RcuThreadRegistration {
     #[cfg(feature = "rseq_backend")]
-    fuchsia_rseq::rseq_register_thread_with_cs(crate::read_counters::rcu_critical_section());
+    {
+        RCU_THREAD_BLOCK.with(|block| {
+            assert!(
+                !block.holding_read_lock(),
+                "Cannot register thread while holding an RCU read lock"
+            );
+            assert!(block.rseq.get().is_none(), "thread already registered");
+            let rseq = fuchsia_rseq::rseq_register_thread_with_cs(
+                crate::read_counters::rcu_critical_section(),
+            );
+            block.rseq.set(Some(rseq));
+        });
+    }
 
     RcuThreadRegistration { _marker: PhantomData }
 }
 
 /// Unregisters the current thread from RCU and RSEQ.
-pub fn unregister_thread() {
+pub(crate) fn unregister_thread() {
     #[cfg(feature = "rseq_backend")]
-    fuchsia_rseq::rseq_unregister_thread();
+    {
+        RCU_THREAD_BLOCK.with(|block| {
+            assert!(
+                !block.holding_read_lock(),
+                "Cannot unregister thread while holding an RCU read lock"
+            );
+            assert!(block.rseq.take().is_some(), "thread not registered");
+        });
+        // SAFETY: We've verified no read lock is held and cleared the cached `rseq`
+        // handle from `RCU_THREAD_BLOCK`, so no further access will be made using that handle.
+        unsafe {
+            fuchsia_rseq::rseq_unregister_thread();
+        }
+    }
 }
 
 /// Exposes the thread-local counters for RCU stall detection.
@@ -183,7 +225,11 @@ pub(crate) fn rcu_read_lock() {
 
             #[cfg(feature = "rseq_backend")]
             {
-                control_block.read_counters.begin(index);
+                match thread_block.rseq.get() {
+                    // SAFETY: `register_thread()` initialized `rseq` with `rcu_critical_section()`.
+                    Some(rseq) => unsafe { control_block.read_counters.begin(&rseq, index) },
+                    None => control_block.read_counters.begin_slow(index),
+                }
                 std::sync::atomic::compiler_fence(Ordering::SeqCst);
             }
 
@@ -219,7 +265,11 @@ pub(crate) fn rcu_read_unlock() {
             #[cfg(feature = "rseq_backend")]
             {
                 std::sync::atomic::compiler_fence(Ordering::SeqCst);
-                control_block.read_counters.end(index);
+                match thread_block.rseq.get() {
+                    // SAFETY: `register_thread()` initialized `rseq` with `rcu_critical_section()`.
+                    Some(rseq) => unsafe { control_block.read_counters.end(&rseq, index) },
+                    None => control_block.read_counters.end_slow(index),
+                }
             }
 
             #[cfg(not(feature = "rseq_backend"))]

@@ -70,10 +70,10 @@ to ensure they pass with the new expectations.
 Sometimes, tests might fail audit checks on Starnix due to expected differences
 or issues. You can manage these cases using the following JSON files:
 
-*   `audit_failure.json`: Add entries here for tests that are failing on Starnix
+*   `audit_failure.json5`: Add entries here for tests that are failing on Starnix
     due to mismatches in audit logs or a different number of audit logs compared
     to Linux.
-*   `audit_skip.json`: Use this file to skip audit checks for tests that are
+*   `audit_skip.json5`: Use this file to skip audit checks for tests that are
     expected to fail and would affect the audit checker. This can happen,
     for example, if a test manipulates `NETLINK_AUDIT` or if audit logs are
     corrupted on Linux because the tests don't use subprocesses.
@@ -115,8 +115,8 @@ To check that the audit checks are correct:
 
 If you encounter failures on Starnix, you can use:
 
-* `audit_failure.json` - add here if the test is failing on Starnix because of various reasons such as mismatches in audit logs or different number of audit logs
-* `audit_skip.json` - add here if the test is expected to fail because of NETLINK_AUDIT manipulation for example; this can also be used for Linux when audit logs are corrupted because the tests do not use subprocesses
+* `audit_failure.json5` - add here if the test is failing on Starnix because of various reasons such as mismatches in audit logs or different number of audit logs
+* `audit_skip.json5` - add here if the test is expected to fail because of NETLINK_AUDIT manipulation for example; this can also be used for Linux when audit logs are corrupted because the tests do not use subprocesses
 
 
 ### Writing a test

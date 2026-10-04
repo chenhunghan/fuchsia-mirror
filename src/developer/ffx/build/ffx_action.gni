@@ -168,7 +168,6 @@ template("ffx_action") {
     # Use a builddir-specific environment, not the user's own environment.
     _ffx_config = [
       "ffx.analytics.disabled=true",
-      "daemon.autostart=false",
       "log.enabled=false",
     ]
 

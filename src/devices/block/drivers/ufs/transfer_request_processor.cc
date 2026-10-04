@@ -9,6 +9,7 @@
 #include <lib/trace/event.h>
 
 #include <optional>
+#include <type_traits>
 
 #include <safemath/checked_math.h>
 #include <safemath/safe_conversions.h>
@@ -19,6 +20,19 @@
 namespace ufs {
 
 namespace {
+
+// Writes a descriptor or PRDT entry to uncached DMA memory using sequential 32-bit volatile stores
+// to prevent uncached read-modify-write pipeline stalls and unaligned memory access penalties on
+// ARM64.
+template <typename T>
+void WriteToUncachedDescriptor(T *dest, const T &src) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  volatile uint32_t *dst = reinterpret_cast<volatile uint32_t *>(dest->dwords);
+  for (size_t i = 0; i < std::size(src.dwords); ++i) {
+    dst[i] = src.dwords[i];
+  }
+}
+
 void FillPrdt(PhysicalRegionDescriptionTableEntry *prdt,
               const std::vector<zx_paddr_t> &buffer_physical_addresses, uint32_t prdt_count,
               uint32_t data_length) {
@@ -26,9 +40,11 @@ void FillPrdt(PhysicalRegionDescriptionTableEntry *prdt,
     // It only supports 4KB data buffers for each entry in the scatter-gather.
     ZX_ASSERT(buffer_physical_addresses[i] != 0);
     uint32_t byte_count = data_length < kPrdtEntryDataLength ? data_length : kPrdtEntryDataLength;
-    prdt->set_data_base_address(static_cast<uint32_t>(buffer_physical_addresses[i] & 0xffffffff));
-    prdt->set_data_base_address_upper(static_cast<uint32_t>(buffer_physical_addresses[i] >> 32));
-    prdt->set_data_byte_count(byte_count - 1);
+    PhysicalRegionDescriptionTableEntry entry{};
+    entry.set_data_base_address(static_cast<uint32_t>(buffer_physical_addresses[i] & 0xffffffff));
+    entry.set_data_base_address_upper(static_cast<uint32_t>(buffer_physical_addresses[i] >> 32));
+    entry.set_data_byte_count(byte_count - 1);
+    WriteToUncachedDescriptor(prdt, entry);
 
     ++prdt;
     data_length -= byte_count;
@@ -59,7 +75,6 @@ std::tuple<uint16_t, uint32_t> TransferRequestProcessor::PreparePrdt<ScsiCommand
   ZX_DEBUG_ASSERT_MSG(total_length <= slots_.GetDescriptorBufferSize(slot),
                       "Invalid UPIU size for prdt");
   auto prdt = slots_.GetDescriptorBuffer<PhysicalRegionDescriptionTableEntry>(slot, prdt_offset);
-  CustomMemSet(prdt, 0, prdt_length_in_bytes);
 
   FillPrdt(prdt, buffer_phys, prdt_entry_count, data_transfer_length);
 
@@ -584,27 +599,32 @@ zx::result<> TransferRequestProcessor::FillDescriptorAndSendRequest(
   zx_paddr_t paddr = request_slot.command_descriptor_io->phys();
 
   // Fill up UTP Transfer Request Descriptor.
-  CustomMemSet(descriptor, 0, sizeof(TransferRequestDescriptor));
-  descriptor->set_interrupt(true);
-  descriptor->set_ru(reliable_write);
-  descriptor->set_data_direction(data_dir);
-  descriptor->set_command_type(kCommandTypeUfsStorage);
+  TransferRequestDescriptor local_descriptor{};
+  local_descriptor.set_interrupt(true);
+  local_descriptor.set_ru(reliable_write);
+  local_descriptor.set_data_direction(data_dir);
+  local_descriptor.set_command_type(kCommandTypeUfsStorage);
   // If the command was successful, overwrite |overall_command_status| field with |kSuccess|.
-  descriptor->set_overall_command_status(OverallCommandStatus::kInvalid);
-  descriptor->set_utp_command_descriptor_base_address(static_cast<uint32_t>(paddr & 0xffffffff));
-  descriptor->set_utp_command_descriptor_base_address_upper(static_cast<uint32_t>(paddr >> 32));
+  local_descriptor.set_overall_command_status(OverallCommandStatus::kInvalid);
+  local_descriptor.set_utp_command_descriptor_base_address(
+      static_cast<uint32_t>(paddr & 0xffffffff));
+  local_descriptor.set_utp_command_descriptor_base_address_upper(
+      static_cast<uint32_t>(paddr >> 32));
 
-  descriptor->set_response_upiu_offset(response_offset / kDwordSize);
-  descriptor->set_response_upiu_length(response_length / kDwordSize);
-  descriptor->set_prdt_offset(prdt_entry_count > 0 ? (prdt_offset / kDwordSize) : 0);
-  descriptor->set_prdt_length(prdt_entry_count);
+  local_descriptor.set_response_upiu_offset(response_offset / kDwordSize);
+  local_descriptor.set_response_upiu_length(response_length / kDwordSize);
+  local_descriptor.set_prdt_offset(prdt_entry_count > 0 ? (prdt_offset / kDwordSize) : 0);
+  local_descriptor.set_prdt_length(prdt_entry_count);
 
   if (inline_crypto.is_enabled) {
-    descriptor->set_ce(1);
-    descriptor->set_cci(inline_crypto.slot);
-    descriptor->set_data_unit_number_lower(static_cast<uint32_t>(inline_crypto.dun & 0xffffffff));
-    descriptor->set_data_unit_number_upper(static_cast<uint32_t>(inline_crypto.dun >> 32));
+    local_descriptor.set_ce(1);
+    local_descriptor.set_cci(inline_crypto.slot);
+    local_descriptor.set_data_unit_number_lower(
+        static_cast<uint32_t>(inline_crypto.dun & 0xffffffff));
+    local_descriptor.set_data_unit_number_upper(static_cast<uint32_t>(inline_crypto.dun >> 32));
   }
+
+  WriteToUncachedDescriptor(descriptor, local_descriptor);
 
   TRACE_DURATION("ufs", "RingRequestDoorbell", "slot", slot);
   if (zx::result<> result = controller_.Notify(NotifyEvent::kSetupTransferRequestList, slot);

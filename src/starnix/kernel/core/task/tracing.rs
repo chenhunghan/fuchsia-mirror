@@ -5,12 +5,62 @@
 use crate::task::{Kernel, PidTable};
 use fuchsia_rcu::RcuReadScope;
 use starnix_logging::{log_debug, log_error, log_warn};
-use starnix_sync::LockDepRwLock;
+use starnix_sync::{
+    LockDepMutex, LockDepRwLock, PidToKoidMapInnerLock, TracePerformanceEventManagerStateLock,
+};
 use starnix_uapi::{pid_t, tid_t};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use zx::Koid;
+
+/// Sink for emitting task attribution events during tracing.
+pub trait TraceEventSink: Send + Sync {
+    /// Emits an association event between Linux pid/tid and Zircon identity.
+    /// `source` is "dump" for existing tasks snapshot, or "new_task" for dynamic spawns.
+    fn emit_association(
+        &self,
+        pid: pid_t,
+        tid: tid_t,
+        identity: ZirconIdentity,
+        source: &'static str,
+    );
+
+    /// Called after an initial dump of running tasks completes.
+    fn on_dump_complete(&self);
+}
+
+/// Production implementation of [`TraceEventSink`] that writes to Fuchsia tracing.
+#[derive(Default)]
+pub struct ProductionTraceEventSink;
+
+impl TraceEventSink for ProductionTraceEventSink {
+    fn emit_association(
+        &self,
+        pid: pid_t,
+        tid: tid_t,
+        identity: ZirconIdentity,
+        source: &'static str,
+    ) {
+        fuchsia_trace::instant!(
+            "starnix:meta",
+            source,
+            fuchsia_trace::Scope::Process,
+            "tid" => tid,
+            "pid" => pid,
+            "koid" => identity.thread.raw_koid().to_string().as_str(),
+            "process_koid" => identity.process.raw_koid().to_string().as_str()
+        );
+    }
+
+    fn on_dump_complete(&self) {
+        if fuchsia_trace::category_enabled(c"starnix:meta") {
+            if let Err(status) = fuchsia_trace::flush_buffer() {
+                log_warn!("fuchsia_trace::flush_buffer failed with status: {status}");
+            }
+        }
+    }
+}
 
 /// The Zircon koids backing one `Task`.
 ///
@@ -131,23 +181,74 @@ pub struct TracePerformanceEventManager {
     active_sessions: AtomicUsize,
 
     /// Serializes session lifecycle transitions (0 -> 1 initialization and 1 -> 0 cleanup).
-    state_lock: Mutex<()>,
+    state_lock: LockDepMutex<(), TracePerformanceEventManagerStateLock>,
 
     /// The bidirectional mapping table. Readers take short read locks per lookup; the
     /// only writers are task spawns while recording (one insert each) and the session
     /// seed/release transitions.
-    map: LockDepRwLock<PidKoidMap, starnix_sync::PidToKoidMapInnerLock>,
+    map: LockDepRwLock<PidKoidMap, PidToKoidMapInnerLock>,
+
+    /// Sink for emitting task attribution events during tracing.
+    sink: Arc<dyn TraceEventSink>,
 }
 
 impl TracePerformanceEventManager {
     /// Creates a new manager holding a weak reference to the enclosing `Kernel`.
     pub fn new(weak_kernel: Weak<Kernel>) -> Self {
+        Self::new_with_sink(weak_kernel, Arc::new(ProductionTraceEventSink))
+    }
+
+    /// Creates a new manager with a custom event sink.
+    pub fn new_with_sink(weak_kernel: Weak<Kernel>, sink: Arc<dyn TraceEventSink>) -> Self {
         Self {
             weak_kernel,
             active_sessions: AtomicUsize::new(0),
-            state_lock: Mutex::new(()),
+            state_lock: LockDepMutex::new(()),
             map: LockDepRwLock::new(PidKoidMap::default()),
+            sink,
         }
+    }
+
+    /// Initializes a background observer that listens for Fuchsia trace state changes
+    /// and opens/closes a [`PidKoidSession`] accordingly.
+    pub fn init_trace_observer(&self, kernel: &Arc<Kernel>) {
+        let weak_kernel = Arc::downgrade(kernel);
+        kernel.kthreads.spawn_future(
+            move || async move {
+                let observer = fuchsia_trace_observer::TraceObserver::new();
+                let mut session: Option<PidKoidSession> = None;
+                if fuchsia_trace::is_enabled() {
+                    if let Some(kernel) = weak_kernel.upgrade() {
+                        session = Some(kernel.trace_event_manager.open());
+                        log_debug!(
+                            "trace-meta-observer: session active on startup: {}",
+                            session.is_some()
+                        );
+                    }
+                }
+                while let Ok(state) = observer.on_state_changed().await {
+                    match state {
+                        fuchsia_trace::TraceState::Started => {
+                            if let Some(kernel) = weak_kernel.upgrade() {
+                                session = Some(kernel.trace_event_manager.open());
+                                log_debug!(
+                                    "trace-meta-observer: session active on trace start: {}",
+                                    session.is_some()
+                                );
+                            }
+                        }
+                        fuchsia_trace::TraceState::Stopping
+                        | fuchsia_trace::TraceState::Stopped => {
+                            if session.take().is_some() {
+                                log_debug!("trace-meta-observer: session dropped on trace stop");
+                            }
+                        }
+                    }
+                }
+                log_warn!("trace-meta-observer loop terminated unexpectedly");
+            },
+            "trace-meta-observer",
+        );
     }
 
     /// Returns true if at least one session is actively recording mappings.
@@ -176,6 +277,7 @@ impl TracePerformanceEventManager {
             return;
         }
         map.insert(pid, tid, identity);
+        self.sink.emit_association(pid, tid, identity, "new_task");
     }
 
     /// Looks up the Zircon koids recorded for a Linux tid.
@@ -225,12 +327,13 @@ impl TracePerformanceEventManager {
     /// Increments the session count, seeding the map from the kernel pid table when this
     /// is the first session.
     fn start_session_internal(&self) {
-        let _guard = self.state_lock.lock().unwrap();
+        let _guard = self.state_lock.lock();
         let current = self.active_sessions.fetch_add(1, Ordering::AcqRel);
         if current == 0 {
             if let Some(kernel) = self.weak_kernel.upgrade() {
-                let snapshot = Self::snapshot_existing_tasks(&kernel.pids);
+                let snapshot = Self::snapshot_existing_tasks(&kernel.pids, &*self.sink);
                 self.map.write().extend_from(snapshot);
+                self.sink.on_dump_complete();
             } else {
                 log_warn!("Kernel is shutting down, unable to snapshot running tasks");
             }
@@ -239,7 +342,7 @@ impl TracePerformanceEventManager {
 
     /// Decrements the session count, releasing the map when the last session drops.
     fn stop_session_internal(&self) {
-        let _guard = self.state_lock.lock().unwrap();
+        let _guard = self.state_lock.lock();
         if self.active_sessions.load(Ordering::Acquire) == 0 {
             log_error!("session stopped without an active session");
             return;
@@ -259,7 +362,7 @@ impl TracePerformanceEventManager {
     /// the gap its tid cannot appear in any trace data because its creator's syscall has
     /// not yet returned. Starnix kernel threads, which have no backing Zircon process,
     /// are intentionally excluded.
-    fn snapshot_existing_tasks(pid_table: &PidTable) -> PidKoidMap {
+    fn snapshot_existing_tasks(pid_table: &PidTable, sink: &dyn TraceEventSink) -> PidKoidMap {
         let mut pid_map = PidKoidMap::default();
 
         let scope = RcuReadScope::new();
@@ -272,7 +375,9 @@ impl TracePerformanceEventManager {
                 continue;
             };
             if let Some(identity) = task.get_zircon_identity() {
-                pid_map.insert(task.get_pid(), pid.id, identity);
+                let pid_val = task.get_pid();
+                pid_map.insert(pid_val, pid.id, identity);
+                sink.emit_association(pid_val, pid.id, identity, "dump");
             }
         }
 
@@ -330,10 +435,45 @@ mod tests {
     use crate::task::ZirconThread;
     use crate::testing::{create_task, spawn_kernel_and_run};
     use futures::channel::oneshot;
+    use std::sync::Mutex;
 
     impl PidKoidMap {
         fn is_empty(&self) -> bool {
             self.tid_to_koid.is_empty() && self.pid_to_koid.is_empty()
+        }
+    }
+
+    struct TestTraceEventSink {
+        events: Arc<Mutex<Vec<(pid_t, tid_t, ZirconIdentity, String)>>>,
+        dump_completed: Arc<Mutex<bool>>,
+    }
+
+    impl TestTraceEventSink {
+        fn new() -> (Self, Arc<Mutex<Vec<(pid_t, tid_t, ZirconIdentity, String)>>>, Arc<Mutex<bool>>)
+        {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let dump_completed = Arc::new(Mutex::new(false));
+            (
+                Self { events: Arc::clone(&events), dump_completed: Arc::clone(&dump_completed) },
+                events,
+                dump_completed,
+            )
+        }
+    }
+
+    impl TraceEventSink for TestTraceEventSink {
+        fn emit_association(
+            &self,
+            pid: pid_t,
+            tid: tid_t,
+            identity: ZirconIdentity,
+            source: &'static str,
+        ) {
+            self.events.lock().unwrap().push((pid, tid, identity, source.to_string()));
+        }
+
+        fn on_dump_complete(&self) {
+            *self.dump_completed.lock().unwrap() = true;
         }
     }
 
@@ -570,5 +710,68 @@ mod tests {
         let result = receiver.recv_timeout(std::time::Duration::from_millis(500));
         drop(read_guard);
         assert_eq!(result, Ok(None), "resolve_koids blocked on write lock for known process");
+    }
+
+    #[fuchsia::test]
+    async fn test_trace_sink_emits_dump_and_new_task() {
+        let (sender, receiver) = oneshot::channel();
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+            let pid = current_task.task.get_pid();
+            let tid = current_task.task.get_tid();
+            let identity = current_task.task.get_zircon_identity().unwrap();
+
+            let (sink, events, dump_completed) = TestTraceEventSink::new();
+            let manager = Arc::new(TracePerformanceEventManager::new_with_sink(
+                Arc::downgrade(&kernel),
+                Arc::new(sink),
+            ));
+
+            let session = manager.open();
+
+            // Initial dump should be completed and include current_task.
+            assert!(*dump_completed.lock().unwrap());
+            {
+                let dumped = events.lock().unwrap().clone();
+                assert_eq!(dumped.len(), 1);
+                assert_eq!(dumped[0], (pid, tid, identity, "dump".to_string()));
+            }
+
+            // Create a new task and associate a thread with it.
+            let another_current = create_task(&kernel, "another-task");
+            let test_thread = another_current
+                .thread_group()
+                .process
+                .create_thread(b"another-thread")
+                .expect("test thread");
+            let thread_koid = test_thread.koid().unwrap();
+            let process_koid = another_current.thread_group().process.koid().unwrap();
+            let another_identity = ZirconIdentity { process: process_koid, thread: thread_koid };
+
+            another_current
+                .running_state()
+                .thread
+                .set(ZirconThread::new(Arc::new(test_thread)))
+                .expect("test thread set");
+
+            let another_pid = another_current.task.get_pid();
+            let another_tid = another_current.task.get_tid();
+
+            manager.record(another_pid, another_tid, another_identity);
+
+            {
+                let all_events = events.lock().unwrap().clone();
+                assert_eq!(all_events.len(), 2);
+                assert_eq!(
+                    all_events[1],
+                    (another_pid, another_tid, another_identity, "new_task".to_string())
+                );
+            }
+
+            drop(session);
+            sender.send(()).unwrap();
+        })
+        .await;
+        receiver.await.unwrap();
     }
 }

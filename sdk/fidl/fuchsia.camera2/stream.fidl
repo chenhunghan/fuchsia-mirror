@@ -114,7 +114,7 @@ closed protocol Stream {
         x_max float32;
         y_max float32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Change the image format of the stream. This is called when clients want
@@ -123,7 +123,7 @@ closed protocol Stream {
     strict SetImageFormat(struct {
         image_format_index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Get the image formats that this stream supports.

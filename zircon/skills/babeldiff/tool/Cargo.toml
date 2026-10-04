@@ -1,0 +1,26 @@
+[package]
+name = "babeldiff"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+description = "Side-by-side correspondence diff for C++ to Rust ports"
+readme = "README.md"
+keywords = ["diff", "rust", "cpp", "code-review", "tree-sitter"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "babeldiff"
+path = "src/lib.rs"
+
+[[bin]]
+name = "babeldiff"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+cpp_demangle = "0.5.1"
+regex = "1"
+tree-sitter = "0.27"
+tree-sitter-cpp = "0.23"
+tree-sitter-rust = "0.24"

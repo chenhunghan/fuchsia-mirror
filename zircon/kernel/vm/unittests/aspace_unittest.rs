@@ -15,28 +15,43 @@ mod sizes {
 #[unittest::suite]
 mod aspace_rs {
     use super::sizes::GB;
+    use crate::arch_rs::vm::is_user_accessible_range;
+    use crate::arch_rs::{
+        KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, USER_ASPACE_BASE, USER_ASPACE_SIZE,
+    };
+    use crate::kernel::deadline::Deadline;
+    use crate::kernel::event::AutounsignalEvent;
+    use crate::kernel::thread;
     use crate::kernel::types::VAddr;
+    use crate::platform_rs::timer::InstantMono;
+    use crate::user_copy::internal::validate_user_accessible_range;
     use crate::user_memory::UserMemory;
     use crate::vm::arch_vm_aspace::{
-        ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_USER, ArchMmuFlags,
+        ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_USER, ArchMmuFlags, NonTerminalAction,
+        TerminalAction,
     };
-    use crate::vm::pmm;
     use crate::vm::scanner::AutoVmScannerDisable;
     use crate::vm::vm::vaddr_to_paddr;
     use crate::vm::vm_address_region::{self as vmar, MemoryPriority, VmAddressRegionOpChildren};
-    use crate::vm::vm_aspace::{Type, VmAspace, vmm_flag};
-    use crate::vm::vm_object::{Resizability, SnapshotType, VmObject};
+    use crate::vm::vm_aspace::{ShareOpt, Type, VmAspace, vmm_flag};
+    use crate::vm::vm_object::{Resizability, SnapshotType, VmObject, VmObjectReadWriteOptions};
     use crate::vm::vm_object_paged::VmObjectPaged;
+    use crate::vm::{pmm, vmm};
     use crate::vm_unittests::test_helper::{
-        ARCH_RW_FLAGS, ARCH_RW_USER_FLAGS, fill_and_test, make_committed_pager_vmo,
+        ARCH_RW_FLAGS, ARCH_RW_USER_FLAGS, alloc_user, fill_and_test, fill_and_test_user,
+        make_committed_pager_vmo,
     };
+    use core::ffi::c_void;
     use core::mem::{MaybeUninit, size_of, size_of_val};
+    use core::ptr::from_ref;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use fbl::RefPtr;
     use kprint::kprintln;
     use page::SIZE as PAGE_SIZE_USIZE;
+    use pin_init::stack_pin_init;
     use unittest::{
-        assert_err, assert_nonnull, assert_ok, assert_true, expect_eq, expect_false, expect_ok,
-        expect_true, unwrap_ok,
+        assert_eq, assert_err, assert_nonnull, assert_ok, assert_true, expect_eq, expect_err,
+        expect_false, expect_ne, expect_ok, expect_true, subtest, unwrap_ok, unwrap_some,
     };
     use zx_status::Status;
 
@@ -89,6 +104,51 @@ mod aspace_rs {
         expect_ok!(err, "VmAspace::FreeRegion region of memory");
     }
 
+    /// Allocates a new address space and creates a few regions in it, then destroys it.
+    #[test]
+    fn multiple_regions_test() {
+        let alloc_size: usize = 16 * 1024;
+
+        let aspace =
+            unwrap_some!(VmAspace::create(Type::User, c"test aspace"), "VmAspace::Create pointer");
+
+        // SAFETY: Active aspace reference is not invalidated during test.
+        let old_aspace = unsafe { thread::current_active_aspace() };
+        // SAFETY: `aspace` remains valid while active.
+        unsafe { vmm::set_active_aspace(Some(&aspace)) };
+
+        // allocate region 0
+        let ptr0 = unwrap_ok!(
+            alloc_user(&aspace, c"test0", alloc_size),
+            "VmAspace::Alloc region of memory"
+        );
+        // fill with known pattern and test
+        expect_true!(fill_and_test_user(ptr0, alloc_size));
+
+        // allocate region 1
+        let ptr1 = unwrap_ok!(
+            alloc_user(&aspace, c"test1", alloc_size),
+            "VmAspace::Alloc region of memory"
+        );
+        // fill with known pattern and test
+        expect_true!(fill_and_test_user(ptr1, alloc_size));
+
+        // allocate region 2
+        let ptr2 = unwrap_ok!(
+            alloc_user(&aspace, c"test2", alloc_size),
+            "VmAspace::Alloc region of memory"
+        );
+        // fill with known pattern and test
+        expect_true!(fill_and_test_user(ptr2, alloc_size));
+
+        // SAFETY: It is sound to restore the previous address space.
+        unsafe { vmm::set_active_aspace(old_aspace) };
+
+        // free the address space all at once
+        let err = aspace.destroy();
+        expect_ok!(err, "VmAspace::Destroy");
+    }
+
     /// Checks that AllocContiguous fails when missing VMM_FLAG_COMMIT.
     #[test]
     fn vmm_alloc_contiguous_missing_flag_commit_fails() {
@@ -134,6 +194,420 @@ mod aspace_rs {
         let aspace = VmAspace::create(Type::User, c"test aspace").expect("VmAspace::create failed");
         let err = aspace.destroy();
         expect_ok!(err, "VmAspace::Destroy");
+    }
+
+    /// Verifies that creating an address space with out-of-range bounds fails.
+    #[test]
+    fn vmaspace_create_invalid_ranges() {
+        // These are defined in vm_aspace.cc.
+        const GUEST_PHYSICAL_ASPACE_BASE: usize = 0;
+        const GUEST_PHYSICAL_ASPACE_SIZE: usize = 1usize << crate::arch_rs::MMU_GUEST_SIZE_SHIFT;
+
+        // Test when base < valid base.
+        expect_true!(
+            VmAspace::create_with_opts(
+                USER_ASPACE_BASE - 1,
+                4096,
+                Type::User,
+                c"test",
+                ShareOpt::None
+            )
+            .is_none()
+        );
+        expect_true!(
+            VmAspace::create_with_opts(
+                KERNEL_ASPACE_BASE - 1,
+                4096,
+                Type::Kernel,
+                c"test",
+                ShareOpt::None
+            )
+            .is_none()
+        );
+        expect_true!(
+            VmAspace::create_with_opts(
+                GUEST_PHYSICAL_ASPACE_BASE.wrapping_sub(1),
+                4096,
+                Type::GuestPhysical,
+                c"test",
+                ShareOpt::None
+            )
+            .is_none()
+        );
+
+        // Test when base + size exceeds valid range.
+        expect_true!(
+            VmAspace::create_with_opts(
+                USER_ASPACE_BASE,
+                USER_ASPACE_SIZE + 1,
+                Type::User,
+                c"test",
+                ShareOpt::None
+            )
+            .is_none()
+        );
+        expect_true!(
+            VmAspace::create_with_opts(
+                KERNEL_ASPACE_BASE,
+                KERNEL_ASPACE_SIZE + 1,
+                Type::Kernel,
+                c"test",
+                ShareOpt::None
+            )
+            .is_none()
+        );
+        expect_true!(
+            VmAspace::create_with_opts(
+                GUEST_PHYSICAL_ASPACE_BASE,
+                GUEST_PHYSICAL_ASPACE_SIZE + 1,
+                Type::GuestPhysical,
+                c"test",
+                ShareOpt::None
+            )
+            .is_none()
+        );
+    }
+
+    /// Allocates a vm address space object directly, maps something on it, and drops it.
+    #[test]
+    fn vmaspace_alloc_smoke_test() {
+        // Allocates a vm address space object directly, maps something on it,
+        // allows it to go out of scope.
+        let mut aspace = VmAspace::create(Type::User, c"test aspace2");
+
+        let _ptr = unwrap_ok!(
+            alloc_user(aspace.as_ref().unwrap(), c"test", PAGE_SIZE_USIZE),
+            "allocating region\n"
+        );
+
+        // destroy the aspace, which should drop all the internal refs to it
+        let err = aspace.as_ref().unwrap().destroy();
+        expect_ok!(err, "VmAspace::Destroy");
+
+        // drop the ref held by this pointer
+        drop(aspace.take());
+    }
+
+    /// Wrapper for harvesting access bits that informs the page queues.
+    fn harvest_access_bits(
+        non_terminal_action: NonTerminalAction,
+        terminal_action: TerminalAction,
+    ) {
+        let _scanner_disable = AutoVmScannerDisable::new();
+        VmAspace::harvest_all_user_accessed_bits(non_terminal_action, terminal_action);
+    }
+
+    /// Consume the (scalar) value, ensuring that the operation to calculate the value can not be
+    /// optimized out/ deemed as unused by the compiler. I.e. this function can be used as a wrapper
+    /// to a calculation to ensure it will be in the binary.
+    fn consume_value<T>(value: T) {
+        // The compiler must materialize the value into a register, since it doesn't
+        // know that the register's value isn't actually used.
+        core::hint::black_box(value);
+    }
+
+    /// Touch mappings in an aspace and ensure we can correctly harvest the accessed bits.
+    /// This test takes an optional tag that is placed in the top byte of the address when
+    /// performing a user_copy.
+    fn vmaspace_accessed_test(tag: u8) -> bool {
+        let run = subtest!(|tag: u8| {
+            let _scanner_disable = AutoVmScannerDisable::new();
+
+            // Create some memory we can map touch to test accessed tracking on. Needs to be created
+            // from user pager backed memory as harvesting is allowed to be limited to just that.
+            let (vmo, [page]) = unwrap_ok!(make_committed_pager_vmo::<1>(
+                /*trap_dirty=*/ false, /*resizable=*/ false,
+            ));
+            let mem = unwrap_some!(UserMemory::create_from_vmo(
+                VmObjectPaged::into_vm_object(vmo),
+                tag,
+                0
+            ));
+
+            assert_ok!(mem.commit_and_map(0..PAGE_SIZE_USIZE));
+
+            // Initial accessed state is undefined, so harvest it away.
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+
+            // Grab the current queue for the page and then rotate the page queues. This means any
+            // future, correct, access harvesting should result in a new page queue.
+            // SAFETY: `page` is valid and attached to a VM object.
+            let mut current_queue =
+                unsafe { page.as_ref().get_page_queue_ref().load(Ordering::SeqCst) };
+            pmm::page_queues().rotate_reclaim_queues();
+
+            // Read from the mapping to (hopefully) set the accessed bit.
+            consume_value(unwrap_ok!(mem.get::<i32>(0)));
+            // Harvest it to move it in the page queue.
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+
+            // SAFETY: `page` is valid and attached to a VM object.
+            expect_ne!(current_queue, unsafe {
+                page.as_ref().get_page_queue_ref().load(Ordering::SeqCst)
+            });
+            // SAFETY: `page` is valid and attached to a VM object.
+            current_queue = unsafe { page.as_ref().get_page_queue_ref().load(Ordering::SeqCst) };
+
+            // Rotating and harvesting again should not make the queue change since we have not
+            // accessed it.
+            pmm::page_queues().rotate_reclaim_queues();
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+            // SAFETY: `page` is valid and attached to a VM object.
+            expect_eq!(current_queue, unsafe {
+                page.as_ref().get_page_queue_ref().load(Ordering::SeqCst)
+            });
+
+            // Set the accessed bit again, and make sure it does now harvest.
+            pmm::page_queues().rotate_reclaim_queues();
+            consume_value(unwrap_ok!(mem.get::<i32>(0)));
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+            // SAFETY: `page` is valid and attached to a VM object.
+            expect_ne!(current_queue, unsafe {
+                page.as_ref().get_page_queue_ref().load(Ordering::SeqCst)
+            });
+
+            // Set the accessed bit and update age without harvesting.
+            consume_value(unwrap_ok!(mem.get::<i32>(0)));
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAge);
+            // SAFETY: `page` is valid and attached to a VM object.
+            current_queue = unsafe { page.as_ref().get_page_queue_ref().load(Ordering::SeqCst) };
+
+            // Now if we rotate and update again, we should re-age the page.
+            pmm::page_queues().rotate_reclaim_queues();
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAge);
+            // SAFETY: `page` is valid and attached to a VM object.
+            expect_ne!(current_queue, unsafe {
+                page.as_ref().get_page_queue_ref().load(Ordering::SeqCst)
+            });
+            // SAFETY: `page` is valid and attached to a VM object.
+            current_queue = unsafe { page.as_ref().get_page_queue_ref().load(Ordering::SeqCst) };
+            pmm::page_queues().rotate_reclaim_queues();
+            harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAge);
+            // SAFETY: `page` is valid and attached to a VM object.
+            expect_ne!(current_queue, unsafe {
+                page.as_ref().get_page_queue_ref().load(Ordering::SeqCst)
+            });
+        });
+        run(tag)
+    }
+
+    /// Touch mappings in an aspace and ensure accessed bits are correctly harvested.
+    #[test]
+    fn vmaspace_accessed_test_untagged() {
+        expect_true!(vmaspace_accessed_test(0));
+    }
+
+    /// Reruns the accessed-bit test with tagged user pointers.
+    #[test]
+    fn vmaspace_accessed_test_tagged() {
+        // Rerun the `vmaspace_accessed_test` tests with tags in the top byte of user pointers. This
+        // tests that the subsequent accessed faults are handled successfully, even if the FAR
+        // contains a tag.
+
+        // TODO(ethanws): Make this entire test conditional on #[cfg!(target_arch = "aarch64")] when
+        // lib/unittest gets this functionality.
+        if cfg!(target_arch = "aarch64") {
+            expect_true!(vmaspace_accessed_test(0xAB));
+        } else {
+            kprintln!("Skipping vmaspace_accessed_test_tagged; not aarch64.");
+        }
+    }
+
+    /// Ensure user requested VMO read/write handles faults after access bits are harvested.
+    #[test]
+    fn vmaspace_usercopy_accessed_fault_test() {
+        // Ensure that if a user requested VMO read/write operation would hit a page that has had
+        // its accessed bits harvested that any resulting fault (on ARM) can be handled.
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        // Create some memory we can map touch to test accessed tracking on. Needs to be created
+        // from user pager backed memory as harvesting is allowed to be limited to just that.
+        let (mapping_vmo, [_page]) = unwrap_ok!(make_committed_pager_vmo::<1>(
+            /*trap_dirty=*/ false, /*resizable=*/ false
+        ));
+        let mem = unwrap_some!(UserMemory::create_from_vmo(
+            VmObjectPaged::into_vm_object(mapping_vmo),
+            0,
+            0
+        ));
+
+        assert_ok!(mem.commit_and_map(0..PAGE_SIZE_USIZE));
+
+        // Need a separate VMO to read/write from.
+        let vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE));
+
+        // Touch the mapping to make sure it is committed and mapped.
+        unwrap_ok!(mem.put::<u8>(42, 0));
+
+        // Harvest any accessed bits.
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+
+        // Read from the VMO into the mapping that has been harvested.
+        let (res, read_actual) =
+            vmo.read_user(mem.user_out::<u8>(), 0, size_of::<u8>(), VmObjectReadWriteOptions::NONE);
+        assert_ok!(res);
+        assert_eq!(read_actual, size_of::<u8>());
+    }
+
+    /// Test that page tables that do not get accessed can be successfully unmapped and freed.
+    #[test]
+    fn vmaspace_free_unaccessed_page_tables_test() {
+        // Test that page tables that do not get accessed can be successfully unmapped and freed.
+
+        // Disable for RISC-V for now, since the `ArchMmmu` code for this architecture currently
+        // does not track accessed bits in intermediate page tables, and thus has no reasonable
+        // way to honor `NonTerminalAction::FreeUnaccessed` on harvest calls.
+        if cfg!(target_arch = "riscv64") {
+            kprintln!("Skipping on RISC-V");
+            return true;
+        }
+
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        let num_pages: usize = 512 * 3;
+        let middle_page: usize = num_pages / 2;
+        let middle_offset: usize = middle_page * PAGE_SIZE_USIZE;
+        let vmo = unwrap_ok!(VmObjectPaged::create(
+            pmm::ALLOC_FLAG_ANY,
+            0,
+            PAGE_SIZE * (num_pages as u64)
+        ));
+
+        // Construct an additional aspace to use for mappings and touching pages. This allows us to
+        // control whether the aspace is considered active, which can effect reclamation and
+        // scanning.
+        let aspace = unwrap_some!(VmAspace::create(Type::User, c"test-aspace"));
+
+        let _cleanup_aspace = zr::defer(|| {
+            let _ = aspace.destroy();
+        });
+
+        let mem = unwrap_some!(
+            UserMemory::create_in_aspace(VmObjectPaged::into_vm_object(vmo), &aspace, 0, 0),
+            "UserMemory::create_in_aspace"
+        );
+
+        // Put the state we need to share in a struct so we can easily share it with the thread.
+        struct State<'a> {
+            mem: &'a UserMemory,
+            touch_event: &'a AutounsignalEvent,
+            complete_event: &'a AutounsignalEvent,
+            running: AtomicBool,
+            middle_offset: usize,
+        }
+
+        stack_pin_init!(let touch_event = AutounsignalEvent::init_unsignaled());
+        stack_pin_init!(let complete_event = AutounsignalEvent::init_unsignaled());
+
+        let state = State {
+            mem: &mem,
+            touch_event: &touch_event,
+            complete_event: &complete_event,
+            running: AtomicBool::new(true),
+            middle_offset,
+        };
+
+        // Spin up a kernel thread in the aspace we made. This thread will just continuously wait on
+        // an event, touching the mapping whenever it is signaled.
+        extern "C" fn thread_body(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to a live `State` valid for the thread duration.
+            let state = unsafe { arg.cast::<State<'_>>().as_ref_unchecked() };
+
+            while state.running.load(Ordering::SeqCst) {
+                let _ = state.touch_event.wait(&Deadline::infinite());
+                // Check running again so we do not try and touch mem if attempting to shutdown
+                // suddenly.
+                if state.running.load(Ordering::SeqCst) {
+                    state
+                        .mem
+                        .put::<u8>(42, state.middle_offset)
+                        .expect("failed to put byte to UserMemory");
+                    // Signal the event back
+                    state.complete_event.signal();
+                }
+            }
+            0
+        }
+
+        let arg = from_ref(&state).cast_mut().cast::<c_void>();
+        // SAFETY: `thread_body` and `arg` are safe to execute on a new thread.
+        let thread =
+            unwrap_ok!(unsafe { thread::create(c"test-thread".as_ptr(), thread_body, arg) });
+        aspace.attach_to_thread(thread);
+        // SAFETY: `thread` is valid and not yet joined.
+        unsafe { thread.resume() };
+
+        let _cleanup_thread = zr::defer(|| {
+            state.running.store(false, Ordering::SeqCst);
+            state.touch_event.signal();
+            // SAFETY: `thread` is valid and joined once.
+            let _ = unsafe { thread.join(InstantMono::INFINITE) };
+        });
+
+        // Helper to synchronously wait for the thread to perform a touch.
+        let touch = || {
+            state.touch_event.signal();
+            let _ = state.complete_event.wait(&Deadline::infinite());
+        };
+
+        expect_ok!(mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE));
+
+        // Touch the mapping to ensure its accessed.
+        touch();
+
+        // Attempting to map should fail, as it's already mapped.
+        expect_err!(
+            mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+
+        touch();
+        // Harvest the accessed information, this should not actually unmap it, even if we ask it
+        // to.
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        expect_err!(
+            mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+
+        touch();
+        // Harvest the accessed information, then attempt to do it again so that it gets unmapped.
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        expect_ok!(mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE));
+
+        // Touch the mapping to ensure its accessed.
+        touch();
+
+        // Harvest the page accessed information, but retain the non-terminals.
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+        // We can do this a few times.
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+        // Now if we attempt to free unaccessed the non-terminal should still be accessed and so
+        // nothing should get unmapped.
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        expect_err!(
+            mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+
+        // If we are not requesting a free, then we should be able to harvest repeatedly.
+        expect_err!(
+            mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+        expect_err!(
+            mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
+        expect_err!(
+            mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+        harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
     }
 
     /// Tests sparse VM mappings with an empty backing VMO.
@@ -643,6 +1117,170 @@ mod aspace_rs {
 
         let force_result = mapping_result.mapping.force_writable();
         expect_ok!(force_result.map(|_| ()));
+    }
+
+    /// Check if a range of addresses is accessible to the user. If `spectre_validation` is true, this is
+    /// done by checking if `validate_user_accessible_range` returns `{0,0}`. Otherwise, check using
+    /// `is_user_accessible_range`.
+    fn check_user_accessible_range(
+        mut vaddr: usize,
+        mut len: usize,
+        spectre_validation: bool,
+    ) -> bool {
+        if spectre_validation {
+            // If the address and length were not modified, then the pair is valid.
+            let old_vaddr = vaddr;
+            let old_len = len;
+            validate_user_accessible_range(&mut vaddr, &mut len);
+            return vaddr == old_vaddr && len == old_len;
+        }
+
+        is_user_accessible_range(vaddr, len)
+    }
+
+    fn check_user_accessible_range_test(spectre_validation: bool) -> bool {
+        let run = subtest!(|spectre_validation: bool| {
+            use crate::arch_rs::USER_ASPACE_BASE;
+
+            let mut va: usize;
+            let mut len: usize;
+
+            // Test address of zero.
+            va = 0;
+            len = PAGE_SIZE_USIZE;
+            expect_true!(check_user_accessible_range(va, len, spectre_validation));
+
+            // Test address and length of zero (both are valid).
+            va = 0;
+            len = 0;
+            expect_true!(check_user_accessible_range(va, len, spectre_validation));
+
+            // Test very end of address space and zero length (this is invalid since the start has bit 55 set
+            // despite zero length).
+            va = usize::MAX;
+            len = 0;
+            expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+            // Test a regular user address.
+            va = USER_ASPACE_BASE;
+            len = PAGE_SIZE_USIZE;
+            expect_true!(check_user_accessible_range(va, len, spectre_validation));
+
+            // Test zero-length on a regular user address.
+            va = USER_ASPACE_BASE;
+            len = 0;
+            expect_true!(check_user_accessible_range(va, len, spectre_validation));
+
+            // Test overflow past 64 bits.
+            va = USER_ASPACE_BASE;
+            len = (usize::MAX - va).wrapping_add(1);
+            expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                use crate::arch_rs::vm::is_user_accessible;
+
+                // On aarch64, an address is accessible to the user if bit 55 is zero.
+
+                // Test starting on a bad user address.
+                let bad_addr_mask = 1usize << 55;
+                va = bad_addr_mask | USER_ASPACE_BASE;
+                len = PAGE_SIZE_USIZE;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test zero-length on a bad user address.
+                va = bad_addr_mask | USER_ASPACE_BASE;
+                len = 0;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test 2^55 is in the range of `[va, va+len)`, ending on a bad user address.
+                va = USER_ASPACE_BASE;
+                len = bad_addr_mask;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test this returns false if any address within the range of `[va, va+len)`
+                // contains a value where bit 55 is set. This also implies there are many
+                // gaps in ranges above 2^56.
+                //
+                // Here both the start and end values are valid, but this range contains an
+                // address that is invalid.
+                va = 0;
+                len = 0x017f_ffff_ffff_ffff; // Bits 0-56 (except 55) are set.
+                assert_true!(is_user_accessible(va));
+                assert_true!(is_user_accessible(va + len));
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test the range of the largest value less than 2^55 and the smallest value
+                // greater than 2^55 where bit 55 == 0.
+                va = (1usize << 55) - 1;
+                len = 0x0080_0000_0000_0001; // End = `va` + `len` = 2^56.
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Be careful not to just check that 2^55 is in the range. We really want to
+                // check whenever bit 55 is flipped in the range.
+                va = 0x017f_ffff_ffff_ffff; // Start above 2^56. Bit 55 is not set.
+                // End = `va` + `len` = `0x200_0000_0000_0000`. This is above 2^56 and bit 55 also is not set.
+                len = 0x0080_0000_0000_0001;
+                assert_true!(is_user_accessible(va));
+                assert_true!(is_user_accessible(va + len));
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                va = USER_ASPACE_BASE;
+                len = (1usize << 57) + 1;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test a range above 2^56 where bit 55 is never set.
+                va = 0x0170_0000_0000_0000;
+                len = 0x000f_ffff_ffff_ffff;
+                expect_true!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test a range right below 2^55 where bit 55 is never set.
+                va = 0x0070_0000_0000_0000;
+                len = 0x000f_ffff_ffff_ffff;
+                expect_true!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test the last valid user space address with a tag of 0.
+                va = usize::MAX;
+                va &= !(0xffusize << 56); // Set tag to zero.
+                va &= !bad_addr_mask; // Ensure valid user address.
+                len = 0;
+                expect_true!(check_user_accessible_range(va, len, spectre_validation));
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                // On x86_64, an address is accessible to the user if bits 48-63 are zero.
+
+                // Test a bad user address.
+                let bad_addr_mask = 1usize << 48;
+                va = bad_addr_mask | USER_ASPACE_BASE;
+                len = PAGE_SIZE_USIZE;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test zero-length on a bad user address.
+                va = bad_addr_mask | USER_ASPACE_BASE;
+                len = 0;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+
+                // Test ending on a bad user address.
+                va = USER_ASPACE_BASE;
+                len = bad_addr_mask;
+                expect_false!(check_user_accessible_range(va, len, spectre_validation));
+            }
+        });
+        run(spectre_validation)
+    }
+
+    /// Tests `is_user_accessible_range`.
+    #[test]
+    fn arch_is_user_accessible_range() {
+        expect_true!(check_user_accessible_range_test(false));
+    }
+
+    /// Tests `validate_user_accessible_range`.
+    #[test]
+    fn validate_user_address_range() {
+        expect_true!(check_user_accessible_range_test(true));
     }
 
     /// Doesn't do anything, just prints all aspaces.

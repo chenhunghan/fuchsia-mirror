@@ -43,7 +43,6 @@ cc_test_executable("virtual-keyboard-test-bin") {
     "//sdk/lib/fit",
     "//sdk/lib/sys/component/cpp/testing:cpp",
     "//sdk/lib/sys/cpp",
-    "//src/lib/fostr/fidl/fuchsia.ui.gfx",
     "//src/lib/fostr/fidl/fuchsia.ui.input",
     "//src/lib/fxl",
     "//src/lib/fxl/test:gtest_main",

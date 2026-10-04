@@ -197,7 +197,7 @@ template("antlion_host_test") {
       "--ffx-binary",
       rebase_path("${_test_dir}/ffx", root_build_dir),
       "--ffx-subtools-search-path",
-      rebase_path(_test_dir, root_build_dir),
+      rebase_path(host_tools_dir, root_build_dir),
       "--ssh-binary",
       rebase_path("${_test_dir}/ssh", root_build_dir),
     ]

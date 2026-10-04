@@ -41,6 +41,39 @@ class RebootCapableDevice(abc.ABC):
         """Wait for Fuchsia device to go online."""
 
 
+class SuspendResumeCapableDevice(abc.ABC):
+    """Abstract base class to be implemented by a device which supports the
+    suspend and resume operations."""
+
+    @abc.abstractmethod
+    async def suspend(self) -> None:
+        """Suspend the device."""
+
+    @abc.abstractmethod
+    async def resume(self) -> None:
+        """Resume the device."""
+
+    @abc.abstractmethod
+    def register_on_device_suspend_fn(
+        self, fn: Callable[[], None] | Callable[[], Awaitable[None]]
+    ) -> None:
+        """Register a function to be called when device is suspended.
+
+        Args:
+            fn: Function to be called when device is suspended.
+        """
+
+    @abc.abstractmethod
+    def register_on_device_resume_fn(
+        self, fn: Callable[[], None] | Callable[[], Awaitable[None]]
+    ) -> None:
+        """Register a function to be called when device is resumed.
+
+        Args:
+            fn: Function to be called when device is resumed.
+        """
+
+
 class FuchsiaDeviceLogger(abc.ABC):
     """Abstract base class which contains methods for logging message to fuchsia
     device."""

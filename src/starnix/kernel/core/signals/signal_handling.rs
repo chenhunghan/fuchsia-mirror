@@ -415,24 +415,27 @@ fn dispatch_signal_handler(
     siginfo: SignalInfo,
     action: sigaction_t,
 ) -> Result<(), Errno> {
-    let main_stack = registers.stack_pointer_register().checked_sub(RED_ZONE_SIZE);
+    let stack_pointer_register = registers.stack_pointer_register();
+    let on_sigaltstack = signal_state.alt_stack.is_some_and(|sigaltstack| {
+        sigaltstack_contains_pointer(&sigaltstack, stack_pointer_register)
+    });
+    let main_stack = stack_pointer_register.checked_sub(RED_ZONE_SIZE);
     let stack_bottom = if (action.sa_flags & SA_ONSTACK as u64) != 0 {
         match signal_state.alt_stack {
             Some(sigaltstack) => {
-                match main_stack {
-                    // Only install the sigaltstack if the stack pointer is not already in it.
-                    Some(sp) if sigaltstack_contains_pointer(&sigaltstack, sp) => main_stack,
-                    _ => {
-                        // Since the stack grows down, the size is added to the ss_sp when
-                        // calculating the "bottom" of the stack.
-                        // Use the main stack if sigaltstack overflows.
-                        sigaltstack
-                            .ss_sp
-                            .addr
-                            .checked_add(sigaltstack.ss_size)
-                            .map(|sp| sp as u64)
-                            .or(main_stack)
-                    }
+                // Only install the sigaltstack if the stack pointer is not already in it.
+                if on_sigaltstack {
+                    main_stack
+                } else {
+                    // Since the stack grows down, the size is added to the ss_sp when
+                    // calculating the "bottom" of the stack.
+                    // Use the main stack if sigaltstack overflows.
+                    sigaltstack
+                        .ss_sp
+                        .addr
+                        .checked_add(sigaltstack.ss_size)
+                        .map(|sp| sp as u64)
+                        .or(main_stack)
                 }
             }
             None => main_stack,
@@ -457,7 +460,7 @@ fn dispatch_signal_handler(
     // altstack.
     if let Some(alt_stack) = signal_state.alt_stack {
         if sigaltstack_contains_pointer(&alt_stack, stack_pointer)
-            != sigaltstack_contains_pointer(&alt_stack, stack_bottom)
+            != (on_sigaltstack || sigaltstack_contains_pointer(&alt_stack, stack_bottom))
         {
             return error!(EINVAL);
         }

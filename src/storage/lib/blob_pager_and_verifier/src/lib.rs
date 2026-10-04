@@ -39,8 +39,7 @@
 mod delivery;
 
 pub use delivery::{
-    DELIVERY_DATA_SIZE, DeliveryQueueProcessor, DeliveryQueueProvider, TestVmoProvider,
-    UnverifiedPages,
+    DeliveryQueueProcessor, DeliveryQueueProvider, TestVmoProvider, UnverifiedPages,
 };
 
 use anyhow::{Context, Error, anyhow, bail};
@@ -405,6 +404,7 @@ impl Cache {
         root_hash: &[u8; 32],
         vmo_key: u64,
         hashes: Box<[Hash]>,
+        read_alignment: usize,
     ) -> Result<ReadSizedMerkleVerifier, Error> {
         // For blobs <= 8192 bytes (a single block), the Merkle tree consists of only a single leaf,
         // which is identical to the root hash itself. Fxfs omits storing leaf hashes on disk for
@@ -413,7 +413,7 @@ impl Cache {
         let hashes = if hashes.is_empty() { Box::new([Hash::from(*root_hash)]) } else { hashes };
 
         match MerkleVerifier::new(Hash::from(*root_hash), hashes) {
-            Ok(verifier) => ReadSizedMerkleVerifier::new(verifier, delivery::DELIVERY_DATA_SIZE)
+            Ok(verifier) => ReadSizedMerkleVerifier::new(verifier, read_alignment)
                 .map_err(|e| anyhow!("Failed to create ReadSizedMerkleVerifier: {e:?}")),
             Err(e) => {
                 bail!("Failed to verify merkle leaves for key {vmo_key}: {e:?}");
@@ -513,7 +513,12 @@ impl delivery::DeliveryQueueProvider for Cache {
         Ok(())
     }
 
-    fn register_blob(&self, key: u64, leaf_data: PtrByteSlice<'_>) -> Result<(), Error> {
+    fn register_blob(
+        &self,
+        key: u64,
+        leaf_data: PtrByteSlice<'_>,
+        read_alignment: usize,
+    ) -> Result<(), Error> {
         if leaf_data.len() % HASH_SIZE != 0 {
             bail!("RegisterBlob invalid leaf length must be a multiple of HASH_SIZE");
         }
@@ -536,8 +541,12 @@ impl delivery::DeliveryQueueProvider for Cache {
                     );
                     return Ok(());
                 }
-                *verifier =
-                    Some(Self::create_merkle_verifier(root_hash, key, hashes.into_boxed_slice())?);
+                *verifier = Some(Self::create_merkle_verifier(
+                    root_hash,
+                    key,
+                    hashes.into_boxed_slice(),
+                    read_alignment,
+                )?);
                 Ok(())
             }
             Some(BlobState::Ready(cached)) => {
@@ -551,6 +560,7 @@ impl delivery::DeliveryQueueProvider for Cache {
                     &cached.root_hash,
                     key,
                     hashes.into_boxed_slice(),
+                    read_alignment,
                 )?;
                 let _ = cached.merkle_verifier.set(verifier);
                 Ok(())
@@ -698,13 +708,14 @@ impl BlobPagerAndVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delivery::DELIVERY_DATA_SIZE;
     use futures::TryStreamExt;
     use futures::channel::oneshot;
     use mapping::{DeliveryCommand, RawDeliveryCommand};
+    use test_case::test_case;
     use vmo_fifo::SyncSender;
 
-    const TEST_BLOB_SIZE: u64 = (DELIVERY_DATA_SIZE * 2) as u64;
+    const TARGET_READ_AHEAD_SIZE: usize = mapping::TARGET_READ_AHEAD_SIZE as usize;
+    const TEST_BLOB_SIZE: u64 = (TARGET_READ_AHEAD_SIZE * 2) as u64;
     const TEST_VMO_KEY: u64 = 1;
 
     // Used for testing BlobPagerAndVerifier interactions.
@@ -1310,6 +1321,7 @@ mod tests {
             key: key as u64,
             offset: payload.offset(),
             length: flat_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1324,7 +1336,7 @@ mod tests {
         let vmo = create_task.await.expect("create_vmo failed");
 
         // We should be able to deliver data and read it immediately
-        let chunk = &blob_data[..DELIVERY_DATA_SIZE];
+        let chunk = &blob_data[..TARGET_READ_AHEAD_SIZE];
         let mut data_payload = sender.reserve_payload(chunk.len()).expect("reserve_payload failed");
         data_payload.data().copy_from_slice(chunk);
         let data_cmd: RawDeliveryCommand = DeliveryCommand::Data {
@@ -1336,7 +1348,7 @@ mod tests {
         .into();
         data_payload.commit(data_cmd).expect("commit failed");
 
-        let mut read_buf = vec![0u8; DELIVERY_DATA_SIZE];
+        let mut read_buf = vec![0u8; TARGET_READ_AHEAD_SIZE];
         vmo.read(&mut read_buf, 0).expect("read failed");
         assert_eq!(read_buf, chunk);
 
@@ -1376,6 +1388,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: bad_payload.offset(),
             length: corrupted_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         bad_payload.commit(bad_raw_cmd).expect("commit failed");
@@ -1398,6 +1411,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1437,6 +1451,7 @@ mod tests {
             key: 9999 as u64,
             offset: invalid_key_payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         invalid_key_payload.commit(invalid_key_cmd).expect("commit failed");
@@ -1449,6 +1464,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: u32::MAX - 4, // Malicious offset
             length: 8,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         oob_payload.commit(oob_cmd).expect("commit failed");
@@ -1461,6 +1477,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: invalid_len_payload.offset(),
             length: 10,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         invalid_len_payload.commit(invalid_len_cmd).expect("commit failed");
@@ -1494,6 +1511,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1504,7 +1522,7 @@ mod tests {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
 
-        let test_payload = &env.blob_data[..DELIVERY_DATA_SIZE];
+        let test_payload = &env.blob_data[..TARGET_READ_AHEAD_SIZE];
 
         let mut payload =
             sender.reserve_payload(test_payload.len()).expect("reserve_payload failed");
@@ -1519,7 +1537,7 @@ mod tests {
         .into();
         payload.commit(cmd).expect("commit failed");
 
-        let mut read_buf = vec![0u8; DELIVERY_DATA_SIZE];
+        let mut read_buf = vec![0u8; TARGET_READ_AHEAD_SIZE];
         paged_vmo.read(&mut read_buf, 0).expect("read paged_vmo failed");
         assert_eq!(read_buf, test_payload);
 
@@ -1531,7 +1549,7 @@ mod tests {
     async fn test_delivery_data_corrupted() {
         // Verify that when a delivered chunk fails verification, client threads waiting
         // for data within that chunk receive `ZX_ERR_IO_DATA_INTEGRITY`.
-        let blob_size = DELIVERY_DATA_SIZE as u64;
+        let blob_size = TARGET_READ_AHEAD_SIZE as u64;
         let env = TestEnv::new(blob_size).await;
 
         let paged_vmo =
@@ -1553,6 +1571,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1609,8 +1628,8 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_delivery_data_corrupted_chunk_preserves_supplied_pages() {
-        let chunk_size = DELIVERY_DATA_SIZE;
-        let blob_size = (chunk_size * 2) as u64;
+        let read_alignment = TARGET_READ_AHEAD_SIZE;
+        let blob_size = (read_alignment * 2) as u64;
         let env = TestEnv::new(blob_size).await;
 
         let paged_vmo =
@@ -1632,6 +1651,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: read_alignment as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1645,7 +1665,7 @@ mod tests {
         let page_size = zx::system_get_page_size() as usize;
 
         // Chunk 1 test for successful page request.
-        // Start a reader on page 0 and deliver the valid first chunk (0..chunk_size).
+        // Start a reader on page 0 and deliver the valid first chunk (0..read_alignment).
         let paged_vmo_clone1 =
             paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
         let (tx1, rx1) = oneshot::channel();
@@ -1658,7 +1678,7 @@ mod tests {
         });
         fasync::Timer::new(std::time::Duration::from_millis(5)).await;
 
-        let valid_chunk = &env.blob_data[..chunk_size];
+        let valid_chunk = &env.blob_data[..read_alignment];
         let mut payload =
             sender.reserve_payload(valid_chunk.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(valid_chunk);
@@ -1677,15 +1697,15 @@ mod tests {
         // Test for failed page requests on the subsequent chunk.
         let mut reader2 = spawn_reader_expect_error(
             &paged_vmo,
-            chunk_size as u64,
+            read_alignment as u64,
             page_size,
             zx::Status::IO_DATA_INTEGRITY,
         );
         reader2.wait_started().await;
         fasync::Timer::new(std::time::Duration::from_millis(5)).await;
 
-        // Deliver corrupted second chunk (chunk_size..chunk_size * 2).
-        let mut corrupted_chunk = env.blob_data[chunk_size..].to_vec();
+        // Deliver corrupted second chunk (read_alignment..read_alignment * 2).
+        let mut corrupted_chunk = env.blob_data[read_alignment..].to_vec();
         corrupted_chunk[0] ^= 0xFF;
 
         let mut payload =
@@ -1695,7 +1715,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: corrupted_chunk.len() as u32,
-            target_offset: chunk_size as u64,
+            target_offset: read_alignment as u64,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1713,8 +1733,8 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_delivery_data_corrupted_multi_chunk_read() {
-        let chunk_size = DELIVERY_DATA_SIZE;
-        let blob_size = (chunk_size * 3) as u64;
+        let read_alignment = TARGET_READ_AHEAD_SIZE;
+        let blob_size = (read_alignment * 3) as u64;
         let env = TestEnv::new(blob_size).await;
 
         let paged_vmo =
@@ -1736,6 +1756,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: read_alignment as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1761,7 +1782,7 @@ mod tests {
         fasync::Timer::new(std::time::Duration::from_millis(5)).await;
 
         // Deliver Chunk 1 (0..128 KiB) valid.
-        let valid_chunk1 = &env.blob_data[..chunk_size];
+        let valid_chunk1 = &env.blob_data[..read_alignment];
         let mut payload =
             sender.reserve_payload(valid_chunk1.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(valid_chunk1);
@@ -1779,7 +1800,7 @@ mod tests {
         fasync::Timer::new(std::time::Duration::from_millis(5)).await;
 
         // Deliver Chunk 2 (128..256 KiB) corrupted.
-        let mut corrupted_chunk2 = env.blob_data[chunk_size..chunk_size * 2].to_vec();
+        let mut corrupted_chunk2 = env.blob_data[read_alignment..read_alignment * 2].to_vec();
         corrupted_chunk2[0] ^= 0xFF;
         let mut payload =
             sender.reserve_payload(corrupted_chunk2.len()).expect("reserve_payload failed");
@@ -1788,7 +1809,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: corrupted_chunk2.len() as u32,
-            target_offset: chunk_size as u64,
+            target_offset: read_alignment as u64,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1842,8 +1863,10 @@ mod tests {
         env.teardown().await;
     }
 
+    #[test_case(TARGET_READ_AHEAD_SIZE; "read_alignment_128k")]
+    #[test_case(96 * 1024; "read_alignment_96k")]
     #[fuchsia::test]
-    async fn test_delivery_data_multiple_chunks() {
+    async fn test_delivery_data_multiple_chunks(read_alignment: usize) {
         let env = TestEnv::new(TEST_BLOB_SIZE).await;
 
         let paged_vmo =
@@ -1865,6 +1888,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: read_alignment as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1887,16 +1911,15 @@ mod tests {
             let _ = tx.send(());
         });
 
-        // Push incrementally - chunks must be a multiple of DELIVERY_DATA_SIZE
-        let chunk_size = DELIVERY_DATA_SIZE;
-        for (i, chunk) in env.blob_data.chunks(chunk_size).enumerate() {
+        // Push incrementally - chunks must be a multiple of the blob's read_alignment
+        for (i, chunk) in env.blob_data.chunks(read_alignment).enumerate() {
             let mut payload = sender.reserve_payload(chunk.len()).expect("reserve_payload failed");
             payload.data().copy_from_slice(chunk);
             let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
                 key: TEST_VMO_KEY,
                 offset: payload.offset(),
                 length: chunk.len() as u32,
-                target_offset: (i * chunk_size) as u64,
+                target_offset: (i * read_alignment) as u64,
             }
             .into();
             payload.commit(raw_cmd).expect("commit failed");
@@ -1911,7 +1934,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_delivery_data_unaligned_blob_size() {
-        let data_size = (DELIVERY_DATA_SIZE + 1024) as u64; // Blob with unaligned size
+        let data_size = (TARGET_READ_AHEAD_SIZE + 1024) as u64; // Blob with unaligned size
         let env = TestEnv::new(data_size).await;
 
         let paged_vmo =
@@ -1933,6 +1956,7 @@ mod tests {
             key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
+            read_alignment: TARGET_READ_AHEAD_SIZE as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
@@ -1946,7 +1970,7 @@ mod tests {
         let test_payload = env.blob_data.clone();
         assert_eq!(test_payload.len(), data_size as usize);
 
-        let chunk1 = &test_payload[..DELIVERY_DATA_SIZE];
+        let chunk1 = &test_payload[..TARGET_READ_AHEAD_SIZE];
         let mut payload1 = sender.reserve_payload(chunk1.len()).expect("reserve_payload failed");
         payload1.data().copy_from_slice(chunk1);
         let off1 = payload1.offset();
@@ -1962,7 +1986,7 @@ mod tests {
             )
             .expect("commit failed");
 
-        let chunk2 = &test_payload[DELIVERY_DATA_SIZE..];
+        let chunk2 = &test_payload[TARGET_READ_AHEAD_SIZE..];
         let page_size = zx::system_get_page_size() as usize;
         let chunk2_len_aligned = chunk2.len().div_ceil(page_size) * page_size;
         let mut payload2 =
@@ -1976,7 +2000,7 @@ mod tests {
             .commit(
                 DeliveryCommand::Data {
                     key: TEST_VMO_KEY,
-                    target_offset: DELIVERY_DATA_SIZE as u64,
+                    target_offset: TARGET_READ_AHEAD_SIZE as u64,
                     length: chunk2_len_aligned as u32,
                     offset: off2,
                 }

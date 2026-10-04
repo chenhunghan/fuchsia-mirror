@@ -49,8 +49,8 @@ FUNCTIONAL_TESTS=(
 )
 
 # //src/tests/end_to_end/usb/stress/...
-# Excludes usb_disconnect_test, which needs a hardware USB power hub; that
-# one is opt-in via --physical-disconnect.
+# Excludes the PHYSICAL_TESTS below, which need a hardware USB power hub;
+# those are opt-in via --physical-disconnect.
 STRESS_TESTS=(
   usb_virtual_disconnect_test
   cdc_stress_test
@@ -64,6 +64,7 @@ STRESS_TESTS=(
 # Requires a hardware USB power hub (see --help).
 PHYSICAL_TESTS=(
   usb_disconnect_test
+  usb_mdns_hotplug_test
 )
 
 # //src/tests/end_to_end/usb/performance/...
@@ -79,7 +80,7 @@ Usage: run_all_usb_tests_at_desk.sh [options] [-- <extra fx test args>]
 Test selection:
   -f, --functional           Functional tests
   -s, --stress               Stress tests (excluding physical disconnect)
-      --physical-disconnect  Physical USB disconnect test (needs power hub)
+      --physical-disconnect  Physical USB disconnect tests (need power hub)
   -p, --performance          Performance/throughput tests
   -a, --all                  Everything above, including physical disconnect
       --test NAME            Run a specific test by name (repeatable)
@@ -102,8 +103,8 @@ Default when no selection flag is given:
   Functional + stress tests.
 
   Performance tests are excluded by default because they publish benchmark
-  metrics and take substantially longer. The physical disconnect test is
-  excluded by default because it needs extra hardware. Pass -p, --all, or
+  metrics and take substantially longer. The physical disconnect tests are
+  excluded by default because they need extra hardware. Pass -p, --all, or
   --physical-disconnect to opt in.
 
 Note on --device:
@@ -133,6 +134,7 @@ Stress (-s):
   zero_function_stress_test
 Physical disconnect (--physical-disconnect, needs USB power hub):
   usb_disconnect_test
+  usb_mdns_hotplug_test
 Performance (-p):
   adb_throughput_test
   adb_throughput_large_test
@@ -260,7 +262,7 @@ if [[ "${RUN_STRESS}" == true ]]; then
   TESTS_TO_RUN+=("${STRESS_TESTS[@]}")
 fi
 if [[ "${RUN_PHYSICAL}" == true ]]; then
-  echo "WARNING: the physical disconnect test needs a USB power hub." >&2
+  echo "WARNING: the physical disconnect tests need a USB power hub." >&2
   echo "         Uses 'dmc' by default (infra), or Mobly config locally." >&2
   TESTS_TO_RUN+=("${PHYSICAL_TESTS[@]}")
 fi

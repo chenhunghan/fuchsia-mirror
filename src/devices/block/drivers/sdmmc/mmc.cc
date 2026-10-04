@@ -703,6 +703,13 @@ void SdmmcBlockDevice::MmcSetInspectProperties() {
       root_.CreateUint("max_packed_writes_effective", max_packed_writes_effective_);
   properties_.using_fidl_ = root_.CreateBool("using_fidl", sdmmc_->using_fidl());
   properties_.power_suspended_ = root_.CreateBool("power_suspended", power_suspended_);
+
+  // Zero out VENDOR_SPECIFIC_FIELD to avoid saving values that could uniquely identify a device.
+  memset(&raw_ext_csd_[MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_START], 0,
+         MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_SIZE);
+  properties_.ext_csd_ = root_.CreateByteVector("ext_csd", raw_ext_csd_);
+  properties_.ext_csd_timestamp_ = root_.CreateUint("ext_csd_timestamp", 0);
+  properties_.ext_csd_status_ = root_.CreateString("ext_csd_status", zx_status_get_string(ZX_OK));
 }
 
 }  // namespace sdmmc

@@ -82,6 +82,13 @@ import("//build/rust/rustc_test.gni")
 #     Builds unit tests associated with the binary. This will create a
 #     `<name>_lib_test` test file in the output directory. Equivalent
 #     to adding a `rustc_test` target with that name and the same source_root.
+#     Accepts a boolean or one of the following strings:
+#       "host": only define the test target in host toolchains (is_host).
+#       "fuchsia": only define the test target in Fuchsia toolchains
+#         (is_fuchsia).
+#       "both": define the test target in host and Fuchsia toolchains
+#         (is_host || is_fuchsia).
+#     `true` defines the test target in all toolchains.
 #
 #   test_environments (optional)
 #     What environments unit tests, if provided, should target. Only used here
@@ -213,9 +220,38 @@ template("rustc_library") {
     deps = invoker.deps
   }
 
-  # if "with_unit_tests" is set to true, generate an additional rust test target
-  # TODO(https://fxbug.dev/42152447): accept a string.
-  if (defined(invoker.with_unit_tests) && invoker.with_unit_tests) {
+  # Resolve `with_unit_tests`, which may be a boolean or one of "host",
+  # "fuchsia", or "both". See https://fxbug.dev/515405864.
+  #
+  # _with_unit_tests: whether unit tests are requested in any toolchain.
+  # _generate_unit_tests: whether to define the test target in this toolchain.
+  _with_unit_tests = false
+  _generate_unit_tests = false
+  if (defined(invoker.with_unit_tests)) {
+    _with_unit_tests_value = invoker.with_unit_tests
+    if (_with_unit_tests_value == true) {
+      # Legacy boolean: define the test target in all toolchains.
+      _with_unit_tests = true
+      _generate_unit_tests = true
+    } else if (_with_unit_tests_value == "both") {
+      _with_unit_tests = true
+      _generate_unit_tests = is_host || is_fuchsia
+    } else if (_with_unit_tests_value == "host") {
+      _with_unit_tests = true
+      _generate_unit_tests = is_host
+    } else if (_with_unit_tests_value == "fuchsia") {
+      _with_unit_tests = true
+      _generate_unit_tests = is_fuchsia
+    } else {
+      assert(_with_unit_tests_value == false,
+             "with_unit_tests must be a boolean or one of \"host\", " +
+                 "\"fuchsia\", \"both\", got: ${_with_unit_tests_value}")
+    }
+  }
+
+  # If requested for the current toolchain, generate an additional rust test
+  # target.
+  if (_generate_unit_tests) {
     rustc_test_internal("${target_name}_test") {
       name = _crate_name + "_lib_test"
       original_target_name = target_name
@@ -250,6 +286,20 @@ template("rustc_library") {
         configs += invoker.public_configs
       }
     }
+  } else if (_with_unit_tests) {
+    # Unit tests are requested, but not for the current toolchain.
+    not_needed(invoker,
+               [
+                 "args",
+                 "exclude_toolchain_tags",
+                 "package_deps",
+                 "test_build_only",
+                 "test_configs",
+                 "test_deps",
+                 "test_disable_rbe",
+                 "test_environments",
+                 "test_vars",
+               ])
   }
 
   if (defined(invoker.source_root)) {
@@ -307,8 +357,7 @@ template("rustc_library") {
     }
 
     if (defined(invoker.non_test_deps)) {
-      assert(defined(invoker.with_unit_tests) && invoker.with_unit_tests,
-             "use deps if not generating unit tests")
+      assert(_with_unit_tests, "use deps if not generating unit tests")
       deps += invoker.non_test_deps
     }
 

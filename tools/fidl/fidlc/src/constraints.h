@@ -29,6 +29,7 @@ enum class ConstraintKind : uint8_t {
   kNullability,
   kProtocol,
   kUtf8,
+  kZeroability,
 };
 
 // Forward declarations.
@@ -110,12 +111,12 @@ struct ConstraintStorage<ConstraintKind::kHandleSubtype> : public ConstraintStor
   ValueType subtype = kDefault;
 
   // Member pointer to the |subtype| handle field.
-  static constexpr ValueType ConstraintStorage::*kValuePtr = &ConstraintStorage::subtype;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::subtype;
 
   // Member pointer to |LayoutInvocation.subtype_resolved|.
-  static ValueType LayoutInvocation::*kLayoutInvocationValue;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
   // Member pointer to |LayoutInvocation.subtype_raw|.
-  static const Constant* LayoutInvocation::*kLayoutInvocationRaw;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
 
   // Try to a |Constant| constraint param to a |HandleSubtype| and set it.
   bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
@@ -127,9 +128,9 @@ struct ConstraintStorage<ConstraintKind::kHandleRights> : public ConstraintStora
   static const ValueType kDefault;
 
   ValueType rights = kDefault;
-  static constexpr ValueType ConstraintStorage::*kValuePtr = &ConstraintStorage::rights;
-  static ValueType LayoutInvocation::*kLayoutInvocationValue;
-  static const Constant* LayoutInvocation::*kLayoutInvocationRaw;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::rights;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
 
   bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
 };
@@ -140,9 +141,9 @@ struct ConstraintStorage<ConstraintKind::kSize> : public ConstraintStorageBase {
   static const ValueType kDefault;
 
   ValueType size = kDefault;
-  static constexpr ValueType ConstraintStorage::*kValuePtr = &ConstraintStorage::size;
-  static ValueType LayoutInvocation::*kLayoutInvocationValue;
-  static const Constant* LayoutInvocation::*kLayoutInvocationRaw;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::size;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
 
   bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
 
@@ -156,9 +157,9 @@ struct ConstraintStorage<ConstraintKind::kNullability> : public ConstraintStorag
   static constexpr ValueType kDefault = ValueType::kNonnullable;
 
   ValueType nullability = kDefault;
-  static constexpr ValueType ConstraintStorage::*kValuePtr = &ConstraintStorage::nullability;
-  static ValueType LayoutInvocation::*kLayoutInvocationValue;
-  static const Constant* LayoutInvocation::*kLayoutInvocationRaw;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::nullability;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
 
   bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
 
@@ -172,9 +173,9 @@ struct ConstraintStorage<ConstraintKind::kProtocol> : public ConstraintStorageBa
   static constexpr ValueType kDefault = nullptr;
 
   ValueType protocol_decl = kDefault;
-  static constexpr ValueType ConstraintStorage::*kValuePtr = &ConstraintStorage::protocol_decl;
-  static ValueType LayoutInvocation::*kLayoutInvocationValue;
-  static const Constant* LayoutInvocation::*kLayoutInvocationRaw;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::protocol_decl;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
 
   bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
 };
@@ -185,9 +186,25 @@ struct ConstraintStorage<ConstraintKind::kUtf8> : public ConstraintStorageBase {
   static constexpr ValueType kDefault = false;
 
   ValueType utf8 = kDefault;
-  static constexpr ValueType ConstraintStorage::*kValuePtr = &ConstraintStorage::utf8;
-  static ValueType LayoutInvocation::*kLayoutInvocationValue;
-  static const Constant* LayoutInvocation::*kLayoutInvocationRaw;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::utf8;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
+
+  bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
+
+  bool ReportMergeFailure(Reporter* reporter, const Name& layout_name,
+                          const Constant* param) const override;
+};
+
+template <>
+struct ConstraintStorage<ConstraintKind::kZeroability> : public ConstraintStorageBase {
+  using ValueType = Zeroability;
+  static constexpr ValueType kDefault = ValueType::kZeroable;
+
+  ValueType zeroability = kDefault;
+  static constexpr ValueType ConstraintStorage::* kValuePtr = &ConstraintStorage::zeroability;
+  static ValueType LayoutInvocation::* kLayoutInvocationValue;
+  static const Constant* LayoutInvocation::* kLayoutInvocationRaw;
 
   bool ResolveConstraint(TypeResolver* resolver, Constant* param, Resource* resource) override;
 

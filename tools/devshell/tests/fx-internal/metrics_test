@@ -704,8 +704,8 @@ TEST_track_test_event_chunking() {
   metrics-read-config
   metrics_init
 
-  # Construct a 1200 char string: 1000 'A's followed by 200 'B's
-  local chunk1=$(printf 'A%.0s' {1..1000})
+  # Construct a 700 char string: 500 'A's followed by 200 'B's
+  local chunk1=$(printf 'A%.0s' {1..500})
   local chunk2=$(printf 'B%.0s' {1..200})
   local long_json="${chunk1}${chunk2}"
 

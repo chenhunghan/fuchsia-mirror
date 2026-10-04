@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::MIN_INTERVAL_FOR_SYSLOG_MS;
 use crate::driver_utils::{connect_proxy, list_directory_entries};
+use crate::{MIN_INTERVAL_FOR_SYSLOG_MS, round_for_syslog};
 use anyhow::{Result, format_err};
 use fidl_fuchsia_hardware_network as fhwnet;
 use fidl_fuchsia_power_metrics as fmetrics;
@@ -343,10 +343,10 @@ impl NetworkActivityLogger {
 
                     if self.output_samples_to_syslog {
                         info!(
-                            rx_bytes_per_sec,
-                            tx_bytes_per_sec,
-                            rx_frames_per_sec,
-                            tx_frames_per_sec;
+                            rx_bytes_per_sec = round_for_syslog(rx_bytes_per_sec),
+                            tx_bytes_per_sec = round_for_syslog(tx_bytes_per_sec),
+                            rx_frames_per_sec = round_for_syslog(rx_frames_per_sec),
+                            tx_frames_per_sec = round_for_syslog(tx_frames_per_sec);
                             "Network activity"
                         );
                     }

@@ -27,6 +27,7 @@ def _cc_binary_host_tool_impl(
         name,
         target_compatible_with,
         **kwargs):
+    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
     if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
         fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
 
@@ -57,7 +58,7 @@ cc_binary_host_tool = macro(
             doc = "Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.",
             mandatory = False,
             configurable = False,
-            default = HOST_CONSTRAINTS,
+            default = HOST_OS_CONSTRAINTS,
         ),
     },
 )
@@ -83,6 +84,8 @@ def go_binary_host_tool(
         target_compatible_with: Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.
         **kwargs: Passed to `go_binary()`.
     """
+
+    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
     if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
         fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
 
@@ -116,6 +119,8 @@ def py_binary_host_tool(
         target_compatible_with: Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.
         **kwargs: Passed to `py_binary()`.
     """
+
+    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
     if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
         fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
 
@@ -132,6 +137,7 @@ def _rustc_binary_host_tool_impl(
         name,
         target_compatible_with,
         **kwargs):
+    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
     if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
         fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
 
@@ -160,7 +166,7 @@ rustc_binary_host_tool = macro(
             doc = "Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.",
             mandatory = False,
             configurable = False,
-            default = HOST_CONSTRAINTS,
+            default = HOST_OS_CONSTRAINTS,
         ),
     },
 )

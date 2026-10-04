@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "src/developer/debug/zxdb/client/frame.h"
 #include "src/developer/debug/zxdb/client/memory_dump.h"
 #include "src/developer/debug/zxdb/client/mock_remote_api.h"
 #include "src/developer/debug/zxdb/client/process_observer.h"
@@ -391,6 +392,71 @@ TEST_F(ProcessImplTest, ObserverOrder) {
 
   session().process_observers().RemoveObserver(&observer);
   session().thread_observers().RemoveObserver(&observer);
+}
+
+TEST_F(ProcessImplTest, AllThreadsStopped) {
+  constexpr uint64_t kProcessKoid = 1234;
+  constexpr uint64_t kThreadKoid1 = 5678;
+  constexpr uint64_t kThreadKoid2 = 5679;
+
+  Process* process = InjectProcess(kProcessKoid);
+  ASSERT_TRUE(process);
+
+  // Process with no threads should return false.
+  EXPECT_FALSE(process->AllThreadsStopped());
+
+  Thread* thread1 = InjectThread(kProcessKoid, kThreadKoid1);
+  ASSERT_TRUE(thread1);
+
+  // Single running thread should return false.
+  EXPECT_FALSE(process->AllThreadsStopped());
+  // Ignoring the only thread in the process leaves no stopped threads.
+  EXPECT_FALSE(process->AllThreadsStopped(thread1));
+
+  // Stop thread1 on an exception (supports frames).
+  debug_ipc::NotifyException stop1;
+  stop1.type = debug_ipc::ExceptionType::kSingleStep;
+  stop1.thread.id = {.process = kProcessKoid, .thread = kThreadKoid1};
+  stop1.thread.state = debug_ipc::ThreadRecord::State::kBlocked;
+  stop1.thread.blocked_reason = debug_ipc::ThreadRecord::BlockedReason::kException;
+  InjectExceptionWithStack(stop1, {}, true);
+
+  EXPECT_TRUE(process->AllThreadsStopped());
+  EXPECT_FALSE(process->AllThreadsStopped(thread1));
+
+  // Add a second running thread.
+  Thread* thread2 = InjectThread(kProcessKoid, kThreadKoid2);
+  ASSERT_TRUE(thread2);
+
+  // Not all threads are stopped since thread2 is running.
+  EXPECT_FALSE(process->AllThreadsStopped());
+  // Ignoring running thread2 means all remaining threads (thread1) are stopped.
+  EXPECT_TRUE(process->AllThreadsStopped(thread2));
+  // Ignoring stopped thread1 leaves running thread2, so returns false.
+  EXPECT_FALSE(process->AllThreadsStopped(thread1));
+
+  // Put thread2 into a blocked state that does NOT support frames (e.g., sleeping).
+  debug_ipc::NotifyException sleep2;
+  sleep2.type = debug_ipc::ExceptionType::kNone;
+  sleep2.thread.id = {.process = kProcessKoid, .thread = kThreadKoid2};
+  sleep2.thread.state = debug_ipc::ThreadRecord::State::kBlocked;
+  sleep2.thread.blocked_reason = debug_ipc::ThreadRecord::BlockedReason::kSleeping;
+  InjectExceptionWithStack(sleep2, {}, true);
+
+  EXPECT_FALSE(process->AllThreadsStopped());
+  EXPECT_TRUE(process->AllThreadsStopped(thread2));
+
+  // Stop thread2 in a state that supports frames.
+  debug_ipc::NotifyException stop2;
+  stop2.type = debug_ipc::ExceptionType::kSingleStep;
+  stop2.thread.id = {.process = kProcessKoid, .thread = kThreadKoid2};
+  stop2.thread.state = debug_ipc::ThreadRecord::State::kBlocked;
+  stop2.thread.blocked_reason = debug_ipc::ThreadRecord::BlockedReason::kException;
+  InjectExceptionWithStack(stop2, {}, true);
+
+  EXPECT_TRUE(process->AllThreadsStopped());
+  EXPECT_TRUE(process->AllThreadsStopped(thread1));
+  EXPECT_TRUE(process->AllThreadsStopped(thread2));
 }
 
 }  // namespace zxdb

@@ -126,7 +126,7 @@ pub async fn run_crypt_service(
                     fidl_fuchsia_fxfs::WrappedKey::Zxcrypt(key) => {
                         response = unwrap_zxcrypt_key(policy, key).await;
                         match &response {
-                            Ok(v) => Ok(&v[..]),
+                            Ok(v) => Ok((&v[..], None)),
                             Err(e) => Err(e.into_raw()),
                         }
                     }
@@ -205,7 +205,7 @@ mod tests {
             assert_eq!(version, ZXCRYPT_VERSION);
 
             // Check that we can unwrap the returned key.
-            let unwrapped_key2 = crypt
+            let (unwrapped_key2, _) = crypt
                 .unwrap_key(0, &WrappedKey::Zxcrypt(wrapped_key))
                 .await
                 .unwrap()

@@ -542,8 +542,9 @@ pub fn should_return_early(
 ) -> Option<Result<(), StartActionError>> {
     match component {
         InstanceState::Started(_, _) => Some(Ok(())),
-        InstanceState::Unresolved(_) | InstanceState::Resolved(_) => None,
-        InstanceState::Shutdown(_, _) => {
+        InstanceState::Unresolved(_) => None,
+        InstanceState::Resolved(resolved) if !resolved.restarts_disabled => None,
+        InstanceState::Resolved(_) | InstanceState::Shutdown(_, _) => {
             Some(Err(StartActionError::InstanceShutDown { moniker: moniker.clone() }))
         }
         InstanceState::Destroyed => {

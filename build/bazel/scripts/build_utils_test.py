@@ -210,6 +210,11 @@ class ForceSymlinkTest(unittest.TestCase):
 
             self.assertTrue(link_path.is_symlink())
             self.assertEqual(str(link_path.readlink()), "../../target/file")
+            original_ino = link_path.lstat().st_ino
+
+            # Re-creating the symlink with the same target should be a no-op.
+            build_utils.force_symlink(link_path, target_path)
+            self.assertEqual(link_path.lstat().st_ino, original_ino)
 
             # Update the target to a new path, verify the symlink was updated.
             target_path = tmp_path / "target" / "new_file"

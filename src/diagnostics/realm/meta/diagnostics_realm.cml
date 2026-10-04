@@ -15,7 +15,10 @@
             to: [ "#persistence" ],
         },
         {
-            protocol: "fuchsia.power.battery.BatteryManager",
+            protocol: [
+                "fuchsia.hardware.power.statecontrol.ShutdownWatcherRegister",
+                "fuchsia.power.battery.BatteryManager",
+            ],
             from: "parent",
             to: "#persistence",
             availability: "same_as_target",
@@ -54,6 +57,12 @@
         },
         {
             config: "fuchsia.diagnostics.persist.LowBatteryThresholdPercent",
+            from: "parent",
+            to: "#persistence",
+            availability: "same_as_target",
+        },
+        {
+            config: "fuchsia.diagnostics.persist.EnableShutdownSnapshot",
             from: "parent",
             to: "#persistence",
             availability: "same_as_target",

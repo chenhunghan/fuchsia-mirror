@@ -72,13 +72,18 @@ single_version_override(
 #
 # LINT.IfChange(rules_rust_version)
 #
-# @rules_rust needs to be patched to work-around https://github.com/bazelbuild/bazel/issues/28286
-bazel_dep(name = "rules_rust", version = "0.69.0")
+# @rules_rust needs to be patched to:
+# - add the riscv64gc-unknown-fuchsia triple.
+# - pass toolchain-wide `-Zallow-features=` through to rustc.
+bazel_dep(name = "rules_rust", version = "0.74.0")
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 4,
-    patches = ["//build/bazel:vendor_patches/rules_rust-0.69.0/0001-rules_rust-workaround-bazelbuild-issues-28286.patch"],
-    version = "0.69.0",
+    patches = [
+        "//build/bazel:vendor_patches/rules_rust-0.74.0/0001-rules_rust-add-riscv64gc-unknown-fuchsia-triple.patch",
+        "//build/bazel:vendor_patches/rules_rust-0.74.0/0002-rules_rust-pass-through-toolchain-allow-features.patch",
+    ],
+    version = "0.74.0",
 )
 # LINT.ThenChange(//build/bazel/scripts/bazel_rust_analyzer_utils.py)
 
@@ -177,17 +182,6 @@ local_path_override(
     path = "fuchsia_build_generated/fuchsia_in_tree_idk",
 )
 
-# WARNING: Bzlmod names the extension behind each `use_repo_rule()` after its
-# position in this file (`+_repo_rules+`, `+_repo_rules2+`, ...), so inserting
-# one shifts the canonical repository name of every `use_repo_rule()` below it.
-# Several of those canonical names are spelled out by hand, both below and in
-# `ignore_policy` in
-# //build/bazel_sdk/bazel_rules_fuchsia/fuchsia/private/licenses/collection_policy.bzl,
-# and a mismatch there surfaces as a license verification failure on `user`
-# product builds only. Append new `use_repo_rule()` declarations to the end of
-# this file rather than grouping them with related code.
-# TODO(https://fxbug.dev/566262167): Stop hardcoding canonical repository names
-# so that `use_repo_rule()` declarations can be placed anywhere in this file.
 fuchsia_idk_repository = use_repo_rule(
     "//build/bazel/fuchsia_idk:repository_rules.bzl",
     "fuchsia_idk_repository",
@@ -219,8 +213,8 @@ fuchsia_sdk_ext.local(
     visibility_templates = {
         "hlcpp": [
             # Limit the scope of hlcpp to the sdk itself
-            "@@+_repo_rules+internal_sdk//:__subpackages__",
-            "@@rules_fuchsia++fuchsia_sdk_ext+fuchsia_sdk//:__subpackages__",
+            "@internal_sdk//:__subpackages__",
+            "@fuchsia_sdk//:__subpackages__",
             "@@//vendor/*/build:hlcpp_allowlist",
         ],
     },
@@ -238,7 +232,7 @@ fuchsia_sdk_repository = use_repo_rule(
 # TODO(https://fxbug.dev/333907192): Remove this
 fuchsia_sdk_repository(
     name = "internal_sdk",
-    local_paths = ["@@+_repo_rules+fuchsia_internal_only_idk"],
+    local_idk_repos = ["@fuchsia_internal_only_idk"],
     # The @internal_sdk repository is populated from the same content as @fuchsia_internal_only_idk.
     # LINT.IfChange
     local_sdk_version_file = "//:fuchsia_build_generated/fuchsia_internal_only_idk.hash",
@@ -251,11 +245,27 @@ fuchsia_sdk_repository(
     visibility_templates = {
         "hlcpp": [
             # Limit the scope of hlcpp to the sdk itself
-            "@@+_repo_rules+internal_sdk//:__subpackages__",
-            "@@rules_fuchsia++fuchsia_sdk_ext+fuchsia_sdk//:__subpackages__",
+            "@internal_sdk//:__subpackages__",
+            "@fuchsia_sdk//:__subpackages__",
             "@@//vendor/*/build:hlcpp_allowlist",
         ],
     },
+)
+
+# Route `@com_google_googletest`'s `@fuchsia_sdk` dependencies through a shim
+# that resolves them to in-tree targets in `fuchsia_platform` builds.
+googletest_fuchsia_sdk = use_repo_rule(
+    "//build/bazel:googletest_fuchsia_sdk.bzl",
+    "googletest_fuchsia_sdk",
+)
+
+googletest_fuchsia_sdk(name = "googletest_fuchsia_sdk")
+
+fake_fuchsia_sdk = use_extension("@com_google_googletest//:fake_fuchsia_sdk.bzl", "fuchsia_sdk")
+
+override_repo(
+    fake_fuchsia_sdk,
+    fuchsia_sdk = "googletest_fuchsia_sdk",
 )
 
 # The @fuchsia_platform_sysroot repository is populated by symlinks to Ninja sysroot artifacts
@@ -279,11 +289,10 @@ use_repo(fuchsia_clang_ext, "fuchsia_clang")
 
 register_toolchains("@fuchsia_clang//:all")
 
-# `@fuchsia_clang` is hardcoded when generating SDK build files, so it is
-# necessary to inject it into `fuchsia_sdk_ext`. Without this, the SDK
-# repository can only refer to `@fuchsia_clang` with its canonical name, and
-# builds will fail with `@fuchsia_clang` not visible.
-inject_repo(fuchsia_sdk_ext, "fuchsia_clang")
+# `@fuchsia_clang` and `@internal_sdk` are referenced by apparent name in
+# generated `@fuchsia_sdk` build files, so they must be injected into
+# `fuchsia_sdk_ext`.
+inject_repo(fuchsia_sdk_ext, "fuchsia_clang", "internal_sdk")
 
 compact_python_runtime_repository = use_repo_rule(
     "@rules_fuchsia//common:toolchains/python/repository_rule.bzl",
@@ -318,6 +327,7 @@ generate_prebuilt_rust_toolchain_repository = use_repo_rule(
 
 generate_prebuilt_rust_toolchain_repository(
     name = "fuchsia_prebuilt_rust",
+    repository_version_file = "fuchsia_build_generated/content_hashes/fuchsia_prebuilt_rust.hash",
     rust_install_dir = "@@fuchsia_sdk_common++fuchsia_build_config_ext+fuchsia_build_config//:host_prebuilts/rust",
 )
 
@@ -370,28 +380,12 @@ generate_prebuilt_llvm_repository(
     #
     # See https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/llvm/BUILD.gn;l=51;drc=468d94479b10f5613ca928d782990e5340e943a4
     llvm_install_dir = "@@fuchsia_sdk_common++fuchsia_build_config_ext+fuchsia_build_config//:host_prebuilts/llvm",
+    # LINT.IfChange
+    repository_version_file = "fuchsia_build_generated/content_hashes/prebuilt_llvm.hash",
+    # LINT.ThenChange(bazel_content_hashes.gni)
 )
 
 register_toolchains("//:fuchsia_sdk_devicetree_toolchain")
 
 # Register the default build_flags() toolchain definitions
 register_toolchains("@fuchsia_build_info//default_build_flags:all")
-
-# Route `@com_google_googletest`'s `@fuchsia_sdk` dependencies through a shim
-# that resolves them to in-tree targets in `fuchsia_platform` builds. This
-# belongs with the `@fuchsia_sdk` setup above, but is kept here so that it comes
-# after every existing `use_repo_rule()` and therefore does not affect their
-# numbering. See the warning above the first `use_repo_rule()` in this file.
-googletest_fuchsia_sdk = use_repo_rule(
-    "//build/bazel:googletest_fuchsia_sdk.bzl",
-    "googletest_fuchsia_sdk",
-)
-
-googletest_fuchsia_sdk(name = "googletest_fuchsia_sdk")
-
-fake_fuchsia_sdk = use_extension("@com_google_googletest//:fake_fuchsia_sdk.bzl", "fuchsia_sdk")
-
-override_repo(
-    fake_fuchsia_sdk,
-    fuchsia_sdk = "googletest_fuchsia_sdk",
-)

@@ -38,7 +38,6 @@ def run_product_assembly(
         "assembly_enabled=true",
         # imitate the configuration in //src/developer/ffx/build/ffx_action.gni
         "ffx.analytics.disabled=true",
-        "daemon.autostart=false",
         "log.enabled=false",
     ]
 

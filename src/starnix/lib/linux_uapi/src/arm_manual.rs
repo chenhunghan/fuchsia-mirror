@@ -248,8 +248,7 @@ translate_data! {
 }
 impl From<crate::arch32::sigval> for crate::sigval {
     fn from(sigval: crate::arch32::sigval) -> Self {
-        // SAFETY: This is safe because the union has a single field.
-        let bindgen_opaque_blob = unsafe { sigval._bindgen_opaque_blob };
+        let bindgen_opaque_blob: u32 = zerocopy::transmute!(sigval);
         let bindgen_opaque_blob_as_u64: u64 = bindgen_opaque_blob.into();
         Self { _bindgen_opaque_blob: zerocopy::transmute!(bindgen_opaque_blob_as_u64) }
     }
@@ -258,9 +257,7 @@ impl From<crate::arch32::sigval> for crate::sigval {
 impl TryFrom<crate::sigval> for crate::arch32::sigval {
     type Error = ();
     fn try_from(sigval: crate::sigval) -> Result<Self, ()> {
-        // SAFETY: This is safe because the union has a single field.
-        let bindgen_opaque_blob = unsafe { sigval._bindgen_opaque_blob };
-        let bindgen_opaque_blob_as_u64: u64 = zerocopy::transmute!(bindgen_opaque_blob);
+        let bindgen_opaque_blob_as_u64: u64 = zerocopy::transmute!(sigval);
         Ok(Self { _bindgen_opaque_blob: bindgen_opaque_blob_as_u64.try_into().map_err(|_| ())? })
     }
 }
@@ -495,5 +492,34 @@ arch_translate_data! {
         rotate,
         colorspace,
         reserved,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zerocopy::IntoBytes;
+
+    #[test]
+    fn sigval_conversion_preserves_value_bytes() {
+        for value in [0, u32::MAX, 0x1234_5678].into_iter().chain((0..32).map(|bit| 1u32 << bit)) {
+            let compat = crate::arch32::sigval { _bindgen_opaque_blob: value };
+            let native = crate::sigval::from(compat);
+            assert_eq!(native.as_bytes(), u64::from(value).to_ne_bytes());
+
+            let round_trip = crate::arch32::sigval::try_from(native).unwrap();
+            assert_eq!(round_trip.as_bytes(), value.to_ne_bytes());
+        }
+    }
+
+    #[test]
+    fn sigval_conversion_rejects_out_of_range_values() {
+        for value in
+            [u64::MAX, 0x0123_4567_89ab_cdef].into_iter().chain((32..64).map(|bit| 1u64 << bit))
+        {
+            let native = crate::sigval {
+                _bindgen_opaque_blob: crate::__BindgenOpaqueArray8(value.to_ne_bytes()),
+            };
+            assert!(crate::arch32::sigval::try_from(native).is_err());
+        }
     }
 }

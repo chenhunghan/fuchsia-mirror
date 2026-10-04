@@ -50,49 +50,51 @@ use std::borrow::Cow;
 use std::ops::{Deref, Range};
 use std::sync::{Arc, LazyLock, Weak};
 
-/// Loads entries for the `scope` of a task.
-fn task_entries(scope: TaskEntryScope) -> Vec<(FsString, FileMode)> {
-    // NOTE: keep entries in sync with `TaskDirectory::lookup()`.
-    let mut entries = vec![
-        (b"cgroup".into(), mode!(IFREG, 0o444)),
-        (b"cwd".into(), mode!(IFLNK, 0o777)),
-        (b"exe".into(), mode!(IFLNK, 0o777)),
-        (b"fd".into(), mode!(IFDIR, 0o500)),
-        (b"fdinfo".into(), mode!(IFDIR, 0o555)),
-        (b"io".into(), mode!(IFREG, 0o400)),
-        (b"limits".into(), mode!(IFREG, 0o444)),
-        (b"maps".into(), mode!(IFREG, 0o444)),
-        (b"mem".into(), mode!(IFREG, 0o600)),
-        (b"root".into(), mode!(IFLNK, 0o777)),
-        (b"sched".into(), mode!(IFREG, 0o644)),
-        (b"schedstat".into(), mode!(IFREG, 0o444)),
-        (b"smaps".into(), mode!(IFREG, 0o444)),
-        (b"smaps_rollup".into(), mode!(IFREG, 0o444)),
-        (b"stat".into(), mode!(IFREG, 0o444)),
-        (b"statm".into(), mode!(IFREG, 0o444)),
-        (b"status".into(), mode!(IFREG, 0o444)),
-        (b"cmdline".into(), mode!(IFREG, 0o444)),
-        (b"environ".into(), mode!(IFREG, 0o400)),
-        (b"auxv".into(), mode!(IFREG, 0o400)),
-        (b"comm".into(), mode!(IFREG, 0o644)),
-        (b"attr".into(), mode!(IFDIR, 0o555)),
-        (b"ns".into(), mode!(IFDIR, 0o511)),
-        (b"mountinfo".into(), mode!(IFREG, 0o444)),
-        (b"mounts".into(), mode!(IFREG, 0o444)),
-        (b"oom_adj".into(), mode!(IFREG, 0o744)),
-        (b"oom_score".into(), mode!(IFREG, 0o444)),
-        (b"oom_score_adj".into(), mode!(IFREG, 0o744)),
-        (b"timerslack_ns".into(), mode!(IFREG, 0o666)),
-        (b"wchan".into(), mode!(IFREG, 0o444)),
-        (b"clear_refs".into(), mode!(IFREG, 0o200)),
-        (b"pagemap".into(), mode!(IFREG, 0o400)),
-    ];
+/// Static table of entries in `/proc/<pid>` and `/proc/<pid>/task/<tid>`.
+const TASK_ENTRIES: &[(&[u8], FileMode)] = &[
+    // NOTE: keep entries in sync with `TaskDirectoryNode::lookup()`.
+    (b"cgroup", mode!(IFREG, 0o444)),
+    (b"cwd", mode!(IFLNK, 0o777)),
+    (b"exe", mode!(IFLNK, 0o777)),
+    (b"fd", mode!(IFDIR, 0o500)),
+    (b"fdinfo", mode!(IFDIR, 0o555)),
+    (b"io", mode!(IFREG, 0o400)),
+    (b"limits", mode!(IFREG, 0o444)),
+    (b"maps", mode!(IFREG, 0o444)),
+    (b"mem", mode!(IFREG, 0o600)),
+    (b"root", mode!(IFLNK, 0o777)),
+    (b"sched", mode!(IFREG, 0o644)),
+    (b"schedstat", mode!(IFREG, 0o444)),
+    (b"smaps", mode!(IFREG, 0o444)),
+    (b"smaps_rollup", mode!(IFREG, 0o444)),
+    (b"stat", mode!(IFREG, 0o444)),
+    (b"statm", mode!(IFREG, 0o444)),
+    (b"status", mode!(IFREG, 0o444)),
+    (b"cmdline", mode!(IFREG, 0o444)),
+    (b"environ", mode!(IFREG, 0o400)),
+    (b"auxv", mode!(IFREG, 0o400)),
+    (b"comm", mode!(IFREG, 0o644)),
+    (b"attr", mode!(IFDIR, 0o555)),
+    (b"ns", mode!(IFDIR, 0o511)),
+    (b"mountinfo", mode!(IFREG, 0o444)),
+    (b"mounts", mode!(IFREG, 0o444)),
+    (b"oom_adj", mode!(IFREG, 0o744)),
+    (b"oom_score", mode!(IFREG, 0o444)),
+    (b"oom_score_adj", mode!(IFREG, 0o744)),
+    (b"timerslack_ns", mode!(IFREG, 0o666)),
+    (b"wchan", mode!(IFREG, 0o444)),
+    (b"clear_refs", mode!(IFREG, 0o200)),
+    (b"pagemap", mode!(IFREG, 0o400)),
+    // "task" must be last so we can dynamically include it for ThreadGroups.
+    (b"task", mode!(IFDIR, 0o555)),
+];
 
-    if scope == TaskEntryScope::ThreadGroup {
-        entries.push((b"task".into(), mode!(IFDIR, 0o555)));
+/// Returns entries for the `scope` of a task.
+fn task_entries(scope: TaskEntryScope) -> &'static [(&'static [u8], FileMode)] {
+    match scope {
+        TaskEntryScope::Task => &TASK_ENTRIES[..TASK_ENTRIES.len() - 1],
+        TaskEntryScope::ThreadGroup => TASK_ENTRIES,
     }
-
-    entries
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -166,11 +168,11 @@ impl FsNodeOps for TaskDirectoryNode {
         let creds = node.info().cred();
         let fs = node.fs();
         let (mode, ino) = task_entries(self.scope)
-            .into_iter()
+            .iter()
             .enumerate()
             .find_map(|(index, (n, mode))| {
                 if name == *n {
-                    Some((mode, self.inode_range.start + index as ino_t))
+                    Some((*mode, self.inode_range.start + index as ino_t))
                 } else {
                     None
                 }
@@ -181,7 +183,7 @@ impl FsNodeOps for TaskDirectoryNode {
         let ops: Box<dyn FsNodeOps> = match &**name {
             b"cgroup" => Box::new(CgroupFile::new_node(tid)),
             b"cwd" => Box::new(CallbackSymlinkNode::new(move || {
-                Ok(SymlinkTarget::Node(tid.get_task()?.running_state()?.fs().cwd()))
+                Ok(SymlinkTarget::Node(tid.get_task()?.fs()?.cwd()))
             })),
             b"exe" => Box::new(CallbackSymlinkNode::new(move || {
                 let task = tid.get_task()?;
@@ -202,7 +204,7 @@ impl FsNodeOps for TaskDirectoryNode {
             }
             b"mem" => Box::new(MemFile::new_node(tid)),
             b"root" => Box::new(CallbackSymlinkNode::new(move || {
-                Ok(SymlinkTarget::Node(tid.get_task()?.running_state()?.fs().root()))
+                Ok(SymlinkTarget::Node(tid.get_task()?.fs()?.root()))
             })),
             b"sched" => Box::new(StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/322893980"))),
             b"schedstat" => {
@@ -299,13 +301,13 @@ impl FileOps for TaskDirectory {
         // Skip through the entries until the current offset is reached.
         // Subtract 2 from the offset to account for `.` and `..`.
         for (index, (name, mode)) in
-            task_entries(self.scope).into_iter().enumerate().skip(sink.offset() as usize - 2)
+            task_entries(self.scope).iter().enumerate().skip(sink.offset() as usize - 2)
         {
             sink.add(
                 self.inode_range.start + index as ino_t,
                 sink.offset() + 1,
-                DirectoryEntryType::from_mode(mode),
-                name.as_ref(),
+                DirectoryEntryType::from_mode(*mode),
+                (*name).into(),
             )?;
         }
         Ok(())
@@ -1349,8 +1351,8 @@ impl DynamicFileSource for StatusFile {
         writeln!(sink)?;
 
         if let Some(task) = task {
-            if let Ok(running_state) = task.running_state() {
-                writeln!(sink, "Umask:\t0{:03o}", running_state.fs().umask().bits())?;
+            if let Ok(fs) = task.fs() {
+                writeln!(sink, "Umask:\t0{:03o}", fs.umask().bits())?;
             }
             let task_state = task.read();
             writeln!(sink, "SigBlk:\t{:016x}", task_state.signal_mask().0)?;

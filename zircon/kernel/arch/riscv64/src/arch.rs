@@ -92,9 +92,6 @@ pub struct ArchPhysHandoff {
 
 unsafe extern "C" {
     pub fn cpp_riscv64_handoff_boot_hart_id(handoff: *const ArchPhysHandoff) -> u64;
-    fn cpp_riscv64_mmu_early_init();
-    fn cpp_riscv64_mmu_prevm_init();
-    fn cpp_riscv64_mmu_init();
     fn cpp_mp_set_curr_cpu_online(online: bool);
     fn Riscv64ExceptionEntry();
 }
@@ -258,10 +255,10 @@ pub unsafe extern "C" fn ArchPostHandoffBootstrap(arch_handoff: *const ArchPhysH
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_early_init() {
     super::sbi::riscv64_sbi_early_init();
-    // SAFETY: Calls early init routines for MMU, then marks boot CPU online.
+    super::mmu::riscv64_mmu_early_init();
+    // SAFETY: takes no pointers; marks the calling CPU online in the generic mp
+    // layer, which is what the C++ `arch_early_init` did at this point.
     unsafe {
-        cpp_riscv64_mmu_early_init();
-
         // mark the boot cpu online
         cpp_mp_set_curr_cpu_online(true);
     }
@@ -270,10 +267,7 @@ pub extern "C" fn arch_early_init() {
 /// Architecture pre-VM initialization.
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_prevm_init() {
-    // SAFETY: Calls MMU pre-VM init.
-    unsafe {
-        cpp_riscv64_mmu_prevm_init();
-    }
+    super::mmu::riscv64_mmu_prevm_init();
 }
 
 /// Architecture main initialization after heap/MMU are available.
@@ -285,11 +279,7 @@ pub extern "C" fn arch_init() {
 
     super::feature::riscv64_feature_init();
     super::sbi::riscv64_sbi_init();
-
-    // SAFETY: Calls MMU initialization.
-    unsafe {
-        cpp_riscv64_mmu_init();
-    }
+    super::mmu::riscv64_mmu_init();
 }
 
 /// Architecture late per-CPU initialization.

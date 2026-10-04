@@ -4,8 +4,7 @@
 pub use crate::fidl_pipe::{FidlPipe, create_overnet_socket};
 use crate::info::{self, TargetInfo};
 pub use crate::resolve::{
-    DefaultTargetResolver, Resolution, TargetResolver, get_discovery_stream,
-    maybe_locally_resolve_target_spec, resolve_target_address,
+    DefaultTargetResolver, Resolution, TargetResolver, get_discovery_stream, resolve_target_address,
 };
 use crate::{KnockCriticalError, KnockError, KnockNonCriticalError, TargetInfoQuery};
 

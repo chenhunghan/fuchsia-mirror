@@ -61,6 +61,7 @@ void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync
       break;
   }
   zxlogf(INFO, "ADB client connected");
+  RecordEvent("adb_client_connected");
 
   // Note: adb_binding_ is a fidl::ServerBinding (owning handle). Destroying or replacing
   // adb_binding_ synchronously cancels any pending unbind tasks in the FIDL runtime, so connection
@@ -69,6 +70,7 @@ void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync
                        std::move(request->interface), this, [this](fidl::UnbindInfo info) {
                          zxlogf(INFO, "Device closed with reason '%s'",
                                 info.FormatDescription().c_str());
+                         RecordEvent("adb_client_disconnected: unbind");
                          adb_binding_.reset();
                          ResetOrStopUsb(State::kStoppingForReconnect);
                        });
@@ -77,6 +79,7 @@ void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync
 
 void UsbAdbDevice::StopAdb(StopAdbCompleter::Sync& completer) {
   zxlogf(INFO, "ADB client requested disconnect.");
+  RecordEvent("adb_client_disconnected: StopAdb");
   stop_completers_.push_back(completer.ToAsync());
   ResetOrStopUsb(State::kStoppingForReconnect);
 }
@@ -129,8 +132,10 @@ void UsbAdbDevice::ResetOrStopUsb(State stop_state) {
   // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
   zxlogf(INFO, "pending_replies: %ld", pending_replies_.size());
   while (!pending_replies_.empty()) {
-    bulk_out_ep_.PutRequest(
-        usb::FidlRequest(std::move(pending_replies_.front().request().value())));
+    if (pending_replies_.front().request().has_value()) {
+      bulk_out_ep_.PutRequest(
+          usb::FidlRequest(std::move(pending_replies_.front().request().value())));
+    }
     pending_replies_.pop();
   }
   // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
@@ -286,7 +291,7 @@ void UsbAdbDevice::ReceiveQueued() {
     auto completion = std::move(pending_replies_.front());
     pending_replies_.pop();
 
-    zx_status_t status = *completion.status();
+    zx_status_t status = completion.status().value_or(ZX_ERR_INTERNAL);
     auto req = usb::FidlRequest(std::move(completion.request().value()));
 
     if (status != ZX_OK) {
@@ -550,6 +555,7 @@ void UsbAdbDevice::SetConfigured(SetConfiguredRequest& request,
         // starting up - ignore it.
         break;
       case State::kOnline:
+        RecordEvent("usb_bus_disconnected: SetConfigured(false)");
         ResetOrStopUsb(State::kStoppingForReconnect);
         break;
       case State::kStoppingForUnbind:
@@ -649,6 +655,7 @@ void UsbAdbDevice::CheckUsbStopComplete() {
 }
 
 void UsbAdbDevice::Stop(fdf::StopCompleter completer) {
+  RecordEvent("driver_stopped");
   if (throughput_tracker_) {
     throughput_tracker_->Stop();
   }
@@ -779,9 +786,10 @@ zx::result<> UsbAdbDevice::StartUsb() {
     return iface_endpoints.take_error();
   }
   usb_function_binding_.emplace(
-      dispatcher(), std::move(iface_endpoints->server), this, [](fidl::UnbindInfo info) {
+      dispatcher(), std::move(iface_endpoints->server), this, [this](fidl::UnbindInfo info) {
         zxlogf(INFO, "usb_function_binding_ successfully and fully unbound: %s",
                info.FormatDescription().c_str());
+        RecordEvent("usb_function_disconnected: unbind");
       });
 
   std::vector<uint8_t> descriptors_buffer(sizeof(descriptors_));

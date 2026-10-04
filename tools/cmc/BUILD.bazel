@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/idk:idk_host_tool.bzl", "idk_rustc_binary_host_tool")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "cmc_lib",
+    srcs = [
+        "src/compile.rs",
+        "src/debug_print_cm.rs",
+        "src/format.rs",
+        "src/include.rs",
+        "src/lib.rs",
+        "src/merge.rs",
+        "src/opts.rs",
+        "src/reference.rs",
+        "src/util.rs",
+    ],
+    crate_name = "cmc",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:difference",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/tempfile-ext",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:strsim",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//tools/lib/cml",
+        "//tools/lib/reference_doc",
+    ],
+)
+
+idk_rustc_binary_host_tool(
+    name = "cmc",
+    srcs = ["src/main.rs"],
+    api_area = "Component Framework",
+    category = "partner",
+    edition = "2024",
+    idk_name = "cmc",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build/bazel/rules/assembly:__pkg__",
+        "//build/bazel/rules/components:__pkg__",
+        "//build/bazel/rules/packages:__pkg__",
+    ],
+    deps = [
+        ":cmc_lib",
+        "//third_party/rust_crates/vendor:clap",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":cmc_lib_test",
+    ],
+    visibility = ["//tools:__pkg__"],
+)

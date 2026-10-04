@@ -257,6 +257,32 @@ All titles and section headers (`#`, `##`, `###`) must use sentence case.
 # This Title is an Example of Title Case
 ```
 
+### Do not use backticks in page and section titles {#do-not-use-backticks-in-page-and-section-titles}
+
+Do not use backticks (`` ` ``) to format code in page and section titles
+(`#`, `##`, `###`, and so on). Code formatting in headings renders
+inconsistently, clutters the page's table of contents and navigation, and
+gets into auto-generated anchors. Write code terms in titles as plain text,
+and use code formatting in the body text that follows.
+
+<span class="compare-better">Recommended</span>: Write code terms in titles
+as plain text:
+
+```none
+# BUILD.bazel files style guide
+
+## Avoid package default_visibility
+```
+
+<span class="compare-worse">Not recommended</span>: Format code terms in titles
+with backticks:
+
+```none
+# `BUILD.bazel` files style guide
+
+## Avoid package `default_visibility`
+```
+
 ### Use dashes, not underscores, for anchors {#use-dashes-not-underscores-for-anchors}
 
 By default, `fuchsia.dev` creates anchors using underscores (`_`) in place of

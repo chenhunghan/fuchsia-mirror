@@ -2897,4 +2897,117 @@ TEST(PtraceTest, ReplaceForcedSignalWithIgnoredSignal) {
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
+extern "C" void GetConstantFromCodeInsn();
+
+#if defined(__arm__)
+__attribute__((noinline, target("arm")))
+#else
+__attribute__((noinline))
+#endif
+int GetConstantFromCode() {
+#if defined(__x86_64__)
+  int result = 0;
+  asm volatile(
+      ".globl GetConstantFromCodeInsn\n"
+      "GetConstantFromCodeInsn:\n"
+      ".byte 0xb8, 0x01, 0x00, 0x00, 0x00\n"  // movl $1, %eax
+      "nop\n"
+      "nop\n"
+      "nop\n"
+      : "=a"(result));
+  return result;
+#elif defined(__aarch64__)
+  register int result asm("w0") = 0;
+  asm volatile(
+      ".globl GetConstantFromCodeInsn\n"
+      "GetConstantFromCodeInsn:\n"
+      "mov w0, #1\n"
+      "nop\n"
+      : "=r"(result));
+  return result;
+#elif defined(__arm__)
+  register int result asm("r0") = 0;
+  asm volatile(
+      ".globl GetConstantFromCodeInsn\n"
+      "GetConstantFromCodeInsn:\n"
+      "mov r0, #1\n"
+      "nop\n"
+      : "=r"(result));
+  return result;
+#elif defined(__riscv)
+  register int result asm("a0") = 0;
+  asm volatile(
+      ".option push\n"
+      ".option norvc\n"
+      ".globl GetConstantFromCodeInsn\n"
+      "GetConstantFromCodeInsn:\n"
+      "addi a0, zero, 1\n"
+      "nop\n"
+      ".option pop\n"
+      : "=r"(result));
+  return result;
+#else
+#error "Unsupported architecture"
+#endif
+}
+
+long EncodeConstantInsn(long original_data, uint8_t value) {
+#if defined(__x86_64__)
+  return (original_data & ~0xFF00L) | (static_cast<long>(value) << 8);
+#elif defined(__aarch64__)
+  return (original_data & ~0x1FFFE0L) | (static_cast<long>(value) << 5);
+#elif defined(__arm__)
+  return (original_data & ~0xFFL) | static_cast<long>(value);
+#elif defined(__riscv)
+  return (original_data & ~0xFFF00000L) | (static_cast<long>(value) << 20);
+#else
+#error "Unsupported architecture"
+#endif
+}
+
+// Verifies that modifying already-executed instructions via PTRACE_POKEDATA and PTRACE_POKETEXT
+// synchronizes the data and instruction caches so the tracee never executes stale cached
+// instructions.
+TEST(PtraceTest, PokeInstructionCacheCoherency) {
+  constexpr int kIterations = 50;
+
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+
+  pid_t child_pid = helper.RunInForkedProcess([] {
+    SAFE_SYSCALL(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr));
+    // Warm the instruction cache with the initial constant-loading instruction (`1`).
+    EXPECT_EQ(GetConstantFromCode(), 1);
+    SAFE_SYSCALL(raise(SIGSTOP));
+
+    for (int i = 0; i < kIterations; ++i) {
+      EXPECT_EQ(GetConstantFromCode(), i + 2) << "iteration " << i;
+      SAFE_SYSCALL(raise(SIGSTOP));
+    }
+  });
+
+  int status = 0;
+  ASSERT_EQ(SAFE_SYSCALL(waitpid(child_pid, &status, 0)), child_pid);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+
+  const void *insn_addr = reinterpret_cast<const void *>(&GetConstantFromCodeInsn);
+  errno = 0;
+  long original_data = ptrace(PTRACE_PEEKDATA, child_pid, insn_addr, nullptr);
+  ASSERT_FALSE(original_data == -1 && errno != 0) << strerror(errno);
+
+  for (int i = 0; i < kIterations; ++i) {
+    long patched_data = EncodeConstantInsn(original_data, static_cast<uint8_t>(i + 2));
+    auto request = (i % 2 == 0) ? PTRACE_POKEDATA : PTRACE_POKETEXT;
+    ASSERT_THAT(ptrace(request, child_pid, insn_addr, patched_data), SyscallSucceeds());
+    ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+
+    ASSERT_EQ(SAFE_SYSCALL(waitpid(child_pid, &status, 0)), child_pid);
+    ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP)
+        << "iteration " << i << ", status=" << std::hex << status;
+  }
+
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
 }  // namespace

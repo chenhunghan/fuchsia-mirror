@@ -67,9 +67,6 @@ func AddImageDeps(ctx context.Context, s *Shard, buildDir string, pbPath, ffxPat
 		}
 	}()
 
-	if err := ffx.Run(ctx, "config", "set", "daemon.autostart", "false"); err != nil {
-		return err
-	}
 	artifactsGroup := "flash"
 	if s.Env.TargetsEmulator() {
 		artifactsGroup = "emu"

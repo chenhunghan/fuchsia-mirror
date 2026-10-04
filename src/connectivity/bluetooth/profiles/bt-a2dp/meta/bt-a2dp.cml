@@ -15,14 +15,24 @@
             url: "fuchsia-pkg://fuchsia.com/bt-avrcp-target#meta/bt-avrcp-target.cm",
         },
     ],
-    config: {
+    use: [
         // enable sink, allowing peers to stream audio to be played on this device
-        enable_sink: { type: "bool" },
+        {
+            config: "fuchsia.bluetooth.EnableSink",
+            key: "enable_sink",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
 
         // MediaSession domain when publishing the media info from a connected peer
-        domain: {
+        {
+            config: "fuchsia.bluetooth.Domain",
+            key: "domain",
             type: "string",
             max_size: 20,
+            availability: "optional",
+            default: "Bluetooth",
         },
 
         // Where to source audio to send to peers
@@ -30,16 +40,32 @@
         //  - audio_out - (Default) add an audio output to the system
         //  - big_ben - generated a set of tones which approximate the Westminster Quarters.
         //  - none - source is disabled, and will not be available to peers
-        source_type: {
+        {
+            config: "fuchsia.bluetooth.SourceType",
+            key: "source_type",
             type: "string",
             max_size: 10,
+            availability: "optional",
+            default: "audio_out",
         },
 
         // enable avrcp-target, allowing media info to be relayed to peers from local MediaSessions
-        enable_avrcp_target: { type: "bool" },
+        {
+            config: "fuchsia.bluetooth.EnableAvrcpTarget",
+            key: "enable_avrcp_target",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
 
         // attempt to use AAC. If an AAC encoder / decoder is not available, this has no effect.
-        enable_aac: { type: "bool" },
+        {
+            config: "fuchsia.bluetooth.EnableAac",
+            key: "enable_aac",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
 
         // duration for to wait in milliseconds before assuming role of the initiator.
         // If a signaling channel has not been established by this time,
@@ -49,13 +75,23 @@
         // NOTE: This must be low enough to prevent peers from timing out while waiting for
         // initiation. The true delay from the peer's perspective is experimentally 100-500ms larger
         // than the value here.
-        initiator_delay: { type: "uint32" },
+        {
+            config: "fuchsia.bluetooth.InitiatorDelay",
+            key: "initiator_delay",
+            type: "uint32",
+            availability: "optional",
+            default: 500,
+        },
 
         // channel mode requested for the signaling channel
         // options: ["basic", "etrm"]
-        channel_mode: {
+        {
+            config: "fuchsia.bluetooth.ChannelMode",
+            key: "channel_mode",
             type: "string",
             max_size: 5,
+            availability: "optional",
+            default: "basic",
         },
-    },
+    ],
 }

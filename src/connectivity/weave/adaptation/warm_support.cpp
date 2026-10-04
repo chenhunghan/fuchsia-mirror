@@ -11,15 +11,16 @@
 
 #include <fidl/fuchsia.net.interfaces.admin/cpp/fidl.h>
 #include <fidl/fuchsia.net.root/cpp/fidl.h>
-#include <fuchsia/net/cpp/fidl.h>
+#include <fidl/fuchsia.net.routes.admin/cpp/fidl.h>
+#include <fidl/fuchsia.net/cpp/fidl.h>
 #include <fuchsia/net/interfaces/cpp/fidl.h>
-#include <fuchsia/net/stack/cpp/fidl.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fidl/cpp/wire/channel.h>
 #include <lib/syslog/cpp/macros.h>
 #include <netinet/ip6.h>
 
 #include <optional>
+#include <set>
 
 // ==================== WARM Platform Functions ====================
 
@@ -182,29 +183,6 @@ std::optional<uint64_t> GetInterfaceId(const std::string &interface_name) {
     }
   } while (!event.is_idle());
   return 0;
-}
-
-std::string_view StackErrorToString(fuchsia::net::stack::Error error) {
-  switch (error) {
-    case fuchsia::net::stack::Error::INTERNAL:
-      return "internal";
-    case fuchsia::net::stack::Error::NOT_SUPPORTED:
-      return "not supported";
-    case fuchsia::net::stack::Error::INVALID_ARGS:
-      return "invalid arguments";
-    case fuchsia::net::stack::Error::BAD_STATE:
-      return "bad state";
-    case fuchsia::net::stack::Error::TIME_OUT:
-      return "timeout";
-    case fuchsia::net::stack::Error::NOT_FOUND:
-      return "not found";
-    case fuchsia::net::stack::Error::ALREADY_EXISTS:
-      return "already exists";
-    case fuchsia::net::stack::Error::IO:
-      return "i/o";
-    default:
-      return "malformed stack error";
-  }
 }
 
 std::string_view AddressRemovalReasonToString(
@@ -535,20 +513,101 @@ PlatformResult AddRemoveAddressInternal(InterfaceType interface_type,
   }
 }
 
-// Add or remove route to/from forwarding table.
-PlatformResult AddRemoveRouteInternal(InterfaceType interface_type, const Inet::IPPrefix &prefix,
-                                      RoutePriority priority, bool add) {
+std::optional<fidl::SyncClient<fuchsia_net_routes_admin::RouteSetV6>> global_route_set;
+std::set<uint64_t> authenticated_interfaces;
+
+PlatformResult EnsureRouteSetInitialized() {
+  if (global_route_set.has_value()) {
+    return kPlatformResultSuccess;
+  }
+
   auto svc = nl::Weave::DeviceLayer::PlatformMgrImpl().GetComponentContextForProcess()->svc();
 
-  // Determine interface name to add to/remove from.
-  std::optional<std::string> interface_name = GetInterfaceName(interface_type);
-  if (!interface_name) {
+  zx::result routes_endpoints = fidl::CreateEndpoints<fuchsia_net_routes_admin::RouteTableV6>();
+  if (!routes_endpoints.is_ok()) {
+    FX_LOGS(ERROR) << "Failed to create routes endpoints: " << routes_endpoints.status_string();
+    return kPlatformResultFailure;
+  }
+  auto [routes_client_end, routes_server_end] = std::move(*routes_endpoints);
+  if (zx_status_t status =
+          svc->Connect(fidl::DiscoverableProtocolName<fuchsia_net_routes_admin::RouteTableV6>,
+                       routes_server_end.TakeChannel());
+      status != ZX_OK) {
+    FX_LOGS(ERROR) << "Failed to connect to route table: " << zx_status_get_string(status);
+    return kPlatformResultFailure;
+  }
+  fidl::SyncClient routes_client{std::move(routes_client_end)};
+
+  zx::result route_set_endpoints = fidl::CreateEndpoints<fuchsia_net_routes_admin::RouteSetV6>();
+  if (!route_set_endpoints.is_ok()) {
+    FX_LOGS(ERROR) << "Failed to create route set endpoints: "
+                   << route_set_endpoints.status_string();
+    return kPlatformResultFailure;
+  }
+  auto [route_set_client_end, route_set_server_end] = std::move(*route_set_endpoints);
+
+  fuchsia_net_routes_admin::RouteTableV6NewRouteSetRequest route_set_req;
+  route_set_req.route_set(std::move(route_set_server_end));
+  auto new_route_set_result = routes_client->NewRouteSet(std::move(route_set_req));
+  if (!new_route_set_result.is_ok()) {
+    FX_LOGS(ERROR) << "Failed to get new route set: " << new_route_set_result.error_value();
+    return kPlatformResultFailure;
+  }
+  global_route_set = fidl::SyncClient{std::move(route_set_client_end)};
+  return kPlatformResultSuccess;
+}
+
+PlatformResult EnsureInterfaceAuthenticated(uint64_t interface_id) {
+  if (authenticated_interfaces.count(interface_id) > 0) {
+    return kPlatformResultSuccess;
+  }
+
+  // Acquire interfaces Control proxy and fetch authorization proof.
+  std::optional<fidl::SyncClient<fuchsia_net_interfaces_admin::Control>> control_client =
+      GetInterfaceControlViaRoot(interface_id);
+  if (!control_client) {
+    FX_LOGS(ERROR)
+        << "Failed to acquire |fuchsia.net.interfaces.admin/Control| handle for interface "
+        << interface_id;
     return kPlatformResultFailure;
   }
 
-  fuchsia::net::stack::StackSyncPtr net_stack_sync_ptr;
-  if (zx_status_t status = svc->Connect(net_stack_sync_ptr.NewRequest()); status != ZX_OK) {
-    FX_LOGS(ERROR) << "Failed to connect to netstack: " << zx_status_get_string(status);
+  auto auth_result = (*control_client)->GetAuthorizationForInterface();
+  if (!auth_result.is_ok()) {
+    FX_LOGS(ERROR) << "Failed to get interface authorization: " << auth_result.error_value();
+    return kPlatformResultFailure;
+  }
+  fuchsia_net_resources::GrantForInterfaceAuthorization grant =
+      std::move(auth_result->credential());
+
+  fuchsia_net_resources::ProofOfInterfaceAuthorization proof(grant.interface_id(),
+                                                             std::move(grant.token()));
+
+  // Authenticate RouteSetV6 synchronously
+  fuchsia_net_routes_admin::RouteSetV6AuthenticateForInterfaceRequest auth_req;
+  auth_req.credential(std::move(proof));
+  auto authenticate_result = (*global_route_set)->AuthenticateForInterface(std::move(auth_req));
+  if (!authenticate_result.is_ok()) {
+    if (authenticate_result.error_value().is_domain_error()) {
+      FX_LOGS(ERROR) << "AuthenticateForInterface domain failed: "
+                     << static_cast<uint32_t>(authenticate_result.error_value().domain_error());
+    } else {
+      FX_LOGS(ERROR) << "AuthenticateForInterface transport failed: "
+                     << authenticate_result.error_value().framework_error();
+    }
+    return kPlatformResultFailure;
+  }
+
+  authenticated_interfaces.insert(interface_id);
+  return kPlatformResultSuccess;
+}
+
+// Add or remove route to/from forwarding table.
+PlatformResult AddRemoveRouteInternal(InterfaceType interface_type, const Inet::IPPrefix &prefix,
+                                      RoutePriority priority, bool add) {
+  // Determine interface name to add to/remove from.
+  std::optional<std::string> interface_name = GetInterfaceName(interface_type);
+  if (!interface_name) {
     return kPlatformResultFailure;
   }
 
@@ -564,67 +623,86 @@ PlatformResult AddRemoveRouteInternal(InterfaceType interface_type, const Inet::
     return kPlatformResultFailure;
   }
 
-  // Construct route table entry to add or remove.
-  fuchsia::net::stack::ForwardingEntry route_table_entry{
-      .subnet =
-          {
-              .addr = fuchsia::net::IpAddress::WithIpv6([&prefix]() {
-                fuchsia::net::Ipv6Address ipv6_addr;
-                std::memcpy(ipv6_addr.addr.data(),
-                            reinterpret_cast<const uint8_t *>(prefix.IPAddr.Addr),
-                            ipv6_addr.addr.size());
-                return ipv6_addr;
-              }()),
-              .prefix_len = prefix.Length,
-          },
-      .device_id = interface_id.value(),
-  };
-  switch (priority) {
-    case RoutePriority::kRoutePriorityHigh:
-      route_table_entry.metric = kRouteMetric_HighPriority;
-      break;
-    case RoutePriority::kRoutePriorityMedium:
-      route_table_entry.metric = kRouteMetric_MediumPriority;
-      break;
-    case RoutePriority::kRoutePriorityLow:
-      route_table_entry.metric = kRouteMetric_LowPriority;
-      break;
-    default:
-      FX_LOGS(WARNING) << "Unhandled route priority type, using lowest priority.";
-      route_table_entry.metric = kRouteMetric_LowPriority;
-  }
-
-  std::optional<fuchsia::net::stack::Error> error;
-  if (add) {
-    fuchsia::net::stack::Stack_AddForwardingEntry_Result result;
-    if (zx_status_t status =
-            net_stack_sync_ptr->AddForwardingEntry(std::move(route_table_entry), &result);
-        status != ZX_OK) {
-      FX_PLOGS(ERROR, status) << "Failed to add route";
-      return kPlatformResultFailure;
-    }
-    if (result.is_err()) {
-      error = result.err();
-    }
-  } else {
-    fuchsia::net::stack::Stack_DelForwardingEntry_Result result;
-    if (zx_status_t status =
-            net_stack_sync_ptr->DelForwardingEntry(std::move(route_table_entry), &result);
-        status != ZX_OK) {
-      FX_PLOGS(ERROR, status) << "Failed to delete route";
-      return kPlatformResultFailure;
-    }
-    if (result.is_err()) {
-      error = result.err();
-    }
-  }
-  if (error.has_value()) {
-    FX_LOGS(ERROR) << "Unable to modify route: " << StackErrorToString(error.value());
+  if (EnsureRouteSetInitialized() != kPlatformResultSuccess) {
     return kPlatformResultFailure;
   }
 
-  FX_LOGS(INFO) << (add ? "Added" : "Removed") << " route to/from interface id "
-                << interface_id.value();
+  if (EnsureInterfaceAuthenticated(interface_id.value()) != kPlatformResultSuccess) {
+    return kPlatformResultFailure;
+  }
+
+  fuchsia_net_routes::SpecifiedRouteProperties specified_properties;
+
+  fuchsia_net_routes::SpecifiedMetric specified_metric = [&priority]() {
+    switch (priority) {
+      case RoutePriority::kRoutePriorityHigh:
+        return fuchsia_net_routes::SpecifiedMetric::WithExplicitMetric(kRouteMetric_HighPriority);
+      case RoutePriority::kRoutePriorityMedium:
+        return fuchsia_net_routes::SpecifiedMetric::WithExplicitMetric(kRouteMetric_MediumPriority);
+      case RoutePriority::kRoutePriorityLow:
+        return fuchsia_net_routes::SpecifiedMetric::WithExplicitMetric(kRouteMetric_LowPriority);
+      default:
+        return fuchsia_net_routes::SpecifiedMetric::WithExplicitMetric(kRouteMetric_LowPriority);
+    }
+  }();
+  specified_properties.metric(std::move(specified_metric));
+
+  fuchsia_net_routes::RoutePropertiesV6 properties;
+  properties.specified_properties(std::move(specified_properties));
+
+  fuchsia_net_routes::RouteTargetV6 route_target;
+  route_target.outbound_interface(interface_id.value());
+  route_target.next_hop(nullptr);
+
+  fuchsia_net::Ipv6Address ipv6_addr;
+  std::memcpy(ipv6_addr.addr().data(), reinterpret_cast<const uint8_t *>(prefix.IPAddr.Addr),
+              ipv6_addr.addr().size());
+
+  fuchsia_net::Ipv6AddressWithPrefix dest_prefix;
+  dest_prefix.addr(std::move(ipv6_addr));
+  dest_prefix.prefix_len(prefix.Length);
+
+  fuchsia_net_routes::RouteV6 route(
+      std::move(dest_prefix),
+      fuchsia_net_routes::RouteActionV6::WithForward(std::move(route_target)),
+      std::move(properties));
+
+  if (add) {
+    fuchsia_net_routes_admin::RouteSetV6AddRouteRequest add_req(std::move(route));
+    auto add_result = (*global_route_set)->AddRoute(std::move(add_req));
+    if (!add_result.is_ok()) {
+      if (add_result.error_value().is_domain_error()) {
+        FX_LOGS(ERROR) << "AddRoute domain failed: "
+                       << static_cast<uint32_t>(add_result.error_value().domain_error());
+      } else {
+        FX_LOGS(ERROR) << "AddRoute transport failed: "
+                       << add_result.error_value().framework_error();
+      }
+      return kPlatformResultFailure;
+    }
+    if (!add_result.value().did_add()) {
+      FX_LOGS(WARNING) << "AddRoute succeeded but route was already present in RouteSet";
+    }
+    FX_LOGS(INFO) << "Added route to interface id " << interface_id.value();
+  } else {
+    fuchsia_net_routes_admin::RouteSetV6RemoveRouteRequest remove_req(std::move(route));
+    auto remove_result = (*global_route_set)->RemoveRoute(std::move(remove_req));
+    if (!remove_result.is_ok()) {
+      if (remove_result.error_value().is_domain_error()) {
+        FX_LOGS(ERROR) << "RemoveRoute domain failed: "
+                       << static_cast<uint32_t>(remove_result.error_value().domain_error());
+      } else {
+        FX_LOGS(ERROR) << "RemoveRoute transport failed: "
+                       << remove_result.error_value().framework_error();
+      }
+      return kPlatformResultFailure;
+    }
+    if (!remove_result.value().did_remove()) {
+      FX_LOGS(ERROR) << "RemoveRoute failed: route was not found in RouteSet";
+      return kPlatformResultFailure;
+    }
+    FX_LOGS(INFO) << "Removed route from interface id " << interface_id.value();
+  }
 
 #if WARM_CONFIG_SUPPORT_BORDER_ROUTING
   // Set IPv6 forwarding on interface. Note that IPv6 forwarding is only ever
@@ -653,7 +731,7 @@ PlatformResult AddRemoveRouteInternal(InterfaceType interface_type, const Inet::
     auto config = fuchsia_net_interfaces_admin::Configuration();
     config.ipv6(std::move(ipv6_config));
     ::fidl::Result<fuchsia_net_interfaces_admin::Control::SetConfiguration> result =
-        control_client.value()->SetConfiguration(std::move(config));
+        (*control_client)->SetConfiguration(std::move(config));
     if (result.is_error()) {
       FX_LOGS(ERROR) << "Failed to enable IPv6 forwarding on interface id " << interface_id.value()
                      << ": " << result.error_value();

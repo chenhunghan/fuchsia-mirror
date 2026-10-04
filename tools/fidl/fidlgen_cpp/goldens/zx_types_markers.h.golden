@@ -52,10 +52,55 @@ class StatusProtocol final {
   };
 };
 
+class ResultProtocol final {
+  ResultProtocol() = delete;
+
+ public:
+  using Transport = ::fidl::internal::ChannelTransport;
+
+  static constexpr ::fidl::internal::Openness kOpenness = ::fidl::internal::Openness::kOpen;
+
+  class A final {
+    A() = delete;
+
+   public:
+    using Protocol = ::test_zxtypes::ResultProtocol;
+    static constexpr bool kHasClientToServer = true;
+    static constexpr bool kHasClientToServerBody = true;
+    static constexpr bool kHasServerToClient = true;
+    static constexpr bool kHasServerToClientBody = true;
+
+    static constexpr bool kHasNonEmptyUserFacingResponse = true;
+    static constexpr bool kHasDomainError = true;
+    static constexpr bool kHasFrameworkError = true;
+
+    static constexpr uint64_t kOrdinal = 751677647873929722;
+  };
+  class B final {
+    B() = delete;
+
+   public:
+    using Protocol = ::test_zxtypes::ResultProtocol;
+    static constexpr bool kHasClientToServer = true;
+    static constexpr bool kHasClientToServerBody = true;
+    static constexpr bool kHasServerToClient = true;
+    static constexpr bool kHasServerToClientBody = true;
+
+    static constexpr bool kHasNonEmptyUserFacingResponse = true;
+    static constexpr bool kHasDomainError = true;
+    static constexpr bool kHasFrameworkError = true;
+
+    static constexpr uint64_t kOrdinal = 6463185773393452449;
+  };
+};
+
 }  // namespace test_zxtypes
 namespace fidl {
 
 template <>
 struct IsProtocol<::test_zxtypes::StatusProtocol> : public std::true_type {};
+
+template <>
+struct IsProtocol<::test_zxtypes::ResultProtocol> : public std::true_type {};
 
 }  // namespace fidl

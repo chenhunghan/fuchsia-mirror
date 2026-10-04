@@ -602,6 +602,15 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             return (
                 linux_virtual_usb_hub.LinuxVirtualUsbPowerHub(
                     target_serial=target_serial,
+                    # Retry settings for the bus ID lookup in power_off().
+                    bus_id_lookup_attempts=self.user_params.get(
+                        "bus_id_lookup_attempts",
+                        linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_ATTEMPTS,
+                    ),
+                    bus_id_lookup_timeout_sec=self.user_params.get(
+                        "bus_id_lookup_timeout_sec",
+                        linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_TIMEOUT_SEC,
+                    ),
                 ),
                 None,
             )

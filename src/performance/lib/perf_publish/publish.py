@@ -13,7 +13,7 @@ import time
 import types
 from collections.abc import Collection, Sequence, Set
 from importlib.resources import as_file, files
-from typing import Any, Iterable, Self
+from typing import Any, Self
 
 from perf_publish import data  # type: ignore[attr-defined]
 from perf_publish import device_types, metrics_allowlist, summarize
@@ -54,7 +54,7 @@ ENV_FUCHSIA_DEVICE_TYPE: str = "FUCHSIA_DEVICE_TYPE"
 
 
 def publish_fuchsiaperf(
-    fuchsia_perf_file_paths: Iterable[str | os.PathLike[str]],
+    fuchsia_perf_file_paths: Collection[str | os.PathLike[str]],
     expected_metric_names_filename: str | os.PathLike[str],
     test_data_module: types.ModuleType | None = None,
     env: dict[str, str] = dict(os.environ),
@@ -85,7 +85,7 @@ def publish_fuchsiaperf(
 class CatapultConverter:
     def __init__(
         self,
-        fuchsia_perf_file_paths: Iterable[str | os.PathLike[str]],
+        fuchsia_perf_file_paths: Collection[str | os.PathLike[str]],
         expected_metric_names_filename: str | os.PathLike[str],
         test_data_module: types.ModuleType | None = None,
         master: str | None = None,
@@ -203,7 +203,13 @@ class CatapultConverter:
         )
 
         _LOGGER.debug("Checking metrics naming")
-        should_summarize: bool = self._check_fuchsia_perf_metrics_naming(
+        # `should_summarize_file` is False when the file-level `[no-summarize-metrics]` header is
+        # present. When True, `summarize_perf_files` summarizes all metrics except those listed in
+        # `no_summarize_metrics` (which were tagged with the per-metric `[no-summarize]` suffix).
+        (
+            should_summarize_file,
+            no_summarize_metrics,
+        ) = self._check_fuchsia_perf_metrics_naming(
             expected_metric_names_filename,
             fuchsia_perf_file_paths,
             test_data_module=test_data_module,
@@ -214,8 +220,11 @@ class CatapultConverter:
             os.path.dirname(fuchsia_perf_file_paths[0]),
             _SUMMARIZED_RESULTS_FILE,
         )
-        if should_summarize:
-            results = summarize.summarize_perf_files(fuchsia_perf_file_paths)
+        if should_summarize_file:
+            results = summarize.summarize_perf_files(
+                fuchsia_perf_file_paths,
+                no_summarize_metrics=no_summarize_metrics,
+            )
             assert not os.path.exists(self._results_path)
             with open(self._results_path, "w") as f:
                 summarize.write_fuchsiaperf_json(f, results)
@@ -239,7 +248,7 @@ class CatapultConverter:
         )
 
     def _check_extension_and_relocate(
-        self, fuchsia_perf_file_paths: Iterable[str | os.PathLike[str]]
+        self, fuchsia_perf_file_paths: Collection[str | os.PathLike[str]]
     ) -> list[str]:
         perf_file_paths = list(map(str, fuchsia_perf_file_paths))
         if len(perf_file_paths) == 0:
@@ -274,7 +283,7 @@ class CatapultConverter:
     @classmethod
     def from_env(
         cls,
-        fuchsia_perf_file_paths: Iterable[str | os.PathLike[str]],
+        fuchsia_perf_file_paths: Collection[str | os.PathLike[str]],
         expected_metric_names_filename: str | os.PathLike[str],
         test_data_module: types.ModuleType | None = None,
         env: dict[str, str] = dict(os.environ),
@@ -341,7 +350,7 @@ class CatapultConverter:
         input_files: Sequence[str],
         test_data_module: types.ModuleType | None,
         runtime_deps_dir: str | os.PathLike[str],
-    ) -> bool:
+    ) -> tuple[bool, Set[str]]:
         metrics = self._extract_perf_file_metrics(input_files)
         if self._fuchsia_expected_metric_names_dest_dir is None:
             # TODO(b/340319757): Remove this conditional and make the case
@@ -361,14 +370,17 @@ class CatapultConverter:
                     os.path.join(runtime_deps_dir, expected_metric_names_file)
                 )
             metric_allowlist.check(metrics)
-            return metric_allowlist.should_summarize
+            return (
+                metric_allowlist.should_summarize,
+                metric_allowlist.no_summarize_metrics,
+            )
         else:
             self._write_expectation_file(
                 metrics,
                 expected_metric_names_file,
                 self._fuchsia_expected_metric_names_dest_dir,
             )
-            return True
+            return True, frozenset()
 
     def _extract_perf_file_metrics(
         self, input_files: Sequence[str]

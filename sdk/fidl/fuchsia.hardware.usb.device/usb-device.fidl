@@ -30,7 +30,7 @@ closed protocol Device {
     strict GetConfigurationDescriptorSize(struct {
         config uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         size uint16;
     });
 
@@ -38,7 +38,7 @@ closed protocol Device {
     strict GetConfigurationDescriptor(struct {
         config uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         desc vector<uint8>:MAX_CONFIG_DESC_SIZE;
     });
 
@@ -64,7 +64,7 @@ closed protocol Device {
         desc_id uint8;
         lang_id uint16;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         desc string:MAX_STRING_DESC_SIZE;
         actual_lang_id uint16;
     });
@@ -74,7 +74,7 @@ closed protocol Device {
         interface_number uint8;
         alt_setting uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Returns an implementation specific device ID for a USB device.
@@ -98,7 +98,7 @@ closed protocol Device {
     strict SetConfiguration(struct {
         configuration uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };
 

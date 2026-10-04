@@ -51,6 +51,8 @@ class PendingNodeManager {
 
   void MatchPendingNodesWithoutDriver();
 
+  bool HasPendingNodes() const { return !pending_nodes_.empty(); }
+
   // Exposed for testing.
   const std::vector<std::shared_ptr<PendingNode>>& pending_nodes() const { return pending_nodes_; }
 

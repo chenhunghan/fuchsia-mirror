@@ -259,7 +259,9 @@ maybe_rbe_wrap=()
 if [[ "$needs_reproxy_rbe" -eq 1 ]]
 then
   debug "RBE enabled."
+  # LINT.IfChange(reproxy_logs_dir)
   readonly reproxy_logdir="$log_dir/reproxy_logs"
+  # LINT.ThenChange(//build/scripts/main_build.py:reproxy_logs_dir)
   mkdir -p "$reproxy_logdir"
   # reproxy works best when it uses a temp dir on the same physical device
   # as the build dir.
@@ -312,7 +314,9 @@ then
   if [[ "$tui" -eq 1 ]]
   then debug "TUI enabled, using rsproxy."
   fi
+  # LINT.IfChange(rsproxy_logs_dir)
   readonly rsproxy_logdir="$log_dir/rsproxy_logs"
+  # LINT.ThenChange(//build/scripts/main_build.py:rsproxy_logs_dir)
 
   rsproxy_options=()
 

@@ -14,6 +14,8 @@
 
 #include "lib/media/codec_impl/codec_admission_control.h"
 
+namespace {
+
 TEST(AdmissionControl, DelayedAdmission) {
   async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
 
@@ -142,3 +144,34 @@ TEST(AdmissionControl, ChannelClose) {
   loop.RunUntilIdle();
   EXPECT_TRUE(got_callback);
 }
+
+TEST(AdmissionControl, OrderingOfDelayedCallbacks) {
+  async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
+
+  CodecAdmissionControl control(loop.dispatcher());
+
+  std::unique_ptr<CodecAdmission> admission;
+  control.TryAddCodec(false, [&admission](std::unique_ptr<CodecAdmission> new_admission) {
+    admission = std::move(new_admission);
+  });
+  loop.RunUntilIdle();
+  EXPECT_TRUE(admission);
+
+  admission->SetCodecIsClosing();
+
+  std::vector<int> order;
+  control.PostAfterPreviouslyStartedClosesDone([&order] { order.push_back(1); });
+  control.PostAfterPreviouslyStartedClosesDone([&order] { order.push_back(2); });
+
+  loop.RunUntilIdle();
+  EXPECT_TRUE(order.empty());
+
+  admission = nullptr;
+  loop.RunUntilIdle();
+
+  ASSERT_EQ(2u, order.size());
+  EXPECT_EQ(1, order[0]);
+  EXPECT_EQ(2, order[1]);
+}
+
+}  // namespace

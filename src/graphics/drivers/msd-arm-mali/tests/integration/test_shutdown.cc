@@ -33,7 +33,8 @@ class TestConnection : public magma::TestDeviceBase {
     DASSERT(connection_);
 
     uint32_t context_id;
-    magma_status_t status = magma_connection_create_context(connection_, &context_id);
+    magma_status_t status =
+        magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM, &context_id);
     if (status != MAGMA_STATUS_OK)
       return DRET(status);
 

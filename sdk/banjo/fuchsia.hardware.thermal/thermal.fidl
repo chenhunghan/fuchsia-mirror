@@ -16,6 +16,6 @@ closed protocol Thermal {
     strict Connect(resource struct {
         chan zx.Handle:CHANNEL;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

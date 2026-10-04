@@ -34,7 +34,10 @@ use smallvec::SmallVec;
 use starnix_ext::map_ext::EntryExt;
 use starnix_lifecycle::DropNotifier;
 use starnix_logging::{CATEGORY_STARNIX_MM, impossible_error, log_error, log_warn, track_stub};
-use starnix_sync::{LockDepMutex, MmDumpable, Mutex, RwLock, RwLockWriteGuard, ordered_write_lock};
+use starnix_sync::{
+    LockDepMutex, MemoryManagerCachedStatsLock, MmDumpable, RwLock, RwLockWriteGuard,
+    ordered_write_lock,
+};
 use starnix_types::arch::ArchWidth;
 use starnix_types::futex_address::FutexAddress;
 use starnix_types::math::{round_down_to_system_page_size, round_up_to_system_page_size};
@@ -1461,8 +1464,8 @@ impl MemoryManagerState {
             return error!(EFAULT);
         }
 
-        if advice == MADV_NORMAL {
-            track_stub!(TODO("https://fxbug.dev/322874202"), "madvise undo hints for MADV_NORMAL");
+        if advice == MADV_NORMAL || advice == MADV_RANDOM || advice == MADV_SEQUENTIAL {
+            track_stub!(TODO("https://fxbug.dev/322874202"), "madvise paging hints", advice);
             return Ok(());
         }
 
@@ -1559,14 +1562,6 @@ impl MemoryManagerState {
                     }
                     MADV_POPULATE_READ => {
                         track_stub!(TODO("https://fxbug.dev/322874202"), "MADV_POPULATE_READ");
-                        return error!(EINVAL);
-                    }
-                    MADV_RANDOM => {
-                        track_stub!(TODO("https://fxbug.dev/322874202"), "MADV_RANDOM");
-                        return error!(EINVAL);
-                    }
-                    MADV_SEQUENTIAL => {
-                        track_stub!(TODO("https://fxbug.dev/322874202"), "MADV_SEQUENTIAL");
                         return error!(EINVAL);
                     }
                     MADV_FREE if !mapping.flags().contains(MappingFlags::ANONYMOUS) => {
@@ -2339,39 +2334,43 @@ impl MemoryManagerState {
             return error!(EFAULT);
         }
 
-        // Don't create CoW copy of shared memory, go through regular syscall writing.
-        if mapping.flags().contains(MappingFlags::SHARED) {
-            if !mapping.can_write() {
-                // Linux returns EIO here instead of EFAULT.
-                return error!(EIO);
-            }
-            return self.write_mapping_memory(addr, &mapping, &bytes, context);
+        // Don't create CoW copy of shared memory.
+        if mapping.flags().contains(MappingFlags::SHARED) && !mapping.can_write() {
+            // Linux returns EIO here instead of EFAULT.
+            return error!(EIO);
         }
 
-        let backing = match self.get_mapping_backing(&mapping) {
-            MappingBacking::PrivateAnonymous => {
-                // Starnix has a writable handle to private anonymous memory.
-                return context.private_anonymous.write_memory(addr, &bytes);
-            }
-            MappingBacking::Memory(backing) => backing,
+        let memory = match self.get_mapping_backing(&mapping) {
+            MappingBacking::PrivateAnonymous => &context.private_anonymous.backing,
+            MappingBacking::Memory(backing) => backing.memory(),
         };
-
-        let vmo = backing.memory().as_vmo().ok_or_else(|| errno!(EFAULT))?;
-        let addr_offset = backing.address_to_offset(addr);
-        let can_exec =
-            vmo.basic_info().expect("get VMO handle info").rights.contains(Rights::EXECUTE);
+        let vmo = memory.as_vmo().ok_or_else(|| errno!(EFAULT))?;
+        let addr_offset = mapping.address_to_offset(addr);
 
         // Attempt to write to existing VMO
         match vmo.write(&bytes, addr_offset) {
             Ok(()) => {
-                if can_exec {
-                    // Issue a barrier to avoid executing stale instructions.
+                // Only synchronize caches if the mapping itself is currently executable; backing
+                // VMOs (such as `private_anonymous`) may carry `Rights::EXECUTE` even for
+                // non-executable mappings, and Zircon synchronizes the instruction cache if a
+                // mapping is later made executable via `mprotect`.
+                if mapping.can_exec() {
+                    // Synchronize the data and instruction caches across cores and issue an
+                    // instruction stream barrier to avoid executing stale instructions.
+                    memory
+                        .op_range(zx::VmoOp::CACHE_SYNC, addr_offset, bytes.len() as u64)
+                        .map_err(MemoryManager::get_errno_for_vmo_err)?;
                     system_barrier(BarrierType::InstructionStream);
                 }
                 return Ok(());
             }
 
-            Err(zx::Status::ACCESS_DENIED) => { /* Fall through */ }
+            Err(zx::Status::ACCESS_DENIED) => {
+                if mapping.flags().contains(MappingFlags::SHARED) {
+                    return error!(EIO);
+                }
+                // Fall through.
+            }
 
             Err(status) => {
                 return Err(MemoryManager::get_errno_for_vmo_err(status));
@@ -2379,7 +2378,7 @@ impl MemoryManagerState {
         }
 
         // Create a CoW child of the entire VMO and swap with the backing.
-        let mapping_offset = backing.address_to_offset(range.start);
+        let mapping_offset = mapping.address_to_offset(range.start);
         let len = range.end - range.start;
 
         // 1. Obtain a writable child of the VMO.
@@ -2391,9 +2390,11 @@ impl MemoryManagerState {
         // 2. Modify the memory.
         child_vmo.write(&bytes, addr_offset).map_err(MemoryManager::get_errno_for_vmo_err)?;
 
-        // 3. If needed, remint the VMO as executable. Zircon flushes instruction caches when
-        // mapping executable memory below, so a barrier isn't necessary here.
-        let child_vmo = if can_exec {
+        // 3. If the original VMO had `Rights::EXECUTE`, restore it on the child VMO (even if the
+        // mapping is not currently executable) so future `mprotect(..., PROT_EXEC)` calls succeed.
+        // Zircon flushes instruction caches when mapping or protecting executable memory, so a
+        // barrier isn't necessary here.
+        let child_vmo = if memory.get_rights().contains(Rights::EXECUTE) {
             child_vmo
                 .replace_as_executable(&VMEX_RESOURCE)
                 .map_err(MemoryManager::get_errno_for_vmo_err)?
@@ -2421,7 +2422,7 @@ impl MemoryManagerState {
         // 5. Update mappings
         let new_backing = MappingBackingMemory::new(range.start, memory, mapping_offset);
 
-        let mut new_mapping = mapping.clone();
+        let mut new_mapping = mapping;
         new_mapping.set_backing_internal(MappingBacking::Memory(Box::new(new_backing)));
 
         released_mappings.extend(self.mappings.insert(range, new_mapping));
@@ -3126,7 +3127,8 @@ pub struct MemoryManager {
     pub arch_width: ArchWidth,
 
     /// Cached memory stats to avoid expensive Zircon VMAR walks on sequential reads.
-    pub cached_stats: Mutex<Option<(zx::MonotonicInstant, MemoryStats)>>,
+    pub cached_stats:
+        LockDepMutex<Option<(zx::MonotonicInstant, MemoryStats)>, MemoryManagerCachedStatsLock>,
 }
 
 impl ArchSpecific for MemoryManager {
@@ -3282,7 +3284,7 @@ impl MemoryManager {
             inflight_vmspliced_payloads: Default::default(),
             drop_notifier: DropNotifier::default(),
             arch_width,
-            cached_stats: Mutex::default(),
+            cached_stats: LockDepMutex::default(),
         }))
     }
 
@@ -3972,11 +3974,11 @@ impl MemoryManager {
 
             let name_str = match &map.name() {
                 MappingNameRef::File(file) => {
-                    let Ok(running_state) = task.running_state() else {
+                    let Ok(fs) = task.fs() else {
                         log_warn!("Task {} is not running", task.get_tid());
                         continue;
                     };
-                    String::from_utf8_lossy(&file.name().path(&running_state.fs())).into_owned()
+                    String::from_utf8_lossy(&file.name().path(&fs)).into_owned()
                 }
                 MappingNameRef::None | MappingNameRef::AioContext(_) => {
                     if map.flags().contains(MappingFlags::SHARED)
@@ -4558,17 +4560,25 @@ fn write_map(
             let path = if let Some(fs_context) = fs_context {
                 file.name().path(fs_context)
             } else {
-                file.name().path(&task.running_state()?.fs())
+                file.name().path(&*task.fs()?)
             };
-            sink.write_iter(
-                path.iter()
-                    .flat_map(|b| if *b == b'\n' { b"\\012" } else { std::slice::from_ref(b) })
-                    .copied(),
-            );
+            if !path.contains(&b'\n') {
+                sink.write(&path);
+            } else {
+                sink.write_iter(
+                    path.iter()
+                        .flat_map(|b| if *b == b'\n' { b"\\012" } else { std::slice::from_ref(b) })
+                        .copied(),
+                );
+            }
         }
         MappingNameRef::Vma(name) => {
             fill_to_name(sink);
-            sink.write(b"[anon:");
+            if map.flags().contains(MappingFlags::SHARED) {
+                sink.write(b"[anon_shmem:");
+            } else {
+                sink.write(b"[anon:");
+            }
             sink.write(name.as_bytes());
             sink.write(b"]");
         }
@@ -4627,7 +4637,7 @@ impl SequenceFileSource for ProcMapsFile {
         };
         let state = mm.state.read();
         if let Some((range, map)) = state.mappings.find_at_or_after(cursor) {
-            let fs_context = task.running_state().ok().map(|rs| rs.fs());
+            let fs_context = task.fs().ok();
             write_map(&task, fs_context.as_deref(), sink, &state, range, map)?;
             return Ok(Some(range.end));
         }
@@ -4645,6 +4655,69 @@ impl ProcSmapsFile {
         // "smaps" is empty for kthreads, rather than inaccessible.
         let mm = task.mm().map_or_else(|_| Weak::default(), |mm| Arc::downgrade(&mm));
         DynamicFile::new(Self { mm, task: Arc::downgrade(&task) })
+    }
+
+    /// Compute the commited bytes in each memory mapping, using the `zx_mappings`.
+    /// `zx_mappings` must be in base-pointer order, which is guaranteed if obtained from
+    /// ZX_INFO_VMAR_MAPS from
+    /// [zx_object_get_info](https://fuchsia.dev/reference/syscalls/object_get_info).
+    fn compute_committed_bytes(
+        mm: &MemoryManager,
+        state: &MemoryManagerState,
+        zx_mappings: &[zx::MapInfo],
+    ) -> Vec<u64> {
+        let mut committed_bytes_vec = Vec::new();
+        let mut zx_idx = 0;
+        for (mm_range, mm_mapping) in state.mappings.iter() {
+            let mm_start = mm_range.start.ptr();
+            let mm_end = mm_range.end.ptr();
+            let mut committed_bytes = 0;
+            while let Some(zx_mapping) = zx_mappings.get(zx_idx) {
+                let details = zx_mapping.details();
+                // Non-mappings have no committed bytes, we can skip.
+                let Some(zx_details) = details.as_mapping() else {
+                    zx_idx += 1;
+                    continue;
+                };
+                let zx_start = zx_mapping.base;
+                let zx_end = zx_start + zx_mapping.size;
+                assert!(zx_end > mm_start, "Zircon mapping that isn't mapped from starnix: {zx_details:?}");
+                if zx_start >= mm_end {
+                    // This mapping starts in a later MemoryManager mapping
+                    break;
+                }
+
+                // TODO(https://fxbug.dev/419882465): It can happen that the same Zircon mapping
+                // is covered by more than one Starnix mapping. In this case we don't have
+                // enough granularity to answer the question of how many committed bytes belong
+                // to one mapping or another. Make a best-effort approximation by dividing the
+                // committed bytes of a Zircon mapping proportionally.
+                let intersect_size =
+                    std::cmp::min(mm_end, zx_end) - std::cmp::max(mm_start, zx_start);
+                committed_bytes += if intersect_size != zx_mapping.size {
+                    let part = intersect_size as f32 / zx_mapping.size as f32;
+                    (part * zx_details.committed_bytes as f32) as u64
+                } else {
+                    zx_details.committed_bytes as u64
+                };
+                assert_eq!(
+                    match state.get_mapping_backing(mm_mapping) {
+                        MappingBacking::Memory(m) => m.memory().get_koid(),
+                        MappingBacking::PrivateAnonymous =>
+                            mm.mapping_context.private_anonymous.backing.get_koid(),
+                    },
+                    zx_details.vmo_koid,
+                    "MemoryManager and Zircon must agree on which VMO is mapped in this range",
+                );
+                if zx_end <= mm_end {
+                    zx_idx += 1;
+                } else {
+                    break;
+                }
+            }
+            committed_bytes_vec.push(committed_bytes);
+        }
+        committed_bytes_vec
     }
 }
 
@@ -4675,113 +4748,78 @@ impl DynamicFileSource for ProcSmapsFile {
 
         let state = mm.state.read();
         let committed_bytes_vec = mm.with_zx_mappings(current_task, |zx_mappings| {
-            let mut zx_memory_info = RangeMap::<UserAddress, usize>::default();
-            for idx in 0..zx_mappings.len() {
-                let zx_mapping = zx_mappings[idx];
-                // RangeMap uses #[must_use] for its default usecase but this drop is trivial.
-                let _ = zx_memory_info.insert(
-                    UserAddress::from_ptr(zx_mapping.base)
-                        ..UserAddress::from_ptr(zx_mapping.base + zx_mapping.size),
-                    idx,
-                );
-            }
+            Self::compute_committed_bytes(&mm, &state, zx_mappings)
+        });
 
-            let mut committed_bytes_vec = Vec::new();
-            for (mm_range, mm_mapping) in state.mappings.iter() {
-                let mut committed_bytes = 0;
-
-                for (zx_range, zx_mapping_idx) in zx_memory_info.range(mm_range.clone()) {
-                    let intersect_range = zx_range.intersect(mm_range);
-                    let zx_mapping = zx_mappings[*zx_mapping_idx];
-                    let zx_details = zx_mapping.details();
-                    let Some(zx_details) = zx_details.as_mapping() else { continue };
-                    let zx_committed_bytes = zx_details.committed_bytes;
-
-                    // TODO(https://fxbug.dev/419882465): It can happen that the same Zircon mapping
-                    // is covered by more than one Starnix mapping. In this case we don't have
-                    // enough granularity to answer the question of how many committed bytes belong
-                    // to one mapping or another. Make a best-effort approximation by dividing the
-                    // committed bytes of a Zircon mapping proportionally.
-                    committed_bytes += if intersect_range != *zx_range {
-                        let intersection_size =
-                            intersect_range.end.ptr() - intersect_range.start.ptr();
-                        let part = intersection_size as f32 / zx_mapping.size as f32;
-                        let prorated_committed_bytes: f32 = part * zx_committed_bytes as f32;
-                        prorated_committed_bytes as u64
-                    } else {
-                        zx_committed_bytes as u64
-                    };
-                    assert_eq!(
-                        match state.get_mapping_backing(mm_mapping) {
-                            MappingBacking::Memory(m) => m.memory().get_koid(),
-                            MappingBacking::PrivateAnonymous =>
-                                mm.mapping_context.private_anonymous.backing.get_koid(),
-                        },
-                        zx_details.vmo_koid,
-                        "MemoryManager and Zircon must agree on which VMO is mapped in this range",
-                    );
-                }
-                committed_bytes_vec.push(committed_bytes);
-            }
-            Ok(committed_bytes_vec)
-        })?;
-
-        let fs_context = task.running_state().ok().map(|rs| rs.fs());
+        let fs_context = task.fs().ok();
         let fs_context_ref = fs_context.as_deref();
+
+        let mut share_count_cache: HashMap<zx::Koid, u64> = HashMap::default();
+
         for ((mm_range, mm_mapping), committed_bytes) in
             state.mappings.iter().zip(committed_bytes_vec.into_iter())
         {
             write_map(&task, fs_context_ref, sink, &state, mm_range, mm_mapping)?;
 
             let size_kb = (mm_range.end.ptr() - mm_range.start.ptr()) / 1024;
-            writeln!(sink, "Size:           {size_kb:>8} kB",)?;
-            let share_count = match state.get_mapping_backing(mm_mapping) {
-                MappingBacking::Memory(backing) => {
-                    let memory = backing.memory();
-                    if memory.is_clock() {
-                        // Clock memory mappings are not shared in a meaningful way.
-                        1
-                    } else {
-                        let memory_info = backing.memory().info()?;
-                        memory_info.share_count as u64
+            let rss_kb = committed_bytes / 1024;
+
+            let share_count = if rss_kb == 0 {
+                // If there is no memory, share_count has no effect (all below is 0)
+                1
+            } else {
+                match state.get_mapping_backing(mm_mapping) {
+                    MappingBacking::Memory(backing) => {
+                        let memory = backing.memory();
+                        let koid = memory.get_koid();
+                        if let Some(count) = share_count_cache.get(&koid) {
+                            *count
+                        } else {
+                            let count = if memory.is_clock() {
+                                // Clock memory mappings are not shared in a meaningful way.
+                                1
+                            } else {
+                                let memory_info = memory.info()?;
+                                memory_info.share_count as u64
+                            };
+                            let _ = share_count_cache.insert(koid, count);
+                            count
+                        }
+                    }
+                    MappingBacking::PrivateAnonymous => {
+                        1 // Private mapping
                     }
                 }
-                MappingBacking::PrivateAnonymous => {
-                    1 // Private mapping
-                }
             };
 
-            let rss_kb = committed_bytes / 1024;
-            writeln!(sink, "Rss:            {rss_kb:>8} kB")?;
+            let is_shared = share_count > 1;
 
-            let pss_kb = if mm_mapping.flags().contains(MappingFlags::SHARED) {
-                rss_kb / share_count
-            } else {
-                rss_kb
-            };
-            writeln!(sink, "Pss:            {pss_kb:>8} kB")?;
+            let pss_kb = if is_shared { rss_kb / share_count } else { rss_kb };
 
             track_stub!(TODO("https://fxbug.dev/322874967"), "smaps dirty pages");
             let (shared_dirty_kb, private_dirty_kb) = (0, 0);
-
-            let is_shared = share_count > 1;
             let shared_clean_kb = if is_shared { rss_kb } else { 0 };
-            writeln!(sink, "Shared_Clean:   {shared_clean_kb:>8} kB")?;
-            writeln!(sink, "Shared_Dirty:   {shared_dirty_kb:>8} kB")?;
-
             let private_clean_kb = if is_shared { 0 } else { rss_kb };
-            writeln!(sink, "Private_Clean:  {private_clean_kb:>8} kB")?;
-            writeln!(sink, "Private_Dirty:  {private_dirty_kb:>8} kB")?;
 
             let anonymous_kb = if mm_mapping.private_anonymous() { rss_kb } else { 0 };
-            writeln!(sink, "Anonymous:      {anonymous_kb:>8} kB")?;
-            writeln!(sink, "KernelPageSize: {page_size_kb:>8} kB")?;
-            writeln!(sink, "MMUPageSize:    {page_size_kb:>8} kB")?;
-
             let locked_kb =
                 if mm_mapping.flags().contains(MappingFlags::LOCKED) { rss_kb } else { 0 };
-            writeln!(sink, "Locked:         {locked_kb:>8} kB")?;
-            writeln!(sink, "VmFlags: {}", mm_mapping.vm_flags())?;
+            writeln!(
+                sink,
+                "Size:           {size_kb:>8} kB\n\
+                 Rss:            {rss_kb:>8} kB\n\
+                 Pss:            {pss_kb:>8} kB\n\
+                 Shared_Clean:   {shared_clean_kb:>8} kB\n\
+                 Shared_Dirty:   {shared_dirty_kb:>8} kB\n\
+                 Private_Clean:  {private_clean_kb:>8} kB\n\
+                 Private_Dirty:  {private_dirty_kb:>8} kB\n\
+                 Anonymous:      {anonymous_kb:>8} kB\n\
+                 KernelPageSize: {page_size_kb:>8} kB\n\
+                 MMUPageSize:    {page_size_kb:>8} kB\n\
+                 Locked:         {locked_kb:>8} kB\n\
+                 VmFlags: {}",
+                mm_mapping.vm_flags()
+            )?;
 
             track_stub!(TODO("https://fxbug.dev/297444691"), "optional smaps fields");
         }
@@ -4927,20 +4965,24 @@ impl FileOps for ProcPagemapFile {
         let total_bytes_needed = unaligned_offset + to_read;
         let num_pages = (total_bytes_needed + entry_size - 1) / entry_size;
 
-        let state = mm.state.read();
         let can_read_pfn =
             security::is_task_capable_noaudit(current_task, starnix_uapi::auth::CAP_SYS_ADMIN);
 
-        let get_mapping_vmo_info = |mm_mapping: &Mapping, addr: UserAddress| -> (zx::Koid, u64) {
-            match state.get_mapping_backing(mm_mapping) {
-                MappingBacking::Memory(backing) => {
-                    (backing.memory().get_koid(), backing.address_to_offset(addr))
+        let compute_mapping_pfn =
+            |state: &MemoryManagerState, mm_mapping: &Mapping, addr: UserAddress| -> u64 {
+                if !can_read_pfn {
+                    return 0;
                 }
-                MappingBacking::PrivateAnonymous => {
-                    (mm.mapping_context.private_anonymous.backing.get_koid(), addr.ptr() as u64)
-                }
-            }
-        };
+                let (koid, vmo_offset) = match state.get_mapping_backing(mm_mapping) {
+                    MappingBacking::Memory(backing) => {
+                        (backing.memory().get_koid(), backing.address_to_offset(addr))
+                    }
+                    MappingBacking::PrivateAnonymous => {
+                        (mm.mapping_context.private_anonymous.backing.get_koid(), addr.ptr() as u64)
+                    }
+                };
+                compute_pseudo_pfn(koid, vmo_offset / page_size as u64)
+            };
 
         // Bit 63 indicates the page is present in RAM, bit 61 indicates file-page or
         // shared-anon, and bit 57 indicates an exclusively mapped page (anonymous private).
@@ -4962,17 +5004,18 @@ impl FileOps for ProcPagemapFile {
                 Some(addr) => UserAddress::from(addr as u64),
                 None => return Ok(0),
             };
-            let mut entry = 0u64;
-            if let Some((_, mm_mapping)) = state.mappings.get(start_vaddr) {
-                let flags = compute_entry_flags(mm_mapping);
-                let pfn = if can_read_pfn {
-                    let (koid, vmo_offset) = get_mapping_vmo_info(mm_mapping, start_vaddr);
-                    compute_pseudo_pfn(koid, vmo_offset / page_size as u64)
+            let entry = {
+                // Drop the read lock before writing to `dst`, as `dst.write_all` may fault on a
+                // lazy mapping in the same `MemoryManager` and acquire a write lock on `mm.state`.
+                let state = mm.state.read();
+                if let Some((_, mm_mapping)) = state.mappings.get(start_vaddr) {
+                    let flags = compute_entry_flags(mm_mapping);
+                    let pfn = compute_mapping_pfn(&state, mm_mapping, start_vaddr);
+                    flags | pfn
                 } else {
                     0
-                };
-                entry = flags | pfn;
-            }
+                }
+            };
             dst.write_all(&entry.to_ne_bytes())?;
             return Ok(entry_size);
         }
@@ -4998,18 +5041,18 @@ impl FileOps for ProcPagemapFile {
                     None => UserAddress::from(u64::MAX),
                 };
 
-            // Fast path: entire chunk is contained within a single mapping.
-            if let Some((mm_range, mm_mapping)) = state.mappings.get(chunk_start_vaddr) {
-                if mm_range.end >= chunk_end_vaddr {
-                    let flags = compute_entry_flags(mm_mapping);
+            {
+                // Hold `mm.state.read()` only while snapshotting the pagemap entries for this
+                // chunk, and release it before `dst.write_all` which may need `mm.state.write()`
+                // to materialize lazy mappings in the destination buffer.
+                let state = mm.state.read();
 
-                    let start_pfn = if can_read_pfn {
-                        let (koid, vmo_offset) =
-                            get_mapping_vmo_info(mm_mapping, chunk_start_vaddr);
-                        compute_pseudo_pfn(koid, vmo_offset / page_size as u64)
-                    } else {
-                        0
-                    };
+                // Fast path: entire chunk is contained within a single mapping.
+                if let Some((mm_range, mm_mapping)) = state.mappings.get(chunk_start_vaddr)
+                    && mm_range.end >= chunk_end_vaddr
+                {
+                    let flags = compute_entry_flags(mm_mapping);
+                    let start_pfn = compute_mapping_pfn(&state, mm_mapping, chunk_start_vaddr);
 
                     for (i, entry) in chunk_slice.iter_mut().enumerate() {
                         let pfn = if can_read_pfn {
@@ -5019,49 +5062,35 @@ impl FileOps for ProcPagemapFile {
                         };
                         *entry = flags | pfn;
                     }
-
-                    let byte_slice = chunk_slice.as_bytes();
-                    let chunk_byte_offset = if pages_processed == 0 { unaligned_offset } else { 0 };
-                    let chunk_available_bytes = byte_slice.len().saturating_sub(chunk_byte_offset);
-                    let chunk_write_len =
-                        std::cmp::min(to_read - bytes_written_total, chunk_available_bytes);
-
-                    dst.write_all(
-                        &byte_slice[chunk_byte_offset..chunk_byte_offset + chunk_write_len],
-                    )?;
-                    bytes_written_total += chunk_write_len;
-                    pages_processed += current_chunk_pages;
-                    continue;
-                }
-            }
-
-            // General path: spans multiple mappings or unmapped memory.
-            chunk_slice.fill(0);
-
-            for (mm_range, mm_mapping) in state.mappings.range(chunk_start_vaddr..chunk_end_vaddr) {
-                let flags = compute_entry_flags(mm_mapping);
-
-                let map_start_page = (mm_range.start.ptr() as usize) / page_size;
-                let map_end_page = (mm_range.end.ptr() as usize) / page_size;
-
-                let first_page = std::cmp::max(chunk_start_page, map_start_page);
-                let last_page = std::cmp::min(chunk_start_page + current_chunk_pages, map_end_page);
-
-                let first_page_vaddr = UserAddress::from((first_page * page_size) as u64);
-                let start_pfn = if can_read_pfn {
-                    let (koid, vmo_offset) = get_mapping_vmo_info(mm_mapping, first_page_vaddr);
-                    compute_pseudo_pfn(koid, vmo_offset / page_size as u64)
                 } else {
-                    0
-                };
+                    // General path: spans multiple mappings or unmapped memory.
+                    chunk_slice.fill(0);
 
-                for page_idx in first_page..last_page {
-                    let pfn = if can_read_pfn {
-                        (start_pfn.wrapping_add((page_idx - first_page) as u64)) & PAGEMAP_PFN_MASK
-                    } else {
-                        0
-                    };
-                    chunk_slice[page_idx - chunk_start_page] = flags | pfn;
+                    for (mm_range, mm_mapping) in
+                        state.mappings.range(chunk_start_vaddr..chunk_end_vaddr)
+                    {
+                        let flags = compute_entry_flags(mm_mapping);
+
+                        let map_start_page = (mm_range.start.ptr() as usize) / page_size;
+                        let map_end_page = (mm_range.end.ptr() as usize) / page_size;
+
+                        let first_page = std::cmp::max(chunk_start_page, map_start_page);
+                        let last_page =
+                            std::cmp::min(chunk_start_page + current_chunk_pages, map_end_page);
+
+                        let first_page_vaddr = UserAddress::from((first_page * page_size) as u64);
+                        let start_pfn = compute_mapping_pfn(&state, mm_mapping, first_page_vaddr);
+
+                        for page_idx in first_page..last_page {
+                            let pfn = if can_read_pfn {
+                                (start_pfn.wrapping_add((page_idx - first_page) as u64))
+                                    & PAGEMAP_PFN_MASK
+                            } else {
+                                0
+                            };
+                            chunk_slice[page_idx - chunk_start_page] = flags | pfn;
+                        }
+                    }
                 }
             }
 

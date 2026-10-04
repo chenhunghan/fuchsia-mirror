@@ -12,7 +12,7 @@ type SuspendStats = table {
     /// The number of times the device has failed to suspend.
     2: fail_count uint64;
     /// The error code logged after the last failed suspend attempt.
-    3: last_failed_error zx.Status;
+    3: last_failed_error zx.Result;
     /// The amount of time spent in the previous suspend state.
     /// May not be available on all platforms.
     4: last_time_in_suspend zx.Duration;

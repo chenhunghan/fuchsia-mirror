@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-import socket
 import subprocess
 import threading
 from abc import ABC, abstractmethod
@@ -252,16 +251,19 @@ class IPerfClientOverSsh(IPerfClientBase):
             iperf_process = self._ssh_provider.run(
                 iperf_cmd, timeout_sec=timeout
             )
-            iperf_output = iperf_process.stdout
-            with open(full_out_path, "wb") as out_file:
-                out_file.write(iperf_output)
-        except socket.timeout:
+            stdout = iperf_process.stdout or b""
+        except subprocess.CalledProcessError as err:
+            # Capture output on non-zero exit (e.g. server busy) so error details
+            # are preserved in the log file instead of lost.
+            logging.warning(f"iperf client exited with error: {err}")
+            stdout = err.stdout or b""
+        except subprocess.TimeoutExpired as err:
             raise TimeoutError(
-                "Socket timeout. Timed out waiting for iperf "
-                "client to finish."
-            )
-        except Exception as err:
-            logging.exception(f"iperf run failed: {err}")
+                f"Command execution timed out waiting for remote iperf client after {timeout} seconds: {err}"
+            ) from err
+
+        with open(full_out_path, "wb") as out_file:
+            out_file.write(stdout)
 
         return full_out_path
 

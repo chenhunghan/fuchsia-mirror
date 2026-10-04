@@ -6,7 +6,6 @@ package fint
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -16,28 +15,31 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"go.fuchsia.dev/fuchsia/tools/build"
 	fintpb "go.fuchsia.dev/fuchsia/tools/integration/fint/proto"
-	"go.fuchsia.dev/fuchsia/tools/lib/subprocess"
 )
 
 type mockBuildAPIClient struct {
-	affectedTests []string
-	recordedFiles []string
-	err           error
+	affectedTests    []string
+	buildNotAffected bool
+	recordedFiles    []string
+	err              error
 }
 
 func (m *mockBuildAPIClient) ExportDebugSymbols(ctx context.Context, outputDir string, withBreakpad bool) error {
 	return nil
 }
 
-func (m *mockBuildAPIClient) AffectedTests(ctx context.Context, filesListPath string) ([]string, error) {
+func (m *mockBuildAPIClient) AffectedTests(ctx context.Context, filesListPath string) (*build.AffectedTestsResult, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
 	content, err := os.ReadFile(filesListPath)
 	if err == nil && len(content) > 0 {
-		m.recordedFiles = filepath.SplitList(string(content))
+		m.recordedFiles = strings.Split(strings.TrimSpace(string(content)), "\n")
 	}
-	return m.affectedTests, nil
+	return &build.AffectedTestsResult{
+		Targets:          m.affectedTests,
+		BuildNotAffected: m.buildNotAffected,
+	}, nil
 }
 
 func TestResolveAffectedTestNames(t *testing.T) {
@@ -69,13 +71,13 @@ func TestResolveAffectedTestNames(t *testing.T) {
 		},
 	}
 
-	clientOutput := []string{
-		"//src/foo:foo_test(//build/toolchain/fuchsia:arm64),device",
-		"@@//src/bazel:bar_test,host",
-		"//src/recovery/simulator:recovery_simulator_boot_test(//build/toolchain:x64),device",
+	targetLabels := []string{
+		"//src/foo:foo_test(//build/toolchain/fuchsia:arm64)",
+		"@@//src/bazel:bar_test",
+		"//src/recovery/simulator:recovery_simulator_boot_test(//build/toolchain:x64)",
 	}
 
-	got := resolveAffectedTestNames(testSpecs, clientOutput)
+	got := resolveAffectedTestNames(testSpecs, targetLabels)
 	want := []string{"bazel_test_name", "gn_test_name"}
 
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -115,18 +117,7 @@ func TestWriteChangedFilesList(t *testing.T) {
 	}
 }
 
-type fakeRunnerForDualRun struct {
-	mockStdout []byte
-}
-
-func (r *fakeRunnerForDualRun) Run(ctx context.Context, cmd []string, options subprocess.RunOptions) error {
-	if options.Stdout != nil {
-		options.Stdout.Write(r.mockStdout)
-	}
-	return nil
-}
-
-func TestAffectedImplDualRun(t *testing.T) {
+func TestAffectedImpl(t *testing.T) {
 	checkoutDir := t.TempDir()
 	artifactDir := t.TempDir()
 	buildDir := t.TempDir()
@@ -167,65 +158,100 @@ func TestAffectedImplDualRun(t *testing.T) {
 	modules := fakeBuildModules{
 		buildDir:  buildDir,
 		testSpecs: testSpecs,
-		tools: build.Tools{
-			{
-				Name: "ninja",
-				Path: "ninja",
-				OS:   "linux",
-				CPU:  "x64",
+	}
+
+	t.Run("affected tests found", func(t *testing.T) {
+		client := &mockBuildAPIClient{
+			affectedTests: []string{
+				"//src/foo:gn_test(//build/toolchain:arm64)",
+				"@@//src/bazel:bazel_test",
 			},
-		},
-	}
+		}
 
-	runner := &fakeRunnerForDualRun{
-		mockStdout: []byte("ninja explain: obj/src/foo/package_manifest.json is dirty\n"),
-	}
+		artifacts, err := affectedImpl(context.Background(), client, contextSpec, modules)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	client := &mockBuildAPIClient{
-		affectedTests: []string{
-			"//src/foo:gn_test(//build/toolchain:arm64),device",
-			"@@//src/bazel:bazel_test,host",
-		},
-	}
+		expected := []string{"bazel_test", "gn_test"}
+		if diff := cmp.Diff(expected, artifacts.AffectedTests); diff != "" {
+			t.Errorf("unexpected affected tests (-want +got):\n%s", diff)
+		}
+		if artifacts.BuildNotAffected {
+			t.Errorf("expected BuildNotAffected to be false")
+		}
+	})
 
-	platform := "linux-x64"
-	targets := []string{"default"}
+	t.Run("no affected tests", func(t *testing.T) {
+		client := &mockBuildAPIClient{
+			affectedTests: []string{},
+		}
 
-	artifacts, err := affectedImpl(context.Background(), runner, client, contextSpec, modules, platform, targets)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		artifacts, err := affectedImpl(context.Background(), client, contextSpec, modules)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	// Verify comparison log was saved
-	comparisonLogPath, ok := artifacts.LogFiles["affected_tests_comparison.json"]
-	if !ok {
-		t.Fatalf("expected affected_tests_comparison.json in artifacts.LogFiles")
-	}
+		if len(artifacts.AffectedTests) != 0 {
+			t.Errorf("expected 0 affected tests, got %v", artifacts.AffectedTests)
+		}
+		if artifacts.BuildNotAffected {
+			t.Errorf("expected BuildNotAffected to be false, got true")
+		}
+	})
 
-	comparisonContent, err := os.ReadFile(comparisonLogPath)
-	if err != nil {
-		t.Fatalf("failed to read comparison log: %v", err)
-	}
+	t.Run("build not affected", func(t *testing.T) {
+		client := &mockBuildAPIClient{
+			affectedTests:    []string{},
+			buildNotAffected: true,
+		}
 
-	var report map[string]any
-	if err := json.Unmarshal(comparisonContent, &report); err != nil {
-		t.Fatalf("failed to parse comparison log JSON: %v", err)
-	}
+		artifacts, err := affectedImpl(context.Background(), client, contextSpec, modules)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	if report["new_affected_tests"] == nil {
-		t.Errorf("expected new_affected_tests in report")
-	}
-	if report["legacy_affected_tests"] == nil {
-		t.Errorf("expected legacy_affected_tests in report")
-	}
-	if report["legacy_duration_seconds"] == nil {
-		t.Errorf("expected legacy_duration_seconds in report")
-	} else if dur, ok := report["legacy_duration_seconds"].(float64); !ok || dur < 0 {
-		t.Errorf("expected legacy_duration_seconds to be non-negative float, got %v", report["legacy_duration_seconds"])
-	}
-	if report["new_duration_seconds"] == nil {
-		t.Errorf("expected new_duration_seconds in report")
-	} else if dur, ok := report["new_duration_seconds"].(float64); !ok || dur < 0 {
-		t.Errorf("expected new_duration_seconds to be non-negative float, got %v", report["new_duration_seconds"])
-	}
+		if len(artifacts.AffectedTests) != 0 {
+			t.Errorf("expected 0 affected tests, got %v", artifacts.AffectedTests)
+		}
+		if !artifacts.BuildNotAffected {
+			t.Errorf("expected BuildNotAffected to be true, got false")
+		}
+	})
+
+	t.Run("no test specs returns early", func(t *testing.T) {
+		client := &mockBuildAPIClient{
+			affectedTests: []string{"//src/foo:gn_test"},
+		}
+		emptyModules := fakeBuildModules{
+			buildDir:  buildDir,
+			testSpecs: nil,
+		}
+
+		artifacts, err := affectedImpl(context.Background(), client, contextSpec, emptyModules)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(artifacts.AffectedTests) != 0 {
+			t.Errorf("expected 0 affected tests, got %v", artifacts.AffectedTests)
+		}
+		if artifacts.BuildNotAffected {
+			t.Errorf("expected BuildNotAffected to be false, got true")
+		}
+		if len(client.recordedFiles) != 0 {
+			t.Errorf("expected client.AffectedTests not to be called, but recorded files: %v", client.recordedFiles)
+		}
+	})
+
+	t.Run("tool error", func(t *testing.T) {
+		client := &mockBuildAPIClient{
+			err: errors.New("tool failure"),
+		}
+
+		_, err := affectedImpl(context.Background(), client, contextSpec, modules)
+		if err == nil {
+			t.Fatalf("expected error from affectedImpl, got nil")
+		}
+	})
 }

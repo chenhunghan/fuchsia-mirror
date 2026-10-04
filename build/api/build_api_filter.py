@@ -97,6 +97,19 @@ class BuildApiFilter(object):
                 json_content, ("debug", "manifest")
             )
             # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:bazel_host_tests_debug_symbols_json)
+            # Toolchain runtime library debug symbols (e.g. Clang libc++/libunwind
+            # and Rust libstd/libtest from //build/toolchain/runtime:*) point to
+            # prebuilt .debug files under //prebuilt/third_party/{clang,rust}/...
+            # while their stripped runtime libraries are packaged via GN
+            # generated_file() manifests rather than direct Ninja build edges.
+            # Because neither path enters `self._ninja_all`, explicitly preserve
+            # them here.
+            res += [
+                s
+                for s in json_content
+                if s.get("label", "").startswith("//build/toolchain/runtime:")
+                and s not in res
+            ]
             return res
 
         if api_module == "boards":

@@ -93,6 +93,7 @@ enum FullmacDriverEvent {
     EapolConf { resp: fidl_mlme::EapolConfirm },
     OnChannelSwitch { resp: fidl_internal::ChannelSwitchInfo },
     SignalReport { ind: fidl_internal::SignalReportIndication },
+    OnRssiThresholdBreached { cur_rssi_dbm: i8 },
     EapolInd { ind: fidl_mlme::EapolIndication },
     OnPmkAvailable { info: fidl_mlme::PmkInfo },
     SaeHandshakeInd { ind: fidl_mlme::SaeHandshakeIndication },

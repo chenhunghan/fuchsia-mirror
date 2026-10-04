@@ -1021,7 +1021,7 @@ mod tests {
     // Builds a model with structure `root -- child`, retrieves each of the 2 resulting component
     // instances, and tests their public methods.
     #[fuchsia::test]
-    fn build_model() -> Result<()> {
+    async fn build_model() -> Result<()> {
         let components = vec![
             ("root", ComponentDeclBuilder::new().child_default("child").build()),
             ("child", ComponentDeclBuilder::new().build()),
@@ -1068,13 +1068,10 @@ mod tests {
         }
 
         let get_child = root_instance
-            .resolve()
-            .map(|locked| locked.get_child(&ChildName::try_new("child", None).unwrap()))?;
+            .get_child_maybe_resolve(&ChildName::try_new("child", None).unwrap())
+            .await?;
         assert!(get_child.is_some());
         assert_eq!(get_child.as_ref().unwrap().moniker(), child_instance.moniker());
-
-        assert!(root_instance.resolve().is_ok());
-        assert!(child_instance.resolve().is_ok());
 
         Ok(())
     }

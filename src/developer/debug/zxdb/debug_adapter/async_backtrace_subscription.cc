@@ -6,8 +6,6 @@
 
 #include <lib/syslog/cpp/macros.h>
 
-#include <algorithm>
-
 #include "src/developer/debug/zxdb/client/async_task.h"
 #include "src/developer/debug/zxdb/client/async_task_tree.h"
 #include "src/developer/debug/zxdb/client/process.h"
@@ -38,19 +36,6 @@ dap::integer GetProcessKoid(const Thread* thread) {
   FX_DCHECK(thread);
   FX_DCHECK(thread->GetProcess());
   return static_cast<dap::integer>(thread->GetProcess()->GetKoid());
-}
-
-bool AllThreadsStopped(const Process* process, const Thread* ignore_thread = nullptr) {
-  if (!process) {
-    return false;
-  }
-  const auto& threads = process->GetThreads();
-  if (threads.empty()) {
-    return false;
-  }
-  return !std::ranges::any_of(threads, [ignore_thread](const Thread* t) {
-    return t != ignore_thread && !t->CurrentStopSupportsFrames();
-  });
 }
 
 }  // namespace
@@ -95,17 +80,18 @@ void AsyncBacktraceSubscription::OnThreadStopped(Thread* thread, const StopInfo&
     return;
   }
 
-  if (!AllThreadsStopped(thread->GetProcess())) {
+  const Process* process = thread->GetProcess();
+  if (!process || !process->AllThreadsStopped()) {
     return;
   }
 
-  for (Thread* t : thread->GetProcess()->GetThreads()) {
+  for (Thread* t : process->GetThreads()) {
     CollectAndReportAsyncBacktrace(t);
   }
 }
 
 void AsyncBacktraceSubscription::OnProcessStopped(Process* process) {
-  if (!AllThreadsStopped(process)) {
+  if (!process || !process->AllThreadsStopped()) {
     return;
   }
 
@@ -117,7 +103,7 @@ void AsyncBacktraceSubscription::OnProcessStopped(Process* process) {
 void AsyncBacktraceSubscription::DidUpdateStackFrames(Thread* thread) {
   // Notify DAP client to reset this thread's async backtrace subtree, since it has resumed.
   if (!thread->CurrentStopSupportsFrames()) {
-    if (Process* process = thread->GetProcess()) {
+    if (const Process* process = thread->GetProcess()) {
       for (Thread* t : process->GetThreads()) {
         CancelPendingBacktrace(t);
       }
@@ -136,7 +122,7 @@ void AsyncBacktraceSubscription::DidUpdateStackFrames(Thread* thread) {
 }
 
 void AsyncBacktraceSubscription::WillDestroyThread(Thread* thread) {
-  Process* process = thread->GetProcess();
+  const Process* process = thread->GetProcess();
   CancelPendingBacktrace(thread);
 
   // Notify DAP client to remove this thread from the async backtrace view.
@@ -148,7 +134,7 @@ void AsyncBacktraceSubscription::WillDestroyThread(Thread* thread) {
 
   // If thread destruction leaves all remaining threads in the process stopped,
   // trigger async backtrace collection for the remaining threads.
-  if (AllThreadsStopped(process, thread)) {
+  if (process && process->AllThreadsStopped(thread)) {
     for (Thread* t : process->GetThreads()) {
       if (t != thread) {
         CollectAndReportAsyncBacktrace(t);
@@ -177,7 +163,8 @@ void AsyncBacktraceSubscription::CollectAndReportAsyncBacktrace(Thread* thread) 
           return;
         }
 
-        if (!AllThreadsStopped(weak_thread->GetProcess())) {
+        const Process* process = weak_thread->GetProcess();
+        if (!process || !process->AllThreadsStopped()) {
           return;
         }
 
@@ -208,26 +195,31 @@ void AsyncBacktraceSubscription::CollectAndReportAsyncBacktrace(Thread* thread) 
             .id = static_cast<int64_t>(thread_koid),
             .name = weak_thread->GetName(),
             .processId = GetProcessKoid(weak_thread.get()),
-            .tasks = weak_thread->GetAsyncTaskTree().Map<dap::AsyncTaskNode>(
-                [&file_provider](const zxdb::AsyncTask& task, dap::AsyncTaskNode* node) {
-                  if (uint64_t task_id = task.GetId(); task_id != 0) {
-                    node->id = zxdb::to_hex_string(task_id);
-                  }
-                  node->name = task.GetIdentifier().GetFullName();
-                  const zxdb::Location& location = task.GetLocation();
-                  if (location.file_line().is_valid()) {
-                    auto file_metadata = file_provider.GetFileMetadata(
-                        location.file_line().file(), location.file_line().comp_dir());
-                    if (!file_metadata.has_error()) {
-                      node->file = file_metadata.take_value().full_path;
-                      node->line = location.file_line().line();
-                    }
-                  }
-                },
-                [](dap::AsyncTaskNode* node) { return &node->children; }),
+            .tasks = FormatAsyncTaskTree(weak_thread->GetAsyncTaskTree(), file_provider),
         });
       });
   thread->GetAsyncTaskTree().Sync(thread->GetStack(), it->second.callback());
+}
+
+dap::array<dap::AsyncTaskNode> FormatAsyncTaskTree(const AsyncTaskTree& tree,
+                                                   const SourceFileProviderImpl& file_provider) {
+  return tree.Map<dap::AsyncTaskNode>(
+      [&file_provider](const zxdb::AsyncTask& task, dap::AsyncTaskNode* node) {
+        if (uint64_t task_id = task.GetId(); task_id != 0) {
+          node->id = zxdb::to_hex_string(task_id);
+        }
+        node->name = task.GetIdentifier().GetFullName();
+        const zxdb::Location& location = task.GetLocation();
+        if (location.file_line().is_valid()) {
+          auto file_metadata = file_provider.GetFileMetadata(location.file_line().file(),
+                                                             location.file_line().comp_dir());
+          if (!file_metadata.has_error()) {
+            node->file = file_metadata.take_value().full_path;
+            node->line = location.file_line().line();
+          }
+        }
+      },
+      [](dap::AsyncTaskNode* node) { return &node->children; });
 }
 
 }  // namespace zxdb

@@ -567,16 +567,7 @@ func TestGenArgs(t *testing.T) {
 			},
 			orderMatters: true,
 		},
-		{
-			name: "build event service",
-			staticSpec: &fintpb.Static{
-				BuildEventService: "resultstore_infra",
-			},
-			contextSpec: &fintpb.Context{},
-			expectedArgs: []string{
-				`bazel_upload_build_events="resultstore_infra"`,
-			},
-		},
+
 		{
 			name: "temporary go cache",
 			staticSpec: &fintpb.Static{

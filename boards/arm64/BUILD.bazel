@@ -7,6 +7,7 @@ load(
     "@rules_fuchsia//fuchsia:assembly.bzl",
     "fuchsia_board_configuration",
     "fuchsia_prebuilt_board_input_bundle",
+    "fuchsia_prebuilt_board_input_bundle_set",
 )
 
 package(
@@ -62,6 +63,11 @@ fuchsia_board_configuration(
     ],
     version = build_info_version,
     zbi_extra_items = ["@gn_targets//boards/arm64:qemu_psci_cpu_suspend_states"],
+)
+
+fuchsia_prebuilt_board_input_bundle_set(
+    name = "arm64_bibs",
+    files = "@gn_targets//boards/arm64:arm64_bibs",
 )
 
 fuchsia_prebuilt_board_input_bundle(

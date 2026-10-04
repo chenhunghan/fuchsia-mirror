@@ -45,10 +45,13 @@ impl PidEntry {
         let process = self.process.read()?;
         match &*process {
             ProcessEntry::ThreadGroup(thread_group) => {
-                let thread_group = thread_group
-                    .upgrade()
-                    .expect("ThreadGroup was released, but not removed from PidTable");
-                Some(ProcessEntryRef::Process(thread_group))
+                // Because `self.process` is read lock-free under RCU, the process may concurrently
+                // transition to a zombie in `ThreadGroup::remove()` and drop its last strong
+                // `Arc<ThreadGroup>` reference before `upgrade()` is called here.
+                Some(match thread_group.upgrade() {
+                    Some(thread_group) => ProcessEntryRef::Process(thread_group),
+                    None => ProcessEntryRef::Zombie,
+                })
             }
             ProcessEntry::Zombie => Some(ProcessEntryRef::Zombie),
         }
@@ -209,16 +212,18 @@ impl<'a> PidTableGuard<'a> {
         assert_eq!(entry.task.strong_count(&scope), 0);
         if task.is_leader() {
             assert!(entry.process.is_none(&scope));
-        }
-        entry.task.update(Arc::downgrade(&task));
-
-        // If not cloning a thread, add its thread group.
-        if task.is_leader() {
             self.table.last_pid.store(task.tid.id, Ordering::Relaxed);
+            // Publish process before task so lock-free RCU readers that look up a task
+            // first (e.g. /proc/<pid> lookups) always observe its process entry populated
+            // for a leader. Readers that check process first and fall back to task (such as
+            // new_pidfd) rely on task.is_leader() to handle concurrent initialization/reaping.
             entry
                 .process
                 .update(Some(ProcessEntry::ThreadGroup(Arc::downgrade(task.thread_group()))));
+        }
+        entry.task.update(Arc::downgrade(&task));
 
+        if task.is_leader() {
             // Notify thread group changes.
             if let Some(notifier) = self.table.thread_group_notifier.as_ref(&scope) {
                 let mut tg_state = task.thread_group.write();
@@ -453,6 +458,18 @@ mod tests {
         // Capped at PID_MAX_LIMIT.
         assert_eq!(actual_pid_limit_with_cpus(PID_MAX_LIMIT + 1000, 1), PID_MAX_LIMIT);
         assert_eq!(actual_pid_limit_with_cpus(PID_MAX_DEFAULT, 10_000), PID_MAX_LIMIT);
+    }
+
+    #[test]
+    fn test_get_process_after_thread_group_release() {
+        // `get_process()` reads `process` lock-free under RCU, so it can observe a
+        // `ThreadGroup` entry that `kill_process()` is concurrently replacing with `Zombie`
+        // and upgrade the `Weak` only after `CurrentTask::exit()` has dropped the last
+        // strong reference. `Weak::new()` never upgrades, modelling that released state.
+        let pid = PidEntry::new_for_test(1);
+        pid.process.update(Some(ProcessEntry::ThreadGroup(Weak::new())));
+
+        assert!(matches!(pid.get_process(), Some(ProcessEntryRef::Zombie)));
     }
 
     #[::fuchsia::test]

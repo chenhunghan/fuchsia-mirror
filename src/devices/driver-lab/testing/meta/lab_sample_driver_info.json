@@ -1,0 +1,9 @@
+{
+    "short_description": "Reference synthetic platform driver with embedded driver_lab_rust",
+    "manufacturer": "",
+    "families": [],
+    "models": [],
+    "areas": [
+        "Test"
+    ]
+}

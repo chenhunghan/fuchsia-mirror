@@ -4,7 +4,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::anonymous_page_request::AnonymousPageRequest;
 use super::page::{VmPageDoublyLinkedList, VmPagePtr};
+use super::vm_page_list::VmPageSpliceList;
 use crate::kernel::types::PAddr;
 use crate::vm::compressor::VmCompressor;
 use crate::vm::discardable_vmo_tracker::DiscardableVmoTracker;
@@ -16,7 +18,7 @@ use core::marker::{PhantomData, PhantomPinned};
 use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
-use fbl::{HasRefCount, Recyclable, RefCounted, RefPtr};
+use fbl::{HasRefCount, HasRefCountUpgradeable, Recyclable, RefCounted, RefPtr};
 use kalloc::AllocError;
 use ksync::{KMutex, KMutexGuard, LockClass, LockToken, RawCriticalMutex};
 use pin_init::{PinInit, pin_data};
@@ -30,6 +32,10 @@ pub type VmCowReclaimFailure = bindings::VmCowReclaimFailure;
 pub type VmCowReclaimSuccess = bindings::VmCowReclaimSuccess;
 pub type VmCowReclaimType = bindings::VmCowReclaimSuccess_Type;
 pub type PageSourceType = bindings::PageSourceType;
+pub type DiscardablePageCounts = bindings::VmCowPages_DiscardablePageCounts;
+
+/// Argument that specifies the context in which we are supplying pages.
+pub type SupplyOptions = bindings::SupplyOptions;
 
 /// Controls the type of `VmPageOrMarker` slot in `self` `VmCowPages`' `page_list_` that can be
 /// overwritten by the `add_[new_]page[s]_locked` functions. It is the caller's responsibility to
@@ -235,6 +241,8 @@ impl HasRefCount for VmCowPages {
     }
 }
 
+impl HasRefCountUpgradeable for VmCowPages {}
+
 unsafe impl Recyclable for VmCowPages {
     unsafe fn recycle(ptr: NonNull<Self>) {
         unsafe {
@@ -249,6 +257,7 @@ unsafe impl Recyclable for VmCowPages {
 
 impl VmCowPages {
     /// Domain-specific conversion: returns raw pointer for `VmCowPages`.
+    #[inline]
     pub fn as_raw(&self) -> *mut bindings::VmCowPages {
         self.raw.get()
     }
@@ -262,6 +271,22 @@ impl VmCowPages {
         unsafe { RefPtr::try_from_raw(ptr.cast::<Self>()) }
     }
 
+    /// Domain-specific conversion: constructs a `&VmCowPages` from a raw pointer.
+    ///
+    /// Unlike [`VmCowPages::from_raw`] and [`VmCowPages::upgrade_from_raw`], this acquires no
+    /// reference at all; the caller is responsible for keeping the object alive for `'a`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a valid, non-null pointer to a `VmCowPages` that remains live for the
+    /// lifetime `'a`.
+    pub unsafe fn from_raw_ref<'a>(ptr: *const bindings::VmCowPages) -> &'a Self {
+        let ptr: *const Self = ptr.cast();
+        // SAFETY: `bindings::VmCowPages` is layout-compatible with `VmCowPages`, and the caller
+        // guarantees `ptr` is valid for `'a`.
+        unsafe { ptr.as_ref_unchecked() }
+    }
+
     /// Upgrades a raw `VmCowPages` pointer to a `RefPtr<VmCowPages>`, or returns `None` if the
     /// object is being destroyed.
     ///
@@ -273,24 +298,28 @@ impl VmCowPages {
         if ptr.is_null() {
             None
         } else {
-            // SAFETY: `cpp_vm_cow_pages_upgrade_from_raw` incremented the refcount, so we can adopt it.
+            // SAFETY: `cpp_vm_cow_pages_upgrade_from_raw` incremented the refcount,
+            // so we can adopt it.
             unsafe { RefPtr::try_from_raw(ptr.cast::<Self>()) }
         }
     }
 
     /// Returns true if the `VmCowPages` is capable of borrowing pages.
+    #[inline]
     pub fn can_borrow(&self) -> bool {
         // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
         unsafe { bindings::cpp_vm_cow_pages_can_borrow(self.as_raw()) }
     }
 
     /// Returns true if the `VmCowPages` can evict pages (i.e. is user-pager backed).
+    #[inline]
     pub fn can_evict(&self) -> bool {
         // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
         unsafe { bindings::cpp_vm_cow_pages_can_evict(self.as_raw()) }
     }
 
     /// Returns true if the `VmCowPages` is discardable.
+    #[inline]
     pub fn is_discardable(&self) -> bool {
         // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
         unsafe { bindings::cpp_vm_cow_pages_is_discardable(self.as_raw()) }
@@ -310,6 +339,56 @@ impl VmCowPages {
             )
         };
         Status::ok(status)
+    }
+
+    /// Unlocked wrapper around `ReplacePageLocked`, exposed for the physical page provider to
+    /// cancel loans with.
+    ///
+    /// If page is still at offset, replace it with a different page. If `with_loaned` is true,
+    /// replace with a loaned page. If `with_loaned` is false, replace with a non-loaned page and a
+    /// `page_request` is required to be provided.
+    ///
+    /// The replacement page is returned on success.
+    pub fn replace_page(
+        &self,
+        before_page: VmPagePtr,
+        offset: u64,
+        with_loaned: bool,
+        page_request: Option<Pin<&mut AnonymousPageRequest>>,
+    ) -> Result<VmPagePtr, Status> {
+        let mut out_page = ptr::null_mut();
+        let page_request_ptr = match page_request {
+            Some(page_request) => page_request.as_raw(),
+            None => ptr::null_mut(),
+        };
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer, `before_page.as_ffi()` is
+        // a valid `vm_page_t` pointer, `&raw mut out_page` is valid for writing a
+        // `vm_page_t` pointer, and `page_request_ptr` is either null or points to a live
+        // `AnonymousPageRequest`.
+        let status = unsafe {
+            bindings::cpp_vm_cow_pages_replace_page(
+                self.as_raw(),
+                before_page.as_ffi(),
+                offset,
+                with_loaned,
+                &raw mut out_page,
+                page_request_ptr,
+            )
+        };
+
+        // SAFETY: `out_page` must be non-null if `status == OK`, in which case the
+        // conversion from FFI will succeed.
+        Status::ok(status)
+            .map(|()| unsafe { VmPagePtr::from_ffi(out_page).expect("page pointer is non-null") })
+    }
+
+    /// Returns whether this `VmCowPages`'s lock is held by the current thread.
+    ///
+    /// Intended for `debug_assert!`s that both document and check a caller's obligation to hold
+    /// the VMO lock across a call.
+    pub fn lock_is_held(&self) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
+        unsafe { bindings::cpp_vm_cow_pages_lock_is_held(self.as_raw()) }
     }
 
     /// Returns whether page reuse should be delayed on free (i.e. if ever pinned).
@@ -602,6 +681,42 @@ impl VmCowPages {
         (Status::ok(status), zeroed_bytes)
     }
 
+    /// See `VmObject::supply_pages`.
+    ///
+    /// Should never return `Err(Status::SHOULD_WAIT)`, waiting on page requests is managed by
+    /// `ProcessPagesForSupply`.
+    pub fn supply_pages_locked(
+        &self,
+        _token: &LockToken<'_, VmCowPagesLockClass>,
+        range: VmCowRange,
+        pages: Pin<&mut VmPageSpliceList>,
+        options: SupplyOptions,
+        deferred: Pin<&mut DeferredOps<'_>>,
+        page_request: Option<Pin<&mut MultiPageRequest>>,
+    ) -> Result<(), Status> {
+        // SAFETY: We do not move `deferred`.
+        let deferred: &mut DeferredOps<'_> = unsafe { deferred.get_unchecked_mut() };
+        let deferred: *mut bindings::VmCowPages_DeferredOps = deferred.opaque.get();
+        let page_request_ptr = match page_request {
+            Some(page_request) => page_request.as_raw(),
+            None => ptr::null_mut(),
+        };
+        // SAFETY: `self.as_raw()` is a live VmCowPages, `pages.as_raw()` points to a live
+        // `VmPageSpliceList`, `deferred` points to a live `DeferredOps` and `page_request_ptr` is
+        // either null or points to a live `MultiPageRequest`.
+        let status = unsafe {
+            bindings::cpp_vm_cow_pages_supply_pages_locked(
+                self.as_raw(),
+                range,
+                pages.as_raw(),
+                options,
+                deferred,
+                page_request_ptr,
+            )
+        };
+        Status::ok(status)
+    }
+
     /// Test-only interface to get the current populated slots count.
     ///
     /// This method panics if the kernel is built without support for the functional continuous
@@ -609,6 +724,23 @@ impl VmCowPages {
     pub fn debug_get_populated_slots_count(&self) -> u32 {
         // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
         unsafe { bindings::cpp_vm_cow_pages_debug_get_populated_slots_count(self.as_raw()) }
+    }
+
+    /// Returns the number of locked and unlocked pages in this discardable VMO (zero counts if
+    /// this VMO is not discardable, or has not opted into locking / unlocking yet).
+    ///
+    /// See `DiscardableVmoTracker::debug_discardable_page_counts()`.
+    pub fn debug_get_discardable_page_counts(&self) -> DiscardablePageCounts {
+        let mut counts = DiscardablePageCounts { locked: 0, unlocked: 0 };
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer, and `counts` is valid
+        // for writing.
+        unsafe {
+            bindings::cpp_vm_cow_pages_debug_get_discardable_page_counts(
+                self.as_raw(),
+                &mut counts,
+            );
+        }
+        counts
     }
 }
 

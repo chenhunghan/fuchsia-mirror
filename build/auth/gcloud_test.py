@@ -25,6 +25,11 @@ class GcloudTest(unittest.TestCase):
     def setUp(self) -> None:
         # Clear the module's functools cache to prevent cross-contamination between test cases
         gcloud.path.cache_clear()
+        # path() falls back to looking for a system package install, which
+        # would make results depend on whether gcloud is installed on the host.
+        patcher = mock.patch("gcloud.apt.get_binary_path", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @mock.patch.object(shutil, "which", return_value="/usr/bin/gcloud")
     def test_path_true(self, mock_which: mock.Mock) -> None:
@@ -63,9 +68,10 @@ class GcloudTest(unittest.TestCase):
             "Google Cloud SDK ('gcloud') is not installed.", str(ctx.exception)
         )
 
+    @mock.patch.object(shutil, "which", return_value="/bin/gcloud")
     @mock.patch.object(subprocess, "run")
     def test_login_raises_runtime_error_on_failure(
-        self, mock_run: mock.Mock
+        self, mock_run: mock.Mock, mock_which: mock.Mock
     ) -> None:
         mock_run.side_effect = subprocess.CalledProcessError(1, "gcloud")
 

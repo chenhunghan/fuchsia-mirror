@@ -329,16 +329,22 @@ async fn fails_on_create_far_in_install_pkg() {
         .await
 }
 
-// pkg-cache tries to overwrite if BlobCreator.NeedsOverwrite fails.
+// pkg-cache tries to overwrite if BlobCreator.NeedsOverwrite fails, but after writing pkg-cache
+// re-checks blob presence because it relies on clients (e.g. http-client) to do the actual writing
 #[fuchsia::test]
-async fn succeeds_on_needs_overwrite_far_in_install_pkg() {
+async fn fails_on_needs_overwrite_far_in_install_pkg() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_pkg(
         "fails_on_needs_overwrite_far_in_install_pkg",
         FailureSource::Creator(CreatorFailure::OnNeedsOverwrite),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs(blobfs, pkg, Ok(())).await
+    assert_resolve_package_with_failing_blobfs(
+        blobfs,
+        pkg,
+        Err(fidl_fuchsia_pkg::ResolveError::Internal),
+    )
+    .await
 }
 
 #[fuchsia::test]
@@ -377,16 +383,22 @@ async fn fails_on_create_blob_in_install_blob() {
         .await
 }
 
-// pkg-cache tries to overwrite if BlobCreator.NeedsOverwrite fails.
+// pkg-cache tries to overwrite if BlobCreator.NeedsOverwrite fails, but after writing pkg-cache
+// re-checks blob presence because it relies on clients (e.g. http-client) to do the actual writing
 #[fuchsia::test]
-async fn succeeds_on_needs_overwrite_blob_in_install_blob() {
+async fn fails_on_needs_overwrite_blob_in_install_blob() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_blob(
         "fails_on_needs_overwrite_blob_in_install_blob",
         FailureSource::Creator(CreatorFailure::OnNeedsOverwrite),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs(blobfs, pkg, Ok(())).await
+    assert_resolve_package_with_failing_blobfs(
+        blobfs,
+        pkg,
+        Err(fidl_fuchsia_pkg::ResolveError::Internal),
+    )
+    .await
 }
 
 #[fuchsia::test]

@@ -273,6 +273,11 @@ function diff_file_relpath() {
       # looks like ordering differences
       expect="ignore" ;;
 
+    # Generated Rust target summaries from cargo_toml_gen copy crate_root from
+    # project.json, which for generated crates (such as FIDL Rust bindings)
+    # embeds //out/<build_dir>/... paths.
+    rust_targets.json | rustdoc_targets.json | rustdoc_host_targets.json) expect="ignore" ;;
+
     # Diff formatted JSON for readability.
     *.json)
       case "$common_path" in
@@ -428,6 +433,10 @@ function diff_file_relpath() {
     # rustix build script compilation tests are attributed to absolute paths
     # in metadata, which causes false positives in bazel consistency checks
     rustix_test_can_compile) expect="ignore" ;;
+
+    # Generated Cargo.toml files produced by cargo_toml_gen contain absolute
+    # paths to the source tree, 3P rust_crates patches, and the output directory.
+    Cargo.toml | Cargo_for_fuchsia_dir.toml) expect="ignore" ;;
 
     # python compiled files (nondeterministic)
     *.pyc) expect="ignore" ;;

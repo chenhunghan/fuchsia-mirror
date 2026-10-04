@@ -1024,12 +1024,10 @@ mod tests {
                 ) -> Result<Arc<Router<DirConnector>>, RoutingError> {
                     let component = self.weak_component.upgrade().map_err(RoutingError::from)?;
                     let program_output_dict = component
-                        .lock_resolved_state()
+                        .component_sandbox()
                         .await
                         .expect("failed to resolve component")
-                        .sandbox
-                        .program_output_dict
-                        .clone();
+                        .program_output_dict;
                     Ok(IntermediateRouter::new(
                         Arc::downgrade(&program_output_dict).into(),
                         RelativePath::new("my.service.Service").unwrap(),

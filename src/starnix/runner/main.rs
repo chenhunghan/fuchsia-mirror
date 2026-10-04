@@ -4,6 +4,7 @@
 
 use anyhow::{Context as _, Error};
 use fidl_fuchsia_component_runner as frunner;
+use fidl_fuchsia_memory_attribution as fattribution;
 use fidl_fuchsia_settings as fsettings;
 use fidl_fuchsia_starnix_runner as fstarnixrunner;
 use fuchsia_component::client::connect_to_protocol_sync;
@@ -67,6 +68,18 @@ async fn main() -> Result<(), Error> {
     let (suspend_sender, suspend_receiver) = async_channel::unbounded();
     let pager = Arc::new(kernel_manager::pager::Pager::new()?);
     pager.start_threads();
+
+    match fuchsia_component::client::connect_to_protocol::<fattribution::PageRefaultSinkMarker>() {
+        Ok(sink) => match pager.page_refault_counter().readonly_vmo() {
+            Ok(vmo) => {
+                if let Err(e) = sink.send_page_refault_count(vmo) {
+                    info!(e:%; "Failed to send page refault VMO to PageRefaultSink");
+                }
+            }
+            Err(e) => info!(e:%; "Failed to duplicate page refault VMO"),
+        },
+        Err(e) => info!(e:%; "Failed to connect to PageRefaultSink"),
+    }
 
     let suspend_context_for_loop = suspend_context.clone();
     let kernels_ref = &kernels;

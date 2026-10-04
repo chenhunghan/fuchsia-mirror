@@ -37,17 +37,16 @@ pub const TEST_DISK_BLOCK_SIZE: u32 = 512;
 pub const FVM_SLICE_SIZE: u64 = 32 * 1024;
 pub const FVM_F2FS_SLICE_SIZE: u64 = 2 * 1024 * 1024;
 
-// The default disk size is about 55MiB, with about 51MiB dedicated to the data volume. This size
-// is chosen because the data volume has to be big enough to support f2fs (>= DEFAULT_F2FS_MIN_BYTES
-// defined in //src/storage/fshost/device/constants.rs), which has a relatively large minimum size
-// requirement to be formatted.
+// The default disk size is about 24MiB, with 8MiB dedicated to the data volume. When formatting
+// f2fs, DiskBuilder::format_data increases the data volume size to DEFAULT_F2FS_MIN_BYTES (50MiB),
+// which has a relatively large minimum size requirement to be formatted.
 //
 // Only the data volume is actually created with a specific size, the other volumes aren't passed
 // any sizes. Blobfs can resize itself on the fvm, and the other two potential volumes are only
 // used in specific circumstances and are never formatted. The remaining volume size is just used
 // for calculation.
 pub const DEFAULT_F2FS_MIN_BYTES: u64 = 50 * 1024 * 1024;
-pub const DEFAULT_DATA_VOLUME_SIZE: u64 = DEFAULT_F2FS_MIN_BYTES;
+pub const DEFAULT_DATA_VOLUME_SIZE: u64 = 8 * 1024 * 1024;
 pub const BLOBFS_MAX_BYTES: u64 = 8765432;
 // For migration tests, we make sure that the default disk size is twice the data volume size to
 // allow a second full data partition.
@@ -429,6 +428,7 @@ impl DiskBuilder {
         }
         if data_spec.format == Some("f2fs") {
             self.fvm_slice_size = FVM_F2FS_SLICE_SIZE;
+            self.data_volume_size(self.data_volume_size.max(DEFAULT_F2FS_MIN_BYTES));
         }
         self.data_spec = data_spec;
         self

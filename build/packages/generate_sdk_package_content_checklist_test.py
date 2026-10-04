@@ -50,7 +50,7 @@ class ConvertTest(unittest.TestCase):
                     ],
                 },
                 expected_files_exact=["meta/", "bin/bar"],
-                expected_files_present=["my/baz"],
+                expected_files_present=["bin/baz"],
                 reference={
                     "version": "1",
                     "content": {
@@ -109,13 +109,13 @@ class ConvertTest(unittest.TestCase):
     )
     def test_run_main(
         self,
-        exit_code,
-        manifest,
-        expected_files_exact,
-        expected_files_present,
-        reference,
-        warn,
-    ):
+        exit_code: int,
+        manifest: dict[str, object],
+        expected_files_exact: list[str],
+        expected_files_present: list[str],
+        reference: dict[str, object],
+        warn: bool,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             package_manifest_path = os.path.join(
                 tmpdir, "package-manifest.json"

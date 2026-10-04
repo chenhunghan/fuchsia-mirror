@@ -28,7 +28,7 @@ class TestConnection : public magma::TestDeviceBase {
     magma_device_create_connection(device(), &connection_);
     DASSERT(connection_);
 
-    magma_connection_create_context(connection_, &context_id_);
+    magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM, &context_id_);
     helper_.emplace(connection_, context_id_);
   }
 

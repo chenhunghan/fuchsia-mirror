@@ -196,7 +196,7 @@ closed protocol SysSuspend {
         enable_wake bool;
         suspend_reason uint8;
     }) -> (struct {
-        out_status zx.Status;
+        out_status zx.Result;
     });
 };
 

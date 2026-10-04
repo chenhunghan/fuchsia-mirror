@@ -359,20 +359,11 @@ impl CallbackState {
         header.set_payload_len(blob_data.len() as u16);
         header.set_blob_format_type(BlobType::Perfetto.into());
 
-        let record_bytes = fxt::fxt_builder::FxtBuilder::new(header).atom(blob_data).build();
-        assert!(record_bytes.len() % std::mem::size_of::<u64>() == 0);
-        let num_words = record_bytes.len() / std::mem::size_of::<u64>();
-        let record_data = record_bytes.as_ptr();
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        let record_words =
-            unsafe { std::slice::from_raw_parts(record_data.cast::<u64>(), num_words) };
+        let record_words = fxt::fxt_builder::FxtBuilder::new(header).atom(blob_data).build();
 
         while let Some(context) = fuchsia_trace::Context::acquire() {
-            if let Some(bytes) = context.copy_record(record_words) {
-                return Some(bytes);
+            if let Some(words) = context.copy_record(&record_words) {
+                return Some(words);
             }
             if context.buffering_mode() != BufferingMode::Streaming {
                 // If we're not in streaming mode, there will never be room for this record. Drop

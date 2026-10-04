@@ -16,7 +16,7 @@ use std::ops::Deref;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::io::FromRawFd as _;
 use std::pin::Pin;
-use zx_status_ext::StatusExt;
+use zx::StatusExt;
 
 /// An I/O object representing a TCP socket listening for incoming connections.
 ///

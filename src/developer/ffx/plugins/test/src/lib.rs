@@ -158,8 +158,6 @@ pub enum TestToolMessage {
 }
 
 struct Experiment {
-    #[allow(dead_code)]
-    name: &'static str,
     enabled: bool,
 }
 
@@ -173,7 +171,6 @@ impl Experiments {
         experiment_name: &'static str,
     ) -> Experiment {
         Experiment {
-            name: experiment_name,
             enabled: match context.get(experiment_name) {
                 Ok(enabled) => enabled,
                 Err(_) => false,

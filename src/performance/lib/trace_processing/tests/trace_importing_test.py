@@ -6,7 +6,7 @@
 import os
 import pathlib
 import unittest
-from typing import Any, Dict, List
+from typing import Any
 
 import test_utils
 import trace_processing.trace_importing as trace_importing
@@ -319,7 +319,7 @@ class TraceImportingTest(unittest.TestCase):
         # here with a moderate number of trace events (100) because the bug
         # did not reproduce with a small number of trace events (such as 1 or
         # 10) but did reproduce with a larger number (such as 20).
-        trace_json: Dict[str, Any] = {
+        trace_json: dict[str, Any] = {
             "displayTimeUnit": "ns",
             "traceEvents": [],
             "systemTraceEvents": {
@@ -354,8 +354,8 @@ class TraceImportingTest(unittest.TestCase):
         # with a moderate number of trace events (100) because the bug did
         # not reproduce with a small number of trace events (such as 1 or 10
         # or 20) but did reproduce with a larger number (such as 50).
-        expected_names: List[str] = []
-        trace_json: Dict[str, Any] = {
+        expected_names: list[str] = []
+        trace_json: dict[str, Any] = {
             "displayTimeUnit": "ns",
             "traceEvents": [],
             "systemTraceEvents": {
@@ -398,11 +398,11 @@ class TraceImportingTest(unittest.TestCase):
             os.path.join(self._runtime_deps_path, "flow_ids.json")
         )
 
-        events: List[trace_model.Event] = list(model.all_events())
+        events: list[trace_model.Event] = list(model.all_events())
         self.assertEqual(len(events), 4)
 
-        flow_events: List[trace_model.FlowEvent] = list(
-            trace_utils.filter_events(events, type=trace_model.FlowEvent)
+        flow_events: list[trace_model.FlowEvent] = list(
+            trace_utils.filter_events(iter(events), type=trace_model.FlowEvent)
         )
         flow_events.sort(key=lambda x: x.start)
         self.assertEqual(len(flow_events), 3)
@@ -419,8 +419,10 @@ class TraceImportingTest(unittest.TestCase):
         thread: trace_model.Thread = process.threads[0]
         self.assertEqual(len(model.processes), 1)
         self.assertEqual(len(process.threads), 1)
-        flow_events: List[trace_model.FlowEvent] = list(
-            trace_utils.filter_events(thread.events, type=trace_model.FlowEvent)
+        flow_events: list[trace_model.FlowEvent] = list(
+            trace_utils.filter_events(
+                iter(thread.events), type=trace_model.FlowEvent
+            )
         )
         self.assertEqual(len(flow_events), 6)
         self.assertEqual(

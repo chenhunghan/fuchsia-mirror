@@ -1,0 +1,48 @@
+Subject: [rules_rust] Pass through toolchain -Zallow-features when unconfigured
+
+In rules_rust 0.74.0, `-Zallow-features=` entries in the toolchain's
+`extra_rustc_flags` (and in `rust_flags`) are always stripped, and only
+re-emitted when the target sets `unstable_rust_features_config`. Fuchsia
+does not use `unstable_rust_features_config`, and relies on a
+toolchain-wide `-Zallow-features=` (matching GN's
+//build/config/rust:no_features) to forbid unstable features, so this
+silently disables that enforcement.
+
+Only extract `-Zallow-features=` when there is a feature config to merge
+it with, restoring the rules_rust <= 0.69 behavior otherwise.
+---
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/rustc.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/rustc.bzl
+@@ -1491,10 +1491,16 @@
+     # features is enforced. When the config is unset or `__all__`,
+     # stripped features are silently dropped — matching the historical
+     # behavior where `__all__` (or no config) means "no restriction".
+-    extra_rustc_flags = _extract_allowed_unstable_features_from_flags(
+-        collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type),
+-        all_allowed_unstable_features,
+-    )
++    #
++    # Fuchsia: Only extract `-Zallow-features=` when there is a feature config
++    # to merge it with. Otherwise, pass toolchain-wide `-Zallow-features=`
++    # through unchanged, as rules_rust <= 0.69 did, so that it is enforced.
++    extra_rustc_flags = collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type)
++    if getattr(ctx.attr, "unstable_rust_features_config", None):
++        extra_rustc_flags = _extract_allowed_unstable_features_from_flags(
++            extra_rustc_flags,
++            all_allowed_unstable_features,
++        )
+     if getattr(ctx.attr, "unstable_rust_features_config", None) and not "__all__" in all_allowed_unstable_features:
+         deduped_allowed = {f: None for f in all_allowed_unstable_features}.keys()
+         extra_rustc_flags.append("-Zallow-features=" + ",".join(deduped_allowed))
+@@ -1529,7 +1535,10 @@
+     if type(rust_flags) == "Args":
+         rust_flags_args = rust_flags
+     elif rust_flags:
+-        for flag in _extract_allowed_unstable_features_from_flags(rust_flags, all_allowed_unstable_features):
++        # Fuchsia: See the comment above `collect_extra_rustc_flags()`.
++        if getattr(ctx.attr, "unstable_rust_features_config", None):
++            rust_flags = _extract_allowed_unstable_features_from_flags(rust_flags, all_allowed_unstable_features)
++        for flag in rust_flags:
+             if type(flag) in ["tuple", "list"] and len(flag) == 2:
+                 rustc_flags.add_all(
+                     [flag[1]],

@@ -164,24 +164,22 @@ zx::result<> I2cBusVisitor::FinalizeNode(fdf_devicetree::Node& node) {
     }
   }
 
-  if (!controller->second.channels.empty()) {
-    fuchsia_hardware_i2c_businfo::I2CBusMetadata bus_metadata = {{
-        .channels = controller->second.channels,
-        .bus_id = controller->second.bus_id,
-    }};
-    auto encoded_bus_metadata = fidl::Persist(bus_metadata);
-    if (encoded_bus_metadata.is_error()) {
-      fdf::info("Failed to persist fidl metadata for i2c controller '{}': {}", node.name(),
-                encoded_bus_metadata.error_value().FormatDescription());
+  fuchsia_hardware_i2c_businfo::I2CBusMetadata bus_metadata = {{
+      .channels = controller->second.channels,
+      .bus_id = controller->second.bus_id,
+  }};
+  auto encoded_bus_metadata = fidl::Persist(bus_metadata);
+  if (encoded_bus_metadata.is_error()) {
+    fdf::info("Failed to persist fidl metadata for i2c controller '{}': {}", node.name(),
+              encoded_bus_metadata.error_value().FormatDescription());
 
-      return zx::ok();
-    }
-    node.AddMetadata({{
-        .id = fuchsia_hardware_i2c_businfo::I2CBusMetadata::kSerializableName,
-        .data = std::move(encoded_bus_metadata.value()),
-    }});
-    fdf::debug("I2C channels metadata added to node '{}'", node.name());
+    return zx::ok();
   }
+  node.AddMetadata({{
+      .id = fuchsia_hardware_i2c_businfo::I2CBusMetadata::kSerializableName,
+      .data = std::move(encoded_bus_metadata.value()),
+  }});
+  fdf::debug("I2C channels metadata added to node '{}'", node.name());
 
   return zx::ok();
 }

@@ -42,7 +42,6 @@ class BazelLabelMapperTest(unittest.TestCase):
         self.sample_mapping = {
             "boringssl": "boringssl+",
             "fuchsia_sdk": "rules_fuchsia++fuchsia_sdk_ext+fuchsia_sdk",
-            "fuchsia_prebuilt_rust": "+_repo_rules+fuchsia_prebuilt_rust",
         }
         self.root_repo_mapping = BazelRootRepoMapping(
             mapping=self.sample_mapping

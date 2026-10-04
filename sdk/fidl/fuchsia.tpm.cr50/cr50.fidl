@@ -235,7 +235,7 @@ type PhysicalPresenceState = flexible enum {
 /// Union passed to OnChange() event handler of |PhysicalPresenceNotifier|.
 type PhysicalPresenceEvent = flexible union {
     /// An error occurred while polling the TPM.
-    1: err zx.Status;
+    1: err zx.Result;
     /// Physical presence status.
     2: state PhysicalPresenceState;
 };

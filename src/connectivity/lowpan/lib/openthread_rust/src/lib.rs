@@ -34,7 +34,7 @@ pub mod prelude {
     #![allow(unused_imports)]
 
     pub use crate::bindings::*;
-    pub use crate::{ot, otsys, OtBox, OtInstanceBox, OtMessageBox};
+    pub use crate::{OtBox, OtInstanceBox, OtMessageBox, ot, otsys};
     pub use ot::{
         BackboneRouter as _, BorderRouter as _, Boxable as _, Dnssd as _, DnssdExt as _,
         IntoOtError as _, Ip6 as _, Link as _, MessageBuffer as _, OtCastable as _, Reset as _,
@@ -57,7 +57,7 @@ pub(crate) mod prelude_internal {
     pub use core::convert::{TryFrom, TryInto};
     pub use futures::prelude::*;
     pub use log::{debug, error, info, trace, warn};
-    pub use num::FromPrimitive as _;
+    pub use num_traits::FromPrimitive as _;
     pub(crate) use ot::ascii_dump;
     pub use ot::types::*;
     pub use ot::{

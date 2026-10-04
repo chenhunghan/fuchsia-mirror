@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_build_info//:args.bzl",
+    "starnix_sync_detect_lock_dep_cycles",
+)
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_sync",
+    srcs = [
+        "src/atomic_time.rs",
+        "src/condvar.rs",
+        "src/interruptible_event.rs",
+        "src/lib.rs",
+        "src/lock_dep_mutex.rs",
+        "src/lock_ordering.rs",
+        "src/lock_traits.rs",
+        "src/locks.rs",
+        "src/port_event.rs",
+        "src/rw_seq_lock.rs",
+        "src/thread_affinity.rs",
+    ],
+    crate_features = ["detect_lock_dep_cycles"] if starnix_sync_detect_lock_dep_cycles else [],
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    proc_macro_deps = [
+        "//src/starnix/lib/starnix_sync/lock_ordering_macro",
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/kernel/runner:__pkg__",
+        "//src/starnix/lib:__subpackages__",
+        "//src/starnix/modules:__subpackages__",
+        "//src/starnix/runner/lib/kernel_manager:__pkg__",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/derive",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/fuchsia-rcu",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:lock_api",
+        "//third_party/rust_crates/vendor:scopeguard",
+    ],
+)
+
+# Declared as a separate rustc_test so `detect_lock_dep_cycles` is always
+# enabled for unit tests regardless of `starnix_sync_detect_lock_dep_cycles`
+# (matching GN `test_vars`).
+rustc_test(
+    name = "starnix_sync_lib_test",
+    srcs = [
+        "src/atomic_time.rs",
+        "src/condvar.rs",
+        "src/interruptible_event.rs",
+        "src/lib.rs",
+        "src/lock_dep_mutex.rs",
+        "src/lock_ordering.rs",
+        "src/lock_traits.rs",
+        "src/locks.rs",
+        "src/port_event.rs",
+        "src/rw_seq_lock.rs",
+        "src/thread_affinity.rs",
+    ],
+    crate_features = ["detect_lock_dep_cycles"],
+    edition = "2024",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    proc_macro_deps = [
+        "//src/starnix/lib/starnix_sync/lock_ordering_macro",
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/derive",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-rcu",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:lock_api",
+        "//third_party/rust_crates/vendor:scopeguard",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

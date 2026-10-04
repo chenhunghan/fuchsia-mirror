@@ -176,6 +176,10 @@ impl<T: BlockClient> Device for BlockDevice<T> {
     ) -> Result<(), Status> {
         self.remote.connect_mapper(server_end).await
     }
+
+    async fn register_key(&self, key_token: zx::EventPair) -> Result<u8, Status> {
+        self.remote.register_key(key_token).await
+    }
 }
 
 impl<T> Drop for BlockDevice<T> {

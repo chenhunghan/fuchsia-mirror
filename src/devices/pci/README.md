@@ -41,13 +41,14 @@ The PCI bus driver binds to [`fuchsia.hardware.pciroot/Pciroot`](https://cs.open
 
 # Testing
 
+See [`//src/devices/pci/drivers/pci/test/README.md`](drivers/pci/test/README.md) for detailed documentation of the PCI test suite.
+
 ## Tests
 
-* [`//src/devices/pci/drivers/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/drivers/pci/BUILD.gn;l=117)
-  * `pci-driver-test`
-  * `pci-unit-test`
-  * `pci-unit-test-fake_ddk`
-* [`//src/devices/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/BUILD.gn;l=5)
+* [`//src/devices/pci/drivers/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/drivers/pci/BUILD.gn;l=122)
+  * `pci-driver-test`: Rust integration test suite in `drivers/pci/test/driver/driver_tests.rs` running against `fake-bus-pci` (build target `pci_fake`) inside `DriverTestRealm`.
+  * `pci-unit-test`: C++ unit test suite in `drivers/pci/test/unit/` testing allocation, bus, config, device, fake pciroot, and MSI-X against mock DDK and fakes.
+* [`//src/devices/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/BUILD.gn;l=13)
   * `device-protocol-pci-test`
   * `pci-protocol-fake-test`
   * `pci-roothost-test`

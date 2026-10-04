@@ -245,6 +245,8 @@ pub async fn check_env_context<W: Write>(
     };
     check_lock_files(&mut env_node, env_context).await?;
     check_ssh_keys(env_context, &mut env_node).await;
+    #[cfg(target_os = "linux")]
+    crate::ssh_agent::check_ssh_agent(env_context, &mut env_node).await;
     Ok(())
 }
 

@@ -97,7 +97,7 @@ def main():
     writes = []
     if options.write is not None:
         for spec in options.write:
-            m = re.match("(\w+)\+(\w+)=(0x[0-9a-fA-F]+|\w+)", spec)
+            m = re.match(r"(\w+)\+(\w+)=(0x[0-9a-fA-F]+|\w+)", spec)
             if not m:
                 raise ValueError("invalid option!")
                 break

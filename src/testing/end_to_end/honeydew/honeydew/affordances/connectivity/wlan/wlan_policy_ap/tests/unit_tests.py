@@ -59,6 +59,10 @@ class WlanPolicyApTests(unittest.IsolatedAsyncioTestCase):
             spec=affordances_capable.RebootCapableDevice,
             autospec=True,
         )
+        self.suspend_resume_affordance_obj = mock.MagicMock(
+            spec=affordances_capable.SuspendResumeCapableDevice,
+            autospec=True,
+        )
         self.fuchsia_device_close_obj = mock.MagicMock(
             spec=affordances_capable.FuchsiaDeviceClose,
             autospec=True,
@@ -165,6 +169,7 @@ class WlanPolicyApTests(unittest.IsolatedAsyncioTestCase):
             fuchsia_controller=self.fc_transport_obj,
             reboot_affordance=self.reboot_affordance_obj,
             fuchsia_device_close=self.fuchsia_device_close_obj,
+            suspend_resume_affordance=self.suspend_resume_affordance_obj,
         )
 
         # Call make_ready() to ensure the affordance is initialized. This is
@@ -186,11 +191,21 @@ class WlanPolicyApTests(unittest.IsolatedAsyncioTestCase):
                 fuchsia_controller=self.fc_transport_obj,
                 reboot_affordance=self.reboot_affordance_obj,
                 fuchsia_device_close=self.fuchsia_device_close_obj,
+                suspend_resume_affordance=self.suspend_resume_affordance_obj,
             )
 
     async def test_init_register_for_on_device_boot(self) -> None:
         """Verify WlanPolicyAp registers on_device_boot."""
         self.reboot_affordance_obj.register_for_on_device_boot.assert_called_once()
+
+    async def test_init_register_suspend_resume(self) -> None:
+        """Verify WlanPolicyAp registers suspend and resume callbacks."""
+        self.suspend_resume_affordance_obj.register_on_device_suspend_fn.assert_called_once_with(
+            self.wlan_policy_ap_obj._close
+        )
+        self.suspend_resume_affordance_obj.register_on_device_resume_fn.assert_called_once_with(
+            self.wlan_policy_ap_obj.make_ready
+        )
 
     async def test_init_connect_proxy(self) -> None:
         """Verify WlanPolicyAp connects to

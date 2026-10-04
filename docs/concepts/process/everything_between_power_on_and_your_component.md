@@ -87,8 +87,8 @@ bootstrap are children of the root component](images/v2-topology.png)
 
 There are two important components under bootstrap, fshost and driver manager.
 These two components work together to bring up a functional enough system for
-the [session][glossary.session], which then starts up all the user-facing
-software.
+the [session](/docs/glossary/README.md#session-component), which then starts
+up all the user-facing software.
 
 #### driver manager
 
@@ -121,8 +121,9 @@ namespace. This capability is
 
 As fshost finds block devices, it
 [reads headers from each device][fshost-magic-headers] to detect the filesystem
-type. It will initially find the [Fuchsia Volume Manager][glossary.fuchsia-volume-manager]
-(fvm) block, which points to partitions for other block devices. Fshost will
+type. It will initially find the
+[Fuchsia Volume Manager][glossary.fuchsia-volume-manager] (fvm) block, which
+points to partitions for other block devices. Fshost will
 use devfs to cause driver manager to run the fvm driver for this block device,
 which causes other block devices to appear for fshost to inspect. It does a
 similar thing when it discovers a [zxcrypt][zxcrypt] partition, as the disk will
@@ -155,15 +156,14 @@ At this point, the system is ready to launch additional components through FIDL
 protocols and services, or by directly launching them with services provided by
 component_manager.
 
-[glossary.bootfs]: /docs/glossary#README.md#bootfs
-[glossary.virtual memory object]: /docs/glossary#README.md#virtual-memory-object
-[glossary.zircon boot image]: /docs/glossary#README.md#zircon-boot-image
-[glossary.component]: /docs/glossary#README.md#component
-[glossary.driver manager]: /docs/glossary#README.md#driver-manager
-[glossary.driver host]: /docs/glossary#README.md#driver-host
-[glossary.fvm]: /docs/glossary#README.md#fuchsia-volume-manager
-[glossary.realm]: /docs/glossary#README.md#realm
-[glossary.session]: /docs/glossary#README.md#session-component
+[glossary.bootfs]: /docs/glossary/README.md#bootfs
+[glossary.virtual memory object]: /docs/glossary/README.md#virtual-memory-object
+[glossary.zircon boot image]: /docs/glossary/README.md#zircon-boot-image
+[glossary.component]: /docs/glossary/README.md#component
+[glossary.driver manager]: /docs/glossary/README.md#driver-manager
+[glossary.driver host]: /docs/glossary/README.md#driver-host
+[glossary.fuchsia-volume-manager]: /docs/glossary/README.md#fuchsia-volume-manager
+[glossary.realm]: /docs/glossary/README.md#realm
 [glossary.outgoing-directory]: /docs/glossary/README.md#outgoing-directory
 [blobfs]: /docs/concepts/filesystems/blobfs.md
 [bootloader-and-kernel]: /docs/concepts/process/userboot.md#boot_loader_and_kernel_startup

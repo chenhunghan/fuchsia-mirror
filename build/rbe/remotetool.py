@@ -397,9 +397,14 @@ def configure_remotetool(cfg: Path) -> RemoteTool:
 
 
 def main(argv: Sequence[str]) -> int:
-    rtool = configure_remotetool(_REPROXY_CFG)
-    result = rtool.run(argv, show_command=True, quiet=False)
-    return result.returncode
+    try:
+        rtool = configure_remotetool(_REPROXY_CFG)
+        result = rtool.run(argv, show_command=True, quiet=False)
+        return result.returncode
+    except subprocess.CalledProcessError as e:
+        # The underlying tool already prints its own error messages to stderr.
+        # Bypassing the traceback and returning the failed exit code directly.
+        return e.returncode
 
 
 if __name__ == "__main__":

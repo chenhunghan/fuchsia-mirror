@@ -34,37 +34,6 @@ zx::result<OwnedChildNode> AddOwnedChild(
   return zx::ok(OwnedChildNode{std::move(node_controller_client_end), std::move(node_client_end)});
 }
 
-zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
-    fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
-    std::string_view node_name,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
-    cpp20::span<const fuchsia_driver_framework::Offer> offers) {
-  auto [node_controller_client_end, node_controller_server_end] =
-      fidl::Endpoints<fuchsia_driver_framework::NodeController>::Create();
-
-  std::vector<fuchsia_driver_framework::NodeProperty> props{properties.begin(), properties.end()};
-  std::vector<fuchsia_driver_framework::Offer> offers2{offers.begin(), offers.end()};
-
-  fuchsia_driver_framework::NodeAddArgs args{{
-      .name = {std::string(node_name)},
-      .properties = std::move(props),
-      .offers2 = std::move(offers2),
-  }};
-
-  fidl::Result<fuchsia_driver_framework::Node::AddChild> result =
-      fidl::Call(parent)->AddChild({std::move(args), std::move(node_controller_server_end), {}});
-
-  if (result.is_error()) {
-    logger.log(fdf::LogSeverity::ERROR, "Failed to add child {}. Error: {}", node_name,
-               result.error_value().FormatDescription());
-    return zx::error(result.error_value().is_framework_error()
-                         ? result.error_value().framework_error().status()
-                         : ZX_ERR_INTERNAL);
-  }
-
-  return zx::ok(std::move(node_controller_client_end));
-}
-
 zx::result<OwnedChildNode> AddOwnedChild(
     fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
     std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args) {
@@ -91,38 +60,6 @@ zx::result<OwnedChildNode> AddOwnedChild(
   }
 
   return zx::ok(OwnedChildNode{std::move(node_controller_client_end), std::move(node_client_end)});
-}
-
-zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
-    fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
-    std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
-    cpp20::span<const fuchsia_driver_framework::Offer> offers) {
-  auto [node_controller_client_end, node_controller_server_end] =
-      fidl::Endpoints<fuchsia_driver_framework::NodeController>::Create();
-
-  std::vector<fuchsia_driver_framework::NodeProperty> props{properties.begin(), properties.end()};
-  std::vector<fuchsia_driver_framework::Offer> offers2{offers.begin(), offers.end()};
-
-  fuchsia_driver_framework::NodeAddArgs args{{
-      .name = {std::string(node_name)},
-      .properties = std::move(props),
-      .devfs_args = std::move(devfs_args),
-      .offers2 = std::move(offers2),
-  }};
-
-  fidl::Result<fuchsia_driver_framework::Node::AddChild> result =
-      fidl::Call(parent)->AddChild({std::move(args), std::move(node_controller_server_end), {}});
-
-  if (result.is_error()) {
-    logger.log(fdf::LogSeverity::ERROR, "Failed to add devfs child {}. Error: {}", node_name,
-               result.error_value().FormatDescription());
-    return zx::error(result.error_value().is_framework_error()
-                         ? result.error_value().framework_error().status()
-                         : ZX_ERR_INTERNAL);
-  }
-
-  return zx::ok(std::move(node_controller_client_end));
 }
 
 zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(

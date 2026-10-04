@@ -7,7 +7,7 @@
                     event_codes: [
                         1,
                     ],
-                    metric_id: 104,
+                    metric_name: "memory_free_high_water_migrated",
                     metric_type: "Integer",
                     selector: "bootstrap/sysmem:root/sysmem/heaps/SysmemContiguousPool:free_at_high_water_mark",
                 },
@@ -15,7 +15,7 @@
                     event_codes: [
                         1,
                     ],
-                    metric_id: 105,
+                    metric_name: "memory_usage_migrated",
                     metric_type: "Integer",
                     selector: "bootstrap/sysmem:root/sysmem/heaps/SysmemContiguousPool:used_size",
                 },
@@ -23,7 +23,7 @@
                     event_codes: [
                         2,
                     ],
-                    metric_id: 104,
+                    metric_name: "memory_free_high_water_migrated",
                     metric_type: "Integer",
                     selector: "bootstrap/sysmem:root/sysmem/heaps/SysmemAmlogicProtectedPool:free_at_high_water_mark",
                 },
@@ -31,7 +31,7 @@
                     event_codes: [
                         2,
                     ],
-                    metric_id: 105,
+                    metric_name: "memory_usage_migrated",
                     metric_type: "Integer",
                     selector: "bootstrap/sysmem:root/sysmem/heaps/SysmemAmlogicProtectedPool:used_size",
                 },
@@ -39,7 +39,7 @@
                     event_codes: [
                         3,
                     ],
-                    metric_id: 104,
+                    metric_name: "memory_free_high_water_migrated",
                     metric_type: "Integer",
                     selector: "bootstrap/sysmem:root/sysmem/heaps/tee_secure:free_at_high_water_mark",
                 },
@@ -47,7 +47,7 @@
                     event_codes: [
                         3,
                     ],
-                    metric_id: 105,
+                    metric_name: "memory_usage_migrated",
                     metric_type: "Integer",
                     selector: "bootstrap/sysmem:root/sysmem/heaps/tee_secure:used_size",
                 },

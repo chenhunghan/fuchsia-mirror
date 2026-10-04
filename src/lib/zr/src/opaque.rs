@@ -3,24 +3,28 @@
 // found in the LICENSE file.
 
 use core::cell::UnsafeCell;
+use core::marker::{PhantomData, PhantomPinned};
 use core::mem::MaybeUninit;
 
 /// A wrapper for types that are opaque to Rust.
 ///
 /// This is used to wrap C++ objects that Rust should not access directly.
-/// It provides a raw pointer to the inner data for use in FFI.
+/// It provides a raw pointer to the inner data for use in FFI, while ensuring
+/// LLVM knows the object has interior mutability (`UnsafeCell`) and may be
+/// self-referential / address-sensitive (`PhantomPinned`, inhibiting `noalias`
+/// on mutable references to enclosing structs).
 #[repr(transparent)]
-pub struct Opaque<T>(MaybeUninit<UnsafeCell<T>>);
+pub struct Opaque<T>(MaybeUninit<UnsafeCell<T>>, PhantomData<PhantomPinned>);
 
 impl<T> Opaque<T> {
     /// Creates a new `Opaque` value.
     pub const fn new(value: T) -> Self {
-        Self(MaybeUninit::new(UnsafeCell::new(value)))
+        Self(MaybeUninit::new(UnsafeCell::new(value)), PhantomData)
     }
 
     /// Creates an uninitialized `Opaque` value.
     pub const fn uninit() -> Self {
-        Self(MaybeUninit::uninit())
+        Self(MaybeUninit::uninit(), PhantomData)
     }
 
     /// Returns a raw pointer to the opaque data.
@@ -41,9 +45,10 @@ impl<T> Default for Opaque<T> {
 /// This is used as a field in Rust facade structs that represent C++ objects
 /// of unknown size. It keeps the facade struct `Sized` (size 0) so it can be
 /// used in FFI (thin pointers) and with generic containers like `RefPtr`,
-/// while ensuring LLVM knows the object has interior mutability.
+/// while ensuring LLVM knows the object has interior mutability and is `!Unpin`.
 #[repr(C)]
 #[derive(Default)]
 pub struct OpaqueFacade {
     _unused: UnsafeCell<()>,
+    _pinned: PhantomData<PhantomPinned>,
 }

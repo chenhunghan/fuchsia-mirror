@@ -214,8 +214,6 @@ impl EnvironmentContext {
         // `ffx ... --config ssh.priv=path/to/ssh-key --strict target echo`
         runtime_args.assert_no_env(None, &res)?;
         res.runtime_args = runtime_args;
-        // TODO(b/368058956): Print a sanitized config into the logs so we can use it for
-        // debugging.
         Ok(res)
     }
 
@@ -725,6 +723,24 @@ impl EnvironmentContext {
         }
         false
     }
+
+    /// Returns a JSON string of the merged configuration with host and user strings redacted.
+    pub fn sanitized_config(&self) -> String {
+        let config = serde_json::Value::from(self).to_string();
+        analytics::redact_host_and_user_from(&config)
+    }
+}
+
+impl From<&EnvironmentContext> for serde_json::Value {
+    fn from(ctx: &EnvironmentContext) -> Self {
+        serde_json::Value::from(&ctx.config)
+    }
+}
+
+impl From<EnvironmentContext> for serde_json::Value {
+    fn from(ctx: EnvironmentContext) -> Self {
+        serde_json::Value::from(&ctx.config)
+    }
 }
 
 #[cfg(test)]
@@ -879,7 +895,6 @@ mod test {
             context.get_default_env_path().unwrap(),
             isolate_dir.join(crate::paths::ENV_FILE)
         );
-        assert_eq!(context.get_default_ascendd_path().unwrap(), isolate_dir.join("daemon.sock"));
         assert_eq!(context.get_runtime_path().unwrap(), isolate_dir.join("runtime"));
         assert_eq!(context.get_cache_path().unwrap(), isolate_dir.join("cache"));
         assert_eq!(context.get_config_path().unwrap(), isolate_dir.join("config"));
@@ -992,5 +1007,42 @@ mod test {
             ctx.env_args().unwrap(),
             vec!["--no-environment".to_string(), "--strict".to_string()]
         );
+    }
+
+    #[fuchsia::test]
+    fn test_sanitized_config() {
+        let mut config_map = ConfigMap::new();
+        config_map.insert("some_key".to_string(), serde_json::json!("some_value"));
+
+        let user = std::env::var("USER").ok().filter(|u| !u.is_empty());
+        if let Some(ref u) = user {
+            config_map.insert("user_path".to_string(), serde_json::json!(format!("/home/{u}/dir")));
+        }
+
+        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty());
+        if let Some(ref h) = hostname {
+            config_map.insert("host_val".to_string(), serde_json::json!(format!("node.{h}.local")));
+        }
+
+        let ctx =
+            EnvironmentContext::no_context(ExecutableKind::Test, config_map, None, true).unwrap();
+        let sanitized = ctx.sanitized_config();
+        assert_eq!(
+            sanitized,
+            analytics::redact_host_and_user_from(&serde_json::Value::from(&ctx).to_string())
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&sanitized).expect("sanitized config should be valid JSON");
+        assert_eq!(parsed.get("some_key"), Some(&serde_json::json!("some_value")));
+        if user.is_some() {
+            assert_eq!(parsed.get("user_path"), Some(&serde_json::json!("/home/$USER/dir")));
+        }
+        if hostname.is_some() {
+            assert_eq!(parsed.get("host_val"), Some(&serde_json::json!("node.$HOSTNAME.local")));
+        }
     }
 }

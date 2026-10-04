@@ -4,15 +4,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::debuglog_rs::{DLOG_MAX_DATA, ZX_LOG_FLAGS_MASK, dlog_record_t};
+use crate::debuglog_rs::{DLOG_MAX_DATA, dlog_record_t};
 use crate::object::{Dispatcher, HandleValue, LogDispatcher, validate_resource_kind_base};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
 use syscalls_macro::syscall;
 use zx_status::Status;
 use zx_types::{
-    DEBUGLOG_INFO, ZX_HANDLE_INVALID, ZX_LOG_FLAG_READABLE, ZX_RIGHT_READ, ZX_RIGHT_WRITE,
-    ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_DEBUGLOG_BASE, zx_log_record_header_t,
+    DEBUGLOG_INFO, ZX_HANDLE_INVALID, ZX_LOG_FLAG_READABLE, ZX_LOG_FLAGS_MASK, ZX_RIGHT_READ,
+    ZX_RIGHT_WRITE, ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_DEBUGLOG_BASE, zx_log_record_header_t,
 };
 
 const LOCAL_TRACE: u32 = 0;

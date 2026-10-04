@@ -416,7 +416,7 @@ class XhciHarness : public ::testing::Test {
 
   void EnableEndpoint(uint32_t device_id, uint8_t ep_num, bool is_in_endpoint) {
     usb_endpoint_descriptor_t ep_desc = {};
-    ep_desc.bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk);
+    ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
     ep_desc.b_endpoint_address = ep_num | (is_in_endpoint ? 0x80 : 0);
     driver_test().driver()->UsbHciEnableEndpoint(device_id, &ep_desc, nullptr);
   }
@@ -748,9 +748,10 @@ TEST_F(XhciMmioHarness, QueueControlRequest) {
     request.Mmap(reinterpret_cast<void**>(&parameters));
     EXPECT_EQ(*parameters, parameters);
   });
-  request->request()->setup.bm_request_type = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
-  request->request()->setup.b_request = USB_REQ_GET_DESCRIPTOR;
-  request->request()->setup.w_value = USB_DT_DEVICE << 8;
+  request->request()->setup.bm_request_type = kStandardDeviceIn;
+  request->request()->setup.b_request =
+      fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor);
+  request->request()->setup.w_value = usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice);
   ASSERT_LE(zx_system_get_page_size() * 2, static_cast<uint32_t>(UINT16_MAX));
   request->request()->setup.w_length = static_cast<uint16_t>(zx_system_get_page_size() * 2);
   RequestQueue(std::move(*request));

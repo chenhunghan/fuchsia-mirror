@@ -38,6 +38,7 @@ fuchsia_rust_driver("dw-spi-driver") {
   deps = [
     "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_rust_next",
     "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_rust_next",
+    "//sdk/fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_rust_next",
     "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
     "//sdk/fidl/fuchsia.hardware.powerdomain:fuchsia.hardware.powerdomain_rust_next",
     "//sdk/fidl/fuchsia.hardware.reset:fuchsia.hardware.reset_rust_next",
@@ -69,6 +70,7 @@ fuchsia_rust_driver("dw-spi-driver") {
     "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
     "//sdk/lib/driver/fake-clock/rust",
     "//sdk/lib/driver/fake-gpio/rust",
+    "//sdk/lib/driver/fake-pin/rust",
     "//sdk/lib/driver/fake-platform-device/rust",
     "//sdk/lib/driver/fake-powerdomain/rust",
     "//sdk/lib/driver/fake-reset/rust",
@@ -96,6 +98,11 @@ fuchsia_driver_package("package") {
 fuchsia_unittest_package("dw-spi-test") {
   package_name = "dw_spi_test"
   deps = [ ":dw-spi-driver_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }
 
 group("tests") {

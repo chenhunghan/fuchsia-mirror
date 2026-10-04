@@ -1,0 +1,644 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+/// Engineering-only wire contract for the driver-lab driver (phase 1,
+/// read-only). Semantics follow the phase 1 proxy driver specification:
+/// every operation is bounded, policy-checked immediately before access,
+/// and audited, including rejections.
+@available(added=HEAD)
+library fuchsia.driver.lab;
+
+/// Bounds declared by the protocol; runtime target limits may be smaller.
+const MAX_RESOURCES uint32 = 64;
+const MAX_ALLOWLIST_RULES uint32 = 256;
+const MAX_SNAPSHOT_ITEMS uint32 = 64;
+const MAX_SEQUENCE_ITEMS uint32 = 64;
+const MAX_AUDIT_PAGE_ENTRIES uint32 = 64;
+const MAX_NAME_LENGTH uint32 = 64;
+const MAX_STRING_LENGTH uint32 = 128;
+const MAX_OPERATION_LENGTH uint32 = 32;
+const MAX_TRANSFER_SIZE uint32 = 8192;
+
+/// Access classes distinguished by policy. A grant for one class never
+/// authorizes another.
+type AccessClass = strict enum : uint32 {
+    READ_ONCE = 1;
+    SNAPSHOT = 2;
+    WRITE = 3;
+    POLL = 4;
+    SEQUENCE = 5;
+    PROTOCOL = 6;
+    INTERRUPT = 7;
+};
+
+/// Machine-readable reason an operation, allowlist rule, or session open
+/// was refused. `BACKEND_FAULT` is an execution failure after policy
+/// allowed the operation; the audit ring records the distinction.
+type OperationError = flexible enum : uint32 {
+    UNKNOWN_RESOURCE = 1;
+    UNSUPPORTED_WIDTH = 2;
+    UNSUPPORTED_ACCESS_CLASS = 3;
+    MISALIGNED = 4;
+    OFFSET_OVERFLOW = 5;
+    OUT_OF_LOGICAL_BOUNDS = 6;
+    OUT_OF_MAPPED_BOUNDS = 7;
+    NOT_PERMITTED_BY_CEILING = 8;
+    HARD_DENIED = 9;
+    UNKNOWN_READS_NOT_PERMITTED = 10;
+    NOT_IN_ALLOWLIST = 11;
+    LIMIT_EXCEEDED = 12;
+    STALE_IDENTITY = 13;
+    MUTATION_LEASE_CONTENTION = 14;
+    NOT_ACCEPTING = 15;
+    BACKEND_FAULT = 16;
+    /// The request set a field this phase does not implement (for
+    /// example a phase 2 takeover expectation). Fail closed rather than
+    /// silently ignoring the field.
+    UNSUPPORTED_EXPECTATION = 17;
+    PRECONDITION_FAILED = 18;
+    MISSING_PRECONDITION = 19;
+    TIMEOUT = 20;
+    READ_ONLY_SESSION = 21;
+    WRITE_NOT_PERMITTED = 22;
+    POLL_NOT_PERMITTED = 23;
+    UNSUPPORTED_METHOD = 24;
+    TRANSFER_TOO_LARGE = 25;
+};
+
+/// One exact session allowlist rule. Wildcards do not exist.
+type AccessRule = struct {
+    resource uint32;
+    /// Byte offset from the start of the logical resource.
+    offset uint64;
+    /// Access width in bytes.
+    width uint32;
+    class AccessClass;
+};
+
+type ResourceKind = flexible enum : uint32 {
+    MMIO = 1;
+    GPIO = 2;
+    I2C = 3;
+    SPI = 4;
+    INTERRUPT = 5;
+    CLOCK = 6;
+    RESET = 7;
+    SERIAL = 8;
+};
+
+/// Logical description of one offered resource. Never contains physical
+/// addresses or raw handles.
+type ResourceDescription = table {
+    1: id uint32;
+    2: name string:MAX_NAME_LENGTH;
+    3: kind ResourceKind;
+    4: logical_size uint64;
+    /// Per-resource description digest used for persistent grant matching.
+    5: digest string:MAX_STRING_LENGTH;
+};
+
+/// Managed-takeover lifecycle state. Phase 1 never activates takeover,
+/// so the only reported state is `NOT_ACTIVE`; phase 2 adds the takeover
+/// and restoration states without a major version change.
+type TakeoverState = flexible enum : uint32 {
+    NOT_ACTIVE = 1;
+};
+
+type ProxyDescription = table {
+    1: protocol_major uint32;
+    2: protocol_minor uint32;
+    3: proxy_generation uint64;
+    4: boot_id string:MAX_STRING_LENGTH;
+    /// Whole-instance resource-description digest.
+    5: resource_digest string:MAX_STRING_LENGTH;
+    6: policy_digest string:MAX_STRING_LENGTH;
+    7: resources vector<ResourceDescription>:MAX_RESOURCES;
+    8: max_snapshot_items uint32;
+    9: audit_capacity uint64;
+    /// Moniker of the node this proxy instance is bound to. Absent until
+    /// the proxy is bound to a node.
+    10: node_moniker string:MAX_STRING_LENGTH;
+    /// Reserved for phase 2: Driver Manager topology generation at bind
+    /// time, used for takeover staleness. Absent in phase 1.
+    11: topology_generation uint64;
+    /// Takeover lifecycle state. Phase 1 reports `NOT_ACTIVE`.
+    12: takeover TakeoverState;
+};
+
+type SessionMode = strict enum : uint32 {
+    READ_ONLY = 1;
+    MUTATING = 2;
+};
+
+/// Host-supplied provenance recorded with the session. Diagnostic, not
+/// authorization.
+type RunContext = table {
+    1: run_id string:MAX_STRING_LENGTH;
+    2: case_id string:MAX_STRING_LENGTH;
+    3: plan_digest string:MAX_STRING_LENGTH;
+    4: host_tool_version string:MAX_STRING_LENGTH;
+};
+
+/// Expected proxy identity. A mismatch -- including an absent required
+/// field -- is rejected before allowlist validation and before any
+/// hardware access. Extensible so phase 2 can add takeover expectations
+/// without a major version change.
+type Expectations = table {
+    /// Required. Absence is a stale-boot-id rejection.
+    1: boot_id string:MAX_STRING_LENGTH;
+    /// Required. Absence is a stale-proxy-generation rejection.
+    2: proxy_generation uint64;
+    /// Required. Absence is a stale-resource-digest rejection.
+    3: resource_digest string:MAX_STRING_LENGTH;
+    /// Required. Absence is a stale-policy-digest rejection.
+    4: policy_digest string:MAX_STRING_LENGTH;
+    /// Reserved for phase 2: the Driver Manager topology generation the
+    /// host observed. Setting it in phase 1 is rejected as
+    /// `UNSUPPORTED_EXPECTATION`.
+    5: topology_generation uint64;
+    /// Reserved for phase 2: URL of the driver expected bound before
+    /// takeover. Setting it in phase 1 is rejected as
+    /// `UNSUPPORTED_EXPECTATION`.
+    6: bound_driver_url string:MAX_STRING_LENGTH;
+};
+
+type OpenSessionError = flexible enum : uint32 {
+    NOT_ACCEPTING = 1;
+    STALE_BOOT_ID = 2;
+    STALE_PROXY_GENERATION = 3;
+    STALE_RESOURCE_DIGEST = 4;
+    STALE_POLICY_DIGEST = 5;
+    /// The offending rule and reason are recorded in the audit ring.
+    REJECTED_ALLOWLIST = 6;
+    MUTATION_LEASE_HELD = 7;
+    /// The request set a reserved (phase 2) expectation field.
+    UNSUPPORTED_EXPECTATION = 8;
+};
+
+type SnapshotItem = struct {
+    resource uint32;
+    offset uint64;
+};
+
+type ReadResult = struct {
+    value uint32;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type SnapshotItemResult = struct {
+    item SnapshotItem;
+    /// False when this item's backend access failed.
+    ok bool;
+    /// Valid only when `ok` is true.
+    value uint32;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type SnapshotResult = struct {
+    /// One result per item that began execution, in request order.
+    results vector<SnapshotItemResult>:MAX_SNAPSHOT_ITEMS;
+    /// False when execution stopped at a backend failure; later items
+    /// never began. A snapshot is an ordered series of reads, never an
+    /// atomic hardware snapshot.
+    complete bool;
+};
+
+type AuditDecision = flexible enum : uint32 {
+    ALLOWED = 1;
+    DENIED = 2;
+};
+
+type AuditStatus = flexible enum : uint32 {
+    OK = 1;
+    REJECTED = 2;
+    BACKEND_FAULT = 3;
+};
+
+type AuditEntry = table {
+    1: seq uint64;
+    2: session uint64;
+    3: resource uint32;
+    4: operation string:MAX_OPERATION_LENGTH;
+    5: offset uint64;
+    6: decision AuditDecision;
+    /// Present only when `decision` is `DENIED`.
+    7: denial OperationError;
+    8: status AuditStatus;
+    9: value uint32;
+    10: timestamp_ns int64;
+    /// Host run identifier, present on session-open records where the
+    /// session-to-run association is established.
+    11: run_id string:MAX_STRING_LENGTH;
+    /// Index within a multi-item operation (for example a snapshot).
+    12: item_index uint32;
+    /// Instance identity stamped at drain time, so drained evidence is
+    /// interpretable without the live instance.
+    13: proxy_generation uint64;
+    14: boot_id string:MAX_STRING_LENGTH;
+};
+
+type AuditPage = struct {
+    /// Entries with sequence >= the requested cursor, oldest first.
+    entries vector<AuditEntry>:MAX_AUDIT_PAGE_ENTRIES;
+    /// Whether `oldest_retained` is meaningful (the ring is nonempty).
+    has_oldest bool;
+    /// Oldest sequence still retained. A cursor older than this indicates
+    /// entries were overwritten before they were drained.
+    oldest_retained uint64;
+    /// Cursor to pass to the next read.
+    next_cursor uint64;
+};
+
+type WritePrecondition = struct {
+    expected uint32;
+    mask uint32;
+};
+
+type WriteResult = struct {
+    /// Present if readback was configured or requested.
+    readback_value uint32;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type PollResult = struct {
+    value uint32;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type BarrierVariant = flexible enum : uint32 {
+    MEMORY = 1;
+};
+
+type GpioReadResult = struct {
+    value bool;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type GpioWriteResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type I2cTransferResult = struct {
+    read_data vector<uint8>:MAX_TRANSFER_SIZE;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type SpiTransmitResult = struct {
+    rx_data vector<uint8>:MAX_TRANSFER_SIZE;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type InterruptResult = struct {
+    resource uint32;
+    sequence uint64;
+    count uint64;
+    timestamp_ns int64;
+    coalesced_count uint64;
+};
+
+type ClockEnableResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ClockDisableResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ClockIsEnabledResult = struct {
+    enabled bool;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ClockSetRateResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ClockQueryRateResult = struct {
+    hz_out uint64;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ClockGetRateResult = struct {
+    hz uint64;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ResetAssertResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ResetDeassertResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ResetToggleResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type ResetStatusResult = struct {
+    asserted bool;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type SerialReadResult = struct {
+    data vector<uint8>:MAX_TRANSFER_SIZE;
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type SerialWriteResult = struct {
+    audit_seq uint64;
+    timestamp_ns int64;
+};
+
+type SequenceItem = flexible union {
+    1: read32 struct {
+        resource uint32;
+        offset uint64;
+    };
+    2: write32 struct {
+        resource uint32;
+        offset uint64;
+        value uint32;
+        write_mask uint32;
+        precondition box<WritePrecondition>;
+        readback bool;
+    };
+    3: poll32 struct {
+        resource uint32;
+        offset uint64;
+        expected uint32;
+        mask uint32;
+        interval_ns int64;
+        timeout_ns int64;
+    };
+    4: delay_ns int64;
+    5: barrier BarrierVariant;
+    6: gpio_read struct {
+        resource uint32;
+    };
+    7: gpio_write struct {
+        resource uint32;
+        value bool;
+    };
+    8: i2c_transfer struct {
+        resource uint32;
+        write_data vector<uint8>:MAX_TRANSFER_SIZE;
+        read_length uint32;
+    };
+    9: spi_transmit struct {
+        resource uint32;
+        tx_data vector<uint8>:MAX_TRANSFER_SIZE;
+    };
+};
+
+type SequenceItemOutcome = flexible union {
+    1: read32 ReadResult;
+    2: write32 WriteResult;
+    3: poll32 PollResult;
+    4: delay_ns struct {};
+    5: barrier struct {};
+    6: error OperationError;
+    7: gpio_read GpioReadResult;
+    8: gpio_write GpioWriteResult;
+    9: i2c_transfer I2cTransferResult;
+    10: spi_transmit SpiTransmitResult;
+};
+
+type SequenceItemResult = struct {
+    index uint32;
+    ok bool;
+    outcome SequenceItemOutcome;
+};
+
+type SequenceResult = struct {
+    results vector<SequenceItemResult>:MAX_SEQUENCE_ITEMS;
+    complete bool;
+};
+
+/// Typed endpoint for a GPIO protocol resource.
+open protocol GpioEndpoint {
+    flexible Read() -> (GpioReadResult) error OperationError;
+    flexible Write(struct {
+        value bool;
+    }) -> (GpioWriteResult) error OperationError;
+};
+
+/// Typed endpoint for an I2C protocol resource.
+open protocol I2cEndpoint {
+    flexible Transfer(struct {
+        write_data vector<uint8>:MAX_TRANSFER_SIZE;
+        read_length uint32;
+    }) -> (I2cTransferResult) error OperationError;
+};
+
+/// Typed endpoint for a SPI protocol resource.
+open protocol SpiEndpoint {
+    flexible Transmit(struct {
+        tx_data vector<uint8>:MAX_TRANSFER_SIZE;
+    }) -> (SpiTransmitResult) error OperationError;
+};
+
+/// One experiment session. Closing the channel closes the session,
+/// cancels its pending work, and releases the mutation lease.
+open protocol Session {
+    /// One policy-checked, audited 32-bit read.
+    flexible Read32(struct {
+        resource uint32;
+        offset uint64;
+    }) -> (ReadResult) error OperationError;
+
+    /// Bounded snapshot: every item is validated before the first read.
+    flexible Snapshot(struct {
+        items vector<SnapshotItem>:MAX_SNAPSHOT_ITEMS;
+    }) -> (SnapshotResult) error OperationError;
+
+    /// Reads a bounded audit page so the host can drain incrementally and
+    /// detect gaps.
+    flexible ReadAudit(struct {
+        cursor uint64;
+        limit uint32;
+    }) -> (AuditPage);
+
+    /// One policy-checked, audited 32-bit write with optional precondition,
+    /// read-modify-write, barrier, and readback.
+    flexible Write32(struct {
+        resource uint32;
+        offset uint64;
+        value uint32;
+        write_mask uint32;
+        precondition box<WritePrecondition>;
+        readback bool;
+    }) -> (WriteResult) error OperationError;
+
+    /// Repeated bounded read until (value & mask) == (expected & mask)
+    /// or timeout. Uses asynchronous timers on the driver dispatcher.
+    flexible Poll32(struct {
+        resource uint32;
+        offset uint64;
+        expected uint32;
+        mask uint32;
+        interval_ns int64;
+        timeout_ns int64;
+    }) -> (PollResult) error OperationError;
+
+    /// Bounded ordered sequence of operations. Whole-sequence validation
+    /// occurs before any hardware operation begins.
+    flexible ExecuteSequence(struct {
+        items vector<SequenceItem>:MAX_SEQUENCE_ITEMS;
+    }) -> (SequenceResult) error OperationError;
+
+    /// One policy-checked, audited GPIO read.
+    flexible GpioRead(struct {
+        resource uint32;
+    }) -> (GpioReadResult) error OperationError;
+
+    /// One policy-checked, audited GPIO write. Requires mutation lease.
+    flexible GpioWrite(struct {
+        resource uint32;
+        value bool;
+    }) -> (GpioWriteResult) error OperationError;
+
+    /// One policy-checked, audited I2C transfer. Non-empty write requires mutation lease.
+    flexible I2cTransfer(struct {
+        resource uint32;
+        write_data vector<uint8>:MAX_TRANSFER_SIZE;
+        read_length uint32;
+    }) -> (I2cTransferResult) error OperationError;
+
+    /// One policy-checked, audited SPI transmit. Requires mutation lease.
+    flexible SpiTransmit(struct {
+        resource uint32;
+        tx_data vector<uint8>:MAX_TRANSFER_SIZE;
+    }) -> (SpiTransmitResult) error OperationError;
+
+    /// Opens a typed GPIO endpoint bound to this session.
+    flexible OpenGpio(resource struct {
+        resource uint32;
+        endpoint server_end:GpioEndpoint;
+    }) -> () error OperationError;
+
+    /// Opens a typed I2C endpoint bound to this session.
+    flexible OpenI2c(resource struct {
+        resource uint32;
+        endpoint server_end:I2cEndpoint;
+    }) -> () error OperationError;
+
+    /// Opens a typed SPI endpoint bound to this session.
+    flexible OpenSpi(resource struct {
+        resource uint32;
+        endpoint server_end:SpiEndpoint;
+    }) -> () error OperationError;
+
+    /// Observes an interrupt event. Bounded hanging request that yields when
+    /// the interrupt sequence exceeds `after_sequence` or upon timeout.
+    flexible WaitForInterrupt(struct {
+        resource uint32;
+        after_sequence uint64;
+        timeout_ns int64;
+    }) -> (InterruptResult) error OperationError;
+
+    /// One policy-checked, audited Clock enable. Requires mutation lease.
+    flexible ClockEnable(struct {
+        resource uint32;
+    }) -> (ClockEnableResult) error OperationError;
+
+    /// One policy-checked, audited Clock disable. Requires mutation lease.
+    flexible ClockDisable(struct {
+        resource uint32;
+    }) -> (ClockDisableResult) error OperationError;
+
+    /// One policy-checked, audited Clock is_enabled query.
+    flexible ClockIsEnabled(struct {
+        resource uint32;
+    }) -> (ClockIsEnabledResult) error OperationError;
+
+    /// One policy-checked, audited Clock set_rate. Requires mutation lease.
+    flexible ClockSetRate(struct {
+        resource uint32;
+        hz uint64;
+    }) -> (ClockSetRateResult) error OperationError;
+
+    /// One policy-checked, audited Clock query_supported_rate query.
+    flexible ClockQueryRate(struct {
+        resource uint32;
+        hz_in uint64;
+    }) -> (ClockQueryRateResult) error OperationError;
+
+    /// One policy-checked, audited Clock get_rate query.
+    flexible ClockGetRate(struct {
+        resource uint32;
+    }) -> (ClockGetRateResult) error OperationError;
+
+    /// One policy-checked, audited Reset assert. Requires mutation lease.
+    flexible ResetAssert(struct {
+        resource uint32;
+    }) -> (ResetAssertResult) error OperationError;
+
+    /// One policy-checked, audited Reset deassert. Requires mutation lease.
+    flexible ResetDeassert(struct {
+        resource uint32;
+    }) -> (ResetDeassertResult) error OperationError;
+
+    /// One policy-checked, audited Reset toggle. Requires mutation lease.
+    flexible ResetToggle(struct {
+        resource uint32;
+    }) -> (ResetToggleResult) error OperationError;
+
+    /// One policy-checked, audited Reset status query.
+    flexible ResetStatus(struct {
+        resource uint32;
+    }) -> (ResetStatusResult) error OperationError;
+
+    /// One policy-checked, audited Serial read.
+    flexible SerialRead(struct {
+        resource uint32;
+    }) -> (SerialReadResult) error OperationError;
+
+    /// One policy-checked, audited Serial write. Requires mutation lease.
+    flexible SerialWrite(struct {
+        resource uint32;
+        data vector<uint8>:MAX_TRANSFER_SIZE;
+    }) -> (SerialWriteResult) error OperationError;
+};
+
+@discoverable
+open protocol Proxy {
+    /// Identity, resources, limits, and digests of this proxy instance.
+    flexible Describe() -> (ProxyDescription);
+
+    /// Opens a session with an exact allowlist. Stale expectations and
+    /// rejected allowlists create no session and touch no hardware.
+    flexible OpenSession(resource struct {
+        context RunContext;
+        mode SessionMode;
+        expectations Expectations;
+        allowlist vector<AccessRule>:MAX_ALLOWLIST_RULES;
+        session server_end:Session;
+    }) -> (struct {
+        session_id uint64;
+    }) error OpenSessionError;
+};
+
+service Service {
+    proxy client_end:Proxy;
+};

@@ -29,6 +29,7 @@ go_library(
     target_compatible_with = HOST_CONSTRAINTS,
     deps = [
         "//tools/build",
+        "//tools/debug/elflib",
         "//tools/lib/logger",
         "//tools/lib/osmisc",
     ],

@@ -15,14 +15,19 @@
     (defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL >= 1)
 
 // Dynamic layout size, alignment, and offset expectations matching the current preprocessor options
-#if WITH_LOCK_DEP
+#if defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL == 2
 constexpr size_t kExpectedLockClassStateSize = sizeof(lockdep::ValidatorLockClassState);
 constexpr size_t kExpectedLockClassStateAlign = alignof(lockdep::ValidatorLockClassState);
 constexpr size_t kExpectedLockClassRegistrationSize = 1624;
 constexpr size_t kExpectedStateStorageOffset = 16;
-#else
+#elif defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL == 1
 constexpr size_t kExpectedLockClassStateSize = sizeof(lockdep::MetadataLockClassState);
 constexpr size_t kExpectedLockClassStateAlign = alignof(lockdep::MetadataLockClassState);
+constexpr size_t kExpectedLockClassRegistrationSize = 24;
+constexpr size_t kExpectedStateStorageOffset = 16;
+#else
+constexpr size_t kExpectedLockClassStateSize = sizeof(lockdep::LockClassState);
+constexpr size_t kExpectedLockClassStateAlign = alignof(lockdep::LockClassState);
 constexpr size_t kExpectedLockClassRegistrationSize = 24;
 constexpr size_t kExpectedStateStorageOffset = 16;
 #endif
@@ -62,10 +67,10 @@ class RustLockClassRegistrar {
     for (auto* entry = __start_rust_lock_classes; entry < __stop_rust_lock_classes; ++entry) {
       [[maybe_unused]] const auto& name =
           *reinterpret_cast<const fxt::InternedString*>(entry->name);
-#if WITH_LOCK_DEP
+#if defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL == 2
       new (entry->state_storage)
           lockdep::ValidatorLockClassState(name, static_cast<lockdep::LockFlags>(entry->flags));
-#elif kLockMetadataAvailable
+#elif defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL == 1
       new (entry->state_storage)
           lockdep::MetadataLockClassState(name, static_cast<lockdep::LockFlags>(entry->flags));
 #else

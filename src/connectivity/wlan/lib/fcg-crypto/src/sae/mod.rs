@@ -16,7 +16,7 @@ pub use frame::{AntiCloggingTokenMsg, CommitMsg, ConfirmMsg};
 use ieee80211::{MacAddr, Ssid};
 use log::warn;
 use mundane::hash::Sha256;
-use num::FromPrimitive;
+use num_traits::FromPrimitive;
 use wlan_common::ie::rsn::akm::{self, Akm};
 
 /// Maximum number of incorrect frames sent before SAE fails.

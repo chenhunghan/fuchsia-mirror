@@ -1456,42 +1456,31 @@ zx::result<> Ufs::Start(fdf::DriverContext context) {
   return zx::ok();
 }
 
-void Ufs::ServeInlineEncryption(
-    fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) {
-  inline_encryption_bindings_.AddBinding(dispatcher(), std::move(server_end), this,
-                                         fidl::kIgnoreBindingClosure);
-}
-
-void Ufs::ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync& completer) {
+zx::result<uint8_t> Ufs::ProgramKeySlot(fidl::VectorView<uint8_t> wrapped_key,
+                                        uint32_t data_unit_size) {
   if (!inline_encryption_client_.is_valid()) {
-    completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
-    return;
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
   // UFSHCI CRYPTOCFG DWORD 16 DUSIZE[7:0] encodes the data unit size as a one-hot
   // bitmask in multiples of 512 bytes (0x01 = 512B/0x200 .. 0x80 = 64KiB/0x10000).
   constexpr uint32_t kMinCryptoDataUnitSize = 0x200;    // 512 B (DUSIZE = 0x01)
   constexpr uint32_t kMaxCryptoDataUnitSize = 0x10000;  // 64 KiB (DUSIZE = 0x80)
-  const uint32_t du = request->data_unit_size;
+  const uint32_t du = data_unit_size;
   if (du < kMinCryptoDataUnitSize || du > kMaxCryptoDataUnitSize || !std::has_single_bit(du)) {
-    completer.ReplyError(ZX_ERR_INVALID_ARGS);
-    return;
+    return zx::error(ZX_ERR_INVALID_ARGS);
   }
-  auto result =
-      inline_encryption_client_->ProgramKey(request->wrapped_key, request->data_unit_size);
+  auto result = inline_encryption_client_->ProgramKeySlot(wrapped_key, data_unit_size);
   if (!result.ok()) {
-    completer.ReplyError(result.status());
-    return;
+    return zx::error(result.status());
   }
   if (result->is_error()) {
-    completer.ReplyError(result->error_value());
-    return;
+    return zx::error(result->error_value());
   }
 
   const uint8_t slot = result->value()->slot;
   constexpr uint8_t kMaxCryptoSlots = 32;
   if (slot >= kMaxCryptoSlots) {
-    completer.ReplyError(ZX_ERR_OUT_OF_RANGE);
-    return;
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
   }
 
   // Configure UFSHCI CRYPTO_CFG per Section 5.6.3:
@@ -1509,25 +1498,22 @@ void Ufs::ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync& c
   GetMmio().Write32(0, cfg_offset + kCryptoCfgDword17Offset);
   GetMmio().Write32(kCryptoCfgEnable | (dusize_flag & 0xffU), cfg_offset + kCryptoCfgDword16Offset);
 
-  completer.ReplySuccess(slot);
+  return zx::ok(slot);
 }
 
-void Ufs::DeriveRawSecret(DeriveRawSecretRequestView request,
-                          DeriveRawSecretCompleter::Sync& completer) {
+zx::result<std::vector<uint8_t>> Ufs::DeriveRawSecret(fidl::VectorView<uint8_t> wrapped_key) {
   if (!inline_encryption_client_.is_valid()) {
-    completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
-    return;
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
-  auto result = inline_encryption_client_->DeriveRawSecret(std::move(request->wrapped_key));
+  auto result = inline_encryption_client_->DeriveRawSecret(wrapped_key);
   if (!result.ok()) {
-    completer.ReplyError(result.status());
-    return;
+    return zx::error(result.status());
   }
   if (result->is_error()) {
-    completer.ReplyError(result->error_value());
-    return;
+    return zx::error(result->error_value());
   }
-  completer.ReplySuccess(std::move(result->value()->secret));
+  auto& secret = result->value()->secret;
+  return zx::ok(std::vector<uint8_t>(secret.begin(), secret.end()));
 }
 
 void Ufs::OnDispatcherShutdown() {

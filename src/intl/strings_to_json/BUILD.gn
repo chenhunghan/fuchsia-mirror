@@ -27,7 +27,7 @@ install_host_tools("install") {
 if (is_host) {
   rustc_binary("strings_to_json_bin") {
     name = "strings_to_json"
-    with_unit_tests = true
+    with_unit_tests = "host"
     edition = "2024"
     deps = [
       "//src/lib/intl/strings:lib",

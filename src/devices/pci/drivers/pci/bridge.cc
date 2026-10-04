@@ -42,6 +42,7 @@ zx_status_t Bridge::Create(zx_device_t* parent, std::unique_ptr<Config>&& config
   fbl::RefPtr<pci::Bridge> bridge = fbl::AdoptRef(raw_bridge);
   zx_status_t status = bridge->Init();
   if (status != ZX_OK) {
+    bridge->Disable();
     return status;
   }
 
@@ -54,15 +55,7 @@ zx_status_t Bridge::Create(zx_device_t* parent, std::unique_ptr<Config>&& config
 zx_status_t Bridge::Init() {
   fbl::AutoLock dev_lock(&dev_lock_);
 
-  // Initialize the device portion of ourselves first. This will handle initializing
-  // bars/capabilities, and linking ourselves upstream before we need the information
-  // for our own window allocation.
-  zx_status_t status = pci::Device::InitLocked();
-  if (status != ZX_OK) {
-    return status;
-  }
-
-  // Sanity checks of bus allocation.
+  // Sanity checks of bus allocation before registering the device with the DDK.
   //
   // TODO(cja) : Strengthen sanity checks around bridge topology and
   // handle the need to reconfigure bridge topology if a bridge happens to be
@@ -98,7 +91,14 @@ zx_status_t Bridge::Init() {
   }
 
   // Parse the state of its I/O and Memory windows.
-  status = ParseBusWindowsLocked();
+  zx_status_t status = ParseBusWindowsLocked();
+  if (status != ZX_OK) {
+    return status;
+  }
+
+  // Initialize the device portion of ourselves. This will handle initializing
+  // bars/capabilities and publishing the device node after validating the bridge topology.
+  status = pci::Device::InitLocked();
   if (status != ZX_OK) {
     return status;
   }
@@ -216,6 +216,8 @@ zx::result<> Bridge::AllocateBridgeWindowsLocked() {
     zxlogf(TRACE,
            "[%s] Error configuring I/O window (%s), I/O bars downstream will be unavailable!\n",
            cfg_->addr(), result.status_string());
+  } else if (io_base_ <= io_limit_) {
+    ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/kCommandIoEn);
   }
   result =
       configure_window(upstream_->mmio_regions(), mmio_regions_, mem_base_, mem_limit_, "mmio");
@@ -223,6 +225,8 @@ zx::result<> Bridge::AllocateBridgeWindowsLocked() {
     zxlogf(TRACE,
            "[%s] Error configuring MMIO window (%s), MMIO bars downstream will be unavailable!\n",
            cfg_->addr(), result.status_string());
+  } else if (mem_base_ <= mem_limit_) {
+    ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/kCommandMemEn);
   }
   result = configure_window(upstream_->pf_mmio_regions(), pf_mmio_regions_, pf_mem_base_,
                             pf_mem_limit_, "pf_mmio");
@@ -231,6 +235,8 @@ zx::result<> Bridge::AllocateBridgeWindowsLocked() {
            "[%s] Error configuring PF-MMIO window (%s), PF-MMIO bars downstream will be "
            "unavailable!\n",
            cfg_->addr(), result.status_string());
+  } else if (pf_mem_base_ <= pf_mem_limit_) {
+    ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/kCommandMemEn);
   }
 
   return zx::ok();
@@ -281,24 +287,16 @@ void Bridge::Disable() {
   {
     fbl::AutoLock dev_lock(&dev_lock_);
 
-    // Disable the device portion of ourselves.
+    // Disable the device portion of ourselves. This clears kCommandIoEn,
+    // kCommandMemEn, and kCommandBusMasterEn in hardware config space, which
+    // stops the bridge from decoding or forwarding any I/O or memory
+    // transactions. Because the PCI bus driver does not dynamically reprogram
+    // bridge windows on startup and instead relies on ParseBusWindowsLocked()
+    // reading the firmware- or root-complex-configured windows from config
+    // space, do not overwrite the hardware window base and limit registers.
     Device::DisableLocked();
 
-    // Close all of our IO windows at the HW level and update the internal
-    // bookkeeping to indicate that they are closed.
-    cfg_->Write(Config::kIoBase, 0xF0);
-    cfg_->Write(Config::kIoLimit, 0);
-    cfg_->Write(Config::kIoBaseUpper, 0);
-    cfg_->Write(Config::kIoLimitUpper, 0);
-
-    cfg_->Write(Config::kMemoryBase, 0xFFF0);
-    cfg_->Write(Config::kMemoryLimit, 0);
-
-    cfg_->Write(Config::kPrefetchableMemoryBase, 0xFFF0);
-    cfg_->Write(Config::kPrefetchableMemoryLimit, 0);
-    cfg_->Write(Config::kPrefetchableMemoryBaseUpper, 0);
-    cfg_->Write(Config::kPrefetchableMemoryLimitUpper, 0);
-
+    // Update the internal bookkeeping to indicate that the windows are closed.
     pf_mem_limit_ = mem_limit_ = io_limit_ = 0u;
     pf_mem_base_ = mem_base_ = io_base_ = 1u;
   }

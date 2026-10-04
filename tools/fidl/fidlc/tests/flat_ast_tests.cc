@@ -21,6 +21,7 @@ TEST(FlatAstTests, GoodImplicitAssumptions) {
   // Preconditions to unit test cases: if these change, we need to rewrite the tests themselves.
   EXPECT_TRUE(HandleSubtype::kChannel < HandleSubtype::kEvent);
   EXPECT_TRUE(Nullability::kNullable < Nullability::kNonnullable);
+  EXPECT_TRUE(Zeroability::kZeroable < Zeroability::kNotZeroable);
 }
 
 TEST(FlatAstTests, BadCannotReferenceAnonymousName) {

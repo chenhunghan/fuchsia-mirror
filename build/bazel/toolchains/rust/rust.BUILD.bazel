@@ -8,10 +8,40 @@ load("@//build/bazel/versioning:rustc_api_level.bzl", "get_rustc_api_level_flags
 load("@fuchsia_build_config//:defs.bzl", "build_config")
 load("@fuchsia_rules_common//build_flags:toolchain.bzl", "rust_toolchain_with_build_flags")
 load("@rules_rust//rust:toolchain.bzl", "rust_stdlib_filegroup", "rust_toolchain")
+load("//:generated_constants.bzl", rust_constants = "constants")
 
 host_os = build_config.host_os
+
 host_arch = build_config.host_arch
+
 host_triple = build_config.host_target_triple
+
+# Fuchsia binaries are linked with -Cprefer-dynamic, so they need the prebuilt
+# libstd shared library at runtime. Expose it per CPU so that packaging rules
+# can select the right one. The file name embeds a hash that changes on every
+# toolchain roll, hence the generated constants.
+[
+    filegroup(
+        name = "libstd_dist_" + cpu,
+        srcs = [dist],
+        visibility = ["//visibility:public"],
+    )
+    for cpu, dist in rust_constants.libstd_dist.items()
+]
+
+# Debug symbols for the prebuilt runtime libraries above, laid out as a
+# .build-id directory in the same way as the prebuilt Clang toolchain.
+#
+# The directory itself is exported, rather than a glob of its content, because
+# FuchsiaDebugSymbolInfo consumers expect .build-id directories (e.g.
+# `ffx debug symbol-index add` rejects individual files). Bazel tracks the
+# content of source directories used as action inputs.
+#
+# BUILD.bazel is used as the source search root for these debug symbols.
+exports_files([
+    "BUILD.bazel",
+    "lib/debug/.build-id",
+])
 
 # LINT.IfChange
 _HOST_DEBUG_INFO = {
@@ -109,6 +139,12 @@ _EXTRA_TARGET_RUST_FLAGS = _DEFAULT_COMMON_RUST_FLAGS + [
     "-Cforce-unwind-tables=yes",
     "-Zpanic_abort_tests",
 
+    # GN: //build/config/fuchsia:dynamic_rust_standard_library
+    #
+    # Fuchsia links the Rust standard library dynamically so a single copy of
+    # libstd is shared by all Rust components in a package set.
+    "-Cprefer-dynamic",
+
     # GN: //build/config/fuchsia:large_rust_stack
     #
     # Rust's default main thread stack is too small for several in-tree
@@ -119,6 +155,17 @@ _EXTRA_TARGET_RUST_FLAGS = _DEFAULT_COMMON_RUST_FLAGS + [
     # through the clang driver instead, which rejects the joined -z form, so
     # the flag has to be routed with -Wl,.
     "-Clink-arg=-Wl,-z,stack-size=0x200000",
+
+    # No GN equivalent, as GN links Rust with lld directly.
+    #
+    # rustc passes -pie to the linker for Fuchsia executables, but clang's
+    # Fuchsia driver always adds -pie itself and never claims the one it is
+    # given, so every link prints "argument unused during compilation: '-pie'"
+    # through rustc's linker_messages lint. The output is PIE either way.
+    #
+    # TODO(https://fxbug.dev/567308599): Remove once the clang Fuchsia driver
+    # claims -pie, or GN and Bazel converge on how Rust is linked.
+    "-Clink-arg=-Wno-unused-command-line-argument",
 
     # GN: //build/config/rust:v0_symbol_mangling
     #
@@ -145,19 +192,8 @@ rust_stdlib_filegroup(
 
 rust_toolchain(
     name = "rust_linux_x64_toolchain_base",
-    rustc = "//:bin/rustc",
-    rustc_lib = "//:rustc_lib",
-    clippy_driver = "//:bin/clippy-driver",
-    rust_std = "//:rust_std_linux_x64",
-    rust_doc = "//:bin/rustdoc",
-    rustfmt = "//:bin/rustfmt",
     binary_ext = "",
-    staticlib_ext = ".a",
-    dylib_ext = ".so",
-    stdlib_linkflags = ["-lpthread", "-ldl"],
-    exec_triple = "x86_64-unknown-linux-gnu",
-    target_triple = "x86_64-unknown-linux-gnu",
-    extra_rustc_flags = _EXTRA_HOST_RUST_FLAGS,
+    clippy_driver = "//:bin/clippy-driver",
 
     # Ensure debug symbols are preserved even with --compilation_mode is
     # set to 'fastbuild' or 'opt', as there are no separate actions to produce
@@ -166,15 +202,29 @@ rust_toolchain(
     # debug_info controls whether debug info is generated during compilation,
     # and strip_level controls whether they are removed during linking.
     debug_info = _HOST_DEBUG_INFO,
-    strip_level = _HOST_STRIP_LEVEL,
+    dylib_ext = ".so",
+    exec_triple = "x86_64-unknown-linux-gnu",
+    extra_rustc_flags = _EXTRA_HOST_RUST_FLAGS,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
+    rust_doc = "//:bin/rustdoc",
+    rust_std = "//:rust_std_linux_x64",
+    rustc = "//:bin/rustc",
+    rustc_lib = "//:rustc_lib",
+    rustfmt = "//:bin/rustfmt",
+    staticlib_ext = ".a",
+    stdlib_linkflags = [
+        "-lpthread",
+        "-ldl",
+    ],
+    strip_level = _HOST_STRIP_LEVEL,
+    target_triple = "x86_64-unknown-linux-gnu",
 )
 
 rust_toolchain_with_build_flags(
     name = "rust_linux_x64_toolchain",
-    toolchain = ":rust_linux_x64_toolchain_base",
     extra_rustc_flags = get_rustc_api_level_flags(),
+    toolchain = ":rust_linux_x64_toolchain_base",
 )
 
 toolchain(
@@ -200,19 +250,8 @@ rust_stdlib_filegroup(
 
 rust_toolchain(
     name = "rust_linux_arm64_toolchain_base",
-    rustc = "//:bin/rustc",
-    rustc_lib = "//:rustc_lib",
-    clippy_driver = "//:bin/clippy-driver",
-    rust_std = "//:rust_std_linux_arm64",
-    rust_doc = "//:bin/rustdoc",
-    rustfmt = "//:bin/rustfmt",
     binary_ext = "",
-    staticlib_ext = ".a",
-    dylib_ext = ".so",
-    stdlib_linkflags = ["-lpthread", "-ldl"],
-    exec_triple = "aarch64-unknown-linux-gnu",
-    target_triple = "aarch64-unknown-linux-gnu",
-    extra_rustc_flags = _EXTRA_HOST_RUST_FLAGS,
+    clippy_driver = "//:bin/clippy-driver",
 
     # Ensure debug symbols are preserved even with --compilation_mode is
     # set to 'fastbuild' or 'opt', as there are no separate actions to produce
@@ -221,15 +260,29 @@ rust_toolchain(
     # debug_info controls whether debug info is generated during compilation,
     # and strip_level controls whether they are removed during linking.
     debug_info = _HOST_DEBUG_INFO,
-    strip_level = _HOST_STRIP_LEVEL,
+    dylib_ext = ".so",
+    exec_triple = "aarch64-unknown-linux-gnu",
+    extra_rustc_flags = _EXTRA_HOST_RUST_FLAGS,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
+    rust_doc = "//:bin/rustdoc",
+    rust_std = "//:rust_std_linux_arm64",
+    rustc = "//:bin/rustc",
+    rustc_lib = "//:rustc_lib",
+    rustfmt = "//:bin/rustfmt",
+    staticlib_ext = ".a",
+    stdlib_linkflags = [
+        "-lpthread",
+        "-ldl",
+    ],
+    strip_level = _HOST_STRIP_LEVEL,
+    target_triple = "aarch64-unknown-linux-gnu",
 )
 
 rust_toolchain_with_build_flags(
     name = "rust_linux_arm64_toolchain",
-    toolchain = ":rust_linux_arm64_toolchain_base",
     extra_rustc_flags = get_rustc_api_level_flags(),
+    toolchain = ":rust_linux_arm64_toolchain_base",
 )
 
 toolchain(
@@ -255,33 +308,33 @@ rust_stdlib_filegroup(
 
 rust_toolchain(
     name = "rust_fuchsia_x64_toolchain_base",
-    rustc = "//:bin/rustc",
-    rustc_lib = "//:rustc_lib",
-    clippy_driver = "//:bin/clippy-driver",
-    rust_std = "//:rust_std_fuchsia_x64",
-    rust_doc = "//:bin/rustdoc",
-    rustfmt = "//:bin/rustfmt",
     binary_ext = "",
-    staticlib_ext = ".a",
-    dylib_ext = ".so",
-    stdlib_linkflags = [],
-    exec_triple = "x86_64-unknown-fuchsia",
-    target_triple = "x86_64-unknown-fuchsia",
-    extra_rustc_flags = _EXTRA_TARGET_RUST_FLAGS,
+    clippy_driver = "//:bin/clippy-driver",
 
     # Keep debug symbols in the linked binary regardless of --compilation_mode.
     # fx_package extracts them into a .build-id directory and strips the copy
     # that goes into the package, mirroring how GN handles Fuchsia binaries.
     debug_info = _TARGET_DEBUG_INFO,
-    strip_level = _TARGET_STRIP_LEVEL,
+    dylib_ext = ".so",
+    exec_triple = "x86_64-unknown-fuchsia",
+    extra_rustc_flags = _EXTRA_TARGET_RUST_FLAGS,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
+    rust_doc = "//:bin/rustdoc",
+    rust_std = "//:rust_std_fuchsia_x64",
+    rustc = "//:bin/rustc",
+    rustc_lib = "//:rustc_lib",
+    rustfmt = "//:bin/rustfmt",
+    staticlib_ext = ".a",
+    stdlib_linkflags = [],
+    strip_level = _TARGET_STRIP_LEVEL,
+    target_triple = "x86_64-unknown-fuchsia",
 )
 
 rust_toolchain_with_build_flags(
     name = "rust_fuchsia_x64_toolchain",
-    toolchain = ":rust_fuchsia_x64_toolchain_base",
     extra_rustc_flags = get_rustc_api_level_flags(),
+    toolchain = ":rust_fuchsia_x64_toolchain_base",
 )
 
 toolchain(
@@ -307,18 +360,15 @@ rust_stdlib_filegroup(
 
 rust_toolchain(
     name = "rust_fuchsia_arm64_toolchain_base",
-    rustc = "//:bin/rustc",
-    rustc_lib = "//:rustc_lib",
-    clippy_driver = "//:bin/clippy-driver",
-    rust_std = "//:rust_std_fuchsia_arm64",
-    rust_doc = "//:bin/rustdoc",
-    rustfmt = "//:bin/rustfmt",
     binary_ext = "",
-    staticlib_ext = ".a",
+    clippy_driver = "//:bin/clippy-driver",
+
+    # Keep debug symbols in the linked binary regardless of --compilation_mode.
+    # fx_package extracts them into a .build-id directory and strips the copy
+    # that goes into the package, mirroring how GN handles Fuchsia binaries.
+    debug_info = _TARGET_DEBUG_INFO,
     dylib_ext = ".so",
-    stdlib_linkflags = [],
     exec_triple = "aarch64-unknown-fuchsia",
-    target_triple = "aarch64-unknown-fuchsia",
     extra_rustc_flags = _EXTRA_TARGET_RUST_FLAGS + [
         # See https://fuchsia.dev/fuchsia-src/concepts/kernel/shadow_call_stack#use_in_zircon_fuchsia
         # Rust compilers are detecting incompatible ABIs in rust builds. Any Rust
@@ -328,20 +378,23 @@ rust_toolchain(
         "-Zsanitizer=shadow-call-stack",
         "-Zfixed-x18",
     ],
-
-    # Keep debug symbols in the linked binary regardless of --compilation_mode.
-    # fx_package extracts them into a .build-id directory and strips the copy
-    # that goes into the package, mirroring how GN handles Fuchsia binaries.
-    debug_info = _TARGET_DEBUG_INFO,
-    strip_level = _TARGET_STRIP_LEVEL,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
+    rust_doc = "//:bin/rustdoc",
+    rust_std = "//:rust_std_fuchsia_arm64",
+    rustc = "//:bin/rustc",
+    rustc_lib = "//:rustc_lib",
+    rustfmt = "//:bin/rustfmt",
+    staticlib_ext = ".a",
+    stdlib_linkflags = [],
+    strip_level = _TARGET_STRIP_LEVEL,
+    target_triple = "aarch64-unknown-fuchsia",
 )
 
 rust_toolchain_with_build_flags(
     name = "rust_fuchsia_arm64_toolchain",
-    toolchain = ":rust_fuchsia_arm64_toolchain_base",
     extra_rustc_flags = get_rustc_api_level_flags(),
+    toolchain = ":rust_fuchsia_arm64_toolchain_base",
 )
 
 toolchain(
@@ -370,18 +423,15 @@ rust_stdlib_filegroup(
 
 rust_toolchain(
     name = "rust_fuchsia_riscv64_toolchain_base",
-    rustc = "//:bin/rustc",
-    rustc_lib = "//:rustc_lib",
-    clippy_driver = "//:bin/clippy-driver",
-    rust_std = "//:rust_std_fuchsia_riscv64",
-    rust_doc = "//:bin/rustdoc",
-    rustfmt = "//:bin/rustfmt",
     binary_ext = "",
-    staticlib_ext = ".a",
+    clippy_driver = "//:bin/clippy-driver",
+
+    # Keep debug symbols in the linked binary regardless of --compilation_mode.
+    # fx_package extracts them into a .build-id directory and strips the copy
+    # that goes into the package, mirroring how GN handles Fuchsia binaries.
+    debug_info = _TARGET_DEBUG_INFO,
     dylib_ext = ".so",
-    stdlib_linkflags = [],
-    exec_triple = "riscv64-unknown-fuchsia",
-    target_triple = "riscv64-unknown-fuchsia",
+    exec_triple = "riscv64gc-unknown-fuchsia",
     extra_rustc_flags = _EXTRA_TARGET_RUST_FLAGS + [
         # See https://fuchsia.dev/fuchsia-src/concepts/kernel/shadow_call_stack#use_in_zircon_fuchsia
         # Rust compilers are detecting incompatible ABIs in rust builds. Any Rust
@@ -392,20 +442,23 @@ rust_toolchain(
         # TODO(https://fxbug.dev/501183733) remove once rustc's frontend does this automatically
         "-Ctarget-feature=+v",
     ],
-
-    # Keep debug symbols in the linked binary regardless of --compilation_mode.
-    # fx_package extracts them into a .build-id directory and strips the copy
-    # that goes into the package, mirroring how GN handles Fuchsia binaries.
-    debug_info = _TARGET_DEBUG_INFO,
-    strip_level = _TARGET_STRIP_LEVEL,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
+    rust_doc = "//:bin/rustdoc",
+    rust_std = "//:rust_std_fuchsia_riscv64",
+    rustc = "//:bin/rustc",
+    rustc_lib = "//:rustc_lib",
+    rustfmt = "//:bin/rustfmt",
+    staticlib_ext = ".a",
+    stdlib_linkflags = [],
+    strip_level = _TARGET_STRIP_LEVEL,
+    target_triple = "riscv64gc-unknown-fuchsia",
 )
 
 rust_toolchain_with_build_flags(
     name = "rust_fuchsia_riscv64_toolchain",
-    toolchain = ":rust_fuchsia_riscv64_toolchain_base",
     extra_rustc_flags = get_rustc_api_level_flags(),
+    toolchain = ":rust_fuchsia_riscv64_toolchain_base",
 )
 
 toolchain(

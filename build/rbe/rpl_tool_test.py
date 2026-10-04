@@ -18,7 +18,7 @@ from api.log import log_pb2
 
 
 class NormalizeInputPathPrefixTests(unittest.TestCase):
-    def test_no_working_dirs_no_change(self):
+    def test_no_working_dirs_no_change(self) -> None:
         p = Path("out/build-1/foo/bar.txt")
         new_p = rpl_tool.normalize_input_path_prefix(p, [])
         self.assertEqual(new_p, str(p))
@@ -33,7 +33,7 @@ _FAKE_REMOTETOOL = remotetool.RemoteTool(reproxy_cfg=_reproxy_cfg)
 
 
 class InferRecordCommandAndInputsTests(unittest.TestCase):
-    def test_one_record(self):
+    def test_one_record(self) -> None:
         command = ["cat", "hello.txt"]
         inputs = {Path("hello.txt"): "00de7abc8771/7"}
         action_digest = "90123eeecbd19898/147"
@@ -62,7 +62,7 @@ class InferRecordCommandAndInputsTests(unittest.TestCase):
         record_original.command.input.inputs.extend(record.command.input.inputs)
         self.assertEqual(record, record_original)
 
-    def test_one_record_input_in_working_dir(self):
+    def test_one_record_input_in_working_dir(self) -> None:
         working_dir = "out/construction/site"
         input = "w00f.txt"
         command = ["cat", input]
@@ -93,7 +93,7 @@ class InferRecordCommandAndInputsTests(unittest.TestCase):
         record_original.command.input.inputs.extend(record.command.input.inputs)
         self.assertEqual(record, record_original)
 
-    def test_one_record_input_in_remote_working_dir(self):
+    def test_one_record_input_in_remote_working_dir(self) -> None:
         remote_working_dir = "set/by/some/tool"
         input = "w00f.txt"
         command = ["cat", input]
@@ -126,7 +126,7 @@ class InferRecordCommandAndInputsTests(unittest.TestCase):
 
 
 class ExpandToRplTests(unittest.TestCase):
-    def test_expand_two_records(self):
+    def test_expand_two_records(self) -> None:
         command1 = ["cat", "hello.txt"]
         command2 = ["cow", "moo.txt"]
         inputs1 = {Path("hello.txt"): "00de7abc8771/7"}
@@ -193,7 +193,7 @@ class ExpandToRplTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_expand_to_rpl_to_file(self):
+    def test_expand_to_rpl_to_file(self) -> None:
         empty_logdump = log_pb2.LogDump()
         log = reproxy_logs.ReproxyLog(empty_logdump)
         with mock.patch.object(
@@ -224,7 +224,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(expand_args[0], log.proto)
         self.assertEqual(expand_args[1], _FAKE_REMOTETOOL)
 
-    def test_expand_to_rpl_to_stdout(self):
+    def test_expand_to_rpl_to_stdout(self) -> None:
         empty_logdump = log_pb2.LogDump()
         log = reproxy_logs.ReproxyLog(empty_logdump)
         with mock.patch.object(

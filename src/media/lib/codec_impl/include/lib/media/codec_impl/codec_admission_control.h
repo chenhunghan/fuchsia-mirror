@@ -50,7 +50,18 @@ class CodecAdmissionControl {
   class PreviousCloseHandle {
    public:
     void AddClosureToReference(std::shared_ptr<fit::deferred_callback> input_defer) {
-      defer_list_.push_back(input_defer);
+      defer_list_.push_back(std::move(input_defer));
+    }
+    // The NOLINT below was observed to be necessary despite the destructor not being empty, at
+    // least wrt how shac runs in CQ. It's TBD why shac was flagging this while "fx lint" wasn't.
+    ~PreviousCloseHandle() {  // NOLINT(modernize-use-equals-default)
+      // Explicitly drop refs front-to-back so the wrapped deferred_callbacks
+      // fire (and thus PostTask) in insertion order, preserving the FIFO
+      // contract of PostAfterPreviouslyStartedClosesDone. The C++ standard does
+      // not guarantee std::vector's element destruction order.
+      for (auto& d : defer_list_) {
+        d.reset();
+      }
     }
 
    private:
@@ -61,7 +72,7 @@ class CodecAdmissionControl {
   std::unique_ptr<CodecAdmission> TryAddCodecInternal(bool multi_instance);
   std::shared_ptr<PreviousCloseHandle> OnCodecIsClosing() __TA_REQUIRES(lock_);
 
-  void RemoveCodec(bool multi_instance, uint64_t key_value);
+  void RemoveCodec(bool multi_instance, uint64_t port_key);
   void CleanOutPreviousClosures() __TA_REQUIRES(lock_);
   void CheckForClosedChannels() __TA_REQUIRES(lock_);
 
@@ -109,7 +120,7 @@ class CodecAdmission {
     if (nop_instance_) {
       return;
     }
-    std::lock_guard<std::mutex> lock(codec_admission_control_->lock_);
+    std::scoped_lock lock(codec_admission_control_->lock_);
     SetCodecIsClosingLocked();
   }
 

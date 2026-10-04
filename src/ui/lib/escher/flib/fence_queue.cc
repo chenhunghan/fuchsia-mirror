@@ -9,7 +9,7 @@
 
 namespace escher {
 
-void FenceQueue::QueueTask(fit::function<void()> task, std::vector<zx::event> fences) {
+void FenceQueue::QueueTask(fit::function<void()> task, std::vector<zx::handle> fences) {
   queue_.emplace_back(std::move(task), std::move(fences));
   ProcessQueue();
 }
@@ -21,13 +21,13 @@ void FenceQueue::ProcessQueue() {
   }
 
   // Handle the next task on the queue.
-  fence_listener_.emplace(std::move(queue_.front().second));
-  queue_.front().second.clear();
+  fence_listener_.emplace(std::move(queue_.front().fences));
+  queue_.front().fences.clear();
 
   fence_listener_->WaitReadyAsync([weak = weak_from_this()] {
     if (auto locked = weak.lock()) {
       // Execute task.
-      locked->queue_.front().first();
+      locked->queue_.front().task();
     }
 
     // The FenceQueue may have been destroyed in the task. Retry the lock to avoid any weirdness.

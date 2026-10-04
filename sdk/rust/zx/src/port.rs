@@ -399,21 +399,16 @@ impl GuestIoPacket {
 
     /// For `PortAccessType::Write` this is the data that was being written.
     pub fn data(&self) -> Option<guest::PortData> {
-        #[repr(C)]
-        union DataUnion {
-            bit8: [u8; 4],
-            bit16: [u16; 2],
-            bit32: [u32; 1],
-        }
         if let guest::AccessType::Write = self.access_type() {
-            unsafe {
-                let data = &DataUnion { bit8: self.0.data };
-                self.access_size().map(|size| match size {
-                    guest::PortAccessSize::Bits8 => guest::PortData::Data8(data.bit8[0]),
-                    guest::PortAccessSize::Bits16 => guest::PortData::Data16(data.bit16[0]),
-                    guest::PortAccessSize::Bits32 => guest::PortData::Data32(data.bit32[0]),
-                })
-            }
+            self.access_size().map(|size| match size {
+                guest::PortAccessSize::Bits8 => guest::PortData::Data8(self.0.data[0]),
+                guest::PortAccessSize::Bits16 => {
+                    guest::PortData::Data16(u16::from_ne_bytes([self.0.data[0], self.0.data[1]]))
+                }
+                guest::PortAccessSize::Bits32 => {
+                    guest::PortData::Data32(u32::from_ne_bytes(self.0.data))
+                }
+            })
         } else {
             None
         }

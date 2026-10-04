@@ -261,11 +261,10 @@ fn binder_transaction_bench(
     current_task: &'static CurrentTask,
 ) {
     let _ = group.bench_function("binder_transaction", move |b| {
-        let connection_state = Arc::new(security::binder_connection_alloc(current_task));
+        let creds = current_task.current_creds();
         b.iter(|| {
             let _ = std::hint::black_box(
-                security::binder_transaction(current_task, current_task, &connection_state)
-                    .unwrap(),
+                security::binder_transaction(current_task, &creds, &creds).unwrap(),
             );
         })
     });

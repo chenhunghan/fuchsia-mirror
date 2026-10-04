@@ -31,7 +31,7 @@ def read_build_fences_file(path: str) -> str:
     return result
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Process build force-clean fences."
     )
@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    def _log(msg):
+    def _log(msg: str) -> None:
         if args.verbose:
             print(msg)
 
@@ -88,7 +88,7 @@ def main():
         if os.path.exists(file_path):
             all_fences_files.append(file_path)
 
-    current_fences = []
+    current_fences: list[str] = []
 
     # read fences file directly.
     for path in sorted(all_fences_files):
@@ -106,7 +106,7 @@ def main():
             ).stdout
         )
 
-    current_fences = "\n".join(current_fences)
+    current_fences_str = "\n".join(current_fences)
 
     existing_fences = None
     existing_fences_path = os.path.join(args.build_dir, ".force_clean_fences")
@@ -115,12 +115,12 @@ def main():
         with open(existing_fences_path, "r") as f:
             existing_fences = f.read()
 
-    def _write_fences():
+    def _write_fences() -> None:
         _log(
-            f"writing new fences:\n=============\n{current_fences}\n============="
+            f"writing new fences:\n=============\n{current_fences_str}\n============="
         )
         with open(existing_fences_path, "w") as f:
-            f.write(current_fences)
+            f.write(current_fences_str)
 
     # clobber if needed
     if existing_fences == None:
@@ -128,7 +128,7 @@ def main():
         _write_fences()
         status = "ok: no fences found."
 
-    elif existing_fences != current_fences:
+    elif existing_fences != current_fences_str:
         print(f"new //build/force_clean/ fences found, clobbering build...")
         subprocess.run([args.gn_bin, "clean", args.build_dir])
         status = "clean: new fences found."

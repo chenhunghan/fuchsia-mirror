@@ -124,10 +124,10 @@ fn run_task(
         exception_report_raw,
     };
 
-    #[allow(
-        clippy::undocumented_unsafe_blocks,
-        reason = "Force documented unsafe blocks in Starnix"
-    )]
+    // SAFETY: `restricted_enter_context`, `restricted_state_ptr`, and `extended_pstate_ptr`
+    // point to valid, exclusively-owned state for the current thread that outlives
+    // `restricted_enter_loop`. The thread's extended pstate storage matches the
+    // architectural mode in `restricted_state_ptr`.
     let restricted_enter_status = zx::Status::ok(unsafe {
         restricted_enter_loop(
             RESTRICTED_ENTER_OPTIONS,

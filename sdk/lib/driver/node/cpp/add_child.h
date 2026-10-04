@@ -46,16 +46,6 @@ zx::result<OwnedChildNode> AddOwnedChild(
     fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
     std::string_view node_name);
 
-// Adds an un-owned child node under the given |parent|. The driver framework will try to match
-// and bind a driver to this child.
-//
-// This is a synchronous call and requires that the dispatcher allow sync calls.
-zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
-    fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
-    std::string_view node_name,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
-    cpp20::span<const fuchsia_driver_framework::Offer> offers);
-
 // Creates an owned child node with devfs support under the given |parent|. The driver framework
 // will NOT try to match and bind a driver to this child as it is already owned by the current
 // driver.
@@ -64,16 +54,6 @@ zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
 zx::result<OwnedChildNode> AddOwnedChild(
     fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
     std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args);
-
-// Creates an un-owned child node with devfs support under the given |parent|. The driver framework
-// will try to match and bind a driver to this child.
-//
-// This is a synchronous call and requires that the dispatcher allow sync calls.
-zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
-    fidl::UnownedClientEnd<fuchsia_driver_framework::Node> parent, fdf::Logger& logger,
-    std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
-    cpp20::span<const fuchsia_driver_framework::Offer> offers);
 
 // Adds an un-owned child node under the given |parent|. The driver framework will try to match
 // and bind a driver to this child.

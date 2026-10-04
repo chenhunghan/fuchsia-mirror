@@ -2,38 +2,98 @@
     "version": 1,
     "checks": [
         {
+            "name": "gn_secondary_tree",
+            "description": "Errors when the change adds or edits a Bazel build file (BUILD.bazel, BUILD, .bzl) under build/secondary/ (GN-only overlay tree for third-party code), adds a //build/secondary/... dependency to a Bazel file elsewhere, or adds a bazel2gn third_party_target_map.json entry pointing into build/secondary/; such code must move (in a separate CL below the migration) to the //third_party/<name>/src layout with BUILD.gn and BUILD.bazel in //third_party/<name>/, using new_local_repository with a Fuchsia build file when upstream's own BUILD/WORKSPACE makes src/ a separate Bazel package.",
+            "script_file": "gn_secondary_tree.sh",
+            "enabled": true
+        },
+        {
             "name": "migration_sanity",
-            "description": "Deterministic check for BUILD.bazel/BUILD.gn dual-build parity: rejects target-level # @bazel2gn:skip on convertible library/binary/reference targets, rejects convertible GN targets left above the BAZEL2GN SENTINEL in BUILD.gn, and verifies //pkg:verify_bazel2gn registration in //build/bazel2gn_verification_targets.gni",
+            "description": "Deterministic check for BUILD.bazel/BUILD.gn dual-build parity: rejects target-level # @bazel2gn:skip on convertible library/binary/reference targets, rejects convertible GN targets left above the BAZEL2GN SENTINEL in BUILD.gn, and verifies //pkg:verify_bazel2gn registration in //build/bazel2gn_verification_targets.gni; when build/bazel/rules/testing/fx_test.bzl exists, also rejects GN test packages (fuchsia_unittest_package, fuchsia_test_package) duplicated by a BUILD.bazel fx_package of the same name, and GN test packages that only package C/C++ or Rust tests Bazel can build (a BUILD.bazel cc/fx_cc binary or rustc_* unit test, or a GN test executable with only C/C++ sources whose deps all have a Bazel build) and use no GN-only features, which should be migrated to fx_test + bazel_test_suite; tests of unknown language never trigger it. Tests move to Bazel and bazel2gn does not translate them: in a dual-build package, a BUILD.bazel test target (rustc_test, go_test, host_go_test, test_suite) or with_unit_tests/with_host_unit_tests/test_deps attribute of a rustc_* target without # @bazel2gn:skip, or a generated BUILD.gn section containing with_unit_tests/test_deps/rustc_test/go_test, is test_generated_by_bazel2gn.",
             "script_file": "migration_sanity.sh",
             "enabled": true
         },
         {
+            "name": "gn_dep_parity",
+            "description": "Compares every migrated GN target's dependency labels and edge kinds with its BUILD.gn at $PLANTER_CHANGE_BASE, in every changed package that keeps a BUILD.gn (following GN groups the target newly depends on): errors when a dependency was swapped for a sibling target of the same package (e.g. a GN-only *_static wrapper carrying link settings replaced by the library it wraps), when a removed dependency carried link-affecting settings (except a test_deps entry of a target whose GN unit test moved to Bazel, i.e. that no longer sets with_unit_tests), or when a public_deps edge with public_configs became private without the configs being re-exported as all_dependent_configs (bazel2gn emits Rust deps as private GN deps); reports dependencies no target of the package uses anymore as INFO.",
+            "script_file": "gn_dep_parity.sh",
+            "enabled": true
+        },
+        {
+            "name": "gn_attr_parity",
+            "description": "Errors when a GN target of a changed package had a GN-only attribute that bazel2gn cannot emit (exclude_toolchain_tags, configs -=, disable_syslog_backend) at $PLANTER_CHANGE_BASE and the target in the current BUILD.gn lost it (converted by bazel2gn, removed, or BUILD.gn deleted): such targets stay hand-written above the BAZEL2GN SENTINEL (migration_sanity accepts the Bazel # @bazel2gn:skip for them), otherwise coverage builders fail to link or excluded tests run in sanitizer builders. Exception: rustc_library/rustc_staticlib pass exclude_toolchain_tags only to their with_unit_tests test and rustc_macro ignores it, so for them losing it is accepted when the base target had no with_unit_tests or a hand-written GN <name>_test keeps the same values.",
+            "script_file": "gn_attr_parity.sh",
+            "enabled": true
+        },
+        {
+            "name": "gn_target_type_parity",
+            "description": "Verifies that a migration keeps what GN builds. With bazel2gn (BUILD.gn kept), no converted GN target may change type: a source_set() must not become a static_library() (the cc_library needs alwayslink = True) or vice versa, and no other template may change (e.g. an sdk_source_set, or a GN-only wrapper template). When a GN target is removed (full removal), the cc_library/fx_cc_library of the same name in BUILD.bazel must set alwayslink = True if and only if it was a GN source_set(). Exception: when build/bazel/rules/testing/fx_test.bzl exists, a GN test package (fuchsia_unittest_package, fuchsia_test_package, fuchsia_test) or host test (python_host_test, host_test) may become a same-named bazel_test_suite exporting its migrated Bazel tests (C++ or Rust); a GN rustc_test, go_test or test may likewise become a same-named bazel_test_suite.",
+            "script_file": "gn_target_type_parity.sh",
+            "enabled": true
+        },
+        {
             "name": "visibility_audit",
-            "description": "Audits BUILD.bazel visibility attributes for package-level default_visibility, missing target visibility, overly narrow sprawling visibility lists (>15 entries across >=6 areas on globally-used platform libraries/test utilities that should use target-level //visibility:public or 2-3 level rollups), unjustified //visibility:public on narrow targets, redundant :__pkg__, disguised public wildcards, multi-domain umbrella wildcards, cross-area depth-2 wildcards, overbroad depth>=3 LCA wildcards, and false-positive rdeps",
+            "description": "Audits BUILD.bazel visibility attributes for package-level default_visibility, missing target visibility, exports_files() without visibility, overly narrow sprawling visibility lists (>15 entries across >=6 areas on globally-used platform libraries/test utilities that should use target-level //visibility:public or 2-3 level rollups), unjustified //visibility:public on narrow targets, redundant :__pkg__, disguised public wildcards, multi-domain umbrella wildcards, cross-area depth-2 wildcards, overbroad depth>=3 LCA wildcards, and false-positive rdeps",
             "script_file": "visibility_audit.sh",
             "enabled": true
         },
         {
             "name": "build_only_scope",
-            "description": "Fails if the migration change (HEAD commit, uncommitted, or untracked files) modifies any non-build file (anything other than BUILD.gn/BUILD.bazel/BUILD/*.gni/*.bzl/MODULE.bazel). Migrations must not edit source code.",
+            "description": "Fails if the migration change (HEAD commit, uncommitted, or untracked files) modifies any non-build file (anything other than BUILD.gn/BUILD.bazel/BUILD/*.BUILD.bazel/*.BUILD/*.gni/*.bzl/MODULE.bazel). Migrations must not edit source code. A newly added non-shard .cml file is allowed when the nearest BUILD.bazel declares an fx_test_component whose manifest points at it (hand-written test manifest replacing the one GN's fuchsia_unittest_package generated, for C++ and Rust tests alike).",
             "script_file": "build_only_scope.sh",
             "enabled": true
         },
         {
             "name": "lint_config_parity",
-            "description": "Flags lint-driven source edits (removed .clone(), added #[allow]/#[expect]/NOLINT, removed use imports, let _ =) in non-build files with file:line evidence, and warns when BUILD.bazel lint_config is outside //build/config/rust/lints (Bazel replaces default lints, GN appends).",
+            "description": "Flags lint-driven source edits (removed .clone(), added #[allow]/#[expect]/NOLINT, removed use imports, let _ =) in non-build files with file:line evidence, and warns when a BUILD.bazel lint_config outside //build/config/rust/lints fails to resolve to a rust_lint_config that includes the default clippy and rustc lint sets (Bazel replaces default lints, GN appends).",
             "script_file": "lint_config_parity.sh",
             "enabled": true
         },
         {
             "name": "shared_config_reuse",
-            "description": "Flags lint-config indirection and duplication in the change: new alias() targets that only re-export a rust_lint_config (or lint-named config), dict literals in changed BUILD.bazel/.bzl files that copy the default clippy/rustc lint entries owned by //build/config/rust/lints instead of loading its exported .bzl constants, dual-build lint_config labels without a same-named GN config() in the label's package (bazel2gn copies lint_config verbatim), and LINT.ThenChange references newly broken by moving lint dicts.",
+            "description": "Flags lint-config and GN build-argument indirection and duplication in the change: new alias() targets that only re-export a rust_lint_config (or lint-named config), dict literals in changed BUILD.bazel/.bzl files that copy the default clippy/rustc lint entries owned by //build/config/rust/lints instead of loading its exported .bzl constants, dual-build lint_config labels without a same-named GN config() in the label's package (bazel2gn copies lint_config verbatim), LINT.ThenChange references newly broken by moving lint dicts, and GN declare_args() build arguments duplicated in .bzl/BUILD.bazel instead of being exported via //build/bazel:gn_build_variables_for_bazel to @fuchsia_build_info//:args.bzl with LINT.IfChange/ThenChange comments.",
             "script_file": "shared_config_reuse.sh",
             "enabled": true
         },
         {
+            "name": "bazel_minimality",
+            "description": "Audits BUILD.bazel and .bzl files for redundant default attributes (crate_name == name, version = \"0.1.0\" on internal rustc_* targets, default crate_root), single-platform srcs = select({..., \"//conditions:default\": []}) workarounds that should use target_compatible_with, inline-expanded GN read_file() lists missing LINT.IfChange/LINT.ThenChange, genrule commands added by the change that derive paths or arguments in the shell ($$(dirname $(location <one input>)), $$(python3 -c ...), backticks) or hard-code bazel-out/ paths instead of Bazel's predefined genrule variables ($@, $<, $(SRCS), $(execpath), $(@D), $(RULEDIR)) and Starlark values, buildifier formatting and buildifier_lint warnings, and drive-by edits to unrelated packages outside the target directory.",
+            "script_file": "bazel_minimality.sh",
+            "enabled": true
+        },
+        {
+            "name": "cq_reachability",
+            "description": "Verifies that migrated test targets remain wired into group(\"tests\") in BUILD.gn/BUILD.bazel and that Case 2 dual-build packages register //<pkg>:verify_bazel2gn. When build/bazel/rules/testing/fx_test.bzl exists, also verifies that every Bazel fx_test and host test (host_rustc_test, wrap_host_rust_test, host_py_test, host_test, host_go_test, the <name>_test of rustc_* with_unit_tests = \"host\"/\"both\", and test_suite expansions) in a changed package is listed in a GN bazel_test_suite (fx_test in target_tests, host tests in host_tests) that is wired into group(\"tests\"), since fx test and infra only see Bazel tests through bazel_test_suite. Tests move to Bazel and bazel2gn does not translate them, so none is reached through GN. Every Rust device test binary (rustc_test, or the <name>_test of with_unit_tests = \"fuchsia\"/\"both\") must be packaged by an fx_packaged_binary for an fx_test (unpackaged_rust_device_test).",
+            "script_file": "cq_reachability.sh",
+            "enabled": true
+        },
+        {
+            "name": "confidentiality_check",
+            "description": "Blocks internal vendor subpaths, internal domain names, personal email addresses, user handle mentions, and reviewer/person names from being added in the change.",
+            "script_file": "confidentiality_check.sh",
+            "enabled": true
+        },
+        {
+            "name": "gn_format",
+            "description": "Mirrors the CQ static-checks gn_format step: runs `gn format --dry-run` on every GN file (BUILD.gn, *.gni, *.gn) the change adds or modifies anywhere in the checkout (including verification .gni lists and parent groups edited by hand) and errors when one is unformatted or unparsable.",
+            "script_file": "gn_format.sh",
+            "enabled": true
+        },
+        {
+            "name": "commit_message_format",
+            "description": "When HEAD is the task's commit, warns if the subject does not follow '[bazel_migration][<subsystem>] //<migrated dir>' or, when the directory's git log has no established subsystem tag (no parent subsystem), '[bazel_migration] //<migrated dir>'; flags leaf-directory tags and missing tags against git log history. A target directory build/secondary/<dir> (GN-only overlay) is expected as //<dir>, where gn_secondary_tree requires the migration to land, and a change that modifies no file versus its parent (nothing migrated, e.g. blocked) gets INFO commit_subject_empty_change instead of subject warnings. Also lints Test: footers: fx bazel without --config=, Bazel labels without leading @, redundant //a/b:b labels, :all builds instead of the migrated test target, bazel2gn verification not written as the single last line 'Test: fx bazel2gn', and Test: footers that run migrated tests directly when an ancestor BUILD.bazel test_suite() includes them (prefer that suite or the GN group reaching it); reports as INFO when no ancestor test_suite() includes the migrated tests (developer must choose one). Also lints the body: .bzl/MODULE.bazel edits outside the migrated directories (not specific to the migrated targets) must be described in the body, and the body must not name underlying rules (rust_library, rust_test, cc_library, ...) that no migrated BUILD.bazel calls directly, and must not present a crate_name that differs from its target name (or <crate_name>_test) as a target name.",
+            "script_file": "commit_message_format.sh",
+            "enabled": true
+        },
+        {
+            "name": "test_data_attribute",
+            "description": "Flags test-only files (test_data/, testdata/, tests/, fixtures, golden paths) listed in the runtime `data` attribute of a BUILD.bazel rustc_library/rustc_binary/rustc_proc_macro that defines unit tests (with_unit_tests/with_host_unit_tests); they belong in `test_data` (or a host_test_data() target), not `data`, and must not be worked around by editing shared rule macros or sources.",
+            "script_file": "test_data_attribute.sh",
+            "enabled": true
+        },
+        {
             "name": "build_verification",
-            "description": "Builds the change: `fx build` (GN targets and all GN dependents), `fx build --host //build:bazel2gn_verifications` (BUILD.gn/BUILD.bazel drift), and `fx bazel build --config=fuchsia_platform` / `--config=host` of `//<dir>:all` for every changed directory with a BUILD.bazel. Emits one ERROR finding with the relevant log lines per failing step. Set PLANTER_SKIP_BUILD=1 to skip.",
+            "description": "Builds the change: `fx build` (the configured product graph, which can leave out the migrated packages' tests and many GN dependents), then `fx build <labels>` for GN targets the product graph may leave out (the changed packages' :tests groups and test binaries, and GN tests, binaries and libraries in other packages that depend on a changed package, limited to labels in the GN graph; catches GN-only link failures such as undefined operator new after a dependency label or edge changed), `fx build --host //build:bazel2gn_verifications` (BUILD.gn/BUILD.bazel drift), and `fx bazel build --config=fuchsia_platform` / `--config=host` of `//<dir>:all` for every changed directory with a BUILD.bazel (excluding `_validate_json_action` targets such as `<fidl>_validate_ir_json` from top-level `:all` so `assert_no_deps_aspect` does not crash on their scalar `data` attribute), plus commit `Test:` footer validation for consolidating to `<= 3` `Test:` lines, unconfigured GN labels, bash syntax errors (unquoted toolchain parentheses), and unexcluded `_validate_json_action` targets. Set PLANTER_SKIP_BUILD=1 to skip builds, PLANTER_BUILD_DRY_RUN=1 to list the shell-quoted commands. Also runs `fx bazel test --config=host` on the changed packages' Bazel host tests (host_rustc_test, wrap_host_rust_test, host_go_test, host_py_test, host_test), and after the GN build reports as INFO whether each exported bazel_test_suite test reached <build dir>/tests.json (fx_test is only built, never run with fx bazel test). When `fx build` fails only in Bazel actions of targets in another git repository than the change that have no Bazel dependency path (fx bazel query somepath) to any changed package, and the change touches no .bzl/MODULE.bazel, the failure is reported as INFO preexisting_failure_gn_build (out-of-sync checkout) and the remaining steps still verify the change.",
             "script_file": "build_verification.sh",
             "enabled": true
         }

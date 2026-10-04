@@ -73,18 +73,23 @@ impl ConnectionSelectionManager {
         }
     }
 
-    /// Cancels the future associated with the given selection_id.
-    pub fn cancel(&mut self, selection_id: &SelectionIdentifier) {
+    /// Cancels the future associated with the given selection_id. Returns true if an active
+    /// selection was cancelled.
+    pub fn cancel(&mut self, selection_id: &SelectionIdentifier) -> bool {
         if let Some(cancel_tx) = self.cancellation_handles.remove(selection_id) {
             let _ = cancel_tx.send(());
+            return true;
         }
+        false
     }
 
-    /// Cancels all active connection selections.
-    pub fn cancel_all(&mut self) {
-        for selection_id in self.active_selections() {
-            self.cancel(&selection_id);
+    /// Cancels all active connection selections and returns their identifiers.
+    pub fn cancel_all(&mut self) -> Vec<SelectionIdentifier> {
+        let active = self.active_selections();
+        for selection_id in &active {
+            let _ = self.cancel(selection_id);
         }
+        active
     }
 
     /// Returns a list of SelectionIdentifiers for connection selections currently being processed.
@@ -285,7 +290,7 @@ mod tests {
         assert_eq!(manager.active_selections().len(), 2);
 
         // Cancel one
-        manager.cancel(&id_auto);
+        assert!(manager.cancel(&id_auto));
 
         // Polling should return cancelled result for id_auto
         let mut futures = ConnectionSelectionFutures::new(&mut manager);
@@ -315,7 +320,7 @@ mod tests {
 
         assert_eq!(manager.active_selections().len(), 2);
 
-        manager.cancel_all();
+        assert_eq!(manager.cancel_all().len(), 2);
 
         assert_eq!(manager.active_selections().len(), 0);
 

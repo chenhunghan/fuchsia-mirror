@@ -61,6 +61,7 @@ class WlanPolicyAp(AsyncLazyReady):
         fuchsia_controller: fc_transport.FuchsiaController,
         reboot_affordance: affordances_capable.RebootCapableDevice,
         fuchsia_device_close: affordances_capable.FuchsiaDeviceClose,
+        suspend_resume_affordance: affordances_capable.SuspendResumeCapableDevice,
     ) -> None:
         """Create an WlanPolicyAp Fuchsia Controller affordance.
 
@@ -70,6 +71,8 @@ class WlanPolicyAp(AsyncLazyReady):
             fuchsia_controller: Fuchsia Controller transport.
             reboot_affordance: Object that implements RebootCapableDevice.
             fuchsia_device_close: Object that implements FuchsiaDeviceClose.
+            suspend_resume_affordance: Object that implements
+                SuspendResumeCapableDevice.
         """
         AsyncLazyReady.__init__(self)
 
@@ -78,12 +81,30 @@ class WlanPolicyAp(AsyncLazyReady):
         self._fc_transport = fuchsia_controller
         self._reboot_affordance = reboot_affordance
         self._fuchsia_device_close = fuchsia_device_close
+        self._suspend_resume_affordance = suspend_resume_affordance
 
         self._access_point_controller: _AccessPointControllerState | None = None
 
         self.verify_supported()
 
         self._reboot_affordance.register_for_on_device_boot(self.make_ready)
+        self._suspend_resume_affordance.register_on_device_suspend_fn(
+            self._close
+        )
+        self._suspend_resume_affordance.register_on_device_resume_fn(
+            self.make_ready
+        )
+        self._fuchsia_device_close.register_for_on_device_close(self._close)
+
+    async def _close(self) -> None:
+        """Release handle on access point controller."""
+        if self._access_point_controller:
+            self._access_point_controller.access_point_state_updates_server_task.cancel()
+            try:
+                await self._access_point_controller.access_point_state_updates_server_task
+            except asyncio.CancelledError:
+                pass
+            self._access_point_controller = None
 
     async def make_ready(self) -> None:
         await super().make_ready()

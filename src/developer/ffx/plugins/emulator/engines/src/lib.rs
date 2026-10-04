@@ -252,7 +252,6 @@ pub fn process_flags_from_str(text: &str, emu_config: &EmulatorConfiguration) ->
         .map_err(|e| bug!("Error processing flags: {e}"))
 }
 
-#[allow(dead_code)]
 /// Ensures all ports are mapped with available port values, assigning free ports any that are
 /// missing, and making sure there are no conflicts within the map.
 pub(crate) fn finalize_port_mapping(emu_config: &mut EmulatorConfiguration) -> Result<()> {

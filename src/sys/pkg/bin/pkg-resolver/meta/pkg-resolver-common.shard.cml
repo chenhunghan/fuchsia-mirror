@@ -14,7 +14,6 @@
         {
             protocol: [
                 "fuchsia.component.resolution.Resolver",
-                "fuchsia.pkg.Authority",
                 "fuchsia.pkg.Cup",
                 "fuchsia.pkg.internal.OtaDownloader",
                 "fuchsia.pkg.PackageResolver",
@@ -23,6 +22,11 @@
                 "fuchsia.pkg.resolution.PackageResolver",
                 "fuchsia.pkg.rewrite.Engine",
             ],
+        },
+        {
+            // pkg-cache connects on startup but on some configurations will only use it for OTA
+            protocol: "fuchsia.pkg.Authority",
+            delivery: "on_readable",
         },
         {
             resolver: "full-resolver",

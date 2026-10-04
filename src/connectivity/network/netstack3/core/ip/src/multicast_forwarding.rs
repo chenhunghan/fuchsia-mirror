@@ -24,8 +24,8 @@ use core::sync::atomic::Ordering;
 use net_types::ip::{GenericOverIp, Ip, IpVersionMarker};
 use netstack3_base::{
     AnyDevice, AtomicInstant, CounterContext, DeviceIdContext, EventContext, HandleableTimer,
-    InstantBindingsTypes, InstantContext, LocalFrameDestination, TimerBindingsTypes, TimerContext,
-    WeakDeviceIdentifier,
+    InstantBindingsTypes, InstantContext, LocalFrameDestination, Marks, TimerBindingsTypes,
+    TimerContext, WeakDeviceIdentifier,
 };
 use packet_formats::ip::IpPacket;
 use zerocopy::SplitByteSlice;
@@ -196,6 +196,7 @@ pub(crate) fn lookup_multicast_route_or_stash_packet<I, B, CC, BC>(
     dev: &CC::DeviceId,
     frame_dst: Option<LocalFrameDestination>,
     max_fragment_len: Option<usize>,
+    marks: Marks,
 ) -> Option<MulticastRouteTargets<CC::DeviceId>>
 where
     I: IpLayerIpExt,
@@ -274,6 +275,7 @@ where
                     dev,
                     frame_dst,
                     max_fragment_len,
+                    marks,
                 )
             }) {
                 QueuePacketOutcome::QueuedInNewQueue => {
@@ -713,6 +715,7 @@ mod tests {
             &actual_dev,
             FRAME_DST,
             MAX_FRAGMENT_LEN,
+            Default::default(),
         );
 
         // Verify that multicast routing events are generated.

@@ -310,7 +310,7 @@ FakeDriverIndex DriverRunnerTestBase::CreateDriverIndex() {
               .composite = fdfw::CompositeInfo{{
                   .spec = fdfw::CompositeNodeSpec{{
                       .name = "test-group",
-                      .parents = std::vector<fdfw::ParentSpec>(2),
+                      .parents2 = std::vector<fdfw::ParentSpec2>(2),
                   }},
                   .matched_driver = fdfw::CompositeDriverMatch{{
                       .composite_driver = fdfw::CompositeDriverInfo{{
@@ -335,7 +335,7 @@ FakeDriverIndex DriverRunnerTestBase::CreateDriverIndex() {
               .composite = fdfw::CompositeInfo{{
                   .spec = fdfw::CompositeNodeSpec{{
                       .name = "test-group",
-                      .parents = std::vector<fdfw::ParentSpec>(2),
+                      .parents2 = std::vector<fdfw::ParentSpec2>(2),
                   }},
                   .matched_driver = fdfw::CompositeDriverMatch{{
                       .composite_driver = fdfw::CompositeDriverInfo{{

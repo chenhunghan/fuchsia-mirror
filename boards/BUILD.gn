@@ -25,6 +25,7 @@ if (target_cpu == "x64") {
     testonly = true
     deps = [
       "//boards/arm64",
+      "//boards/arm64:arm64_bibs",
       "//boards/pkvm:arm64",
       "//boards/qemu-arm64",
       "//boards/vim3",

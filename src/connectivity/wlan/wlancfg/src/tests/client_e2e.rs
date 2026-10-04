@@ -202,10 +202,12 @@ fn test_setup(
     ));
     let (connection_selection_request_sender, connection_selection_request_receiver) =
         mpsc::channel(5);
+    let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
     let connection_selection_fut = Box::pin(
         connection_selection::serve_connection_selection_request_loop(
             connection_selector,
             connection_selection_request_receiver,
+            power_manager.clone(),
         ) // Map the output type of this future to match the other ones we want to combine with it
         .map(|_| {
             let result: Result<Infallible, Error> =
@@ -265,6 +267,7 @@ fn test_setup(
         defect_receiver,
         recovery_receiver,
         inspect::Inspector::default().root().create_child("iface_manager"),
+        power_manager.clone(),
     );
     let iface_manager_service = Box::pin(iface_manager_service);
     let scan_manager_service = Box::pin(
@@ -294,6 +297,7 @@ fn test_setup(
             client_provider_lock,
             client_provider_requests,
             telemetry_sender,
+            power_manager.clone(),
         )
         // Map the output type of this future to match the other ones we want to combine with it
         .map(|_| {
@@ -359,6 +363,7 @@ fn add_phy(exec: &mut TestExecutor, test_values: &mut TestValues) {
         legacy_client.clone(),
         test_values.internal_objects.phy_manager.clone(),
         test_values.internal_objects.iface_manager.clone(),
+        test_values.internal_objects.power_manager.clone(),
     );
     let add_phy_event = DeviceWatcherEvent::OnPhyAdded { phy_id: TEST_PHY_ID };
     let add_phy_fut = device_monitor::handle_event(&listener, add_phy_event);
@@ -485,29 +490,14 @@ fn prepare_client_interface(
         }
     );
 
-    let iface_sme_stream = sme_server.into_stream();
+    let mut iface_sme_stream = sme_server.into_stream();
 
-    // Expect to get an SME request for the state machine creation
+    // Configure new iface does an initial disconnect
     let sme_req = run_while(
         exec,
         &mut test_values.internal_objects.internal_futures,
-        test_values.external_interfaces.monitor_service_stream.next(),
+        iface_sme_stream.next(),
     );
-    let sme_server = assert_matches!(
-        sme_req,
-        Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-            iface_id: TEST_CLIENT_IFACE_ID, sme_server, responder
-        })) => {
-            // Send back a positive acknowledgement.
-            assert!(responder.send(Ok(())).is_ok());
-            sme_server
-        }
-    );
-    let mut sme_stream = sme_server.into_stream();
-
-    // State machine does an initial disconnect
-    let sme_req =
-        run_while(exec, &mut test_values.internal_objects.internal_futures, sme_stream.next());
     assert_matches!(
         sme_req,
         Some(Ok(fidl_sme::ClientSmeRequest::Disconnect {
@@ -1988,6 +1978,7 @@ fn inform_watcher_of_client_iface_removal_and_expect_iface_recovery(
         legacy_client.clone(),
         test_values.internal_objects.phy_manager.clone(),
         test_values.internal_objects.iface_manager.clone(),
+        test_values.internal_objects.power_manager.clone(),
     );
     let remove_iface_event = DeviceWatcherEvent::OnIfaceRemoved { iface_id: expected_iface_id };
     let remove_iface_fut = device_monitor::handle_event(&listener, remove_iface_event);
@@ -2949,7 +2940,12 @@ fn solicit_roam_scan_weak_rssi(
         exec,
         test_values,
         existing_connection,
-        SignalReportIndication { rssi_dbm: -91, snr_db: 100, tx_rate_500kbps: 0 },
+        SignalReportIndication {
+            rssi_dbm: Some(-91),
+            snr_db: Some(100),
+            tx_rate_500kbps: Some(0),
+            ..Default::default()
+        },
     )
 }
 
@@ -3549,6 +3545,7 @@ fn test_power_element_lease_and_suspend_resume_lifecycle() {
         legacy_client.clone(),
         test_values.internal_objects.phy_manager.clone(),
         test_values.internal_objects.iface_manager.clone(),
+        test_values.internal_objects.power_manager.clone(),
     );
     let remove_phy_event = DeviceWatcherEvent::OnPhyRemoved { phy_id: TEST_PHY_ID };
     let remove_phy_fut = device_monitor::handle_event(&listener, remove_phy_event);

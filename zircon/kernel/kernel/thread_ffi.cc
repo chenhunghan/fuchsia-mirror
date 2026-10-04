@@ -63,9 +63,11 @@ void cpp_thread_preempt_clear_timeslice_extension();
 void cpp_thread_preempt_disable();
 void cpp_thread_preempt_enable();
 void cpp_thread_preempt();
-zx_status_t cpp_thread_current_sleep_relative(zx_duration_mono_t duration);
 zx_status_t cpp_thread_current_sleep_etc(const Deadline* deadline, Interruptible interruptible,
                                          zx_instant_mono_t now);
+zx_status_t cpp_thread_current_sleep(zx_instant_mono_t duration);
+zx_status_t cpp_thread_current_sleep_relative(zx_duration_mono_t duration);
+zx_status_t cpp_thread_current_sleep_interruptible(zx_instant_mono_t duration);
 zx_status_t cpp_thread_current_soft_fault(vaddr_t va, uint flags);
 zx_status_t cpp_restricted_enter(uintptr_t vector_table_ptr, uintptr_t context);
 
@@ -77,8 +79,12 @@ bool cpp_thread_is_user_state_saved(Thread* thread);
 bool cpp_thread_is_running(const Thread* thread);
 const char* cpp_thread_name(const Thread* thread);
 void cpp_thread_process_pending_signals(void* frame);
-bool cpp_thread_is_in_restricted_mode(Thread* thread);
+
+void cpp_thread_current_memory_allocation_state_enable();
+void cpp_thread_current_memory_allocation_state_disable();
 bool cpp_thread_current_memory_allocation_state_is_enabled();
+void cpp_thread_current_signal_policy_exception(uint32_t policy_exception_code,
+                                                uint32_t policy_exception_data);
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE Thread* cpp_thread_create_default(const char* name, thread_start_routine entry,
@@ -173,14 +179,26 @@ FFI_ALWAYS_INLINE void cpp_thread_preempt_enable() {
 FFI_ALWAYS_INLINE void cpp_thread_preempt() { Thread::Current::Preempt(); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_etc(const Deadline* deadline,
+                                                           Interruptible interruptible,
+                                                           zx_instant_mono_t now) {
+  DEBUG_ASSERT(deadline != nullptr);
+  return Thread::Current::SleepEtc(*deadline, interruptible, now);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep(zx_instant_mono_t duration) {
+  return Thread::Current::Sleep(duration);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_relative(zx_duration_mono_t duration) {
   return Thread::Current::SleepRelative(duration);
 }
 
-zx_status_t cpp_thread_current_sleep_etc(const Deadline* deadline, Interruptible interruptible,
-                                         zx_instant_mono_t now) {
-  DEBUG_ASSERT(deadline != nullptr);
-  return Thread::Current::SleepEtc(*deadline, interruptible, now);
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_interruptible(zx_instant_mono_t duration) {
+  return Thread::Current::SleepInterruptible(duration);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -263,8 +281,24 @@ FFI_ALWAYS_INLINE VmAspace* cpp_thread_current_active_aspace() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_current_memory_allocation_state_enable() {
+  return Thread::Current::memory_allocation_state().Enable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_current_memory_allocation_state_disable() {
+  return Thread::Current::memory_allocation_state().Disable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE bool cpp_thread_current_memory_allocation_state_is_enabled() {
   return Thread::Current::memory_allocation_state().IsEnabled();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_current_signal_policy_exception(uint32_t policy_exception_code,
+                                                                  uint32_t policy_exception_data) {
+  Thread::Current::SignalPolicyException(policy_exception_code, policy_exception_data);
 }
 
 }  // extern "C"

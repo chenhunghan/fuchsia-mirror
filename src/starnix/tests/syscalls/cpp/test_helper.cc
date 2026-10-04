@@ -263,12 +263,14 @@ void SignalMaskHelper::waitForSignal(int signal) {
   ASSERT_EQ(sig, signal);
 }
 
-int SignalMaskHelper::timedWaitForSignal(int signal, time_t msec) {
-  siginfo_t siginfo;
-  struct timespec ts;
-  ts.tv_sec = 0;
-  ts.tv_nsec = msec * 1000000;
-  return static_cast<int>(TEMP_FAILURE_RETRY(sigtimedwait(&this->_sigset, &siginfo, &ts)));
+int SignalMaskHelper::timedWaitForSignal(int signal, time_t msec, siginfo_t *siginfo) {
+  siginfo_t local_siginfo;
+  struct timespec ts = {
+      .tv_sec = msec / 1000,
+      .tv_nsec = (msec % 1000) * 1000000,
+  };
+  siginfo_t *target_info = siginfo ? siginfo : &local_siginfo;
+  return static_cast<int>(TEMP_FAILURE_RETRY(sigtimedwait(&this->_sigset, target_info, &ts)));
 }
 
 void SignalMaskHelper::restoreSigmask() { sigprocmask(SIG_SETMASK, &this->_sigmaskCopy, nullptr); }
@@ -665,7 +667,7 @@ bool TryWrite(uintptr_t addr) {
 
 testing::AssertionResult WaitUntilBlocked(pid_t target, bool ignore_tracer) {
   return WaitForTaskState(target, target, [ignore_tracer](std::string_view state) {
-    return cpp23::contains(state, 'S') || (!ignore_tracer && cpp23::contains(state, 't'));
+    return state == "S" || (!ignore_tracer && (state == "t" || state == "T"));
   });
 }
 
@@ -674,25 +676,33 @@ testing::AssertionResult WaitUntilZombie(pid_t target) {
                           [](std::string_view state) { return cpp23::contains(state, 'Z'); });
 }
 
+std::optional<std::string_view> GetTaskState(std::string_view stat) {
+  // From https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html, the name of the executable
+  // is the second field, and is the only field in parenthesis. Task state is the field
+  // immediately following it.
+  size_t last_paren = stat.rfind(')');
+  if (last_paren != std::string_view::npos && last_paren + 2 < stat.size()) {
+    return stat.substr(last_paren + 2, 1);
+  }
+  return std::nullopt;
+}
+
 testing::AssertionResult WaitForTaskState(pid_t pid, pid_t tid,
                                           fit::function<bool(std::string_view)> predicate) {
   std::string stat_path = fxl::StringPrintf("/proc/%d/task/%d/stat", pid, tid);
+  std::string stat_buf;
   for (int i = 0; i < 100000; i++) {
-    std::string stat_buf;
     if (!files::ReadFileToString(stat_path, &stat_buf)) {
       return testing::AssertionFailure() << "Failed to read " << stat_path;
     }
-    if (predicate(stat_buf)) {
+
+    if (auto task_state = GetTaskState(stat_buf); task_state && predicate(*task_state)) {
       return testing::AssertionSuccess();
-    }
-    if (i == 99999) {
-      return testing::AssertionFailure()
-             << "Failed to wait for task with PID=" << pid << " TID=" << tid
-             << " to reach state. Final state: " << stat_buf;
     }
     usleep(1000);  // Sleep for 1ms to avoid busy-looping.
   }
-  return testing::AssertionFailure() << "Unreachable";
+  return testing::AssertionFailure() << "Failed to wait for task with PID=" << pid << " TID=" << tid
+                                     << " to reach state. Final state: " << stat_buf;
 }
 
 // This variable is accessed from within a signal handler and thus must be declared volatile.

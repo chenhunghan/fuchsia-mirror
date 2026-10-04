@@ -58,12 +58,12 @@ def create(
     for c in configs:
         if isinstance(c, (str, int)) and str(c).isdigit():
             results.append(IPerfServer(int(c)))
-        elif isinstance(c, dict) and "ssh_config" in c and "port" in c:
+        elif isinstance(c, dict) and "ssh_config" in c:
             config = MapValidator(c)
             results.append(
                 IPerfServerOverSsh(
                     settings.from_config(config.get(dict, "ssh_config")),
-                    config.get(int, "port"),
+                    port=config.get(int, "port", 5201),
                     test_interface=config.get(str, "test_interface"),
                     use_killall=config.get(bool, "use_killall", False),
                 )
@@ -81,6 +81,9 @@ def destroy(
     for iperf_server in objects:
         try:
             iperf_server.stop()
+            # Explicitly close any active SSH sessions to prevent lingering connections on DUT.
+            if isinstance(iperf_server, IPerfServerOverSsh):
+                iperf_server.close_ssh()
         except Exception:
             logging.exception(f"Unable to properly clean up {iperf_server}.")
 
@@ -441,6 +444,7 @@ class IPerfServerOverSsh(IPerfServerBase):
         port: int,
         test_interface: str,
         use_killall: bool = False,
+        ssh_session: connection.SshConnection | None = None,
     ):
         super().__init__(port)
         self.test_interface = test_interface
@@ -452,8 +456,11 @@ class IPerfServerOverSsh(IPerfServerBase):
             },
         )
         self._ssh_settings = ssh_settings
+        # Allow injecting a mock SSH session or reusing an existing connection for unit testing.
         self._ssh_session: connection.SshConnection | None = (
-            connection.SshConnection(ssh_settings)
+            ssh_session
+            if ssh_session is not None
+            else connection.SshConnection(ssh_settings)
         )
         self._journalctl = optional(LinuxJournalctlCommand(self._ssh_session))
         self._ss = optional(LinuxCommand(self._ssh_session, "ss"))
@@ -509,6 +516,10 @@ class IPerfServerOverSsh(IPerfServerBase):
 
         Necessary for changing DHCP scopes during a test.
         """
+        # OpenWrt bridge interfaces (br-lan, lan) use static IP addresses; attempting
+        # DHCP renewal severs the SSH connection and fails because no DHCP client runs on them.
+        if self.test_interface in ("br-lan", "lan"):
+            return
         utils.renew_linux_ip_address(self._get_ssh(), self.test_interface)
 
     def get_addr(
@@ -585,10 +596,16 @@ class IPerfServerOverSsh(IPerfServerBase):
             logging.debug(f"Using iperf3 binary located at {iperf_binary}")
         iperf_command = f"{iperf_binary} -s -J -p {self.port}"
 
-        cmd = f"{iperf_command} {extra_args} > {self._get_remote_log_path()}"
+        # Prepend 'exec' so the spawned process directly replaces the shell, ensuring
+        # the returned PID is that of iperf3 rather than a wrapper shell.
+        cmd = (
+            f"exec {iperf_command} {extra_args} > {self._get_remote_log_path()}"
+        )
 
         job_result = self._get_ssh().run_async(cmd)
-        self._iperf_pid = job_result.stdout.decode("utf-8")
+        pid_str = job_result.stdout.decode("utf-8").strip()
+        # Verify pid_str is purely numeric before storing to prevent passing error strings to 'kill -9'.
+        self._iperf_pid = pid_str if pid_str.isdigit() else None
         self._current_tag = tag
 
     def stop(self) -> str | None:
@@ -603,24 +620,34 @@ class IPerfServerOverSsh(IPerfServerBase):
 
         ssh = self._get_ssh()
 
+        # On OpenWrt, killall reliably terminates iperf3 when ss/PID tracking is unavailable.
         if self._use_killall:
             ssh.run(["killall", "iperf3"], ignore_status=True)
         elif self._iperf_pid:
-            ssh.run(["kill", "-9", self._iperf_pid])
+            ssh.run(["kill", "-9", self._iperf_pid], ignore_status=True)
 
-        iperf_result = ssh.run(f"cat {self._get_remote_log_path()}")
+        # Ignore non-zero exit status if remote log file is empty or missing.
+        iperf_result = ssh.run(
+            ["cat", self._get_remote_log_path()], ignore_status=True
+        )
 
         log_file = self._get_full_file_path(self._current_tag)
         with open(log_file, "wb") as f:
             f.write(iperf_result.stdout)
 
-        ssh.run(["rm", self._get_remote_log_path()])
+        # Use -f to prevent errors if the remote file does not exist.
+        ssh.run(["rm", "-f", self._get_remote_log_path()], ignore_status=True)
         self._iperf_pid = None
         return log_file
 
     def _get_ssh(self) -> connection.SshConnection:
         if self._ssh_session is None:
             self._ssh_session = connection.SshConnection(self._ssh_settings)
+            # Re-instantiate command wrappers with the new SSH session when reconnecting.
+            self._journalctl = optional(
+                LinuxJournalctlCommand(self._ssh_session)
+            )
+            self._ss = optional(LinuxCommand(self._ssh_session, "ss"))
 
             # Disable NetworkManager on the test interface
             self._nmcli = optional(nmcli.LinuxNmcliCommand(self._ssh_session))
@@ -664,10 +691,17 @@ class IPerfServerOverSsh(IPerfServerBase):
             logger.epoch_to_log_line_timestamp(utils.get_current_epoch_time())
         )
 
+        # OpenWrt does not use systemd/journalctl; skip downloading when journalctl is unavailable
+        # to avoid writing placeholder 'journalctl not available' files.
         systemd_journal = self.get_systemd_journal()
-        systemd_journal_path = os.path.join(
-            path, f"iperf_systemd_{timestamp}.log"
-        )
-        with open(systemd_journal_path, "a") as f:
-            f.write(systemd_journal)
-        self.log.info(f"Wrote systemd journal to {systemd_journal_path}")
+        if systemd_journal and systemd_journal != "journalctl not available":
+            systemd_journal_path = os.path.join(
+                path, f"iperf_systemd_{timestamp}.log"
+            )
+            with open(systemd_journal_path, "a", encoding="utf-8") as f:
+                f.write(systemd_journal)
+            self.log.info(f"Wrote systemd journal to {systemd_journal_path}")
+        else:
+            self.log.debug(
+                "Systemd journal not available on this device; skipping."
+            )

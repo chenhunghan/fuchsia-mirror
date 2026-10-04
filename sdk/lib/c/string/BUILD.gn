@@ -3,12 +3,14 @@
 # found in the LICENSE file.
 
 import("//build/toolchain/rbe.gni")
+import("//build/toolchain/toolchain_environment.gni")
 import("../libc.gni")
 
 llvm_libc_group("string") {
   deps = [
-    ":mem",
-    ":str",
+    ":impure",
+    ":pure-compiler",
+    ":pure-no-compiler",
   ]
 
   # TODO(https://fxbug.dev/42053650): not yet using the llvm-libc versions of these
@@ -22,9 +24,39 @@ llvm_libc_group("string") {
   testonly_deps = [ ":strsignalerror" ]
 }
 
-llvm_libc_source_set("mem") {
+# These are the pure functions (no ambient state references) that are called
+# directly by the compiler.  These are the most important to optimize, and have
+# special code-patched versions in the kernel.
+llvm_libc_group("pure-compiler") {
+  deps = [
+    ":memcpy",
+    ":memset",
+  ]
+}
+
+# These are all the other pure functions.
+llvm_libc_source_set("pure-no-compiler") {
   functions = [
     "memccpy",
+    "stpcpy",
+    "strchrnul",
+    "strcpy",
+    "strchr",
+    "strspn",
+    "strcat",
+    "strstr",
+    "strsep",
+    "strcspn",
+    "strncat",
+    "strlcat",
+    "strlcpy",
+    "strncmp",
+    "strrchr",
+    "strncpy",
+    "strcmp",
+    "strnlen",
+    "strpbrk",
+    "stpncpy",
     "memmem",
     "mempcpy",
     "memrchr",
@@ -33,8 +65,8 @@ llvm_libc_source_set("mem") {
   deps = [
     ":memchr",
     ":memcmp",
-    ":memcpy",
-    ":memset",
+    ":memmove",
+    ":strlen",
   ]
 }
 
@@ -43,6 +75,15 @@ unsanitized_funcs = [
   "memmove",
   "memset",
 ]
+
+kernel_unsanitized_remove_configs = []
+if (is_kernel && toolchain_variant.tags + [ "uses-shadow" ] -
+                 [ "uses-shadow" ] != toolchain_variant.tags) {
+  kernel_unsanitized_remove_configs = [
+    "//build/config/sanitizers:asan",
+    "//build/config/sanitizers:hwasan",
+  ]
+}
 
 # The compiler will turn code that looks like it implements these functions
 # into calls to their standard names.  It doesn't recognize that the internal
@@ -55,6 +96,13 @@ foreach(funcs,
           [ "memchr" ],
           [ "memcmp" ],
           [
+            # These go together in that they both need -fno-builtin-... for
+            # both, not just each for itself.  They get separate hermetic TUs
+            # even though any non-inlined subroutines will likely be common
+            # across both.  But some environments need one and not the other
+            # (such as the kernel proper where memcpy is replaced but not
+            # memmove), so they need to stay independent.  Any commonalities
+            # should still be merged by ICF in the final link, ideally.
             "memcpy",
             "memmove",
           ],
@@ -66,8 +114,9 @@ foreach(funcs,
 
     cflags = []
 
-    # TODO(https://fxbug.dev/42079782): gcc is not correctly honoring -fno-builtin-memmove,
-    # but -fno-builtin correctly suppresses the call to memmove.
+    # TODO(https://fxbug.dev/42079782): gcc is not correctly honoring
+    # -fno-builtin-memmove, but -fno-builtin correctly suppresses the call to
+    # memmove.
     if (funcs[0] == "memcpy" && is_gcc) {
       cflags += [ "-fno-builtin" ]
     }
@@ -81,9 +130,8 @@ foreach(funcs,
     foreach(func, funcs) {
       cflags += [ "-fno-builtin-$func" ]
 
-      # TODO(https://fxbug.dev/42077425): The .weakref shenanigans in dynlink.c aren't
-      # compatible with full LTO and a memcpy defined in C++. This only affects
-      # riscv64 in practice, since others use assembly definitions regardless.
+      # TODO(https://fxbug.dev/42077425): The .weakref shenanigans in dynlink.c
+      # aren't compatible with full LTO and a memcpy defined in C++.
       if ((func == "memcpy" || func == "memset") && !is_gcc &&
           toolchain_environment == "user.basic") {
         cflags += [
@@ -94,89 +142,110 @@ foreach(funcs,
     }
   }
 
-  # These also need to stick to the basic machine ABI so that dynlink.c can
-  # use them early.  This requires hermetic_source_set() to contain any
-  # COMDAT code, so the exported symbols must be named here.
-  # TODO(https://fxbug.dev/501232406): Only unsanitized_funcs probably need
-  # to be special here after the legacy musl code is gone.
-  global_alias_prefixes = []
-  weak_alias_prefixes = []
-  export_alias_prefixes = []
-  global_alias_prefixes = [ "__libc_" ]
-  weak_alias_prefixes = [
-    "__asan_",
-    "__hwasan_",
-  ]
-  if (funcs + unsanitized_funcs - unsanitized_funcs == []) {
-    export_alias_prefixes += [ "__unsanitized_" ]
-  }
-
-  llvm_libc_source_set(funcs[0]) {
-    visibility = [ ":*" ]
-
-    functions = funcs
-
-    # Avoid self-referential libcalls.
-    configs = [ ":no-builtin-${funcs[0]}" ]
-
-    basic_abi = true
-    global_symbols = []
-    foreach(func, funcs) {
-      foreach(prefix,
-              [ "" ] + global_alias_prefixes + weak_alias_prefixes +
-                  export_alias_prefixes) {
-        global_symbols += [ prefix + func ]
-      }
-    }
-
-    # See the generated_file() target below.
-    non_test_deps = [ ":${funcs[0]}.inc" ]
-    non_test_vars = {
-      inputs = [ "$target_gen_dir/${funcs[0]}.inc" ]
-      cflags = [
-        "-include",
-        rebase_path(inputs[0], root_build_dir),
+  foreach(func, funcs) {
+    # These also need to stick to the basic machine ABI so that dynlink.c can
+    # use them early.  This requires hermetic_source_set() to contain any
+    # COMDAT code, so the exported symbols must be named here.
+    # TODO(https://fxbug.dev/501232406): Only unsanitized_funcs probably need
+    # to be special here after the legacy musl code is gone.
+    global_alias_prefixes = []
+    weak_alias_prefixes = []
+    export_alias_prefixes = []
+    global_alias_prefixes = []
+    weak_alias_prefixes = []
+    if (!is_kernel) {
+      global_alias_prefixes = [ "__libc_" ]
+      weak_alias_prefixes = [
+        "__asan_",
+        "__hwasan_",
       ]
-      if (cxx_rbe_enable) {
-        # TODO(https://fxbug.dev/501268588): This is working around an RBE
-        # wrapper bug.  Even though it's in the GN inputs and directly on the
-        # command line, it doesn't notice the -include file as a remote input.
-        cflags +=
-            [ "--remote-inputs=" + rebase_path(inputs[0], root_build_dir) ]
+    }
+    is_unsanitized = [ func ] + unsanitized_funcs - unsanitized_funcs == []
+    if (is_unsanitized) {
+      export_alias_prefixes += [ "__unsanitized_" ]
+    }
+
+    _label = get_label_info(":$func", "label_with_toolchain")
+
+    llvm_libc_source_set(func) {
+      visibility = [ ":*" ]
+
+      functions = [ func ]
+
+      # Avoid self-referential libcalls.
+      configs = [ ":no-builtin-${funcs[0]}" ]
+
+      # In the kernel environments, there is no separate subenvironment for the
+      # basic machine ABI.  But there's no need to restrict these functions to
+      # it, because they have the Fuchsia Compiler ABI available throughout
+      # from the earliest compiled code paths (for phys itself, it's set up in
+      # assembly; for the kernel proper, it's set up by physboot; for UEFI, the
+      # Fuchsia Compiler ABI isn't used at all anyway).
+      #
+      # However, the $unsanitized_funcs nonetheless must be compiled in
+      # isolation to avoid sanitizers.  For these functions, the unadorned
+      # names must be defined weak so that the in-kernel sanitizer runtime can
+      # supersede them while calling their `__unsanitized_*` counterparts.
+      # (The llvm-libc macro shenanigans make it infeasible to just not define
+      # the unadorned names at all.)
+      if ((is_unsanitized && kernel_unsanitized_remove_configs != []) ||
+          !is_kernel) {
+        basic_abi = !is_kernel
+        if (is_unsanitized) {
+          remove_configs = kernel_unsanitized_remove_configs
+        }
+
+        global_symbols = []
+        foreach(prefix,
+                [ "" ] + global_alias_prefixes + weak_alias_prefixes +
+                    export_alias_prefixes) {
+          global_symbols += [ prefix + func ]
+        }
+      }
+
+      # See the generated_file() target below.
+      non_test_deps = [ ":$func.inc" ]
+      non_test_vars = {
+        inputs = [ "$target_gen_dir/$func.inc" ]
+        cflags = [
+          "-include",
+          rebase_path(inputs[0], root_build_dir),
+        ]
+        if (cxx_rbe_enable) {
+          # TODO(https://fxbug.dev/501268588): This is working around an RBE
+          # wrapper bug.  Even though it's in the GN inputs and directly on the
+          # command line, it doesn't notice the -include file as a remote
+          # input.
+          cflags +=
+              [ "--remote-inputs=" + rebase_path(inputs[0], root_build_dir) ]
+        }
       }
     }
-  }
 
-  generated_file("${funcs[0]}.inc") {
-    # The user.basic environment doesn't export the symbols it defines.
-    # When building for export in libc.so, we want these compiled in the
-    # user.basic environment, but we also want to export names for them.
-    #
-    # TODO(https://fxbug.dev/501232406): At the same time, dynlink.c needs to
-    # use hidden symbols to access these so that it won't use PLT entries
-    # before they're ready.
-    #
-    # So compile them with extra macros that make the LLVM_LIBC_FUNCTION macro
-    # inject the extra alias declarations.
-    #
-    # These macros are hairy enough that putting them all into a -D switch via
-    # $defines would be a lot, and a potential quoting nightmare.  Hence
-    # instead an -include switch is passed pointing to this generated file of
-    # `#define` directives.
+    generated_file("$func.inc") {
+      # The user.basic environment doesn't export the symbols it defines.
+      # When building for export in libc.so, we want these compiled in the
+      # user.basic environment, but we also want to export names for them.
+      #
+      # TODO(https://fxbug.dev/501232406): At the same time, dynlink.c needs to
+      # use hidden symbols to access these so that it won't use PLT entries
+      # before they're ready.
+      #
+      # So compile them with extra macros that make the LLVM_LIBC_FUNCTION
+      # macro inject the extra alias declarations.
+      #
+      # These macros are hairy enough that putting them all into a -D switch
+      # via $defines would be a lot, and a potential quoting nightmare.  Hence
+      # instead an -include switch is passed pointing to this generated file of
+      # `#define` directives.
 
-    outputs = [ "$target_gen_dir/$target_name" ]
-    output_conversion = "list lines"
+      outputs = [ "$target_gen_dir/$target_name" ]
+      output_conversion = "list lines"
 
-    contents = [ "// Generated by " +
-                 get_label_info(":$target_name", "label_with_toolchain") +
-                 " -- DO NOT EDIT!" ]
-
-    # $llvm_libc/src/__support/common.h puts LLVM_LIBC_FUNCTION_ATTR_$func
-    # before the actual declarations at the front of the LLVM_LIBC_FUNCTION()
-    # expansion.  But the macro shenanigans for this don't permit using any
-    # commas in the value!
-
-    foreach(func, funcs) {
+      # $llvm_libc/src/__support/common.h puts LLVM_LIBC_FUNCTION_ATTR_$func
+      # before the actual declarations at the front of the LLVM_LIBC_FUNCTION()
+      # expansion.  But the macro shenanigans for this don't permit using any
+      # commas in the value!
       extra_decls = ""
       foreach(alias,
               [
@@ -200,49 +269,25 @@ foreach(funcs,
         }
       }
 
-      contents += [
+      if (is_unsanitized && kernel_unsanitized_remove_configs != []) {
+        # For $unsanitized_funcs in the kernel, the actual definition will be
+        # weak and any plain references (e.g. from assembly or uninstrumented
+        # functions) will use the sanitizer runtime's definition instead.  But
+        # the `__unsanitized_*` alias will be defined (as strong) and be used.
+        extra_decls += " [[gnu::weak]]"
+      }
+
+      contents = [
+        "// Generated by $_label -- DO NOT EDIT!",
         "#define LLVM_LIBC_FUNCTION_ATTR_$func LLVM_LIBC_EMPTY, $extra_decls",
       ]
     }
   }
 }
 
-# These are the functions that are nonproblematic in any context.
-llvm_libc_source_set("minimal-str") {
-  visibility = [
-    ":*",
-    "//src/lib/process_builder:static_pie_test_util",
-  ]
-
-  functions = [
-    "stpcpy",
-    "strchrnul",
-    "strcpy",
-    "strchr",
-    "strspn",
-    "strcat",
-    "strstr",
-    "strsep",
-    "strcspn",
-    "strncat",
-    "strlcat",
-    "strlcpy",
-    "strncmp",
-    "strrchr",
-    "strncpy",
-    "strcmp",
-    "strnlen",
-    "strpbrk",
-    "stpncpy",
-  ]
-
-  deps = [
-    ":mem",
-    ":strlen",
-  ]
-}
-
-llvm_libc_source_set("str") {
+# These are the functions that use their own state or other libc state, and
+# cannot be used in hermetic contexts.
+llvm_libc_source_set("impure") {
   functions = [
     "strcasestr",
     "strcoll",
@@ -257,8 +302,6 @@ llvm_libc_source_set("str") {
     #"strerror_r",
     #"strsignal",
   ]
-
-  deps = [ ":minimal-str" ]
 }
 
 llvm_libc_source_set("strsignalerror") {
@@ -310,5 +353,24 @@ llvm_libc_source_set("StringUtil") {
 # hidden-visibility symbols and should be safe in any build environment.
 static_library("hermetic") {
   complete_static_lib = true
-  deps = [ ":minimal-str" ]
+  deps = [
+    ":pure-compiler",
+    ":pure-no-compiler",
+  ]
+}
+
+# The kernel libc shares some source_set() targets here directly, while
+# everything else outside libc itself just uses the :hermetic library.
+source_set("kernel") {
+  visibility = [ "//zircon/kernel/lib/libc/string/*" ]
+  deps = [
+    ":pure-no-compiler",
+    "../strings",
+  ]
+}
+
+# The kernel omits this on machines that replace memcpy / memset in assembly.
+source_set("kernel-compiler") {
+  visibility = [ "//zircon/kernel/lib/libc/string/*" ]
+  deps = [ ":pure-compiler" ]
 }

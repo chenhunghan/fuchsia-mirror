@@ -68,6 +68,7 @@ rust_library(
     target_compatible_with = select({
         "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [],
         "//conditions:default": ["@platforms//:incompatible"],
@@ -80,7 +81,7 @@ rust_library(
         "//third_party/rust_crates/forks/bluetooth/bt-gatt:bt_gatt",
         "//third_party/rust_crates/vendor/futures-0.3.34:futures",
         "//third_party/rust_crates/vendor/log-0.4.29:log",
-        "//third_party/rust_crates/vendor/num-0.4.3:num",
+        "//third_party/rust_crates/vendor/num-traits-0.2.19:num_traits",
         "//third_party/rust_crates/vendor/parking_lot-0.12.5:parking_lot",
         "//third_party/rust_crates/vendor/thiserror-2.0.20:thiserror",
     ],

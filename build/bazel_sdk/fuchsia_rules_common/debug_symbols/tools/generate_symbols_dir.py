@@ -20,13 +20,13 @@ from debug_symbols.tools.pylib import elf_info
 _STAMP_FILE_NAME = ".stamp"
 
 
-def create_empty(path: str):
+def create_empty(path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--debug", action="store_true", help="Enable debug logs."
@@ -45,7 +45,7 @@ def main():
     # Read all input files, one line at a time.
     # Each line is: BUILD_ID  ELF_WITH_SYMBOLS_FILE_PATH
     # and stores the result in a { BUILD_ID -> ELF_FILE } map.
-    debug_map = {}
+    debug_map: dict[str, str] = {}
     for input_file in args.input_file:
         with open(input_file) as f:
             for line in f:

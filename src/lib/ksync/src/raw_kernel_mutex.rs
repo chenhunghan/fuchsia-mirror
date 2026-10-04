@@ -6,15 +6,16 @@ use crate::raw_lock::RawLock;
 use core::ffi::c_void;
 use pin_init::{PinInit, pin_data, pin_init_from_closure};
 
-#[cfg(feature = "lock_name_tracing")]
+#[cfg(any(feature = "lock_name_tracing", feature = "spin_lock_tracing"))]
 const RAW_MUTEX_SIZE: usize = 32;
-#[cfg(not(feature = "lock_name_tracing"))]
+#[cfg(not(any(feature = "lock_name_tracing", feature = "spin_lock_tracing")))]
 const RAW_MUTEX_SIZE: usize = 24;
 
 unsafe extern "C" {
     fn cpp_mutex_destroy(mutex: *mut c_void);
     fn cpp_mutex_acquire(lock: *mut c_void, entry_storage: *mut c_void);
     fn cpp_mutex_release(lock: *mut c_void, entry_storage: *mut c_void);
+    fn cpp_mutex_is_contested(lock: *mut c_void) -> bool;
 
     fn cpp_critical_mutex_destroy(mutex: *mut c_void);
     fn cpp_critical_mutex_acquire(lock: *mut c_void, entry_storage: *mut c_void) -> bool;
@@ -23,6 +24,7 @@ unsafe extern "C" {
         entry_storage: *mut c_void,
         should_clear: bool,
     );
+    fn cpp_critical_mutex_is_contested(lock: *mut c_void) -> bool;
 }
 
 const MUTEX_MAGIC: u32 = 0x6D757478; // 'mutx'
@@ -30,9 +32,9 @@ const INVALID_CPU: u32 = u32::MAX;
 
 const fn make_mutex_storage() -> [u8; RAW_MUTEX_SIZE] {
     let mut bytes = [0u8; RAW_MUTEX_SIZE];
-    #[cfg(feature = "lock_name_tracing")]
+    #[cfg(any(feature = "lock_name_tracing", feature = "spin_lock_tracing"))]
     let offset = 8;
-    #[cfg(not(feature = "lock_name_tracing"))]
+    #[cfg(not(any(feature = "lock_name_tracing", feature = "spin_lock_tracing")))]
     let offset = 0;
 
     let magic_bytes = MUTEX_MAGIC.to_ne_bytes();
@@ -62,7 +64,7 @@ pub struct LockEntryStorage(zr::OpaqueBytes<40>);
 #[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct RawMutex {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     class_id: *const c_void,
     storage: RawMutexStorage,
 }
@@ -73,10 +75,20 @@ impl RawMutex {
     /// Statically initializes a RawMutex in constant context.
     pub const fn const_init(_class_id: *const c_void) -> Self {
         Self {
-            #[cfg(feature = "lock_dep")]
+            #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
             class_id: _class_id,
             storage: RawMutexStorage(zr::OpaqueBytes::new(make_mutex_storage())),
         }
+    }
+
+    /// Is the mutex contested i.e. is at least one thread blocked waiting on it?
+    ///
+    /// The contested flag does not track threads which are spin-waiting on the
+    /// Mutex and have yet to enter a blocking phase.
+    #[inline]
+    pub fn is_contested(&self) -> bool {
+        // SAFETY: The FFI call is safe because the lock is initialized
+        unsafe { cpp_mutex_is_contested(self.as_mut_ptr()) }
     }
 
     /// Returns a slice over the raw mutex storage bytes.
@@ -163,7 +175,7 @@ impl crate::RawLock for RawMutex {
 #[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct RawCriticalMutex {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     class_id: *const c_void,
     storage: RawMutexStorage,
 }
@@ -174,10 +186,20 @@ impl RawCriticalMutex {
     /// Statically initializes a RawCriticalMutex in constant context.
     pub const fn const_init(_class_id: *const c_void) -> Self {
         Self {
-            #[cfg(feature = "lock_dep")]
+            #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
             class_id: _class_id,
             storage: RawMutexStorage(zr::OpaqueBytes::new(make_mutex_storage())),
         }
+    }
+
+    /// Is the mutex contested i.e. is at least one thread blocked waiting on it?
+    ///
+    /// The contested flag does not track threads which are spin-waiting on the
+    /// Mutex and have yet to enter a blocking phase.
+    #[inline]
+    pub fn is_contested(&self) -> bool {
+        // SAFETY: The FFI call is safe because the lock is initialized
+        unsafe { cpp_critical_mutex_is_contested(self.as_mut_ptr()) }
     }
 
     /// Returns a slice over the raw critical mutex storage bytes.
@@ -263,10 +285,12 @@ impl crate::RawLock for RawCriticalMutex {
 }
 
 const _: () = {
-    #[cfg(feature = "lock_dep")]
-    const EXPECTED_SIZE: usize = if cfg!(feature = "lock_name_tracing") { 40 } else { 32 };
-    #[cfg(not(feature = "lock_dep"))]
-    const EXPECTED_SIZE: usize = if cfg!(feature = "lock_name_tracing") { 32 } else { 24 };
+    const HAS_NAME_STORAGE: bool =
+        cfg!(any(feature = "lock_name_tracing", feature = "spin_lock_tracing"));
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
+    const EXPECTED_SIZE: usize = if HAS_NAME_STORAGE { 40 } else { 32 };
+    #[cfg(not(any(feature = "lock_dep", feature = "lock_metadata_only")))]
+    const EXPECTED_SIZE: usize = if HAS_NAME_STORAGE { 32 } else { 24 };
 
     assert!(core::mem::size_of::<RawMutex>() == EXPECTED_SIZE);
     assert!(core::mem::align_of::<RawMutex>() == 8);

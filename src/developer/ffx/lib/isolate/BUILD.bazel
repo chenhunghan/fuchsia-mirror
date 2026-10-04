@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "ffx_isolate",
+    edition = "2024",
+    # The subtool search paths are relative to the build root. Both point at
+    # the host-tools directory, which is what GN computes today.
+    rustc_env = {
+        "SUBTOOL_SEARCH_HOST_TOOLS": "host-tools",  # @bazel2gn:value_overwrite:${_subtool_search_host_tools}
+        "SUBTOOL_SEARCH_TEST_DATA": "host-tools",  # @bazel2gn:value_overwrite:${_subtool_search_test_data}
+    },
+    target_compatible_with = HOST_CONSTRAINTS,
+    test_deps = ["//src/lib/fuchsia"],
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    with_host_unit_tests = True,
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/executor:lib",
+        "//src/developer/ffx/lib/sdk:lib",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

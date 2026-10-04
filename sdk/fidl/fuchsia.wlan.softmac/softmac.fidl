@@ -229,7 +229,7 @@ open protocol WlanSoftmacIfcBase {
     ///       This may be due to the current country setting.
     @selector("fuchsia.wlan.softmac/WlanSoftmacIfc.NotifyScanComplete")
     strict NotifyScanComplete(table {
-        1: status zx.Status;
+        1: status zx.Result;
         2: scan_id uint64;
     }) -> ();
 };

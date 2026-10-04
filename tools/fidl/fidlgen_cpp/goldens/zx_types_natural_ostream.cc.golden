@@ -31,6 +31,30 @@ std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusEnumAlias>::Format(
   }
   return os;
 }
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultEnum>::Format(std::ostream& os, const ::test_zxtypes::ResultEnum& value) {
+  os << "test_zxtypes::ResultEnum";
+  os << "::";
+  switch (value) {
+    case ::test_zxtypes::ResultEnum::kOk:
+      os << "kOk";
+      break;
+    default:
+      os << "UNKNOWN(" << static_cast<int32_t>(value) << ")";
+  }
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultEnumAlias>::Format(std::ostream& os, const ::test_zxtypes::ResultEnumAlias& value) {
+  os << "test_zxtypes::ResultEnumAlias";
+  os << "::";
+  switch (value) {
+    case ::test_zxtypes::ResultEnumAlias::kOk:
+      os << "kOk";
+      break;
+    default:
+      os << "UNKNOWN(" << static_cast<int32_t>(value) << ")";
+  }
+  return os;
+}
 std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusStruct>::Format(std::ostream& os, const ::test_zxtypes::StatusStruct& value) {
   os << "test_zxtypes::StatusStruct";
   os << "{ ";
@@ -66,8 +90,8 @@ std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusProtocolARequest>::
 std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusProtocolAResponse>::Format(std::ostream& os, const ::test_zxtypes::StatusProtocolAResponse& value) {
   os << "test_zxtypes::StatusProtocolAResponse";
   os << "{ ";
-  os << "result";
-  os << " = " << fidl::ostream::Formatted<int32_t>(value.result()) << ", ";
+  os << "status";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.status()) << ", ";
   os << "}";
   return os;
 }
@@ -81,6 +105,62 @@ std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusProtocolBRequest>::
 }
 std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusProtocolBResponse>::Format(std::ostream& os, const ::test_zxtypes::StatusProtocolBResponse& value) {
   os << "test_zxtypes::StatusProtocolBResponse";
+  os << "{ ";
+  os << "status";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.status()) << ", ";
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultStruct>::Format(std::ostream& os, const ::test_zxtypes::ResultStruct& value) {
+  os << "test_zxtypes::ResultStruct";
+  os << "{ ";
+  os << "result";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.result()) << ", ";
+  os << "result_array";
+  os << " = " << fidl::ostream::Formatted<::std::array<int32_t, 10>>(value.result_array()) << ", ";
+  os << "result_vector";
+  os << " = " << fidl::ostream::Formatted<::std::vector<int32_t>>(value.result_vector()) << ", ";
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultStructAlias>::Format(std::ostream& os, const ::test_zxtypes::ResultStructAlias& value) {
+  os << "test_zxtypes::ResultStructAlias";
+  os << "{ ";
+  os << "result";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.result()) << ", ";
+  os << "result_array";
+  os << " = " << fidl::ostream::Formatted<::std::array<int32_t, 10>>(value.result_array()) << ", ";
+  os << "result_vector";
+  os << " = " << fidl::ostream::Formatted<::std::vector<int32_t>>(value.result_vector()) << ", ";
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultProtocolARequest>::Format(std::ostream& os, const ::test_zxtypes::ResultProtocolARequest& value) {
+  os << "test_zxtypes::ResultProtocolARequest";
+  os << "{ ";
+  os << "arg";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.arg()) << ", ";
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultProtocolAResponse>::Format(std::ostream& os, const ::test_zxtypes::ResultProtocolAResponse& value) {
+  os << "test_zxtypes::ResultProtocolAResponse";
+  os << "{ ";
+  os << "result";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.result()) << ", ";
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBRequest>::Format(std::ostream& os, const ::test_zxtypes::ResultProtocolBRequest& value) {
+  os << "test_zxtypes::ResultProtocolBRequest";
+  os << "{ ";
+  os << "arg";
+  os << " = " << fidl::ostream::Formatted<int32_t>(value.arg()) << ", ";
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBResponse>::Format(std::ostream& os, const ::test_zxtypes::ResultProtocolBResponse& value) {
+  os << "test_zxtypes::ResultProtocolBResponse";
   os << "{ ";
   os << "result";
   os << " = " << fidl::ostream::Formatted<int32_t>(value.result()) << ", ";
@@ -119,6 +199,42 @@ std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusTableAlias>::Format
   if (value.status_vector().has_value()) {
     os << "status_vector";
     os << " = " << fidl::ostream::Formatted<::std::vector<int32_t>>(value.status_vector().value()) << ", ";
+  }
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultTable>::Format(std::ostream& os, const ::test_zxtypes::ResultTable& value) {
+  os << "test_zxtypes::ResultTable";
+  os << "{ ";
+  if (value.result().has_value()) {
+    os << "result";
+    os << " = " << fidl::ostream::Formatted<int32_t>(value.result().value()) << ", ";
+  }
+  if (value.result_array().has_value()) {
+    os << "result_array";
+    os << " = " << fidl::ostream::Formatted<::std::array<int32_t, 10>>(value.result_array().value()) << ", ";
+  }
+  if (value.result_vector().has_value()) {
+    os << "result_vector";
+    os << " = " << fidl::ostream::Formatted<::std::vector<int32_t>>(value.result_vector().value()) << ", ";
+  }
+  os << "}";
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultTableAlias>::Format(std::ostream& os, const ::test_zxtypes::ResultTableAlias& value) {
+  os << "test_zxtypes::ResultTableAlias";
+  os << "{ ";
+  if (value.result().has_value()) {
+    os << "result";
+    os << " = " << fidl::ostream::Formatted<int32_t>(value.result().value()) << ", ";
+  }
+  if (value.result_array().has_value()) {
+    os << "result_array";
+    os << " = " << fidl::ostream::Formatted<::std::array<int32_t, 10>>(value.result_array().value()) << ", ";
+  }
+  if (value.result_vector().has_value()) {
+    os << "result_vector";
+    os << " = " << fidl::ostream::Formatted<::std::vector<int32_t>>(value.result_vector().value()) << ", ";
   }
   os << "}";
   return os;
@@ -191,6 +307,74 @@ std::ostream& fidl::ostream::Formatter<::test_zxtypes::StatusProtocolBResult>::F
   }
   return os;
 }
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultUnion>::Format(std::ostream& os, const ::test_zxtypes::ResultUnion& value) {
+  os << "test_zxtypes::ResultUnion::";
+  switch (value.Which()) {
+    case ::test_zxtypes::ResultUnion::Tag::kResult:
+      os << "result(" << fidl::ostream::Formatted<int32_t>(value.result().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultUnion::Tag::kResultArray:
+      os << "result_array(" << fidl::ostream::Formatted<::std::array<int32_t, 10>>(value.result_array().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultUnion::Tag::kResultVector:
+      os << "result_vector(" << fidl::ostream::Formatted<::std::vector<int32_t>>(value.result_vector().value()) << ")";
+      break;
+    default:
+      os << "Unknown";
+  }
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultUnionAlias>::Format(std::ostream& os, const ::test_zxtypes::ResultUnionAlias& value) {
+  os << "test_zxtypes::ResultUnionAlias::";
+  switch (value.Which()) {
+    case ::test_zxtypes::ResultUnionAlias::Tag::kResult:
+      os << "result(" << fidl::ostream::Formatted<int32_t>(value.result().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultUnionAlias::Tag::kResultArray:
+      os << "result_array(" << fidl::ostream::Formatted<::std::array<int32_t, 10>>(value.result_array().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultUnionAlias::Tag::kResultVector:
+      os << "result_vector(" << fidl::ostream::Formatted<::std::vector<int32_t>>(value.result_vector().value()) << ")";
+      break;
+    default:
+      os << "Unknown";
+  }
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultProtocolAResult>::Format(std::ostream& os, const ::test_zxtypes::ResultProtocolAResult& value) {
+  os << "test_zxtypes::ResultProtocolAResult::";
+  switch (value.Which()) {
+    case ::test_zxtypes::ResultProtocolAResult::Tag::kResponse:
+      os << "response(" << fidl::ostream::Formatted<::test_zxtypes::ResultProtocolAResponse>(value.response().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultProtocolAResult::Tag::kErr:
+      os << "err(" << fidl::ostream::Formatted<int32_t>(value.err().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultProtocolAResult::Tag::kFrameworkErr:
+      os << "framework_err(" << fidl::ostream::Formatted<::fidl::internal::FrameworkErr>(value.framework_err().value()) << ")";
+      break;
+    default:
+      os << "Unknown";
+  }
+  return os;
+}
+std::ostream& fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBResult>::Format(std::ostream& os, const ::test_zxtypes::ResultProtocolBResult& value) {
+  os << "test_zxtypes::ResultProtocolBResult::";
+  switch (value.Which()) {
+    case ::test_zxtypes::ResultProtocolBResult::Tag::kResponse:
+      os << "response(" << fidl::ostream::Formatted<::test_zxtypes::ResultProtocolBResponse>(value.response().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultProtocolBResult::Tag::kErr:
+      os << "err(" << fidl::ostream::Formatted<int32_t>(value.err().value()) << ")";
+      break;
+    case ::test_zxtypes::ResultProtocolBResult::Tag::kFrameworkErr:
+      os << "framework_err(" << fidl::ostream::Formatted<::fidl::internal::FrameworkErr>(value.framework_err().value()) << ")";
+      break;
+    default:
+      os << "Unknown";
+  }
+  return os;
+}
 #if __FIDL_SUPPORT_HANDLES
 
 std::ostream& fidl::ostream::Formatter<::fidl::ClientEnd<::test_zxtypes::StatusProtocol>>::Format(std::ostream& os, const ::fidl::ClientEnd<::test_zxtypes::StatusProtocol>& value) {
@@ -207,6 +391,21 @@ std::ostream& operator<<(std::ostream& os, const ::fidl::ClientEnd<::test_zxtype
 
 std::ostream& operator<<(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::StatusProtocol>& value) {
   return fidl::ostream::Formatter<::fidl::ServerEnd<::test_zxtypes::StatusProtocol>>::Format(os, value);
+}
+std::ostream& fidl::ostream::Formatter<::fidl::ClientEnd<::test_zxtypes::ResultProtocol>>::Format(std::ostream& os, const ::fidl::ClientEnd<::test_zxtypes::ResultProtocol>& value) {
+  return os << "ClientEnd<" << "test_zxtypes::ResultProtocol" << ">(" << value.channel().get() << ")";
+}
+
+std::ostream& fidl::ostream::Formatter<::fidl::ServerEnd<::test_zxtypes::ResultProtocol>>::Format(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::ResultProtocol>& value) {
+  return os << "ServerEnd<" << "test_zxtypes::ResultProtocol" << ">(" << value.channel().get() << ")";
+}
+
+std::ostream& operator<<(std::ostream& os, const ::fidl::ClientEnd<::test_zxtypes::ResultProtocol>& value) {
+  return fidl::ostream::Formatter<::fidl::ClientEnd<::test_zxtypes::ResultProtocol>>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::ResultProtocol>& value) {
+  return fidl::ostream::Formatter<::fidl::ServerEnd<::test_zxtypes::ResultProtocol>>::Format(os, value);
 }
 
 #endif  // __FIDL_SUPPORT_HANDLES
@@ -266,6 +465,62 @@ std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::StatusProtocolB
 
 std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::StatusProtocolBResult& value) {
   return fidl::ostream::Formatter<::test_zxtypes::StatusProtocolBResult>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultEnum& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultEnum>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultEnumAlias& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultEnumAlias>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultStruct& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultStruct>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultStructAlias& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultStructAlias>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultTable& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultTable>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultTableAlias& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultTableAlias>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultUnion& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultUnion>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultUnionAlias& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultUnionAlias>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolARequest& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultProtocolARequest>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolAResponse& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultProtocolAResponse>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolAResult& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultProtocolAResult>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolBRequest& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBRequest>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolBResponse& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBResponse>::Format(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolBResult& value) {
+  return fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBResult>::Format(os, value);
 }
 
 #pragma clang diagnostic pop

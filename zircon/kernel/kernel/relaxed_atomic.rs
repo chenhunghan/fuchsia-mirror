@@ -5,8 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 use core::sync::atomic::{
-    AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU16, AtomicU32,
-    AtomicU64, AtomicUsize,
+    AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU16,
+    AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
 use paste::paste;
@@ -18,6 +18,27 @@ use paste::paste;
 pub struct RelaxedAtomic<T> {
     wrapped: T,
 }
+
+impl RelaxedAtomic<AtomicBool> {
+    /// Creates a new `RelaxedAtomic`.
+    #[inline]
+    pub const fn new(value: bool) -> Self {
+        Self { wrapped: AtomicBool::new(value) }
+    }
+
+    /// Loads the value with relaxed ordering.
+    #[inline]
+    pub fn load(&self) -> bool {
+        self.wrapped.load(Ordering::Relaxed)
+    }
+
+    /// Stores the value with relaxed ordering.
+    #[inline]
+    pub fn store(&self, desired: bool) {
+        self.wrapped.store(desired, Ordering::Relaxed)
+    }
+}
+pub type RelaxedAtomicBool = RelaxedAtomic<AtomicBool>;
 
 // Use a macro to stamp out a bunch of implementations until generic_atomic is stabilized.
 // https://github.com/rust-lang/rust/issues/130539.

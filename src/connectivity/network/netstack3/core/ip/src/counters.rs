@@ -12,6 +12,7 @@ use netstack3_base::{
 };
 
 use crate::internal::fragmentation::FragmentationCounters;
+use crate::internal::gso::{GsoCounters, GsoSourceCounters};
 
 /// An IP extension trait supporting counters at the IP layer.
 pub trait IpCountersIpExt: Ip {
@@ -107,6 +108,8 @@ pub struct IpCounters<I: IpCountersIpExt, C: CounterRepr = Counter> {
     pub invalid_cached_conntrack_entry: C,
     /// IP fragmentation counters.
     pub fragmentation: FragmentationCounters<C>,
+    /// Software segmentation counters.
+    pub gso: GsoCounters<C>,
     /// Number of packets filtered out by the socket egress filter.
     pub socket_egress_filter_dropped: C,
     /// Number of packets that could not be parsed and had to be dropped
@@ -144,6 +147,7 @@ impl<I: IpCountersIpExt> Inspectable for IpCounters<I> {
             multicast_no_interest,
             invalid_cached_conntrack_entry,
             fragmentation,
+            gso,
             socket_egress_filter_dropped,
             unparsable_packet,
         } = self;
@@ -202,6 +206,34 @@ impl<I: IpCountersIpExt> Inspectable for IpCounters<I> {
                 .record_counter("ErrorInnerSizeLimitExceeded", error_inner_size_limit_exceeded);
             inspector.record_counter("ErrorFragmentedSerializer", error_fragmented_serializer);
         });
+        inspector.record_child("SegmentsTx", |inspector| {
+            let GsoCounters { forwarded, local } = gso;
+            inspector.record_child("Forwarded", |inspector| {
+                inspector.delegate_inspectable(forwarded);
+            });
+            inspector.record_child("Local", |inspector| {
+                inspector.delegate_inspectable(local);
+            });
+        });
+    }
+}
+
+impl<C: CounterRepr> Inspectable for GsoSourceCounters<C> {
+    fn record<I: Inspector>(&self, inspector: &mut I) {
+        let Self {
+            segmentation_required,
+            segments,
+            error_parse,
+            error_not_segmentable,
+            error_unsupported_headers,
+            error_payload_too_long,
+        } = self;
+        inspector.record_counter("SegmentationRequired", segmentation_required);
+        inspector.record_counter("Segments", segments);
+        inspector.record_counter("ErrorParse", error_parse);
+        inspector.record_counter("ErrorNotSegmentable", error_not_segmentable);
+        inspector.record_counter("ErrorUnsupportedHeaders", error_unsupported_headers);
+        inspector.record_counter("ErrorPayloadTooLong", error_payload_too_long);
     }
 }
 

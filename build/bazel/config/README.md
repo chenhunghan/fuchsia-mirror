@@ -33,3 +33,9 @@ scripts ot locations.
 
   A GN build file that defines a `generated_file()` target dumping
   the current toolchain's bazel build arguments to a JSON file.
+
+- BUILD_CONFIGURATION_VARIABLES.md:
+
+  Documentation explaining how Fuchsia build configuration variables are
+  classified and propagated from GN to Bazel.
+

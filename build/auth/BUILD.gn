@@ -10,6 +10,7 @@ if (is_host) {
     testonly = true
     deps = [
       ":apt_test($host_toolchain)",
+      ":gcloud_creds_test($host_toolchain)",
       ":gcloud_test($host_toolchain)",
     ]
   }
@@ -20,6 +21,15 @@ if (is_host) {
 
   python_library("gcloud") {
     sources = [ "gcloud.py" ]
+    library_deps = [ ":apt" ]
+  }
+
+  python_library("gcloud_creds") {
+    sources = [ "gcloud_creds.py" ]
+    library_deps = [
+      ":apt",
+      ":gcloud",
+    ]
   }
 
   python_build_time_tests("apt_test") {
@@ -32,6 +42,16 @@ if (is_host) {
     tests = [ "gcloud_test.py" ]
     inputs = [ "gcloud.py" ]
     deps = [ ":gcloud" ]
+  }
+
+  python_build_time_tests("gcloud_creds_test") {
+    tests = [ "gcloud_creds_test.py" ]
+    inputs = [ "gcloud_creds.py" ]
+    deps = [
+      ":apt",
+      ":gcloud",
+      ":gcloud_creds",
+    ]
   }
 } else {
   # If evaluated on the target toolchain (e.g. via fx add-test), redirect the

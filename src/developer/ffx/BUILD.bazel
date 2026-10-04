@@ -29,10 +29,12 @@ json_merge(
 test_suite(
     name = "tests",
     tests = [
+        "//src/developer/fastboot:lib_test",
         "//src/developer/ffx/lib/arg_parsing:lib_test",
         "//src/developer/ffx/lib/buildid:lib_test",
         "//src/developer/ffx/lib/compat_info:lib_test",
         "//src/developer/ffx/lib/errors:lib_test",
+        "//src/developer/ffx/lib/isolate:lib_test",
         "//src/developer/ffx/lib/logging:lib_test",
         "//src/developer/ffx/lib/metrics:lib_test",
         "//src/developer/ffx/lib/netext:lib_test",
@@ -43,6 +45,7 @@ test_suite(
         "//src/developer/ffx/lib/termio:termio_test",
         "//src/developer/ffx/lib/trace:lib_test",
         "//src/developer/ffx/lib/traceable_error:lib_test",
+        "//src/developer/ffx/lib/usb_fastboot_discovery:lib_test",
         "//src/developer/ffx/lib/version:lib_test",
     ],
 )

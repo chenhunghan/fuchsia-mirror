@@ -50,7 +50,7 @@ class SamplerDispatcher final : public Dispatcher {
 
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_SAMPLER; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
-  bool is_waitable() const final { return true; }
+  bool is_waitable() const final { return ZX_DEFAULT_SAMPLER_RIGHTS & ZX_RIGHT_WAIT; }
 
   // When the user drops their end of the buffer/sampler, we need to stop sampling and clean up the
   // state.

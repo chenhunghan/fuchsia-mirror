@@ -59,6 +59,8 @@ class TestNormalizeRustcArgs(unittest.TestCase):
             ("-Zdep-info-omit-d-target", ""),
             ("--error-format=human", ""),
             ("--remap-path-prefix=${pwd}=.", ""),
+            ("--remap-path-prefix=${exec_root}=.", ""),
+            ("--remap-path-prefix=${output_base}=.", ""),
             ("-Cdebug-assertions=y", ""),
             ("-Cdebuginfo=2", ""),
             ("-Cembed-bitcode=no", ""),

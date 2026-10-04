@@ -123,16 +123,18 @@ void DeviceEnumerationTest::Verify(const Requirement& requirement, bool fail_on_
                                                 result.matched_nodes.end());
 
   std::set<std::string_view> leftover_nodes;
-  for (auto& [moniker, node] : node_info_) {
-    if (!matched_nodes.contains(moniker)) {
-      leftover_nodes.insert(moniker);
+  if (fail_on_unexpected_nodes) {
+    for (auto& [moniker, node] : node_info_) {
+      if (!matched_nodes.contains(moniker)) {
+        leftover_nodes.insert(moniker);
+      }
     }
-  }
 
-  if (!leftover_nodes.empty()) {
-    std::cerr << "Found " << leftover_nodes.size() << " unexpected node(s):\n";
-    for (const auto& moniker : leftover_nodes) {
-      std::cerr << "     " << moniker << ":\n";
+    if (!leftover_nodes.empty()) {
+      std::cerr << "Found " << leftover_nodes.size() << " unexpected node(s):\n";
+      for (const auto& moniker : leftover_nodes) {
+        std::cerr << "     " << moniker << ":\n";
+      }
     }
   }
 

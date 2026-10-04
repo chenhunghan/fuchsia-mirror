@@ -69,7 +69,6 @@ uapi::check_arch_independent_layout! {
     fuse_attr_out {}
     fuse_create_in {}
     fuse_dirent {}
-    fuse_entry_bpf_out {}
     fuse_entry_out {}
     fuse_flush_in {}
     fuse_forget_in {}
@@ -533,6 +532,13 @@ impl DynamicFileSource for WaitingFile {
 #[derive(Debug, Default)]
 struct FuseNodeMutableState {
     nlookup: u64,
+
+    /// Validity deadline from the most recent entry reply (e.g. to `FUSE_LOOKUP`) that returned
+    /// this node, for the `DirEntry` created for that reply.
+    ///
+    /// Taken by `create_dir_entry_ops` so that the new `DirEntry` is not revalidated before the
+    /// deadline, like Linux does with `fuse_change_entry_timeout()`.
+    entry_valid_until: Option<zx::MonotonicInstant>,
 }
 
 #[derive(Debug)]
@@ -687,6 +693,12 @@ impl FuseNode {
         if entry.nodeid == 0 {
             return error!(ENOENT);
         }
+        let attr_valid_duration = attr_valid_to_duration(entry.attr_valid, entry.attr_valid_nsec)?;
+        let entry_valid_until = zx::MonotonicInstant::after(attr_valid_to_duration(
+            entry.entry_valid,
+            entry.entry_valid_nsec,
+        )?);
+        let mut created = false;
         let node = node.fs().get_and_validate_or_create_node(
             entry.nodeid,
             |node| {
@@ -694,13 +706,14 @@ impl FuseNode {
                 fuse_node.generation == entry.generation
             },
             || {
+                created = true;
                 let fuse_node =
                     FuseNode::new(self.connection.clone(), entry.nodeid, entry.generation);
                 let mut info = FsNodeInfo::default();
                 FuseNode::update_node_info_from_attr(
                     &mut info,
                     entry.attr,
-                    attr_valid_to_duration(entry.attr_valid, entry.attr_valid_nsec)?,
+                    attr_valid_duration,
                     &fuse_node.attributes_valid_until,
                 )?;
                 Ok(FsNode::new_uncached(
@@ -712,10 +725,24 @@ impl FuseNode {
                 ))
             },
         )?;
-        // . and .. do not get their lookup count increased.
+        // . and .. do not get their lookup count increased, nor a `DirEntry` of their own.
         if !DirEntry::is_reserved_name(name) {
             let fuse_node = FuseNode::from_node(&node);
-            fuse_node.state.lock().nlookup += 1;
+            {
+                let mut state = fuse_node.state.lock();
+                state.nlookup += 1;
+                state.entry_valid_until = Some(entry_valid_until);
+            }
+            if !created {
+                node.update_info(|info| {
+                    FuseNode::update_node_info_from_attr(
+                        info,
+                        entry.attr,
+                        attr_valid_duration,
+                        &fuse_node.attributes_valid_until,
+                    )
+                })?;
+            }
         }
         Ok(node)
     }
@@ -789,7 +816,7 @@ impl FileOps for FuseFileObject {
         }
 
         // EOF bounds capping to prevent reading past file limits.
-        let file_size = file.node().info().size;
+        let file_size = file.node().fetch_and_refresh_info(current_task)?.size;
         if offset >= file_size {
             return Ok(0);
         }
@@ -876,10 +903,14 @@ impl FileOps for FuseFileObject {
         if file.node().info().mode.is_dir() {
             return error!(EISDIR);
         }
-        if let Some(file_object) = self.passthrough_file.upgrade() {
-            return file_object.ops().write(&file_object, current_task, offset, data);
-        }
         let node = Self::get_fuse_node(file);
+        if let Some(file_object) = self.passthrough_file.upgrade() {
+            let written = file_object.ops().write(&file_object, current_task, offset, data)?;
+            if written > 0 {
+                node.invalidate_attributes();
+            }
+            return Ok(written);
+        }
 
         let max_transfer = self.connection.max_write_size();
         let mut total_written = 0;
@@ -1161,12 +1192,6 @@ struct FuseDirEntry {
     valid_until: AtomicMonotonicInstant,
 }
 
-impl Default for FuseDirEntry {
-    fn default() -> Self {
-        Self { valid_until: zx::MonotonicInstant::INFINITE_PAST.into() }
-    }
-}
-
 impl DirEntryOps for FuseDirEntry {
     fn revalidate(&self, current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
         // Relaxed because the attributes valid until atomic is not used to synchronize
@@ -1193,18 +1218,14 @@ impl DirEntryOps for FuseDirEntry {
             (parent, name)
         };
         let parent = FuseNode::from_node(&parent.node);
-        let FuseEntryOutExtended {
-            arg:
-                uapi::fuse_entry_out {
-                    nodeid,
-                    generation,
-                    entry_valid,
-                    entry_valid_nsec,
-                    attr,
-                    attr_valid,
-                    attr_valid_nsec,
-                },
-            ..
+        let uapi::fuse_entry_out {
+            nodeid,
+            generation,
+            entry_valid,
+            entry_valid_nsec,
+            attr,
+            attr_valid,
+            attr_valid_nsec,
         } = match parent.connection.lock().execute_operation(
             current_task,
             parent,
@@ -1310,7 +1331,13 @@ impl FsNodeOps for FuseNode {
     }
 
     fn create_dir_entry_ops(&self) -> Box<dyn DirEntryOps> {
-        Box::new(FuseDirEntry::default())
+        let valid_until = self
+            .state
+            .lock()
+            .entry_valid_until
+            .take()
+            .unwrap_or(zx::MonotonicInstant::INFINITE_PAST);
+        Box::new(FuseDirEntry { valid_until: valid_until.into() })
     }
 
     fn create_file_ops(
@@ -1496,23 +1523,25 @@ impl FsNodeOps for FuseNode {
 
     fn link(
         &self,
-        _node: &FsNode,
+        node: &FsNode,
         current_task: &CurrentTask,
         name: &FsStr,
         child: &FsNodeHandle,
     ) -> Result<(), Errno> {
         let child_node = FuseNode::from_node(child);
-        self.connection
-            .lock()
-            .execute_operation(
-                current_task,
-                self,
-                FuseOperation::Link {
-                    link_in: uapi::fuse_link_in { oldnodeid: child_node.nodeid },
-                    name: name.to_owned(),
-                },
-            )
-            .map(|_| ())
+        let response = self.connection.lock().execute_operation(
+            current_task,
+            self,
+            FuseOperation::Link {
+                link_in: uapi::fuse_link_in { oldnodeid: child_node.nodeid },
+                name: name.to_owned(),
+            },
+        )?;
+        let entry = response.entry().ok_or_else(|| errno!(EINVAL))?;
+        if entry.nodeid != child_node.nodeid || entry.generation != child_node.generation {
+            return error!(EINVAL);
+        }
+        self.fs_node_from_entry(node, name, entry).map(|_| ())
     }
 
     fn unlink(
@@ -2458,7 +2487,7 @@ impl RunningOperationKind {
                 Ok(FuseResponse::Init(Self::to_response::<uapi::fuse_init_out>(&buffer)))
             }
             Self::Lookup | Self::Mkdir | Self::Mknod | Self::Link | Self::Symlink => {
-                Ok(FuseResponse::Entry(Self::to_response::<FuseEntryOutExtended>(&buffer)))
+                Ok(FuseResponse::Entry(Self::to_response::<uapi::fuse_entry_out>(&buffer)))
             }
             Self::Open { .. } => {
                 Ok(FuseResponse::Open(Self::to_response::<uapi::fuse_open_out>(&buffer)))
@@ -2676,7 +2705,7 @@ enum FuseResponse {
     Access(Result<(), Errno>),
     Attr(uapi::fuse_attr_out),
     Create(CreateResponse),
-    Entry(FuseEntryOutExtended),
+    Entry(uapi::fuse_entry_out),
     GetXAttr(ValueOrSize<FsString>),
     Init(uapi::fuse_init_out),
     Open(uapi::fuse_open_out),
@@ -2694,7 +2723,7 @@ enum FuseResponse {
 
 impl FuseResponse {
     fn entry(&self) -> Option<&uapi::fuse_entry_out> {
-        if let Self::Entry(entry) = self { Some(&entry.arg) } else { None }
+        if let Self::Entry(entry) = self { Some(entry) } else { None }
     }
 }
 
@@ -2707,18 +2736,6 @@ struct CreateResponse {
 
 static_assertions::const_assert_eq!(
     std::mem::offset_of!(CreateResponse, open),
-    std::mem::size_of::<uapi::fuse_entry_out>()
-);
-
-#[repr(C)]
-#[derive(Clone, Debug, KnownLayout, FromBytes, IntoBytes, Immutable)]
-struct FuseEntryOutExtended {
-    arg: uapi::fuse_entry_out,
-    bpf_arg: uapi::fuse_entry_bpf_out,
-}
-
-static_assertions::const_assert_eq!(
-    std::mem::offset_of!(FuseEntryOutExtended, bpf_arg),
     std::mem::size_of::<uapi::fuse_entry_out>()
 );
 

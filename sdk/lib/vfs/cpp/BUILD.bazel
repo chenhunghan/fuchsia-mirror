@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library(
+    name = "cpp",
+    hdrs = [
+        "composed_service_dir.h",
+        "lazy_dir.h",
+        "node.h",
+        "pseudo_dir.h",
+        "pseudo_file.h",
+        "remote_dir.h",
+        "service.h",
+        "vmo_file.h",
+    ],
+    api_area = "Storage",
+    category = "partner",
+    idk_name = "vfs_cpp",
+    include_base = "//sdk",
+    public_configs = [
+        "//sdk/config",
+    ],
+    stable = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
+    # visibility is limited to actual Bazel dependents.
+    visibility = [
+        "//src/developer/build_info:__pkg__",
+    ],  # @bazel2gn:raw_overwrite:[ "//*" ]
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+        "//sdk/lib/async",
+        "//sdk/lib/fdio",
+        "//sdk/lib/vfs/internal:vfs_internal",
+        "//zircon/system/ulib/zx",
+    ],
+)

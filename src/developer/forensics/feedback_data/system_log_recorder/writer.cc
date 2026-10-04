@@ -24,9 +24,11 @@ namespace feedback_data {
 namespace system_log_recorder {
 
 SystemLogWriter::SystemLogWriter(const std::string& logs_dir, size_t max_num_files,
-                                 std::unique_ptr<Decoder> decoder, const std::string& metadata_path)
+                                 StorageSize total_log_size, std::unique_ptr<Decoder> decoder,
+                                 const std::string& metadata_path)
     : logs_dir_(logs_dir),
       max_num_files_(max_num_files),
+      total_log_size_(total_log_size),
       decoder_(std::move(decoder)),
       metadata_({}, kFirstFileNumber),
       metadata_path_(metadata_path),
@@ -160,7 +162,7 @@ SystemLogWriter::FlushAndReadLogsResult SystemLogWriter::FlushAndReadLogs(
 
   float compression_ratio;
   const fit::result<ReaderError, std::string> uncompressed_log =
-      Concatenate(logs_dir_, feedback::kPersistedLogsTotalSize, decoder_.get(), &compression_ratio);
+      Concatenate(logs_dir_, total_log_size_, decoder_.get(), &compression_ratio);
 
   if (uncompressed_log.is_error()) {
     switch (uncompressed_log.error_value()) {

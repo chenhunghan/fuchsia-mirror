@@ -20,6 +20,21 @@ func debugPathForCheck(check FailureModeCheck) string {
 	return filepath.Join(checkTestNamePrefix, check.Name(), "debug.txt")
 }
 
+// appendFailureReason adds the `Errors` from `extra` to `primary` and returns
+// the result. If `primary` is `nil`, we return `nil` so the errors from `extra`
+// don't effectively *become* the primary failure reason for failures that
+// don't already have one.
+func appendFailureReason(primary *runtests.FailureReason, extra *runtests.FailureReason) *runtests.FailureReason {
+	if primary == nil {
+		return nil
+	}
+	if extra == nil {
+		return primary
+	}
+	primary.Errors = append(primary.Errors, extra.Errors...)
+	return primary
+}
+
 // RunChecks runs the given checks on the given TestingOutputs.
 // A failed test means the Check() returned true. After the first failed test, all
 // later Checks() will be skipped. Tests will not be returned for skipped or passed checks.
@@ -92,19 +107,13 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 
 						if fr != nil {
 							// 1. Dual-write to top-level test.FailureReason.
-							if test.FailureReason == nil {
-								test.FailureReason = &runtests.FailureReason{}
-							}
-							test.FailureReason.Errors = append(test.FailureReason.Errors, fr.Errors...)
+							test.FailureReason = appendFailureReason(test.FailureReason, fr)
 
 							// 2. Dual-write to all failing test cases.
 							for j := range test.Cases {
 								tc := &test.Cases[j]
 								if runtests.IsFailure(tc.Status) {
-									if tc.FailureReason == nil {
-										tc.FailureReason = &runtests.FailureReason{}
-									}
-									tc.FailureReason.Errors = append(tc.FailureReason.Errors, fr.Errors...)
+									tc.FailureReason = appendFailureReason(tc.FailureReason, fr)
 								}
 							}
 						}

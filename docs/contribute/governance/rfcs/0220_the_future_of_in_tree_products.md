@@ -89,10 +89,11 @@ Engineering Council.
 
 ### System
 
-A **system** is a set of images ([ZBI][glossary.zbi], [vbmeta][glossary.vbmeta],
-and optionally an [FVM][glossary.fvm]) destined for a single boot slot on a
-target. This represents a bootable Fuchsia image, though without everything we'd
-want to flash to a target in production (like recovery images).
+A **system** is a set of images ([ZBI][glossary.zircon-boot-image],
+[vbmeta][vbmeta], and optionally an [FVM][glossary.fuchsia-volume-manager])
+destined for a single boot slot on a target. This represents a bootable
+Fuchsia image, though without everything we'd want to flash to a target in
+production (like recovery images).
 
 See [RFC-0115][rfc-0115] for more details on boot slots and flashable images.
 
@@ -848,9 +849,9 @@ Linked at relevant points in the document.
 [core-test-manager]: https://cs.opensource.google/fuchsia/fuchsia/+/main:products/common/core.gni;l=41;drc=c1946eee7aef8fe008361979a4d380e41809ca5e
 [core-virt]: https://cs.opensource.google/fuchsia/fuchsia/+/main:products/common/core.gni;l=45;drc=c1946eee7aef8fe008361979a4d380e41809ca5e
 [core-wlan]: https://cs.opensource.google/fuchsia/fuchsia/+/main:products/common/core.gni;l=21;drc=c1946eee7aef8fe008361979a4d380e41809ca5e
-[glossary.fvm]: /docs/glossary/README.md#fuchsia-volume-manager
-[glossary.vbmeta]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/assembly/vbmeta/README.md
-[glossary.zbi]: /docs/glossary/README.md#zircon-boot-image
+[glossary.fuchsia-volume-manager]: /docs/glossary/README.md#fuchsia-volume-manager
+[glossary.zircon-boot-image]: /docs/glossary/README.md#zircon-boot-image
+[vbmeta]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/assembly/vbmeta/README.md
 [hyrums-law]: https://www.hyrumslaw.com/
 [intersection]: https://en.wikipedia.org/wiki/Intersection
 [minimal-definition]: https://cs.opensource.google/fuchsia/fuchsia/+/main:products/minimal.gni;l=5;drc=668db2670d6d723f1c48849a13e78a109d6dd1c8

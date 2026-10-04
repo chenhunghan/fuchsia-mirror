@@ -198,6 +198,7 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
                     "max_rolling_capture_buffer_size",
                     connectivity_config.network.max_rolling_capture_buffer_size.unwrap_or(16777216),
                 )?
+                .field("tcp_gro_enabled", false)?
                 // Routed from fuchsia.power.SuspendEnabled capability.
                 //
                 // TODO(https://fxbug.dev/368386068): This should not be

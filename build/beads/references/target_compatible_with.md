@@ -45,21 +45,6 @@ go_binary_host_tool(
 )
 ```
 
-#### IDK Host Tool
-```bazel
-load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
-load("//build/bazel/rules/idk:idk_host_tool.bzl", "idk_go_binary_host_tool")
-
-package(default_applicable_licenses = ["//:license"])
-
-idk_go_binary_host_tool(
-    name = "idk_tool_target",
-    api_area = "Developer",
-    category = "partner",
-    target_compatible_with = HOST_OS_CONSTRAINTS,
-)
-```
-
 #### Host-Only Library
 ```bazel
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")

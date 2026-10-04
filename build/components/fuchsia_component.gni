@@ -15,9 +15,8 @@ import("//tools/cmc/build/cml.gni")
 # This logic is taken from `compiled_action()`, and is similar to the logic
 # there, although slightly simplified because we know we will not be opt'ing
 # out of the use of prebuilt tools.
-_cmc_label = "//tools/cmc:cmc.actual(${host_toolchain})"
-_cmc_output_dir =
-    get_label_info("//tools/cmc:cmc.actual(${host_toolchain})", "root_out_dir")
+_cmc_label = "//tools/cmc:cmc(${host_toolchain})"
+_cmc_output_dir = get_label_info(_cmc_label, "root_out_dir")
 _cmc_executable = "${_cmc_output_dir}/cmc"
 
 if (host_tools_base_path_override != "") {

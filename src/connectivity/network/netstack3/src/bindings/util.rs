@@ -36,8 +36,7 @@ use netstack3_core::ip::{
 };
 use netstack3_core::neighbor::{NudUserConfig, NudUserConfigUpdate};
 use netstack3_core::routes::{
-    AddRouteError, AddableEntry, AddableEntryEither, AddableMetric, Entry, EntryEither, Metric,
-    RawMetric,
+    AddRouteError, AddableEntry, AddableMetric, Entry, Metric, RawMetric,
 };
 use netstack3_core::socket::{
     self as core_socket, MulticastInterfaceSelector, MulticastMembershipInterfaceSelector,
@@ -50,17 +49,11 @@ use crate::bindings::devices::BindingId;
 use crate::bindings::socket::{IntoErrno, IpSockAddrExt, SockAddr};
 use crate::bindings::{BindingsCtx, LifetimeExt as _, routes};
 
-mod data_available;
 pub(crate) mod rcu;
 mod result_ext;
 mod scope_ext;
-pub(crate) use data_available::*;
 pub(crate) use result_ext::*;
 pub(crate) use scope_ext::*;
-
-/// The value used to specify that a `ForwardingEntry.metric` is unset, and the
-/// entry's metric should track the interface's routing metric.
-const UNSET_FORWARDING_ENTRY_METRIC: u32 = 0;
 
 /// A signal used between Core and Bindings, whenever Bindings receive a
 /// notification by the protocol (Core), it should kick the associated task
@@ -929,80 +922,6 @@ impl IntoErrno for DeviceNotFoundError {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum ForwardingConversionError {
-    DeviceNotFound,
-    TypeMismatch,
-    Subnet(SubnetError),
-    AddrClassError,
-}
-
-impl From<DeviceNotFoundError> for ForwardingConversionError {
-    fn from(_: DeviceNotFoundError) -> Self {
-        ForwardingConversionError::DeviceNotFound
-    }
-}
-
-impl From<SubnetError> for ForwardingConversionError {
-    fn from(err: SubnetError) -> Self {
-        ForwardingConversionError::Subnet(err)
-    }
-}
-
-impl From<AddrClassError> for ForwardingConversionError {
-    fn from(_: AddrClassError) -> Self {
-        ForwardingConversionError::AddrClassError
-    }
-}
-
-impl From<ForwardingConversionError> for fidl_net_stack::Error {
-    fn from(fwd_error: ForwardingConversionError) -> Self {
-        match fwd_error {
-            ForwardingConversionError::DeviceNotFound => fidl_net_stack::Error::NotFound,
-            ForwardingConversionError::TypeMismatch
-            | ForwardingConversionError::Subnet(_)
-            | ForwardingConversionError::AddrClassError => fidl_net_stack::Error::InvalidArgs,
-        }
-    }
-}
-
-impl TryFromFidlWithContext<fidl_net_stack::ForwardingEntry>
-    for AddableEntryEither<Option<DeviceId<BindingsCtx>>>
-{
-    type Error = ForwardingConversionError;
-
-    fn try_from_fidl_with_ctx<C: ConversionContext>(
-        ctx: &C,
-        fidl: fidl_net_stack::ForwardingEntry,
-    ) -> Result<AddableEntryEither<Option<DeviceId<BindingsCtx>>>, ForwardingConversionError> {
-        let fidl_net_stack::ForwardingEntry { subnet, device_id, next_hop, metric } = fidl;
-        let subnet = subnet.try_into_core()?;
-        let device =
-            BindingId::new(device_id).map(|d| d.try_into_core_with_ctx(ctx)).transpose()?;
-        let next_hop: Option<SpecifiedAddr<IpAddr>> =
-            next_hop.map(|next_hop| (*next_hop).try_into_core()).transpose()?;
-        let metric = if metric == UNSET_FORWARDING_ENTRY_METRIC {
-            AddableMetric::MetricTracksInterface
-        } else {
-            AddableMetric::ExplicitMetric(RawMetric(metric))
-        };
-
-        Ok(match (subnet, device, next_hop.map(Into::into)) {
-            (subnet, device, None) => Self::without_gateway(subnet, device, metric),
-            (SubnetEither::V4(subnet), device, Some(IpAddr::V4(gateway))) => {
-                AddableEntry::with_gateway(subnet, device, gateway, metric).into()
-            }
-            (SubnetEither::V6(subnet), device, Some(IpAddr::V6(gateway))) => {
-                AddableEntry::with_gateway(subnet, device, gateway, metric).into()
-            }
-            (SubnetEither::V4(_), _, Some(IpAddr::V6(_)))
-            | (SubnetEither::V6(_), _, Some(IpAddr::V4(_))) => {
-                return Err(ForwardingConversionError::TypeMismatch);
-            }
-        })
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum AddableEntryFromRoutesExtError {
     UnknownAction,
@@ -1052,43 +971,6 @@ impl<I: Ip> TryFromFidlWithContext<fnet_routes_ext::Route<I>>
             gateway: next_hop,
             metric,
             route_preference: Default::default(),
-        })
-    }
-}
-
-impl TryIntoFidlWithContext<fidl_net_stack::ForwardingEntry>
-    for EntryEither<DeviceId<BindingsCtx>>
-{
-    type Error = !;
-
-    fn try_into_fidl_with_ctx<C: ConversionContext>(
-        self,
-        ctx: &C,
-    ) -> Result<fidl_net_stack::ForwardingEntry, !> {
-        let (subnet, device, gateway, metric): (
-            SubnetEither,
-            _,
-            Option<IpAddr<SpecifiedAddr<Ipv4Addr>, SpecifiedAddr<Ipv6Addr>>>,
-            _,
-        ) = match self {
-            EntryEither::V4(Entry { subnet, device, gateway, metric, route_preference: _ }) => {
-                (subnet.into(), device, gateway.map(|gateway| gateway.into()), metric)
-            }
-            EntryEither::V6(Entry { subnet, device, gateway, metric, route_preference: _ }) => {
-                (subnet.into(), device, gateway.map(|gateway| gateway.into()), metric)
-            }
-        };
-        let RawMetric(metric) = metric.value();
-        let device_id: BindingId = device.try_into_fidl_with_ctx(ctx)?;
-        let next_hop = gateway.map(|next_hop| {
-            let next_hop: SpecifiedAddr<IpAddr> = next_hop.into();
-            Box::new(next_hop.into_fidl())
-        });
-        Ok(fidl_net_stack::ForwardingEntry {
-            subnet: subnet.into_fidl(),
-            device_id: device_id.get(),
-            next_hop,
-            metric: metric,
         })
     }
 }

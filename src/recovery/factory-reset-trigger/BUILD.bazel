@@ -2,9 +2,82 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/factory-reset-trigger.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "factory_reset_trigger",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        # The dynamically linked Rust standard library has an implicit link
+        # attribute on libfdio.so. GN adds this to every Rust target via
+        # //src/lib/fdio/rust:fdio_for_rust_stdlib in BUILDCONFIG.gn.
+        "//sdk/lib/fdio",
+        "//src/lib/fuchsia",
+        "//src/sys/pkg/lib/forced-fdr",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "factory_reset_trigger_packaged_bin",
+    binary = ":bin",
+    binary_name = "factory_reset_trigger",
+)
+
+fx_component_manifest(
+    name = "factory-reset-trigger-manifest",
+    component_name = "factory-reset-trigger",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/factory-reset-trigger.cml",
+)
+
+fx_component(
+    name = "factory-reset-trigger-component",
+    compiled_manifest = ":factory-reset-trigger-manifest",
+    component_name = "factory-reset-trigger",
+    visibility = [
+        "//build/bazel/rules/tests:__subpackages__",
+    ],
+    deps = [
+        ":factory_reset_trigger_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "factory-reset-trigger",
+    package_name = "factory-reset-trigger",
+    components = [
+        ":factory-reset-trigger-component",
+    ],
+    visibility = [
+        "//build/bazel/rules/tests:__subpackages__",
+        "//bundles/assembly:__subpackages__",
+    ],
 )

@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_proc_macro")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_proc_macro(
+    name = "macro",
+    srcs = [
+        "src/common.rs",
+        "src/derive_checked_vec.rs",
+        "src/derive_one_or_many.rs",
+        "src/derive_reference.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "cml_macro",
+    edition = "2024",
+    target_compatible_with = HOST_CONSTRAINTS,
+    visibility = ["//tools/lib/cml:__pkg__"],
+    deps = [
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:proc-macro2",
+        "//third_party/rust_crates/vendor:quote",
+        "//third_party/rust_crates/vendor:syn",
+    ],
+)

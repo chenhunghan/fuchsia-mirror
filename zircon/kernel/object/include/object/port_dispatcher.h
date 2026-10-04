@@ -286,7 +286,7 @@ class PortDispatcher final : public SoloDispatcher<PortDispatcher, ZX_DEFAULT_PO
 
   // Returns true if at least one packet was removed from the queue.
   // Called under the handle table lock when |handle| is not null.
-  // When |handle| is null, ephemeral PortPackets are removed from the queue but not freed.
+  // Any matching ephemeral PortPackets are removed from the queue and freed.
   bool CancelQueued(const void* handle, uint64_t key);
 
   // Removes |port_packet| from this port's queue. Returns false if the packet was

@@ -16,7 +16,6 @@ import (
 	interfacesadmin "fidl/fuchsia/net/interfaces/admin"
 	"fidl/fuchsia/net/multicast/admin"
 	fnetRoutes "fidl/fuchsia/net/routes"
-	"fidl/fuchsia/net/stack"
 
 	"go.fuchsia.dev/fuchsia/src/connectivity/network/netstack/routetypes"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -207,32 +206,6 @@ func ToTCPIPProtocolAddress(sn net.Subnet) tcpip.ProtocolAddress {
 		panic(fmt.Sprintf("unknown IpAddress type %d", typ))
 	}
 	return protocolAddr
-}
-
-func TCPIPRouteToForwardingEntry(route tcpip.Route) stack.ForwardingEntry {
-	forwardingEntry := stack.ForwardingEntry{
-		Subnet: net.Subnet{
-			Addr:      ToNetIpAddress(route.Destination.ID()),
-			PrefixLen: uint8(route.Destination.Prefix()),
-		},
-		DeviceId: uint64(route.NIC),
-	}
-	if route.Gateway.Len() != 0 {
-		nextHop := ToNetIpAddress(route.Gateway)
-		forwardingEntry.NextHop = &nextHop
-	}
-	return forwardingEntry
-}
-
-func ForwardingEntryToTCPIPRoute(forwardingEntry stack.ForwardingEntry) tcpip.Route {
-	route := tcpip.Route{
-		Destination: ToTCPIPSubnet(forwardingEntry.Subnet),
-		NIC:         tcpip.NICID(forwardingEntry.DeviceId),
-	}
-	if nextHop := forwardingEntry.NextHop; nextHop != nil {
-		route.Gateway = ToTCPIPAddress(*nextHop)
-	}
-	return route
 }
 
 // ToStackMulticastRoute converts the provided route to a stack multicast

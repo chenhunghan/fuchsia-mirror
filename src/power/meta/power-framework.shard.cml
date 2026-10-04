@@ -67,8 +67,15 @@
             to: "#power_manager",
         },
         {
+            protocol: [ "fuchsia.feedback.CrashReporter" ],
+            from: "parent",
+            to: [
+                "#power-broker",
+                "#power_manager",
+            ],
+        },
+        {
             protocol: [
-                "fuchsia.feedback.CrashReporter",
                 "fuchsia.kernel.Stats",
                 "fuchsia.ui.activity.Provider",
             ],

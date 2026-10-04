@@ -136,10 +136,10 @@ async fn check_data_volume(
         .await
         .context("get_attributes FIDL call on regular file")?
         .map_err(Status::err_from_raw)
-        .context("get_attributes wrapping_key_id on regular file")?;
+        .context("get_attributes encryption_policy on regular file")?;
     ensure!(
-        mut_attrs.wrapping_key_id == None,
-        "Expected wrapping_key_id to be None for regular non-fscrypt file."
+        mut_attrs.encryption_policy == None,
+        "Expected encryption_policy to be None for regular non-fscrypt file."
     );
     ensure!(imm_attrs.id.is_some(), "Expected ID for regular file");
     ensure!(
@@ -224,10 +224,10 @@ async fn check_data_volume(
             .await
             .context("get_attributes FIDL call on fscrypt file")?
             .map_err(Status::err_from_raw)
-            .context("get_attributes wrapping_key_id on fscrypt file")?;
+            .context("get_attributes encryption_policy on fscrypt file")?;
         ensure!(
-            mut_attrs.wrapping_key_id == Some(WRAPPING_KEY_ID),
-            "Expected wrapping_key_id for fscrypt file."
+            mut_attrs.encryption_policy.map(|p| p.key_identifier) == Some(WRAPPING_KEY_ID),
+            "Expected encryption_policy for fscrypt file."
         );
         ensure!(imm_attrs.id.is_some(), "Expected ID for fscrypt file");
         ensure!(

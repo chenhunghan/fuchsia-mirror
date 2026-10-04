@@ -31,11 +31,7 @@ regio_common = {
 regio_configs = []
 if (is_kernel) {
   regio_configs += [ "//zircon/kernel/switch:allow-new-without-default" ]
-  regio_configs += [ "//zircon/kernel/switch:allow-clone-on-copy" ]
-  regio_configs += [ "//zircon/kernel/switch:allow-non-canonical-clone-impl" ]
   regio_configs += [ "//zircon/kernel/switch:allow-doc-lazy-continuation" ]
-  regio_configs += [ "//zircon/kernel/switch:allow-assertions-on-constants" ]
-  regio_configs += [ "//zircon/kernel/switch:allow-let-unit-value" ]
 }
 
 rustc_library("regio") {

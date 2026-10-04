@@ -438,3 +438,94 @@ impl FSConfig for Gpt {
         format::DiskFormat::Gpt
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PlaceholderFsConfig;
+    impl FSConfig for PlaceholderFsConfig {
+        fn options(&self) -> Options<'_> {
+            Options {
+                component_name: "placeholder",
+                reuse_component_after_serving: false,
+                format_options: FormatOptions::default(),
+                start_options: StartOptions::default(),
+                component_type: ComponentType::StaticChild,
+            }
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_fs_config_defaults_and_options() {
+        let placeholder = PlaceholderFsConfig;
+        assert_eq!(placeholder.options().component_name, "placeholder");
+        assert!(!placeholder.is_multi_volume());
+        assert_eq!(placeholder.disk_format(), format::DiskFormat::Unknown);
+
+        let mut blobfs = Blobfs::dynamic_child();
+        assert_eq!(blobfs.options().format_options.num_inodes, None);
+        blobfs.num_inodes = 2048;
+        blobfs.verbose = true;
+        blobfs.readonly = true;
+        let blobfs_opts = blobfs.options();
+        assert_eq!(blobfs_opts.component_name, "blobfs");
+        assert!(!blobfs_opts.reuse_component_after_serving);
+        assert_eq!(blobfs_opts.format_options.num_inodes, Some(2048));
+        assert_eq!(blobfs_opts.start_options.read_only, Some(true));
+        assert!(!blobfs.is_multi_volume());
+        assert_eq!(blobfs.disk_format(), format::DiskFormat::Blobfs);
+
+        let mut minfs = Minfs::dynamic_child();
+        minfs.fvm_data_slices = 4;
+        minfs.fsck_after_every_transaction = true;
+        let minfs_opts = minfs.options();
+        assert_eq!(minfs_opts.component_name, "minfs");
+        assert_eq!(minfs_opts.format_options.fvm_data_slices, Some(4));
+        assert_eq!(minfs_opts.start_options.fsck_after_every_transaction, Some(true));
+        assert!(!minfs.is_multi_volume());
+        assert_eq!(minfs.disk_format(), format::DiskFormat::Minfs);
+
+        let mut fxfs = Fxfs::dynamic_child();
+        assert_eq!(fxfs.options().start_options.startup_profiling_seconds, Some(0));
+        fxfs.startup_profiling_seconds = Some(30);
+        fxfs.inline_crypto_enabled = true;
+        fxfs.barriers_enabled = true;
+        fxfs.allow_type3_blobs = true;
+        let fxfs_opts = fxfs.options();
+        assert_eq!(fxfs_opts.component_name, "fxfs");
+        assert!(fxfs_opts.reuse_component_after_serving);
+        assert_eq!(fxfs_opts.start_options.startup_profiling_seconds, Some(30));
+        assert_eq!(fxfs_opts.start_options.inline_crypto_enabled, Some(true));
+        assert_eq!(fxfs_opts.start_options.barriers_enabled, Some(true));
+        assert_eq!(fxfs_opts.start_options.allow_type3_blobs, Some(true));
+        assert!(fxfs.is_multi_volume());
+        assert_eq!(fxfs.disk_format(), format::DiskFormat::Fxfs);
+
+        let f2fs = F2fs::dynamic_child();
+        let f2fs_opts = f2fs.options();
+        assert_eq!(f2fs_opts.component_name, "f2fs");
+        assert!(!f2fs_opts.reuse_component_after_serving);
+        assert!(!f2fs.is_multi_volume());
+        assert_eq!(f2fs.disk_format(), format::DiskFormat::F2fs);
+
+        let mut fvm = Fvm::dynamic_child();
+        assert_eq!(fvm.options().format_options.fvm_slice_size, None);
+        fvm.slice_size = 32768;
+        let fvm_opts = fvm.options();
+        assert_eq!(fvm_opts.component_name, "fvm2");
+        assert!(fvm_opts.reuse_component_after_serving);
+        assert_eq!(fvm_opts.format_options.fvm_slice_size, Some(32768));
+        assert!(fvm.is_multi_volume());
+        assert_eq!(fvm.disk_format(), format::DiskFormat::Fvm);
+
+        let mut gpt = Gpt::dynamic_child();
+        gpt.merge_super_and_userdata = true;
+        let gpt_opts = gpt.options();
+        assert_eq!(gpt_opts.component_name, "gpt2");
+        assert!(gpt_opts.reuse_component_after_serving);
+        assert_eq!(gpt_opts.start_options.merge_super_and_userdata, Some(true));
+        assert!(gpt.is_multi_volume());
+        assert_eq!(gpt.disk_format(), format::DiskFormat::Gpt);
+    }
+}

@@ -6,17 +6,11 @@
 import itertools
 import math
 import statistics
+from collections.abc import Collection, Container, Generator, Iterator
 from dataclasses import dataclass
 from typing import (
     Any,
-    Generator,
     Generic,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
-    Type,
     TypeVar,
     overload,
 )
@@ -27,13 +21,13 @@ from trace_processing import trace_model, trace_time
 
 # Compute the linear interpolated [percentile]th percentile
 # (https://en.wikipedia.org/wiki/Percentile) of [values].
-def percentile(values: Iterable[int | float], percentile: int) -> float:
+def percentile(values: Collection[int | float], percentile: int) -> float:
     if not values:
         raise TypeError(
             "[values] must not be empty in order to compute percentile"
         )
 
-    values_list: List[int | float] = sorted(values)
+    values_list: list[int | float] = sorted(values)
     if percentile == 100:
         return float(values_list[-1])
 
@@ -52,10 +46,10 @@ T = TypeVar("T", bound=trace_model.Event)
 
 
 def filter_events(
-    events: Iterable[trace_model.Event],
+    events: Iterator[trace_model.Event],
     type: type[T],
-    category: Optional[str] = None,
-    name: str | Iterable[str] | None = None,
+    category: str | None = None,
+    name: str | Container[str] | None = None,
 ) -> Generator[T, None, None]:
     """Filter |events| based on category, name, or type.
 
@@ -89,9 +83,9 @@ T_Event = TypeVar("T_Event", bound=trace_model.Event)
 class EventFilter(Generic[T_Event]):
     """A filter for trace events."""
 
-    type: Type[T_Event]
-    category: Optional[str] = None
-    name: Optional[str] = None
+    type: type[T_Event]
+    category: str | None = None
+    name: str | None = None
 
 
 T1 = TypeVar("T1", bound=trace_model.Event)
@@ -103,25 +97,25 @@ T5 = TypeVar("T5", bound=trace_model.Event)
 
 @overload
 def filter_events_parallel(
-    events: Iterable[trace_model.Event],
-    filters: Tuple[EventFilter[T1]],
-) -> Tuple[Generator[T1, None, None]]:
+    events: Iterator[trace_model.Event],
+    filters: tuple[EventFilter[T1]],
+) -> tuple[Generator[T1, None, None]]:
     ...
 
 
 @overload
 def filter_events_parallel(
-    events: Iterable[trace_model.Event],
-    filters: Tuple[EventFilter[T1], EventFilter[T2]],
-) -> Tuple[Generator[T1, None, None], Generator[T2, None, None]]:
+    events: Iterator[trace_model.Event],
+    filters: tuple[EventFilter[T1], EventFilter[T2]],
+) -> tuple[Generator[T1, None, None], Generator[T2, None, None]]:
     ...
 
 
 @overload
 def filter_events_parallel(
-    events: Iterable[trace_model.Event],
-    filters: Tuple[EventFilter[T1], EventFilter[T2], EventFilter[T3]],
-) -> Tuple[
+    events: Iterator[trace_model.Event],
+    filters: tuple[EventFilter[T1], EventFilter[T2], EventFilter[T3]],
+) -> tuple[
     Generator[T1, None, None],
     Generator[T2, None, None],
     Generator[T3, None, None],
@@ -131,11 +125,11 @@ def filter_events_parallel(
 
 @overload
 def filter_events_parallel(
-    events: Iterable[trace_model.Event],
-    filters: Tuple[
+    events: Iterator[trace_model.Event],
+    filters: tuple[
         EventFilter[T1], EventFilter[T2], EventFilter[T3], EventFilter[T4]
     ],
-) -> Tuple[
+) -> tuple[
     Generator[T1, None, None],
     Generator[T2, None, None],
     Generator[T3, None, None],
@@ -146,15 +140,15 @@ def filter_events_parallel(
 
 @overload
 def filter_events_parallel(
-    events: Iterable[trace_model.Event],
-    filters: Tuple[
+    events: Iterator[trace_model.Event],
+    filters: tuple[
         EventFilter[T1],
         EventFilter[T2],
         EventFilter[T3],
         EventFilter[T4],
         EventFilter[T5],
     ],
-) -> Tuple[
+) -> tuple[
     Generator[T1, None, None],
     Generator[T2, None, None],
     Generator[T3, None, None],
@@ -165,9 +159,9 @@ def filter_events_parallel(
 
 
 def filter_events_parallel(
-    events: Iterable[trace_model.Event],
-    filters: Tuple[EventFilter[Any], ...],
-) -> Tuple[Generator[trace_model.Event, None, None], ...]:
+    events: Iterator[trace_model.Event],
+    filters: tuple[EventFilter[Any], ...],
+) -> tuple[Generator[trace_model.Event, None, None], ...]:
     """Filter |events| based on a list of filter tuples.
 
     This is more efficient than calling filter_events multiple times on the same
@@ -186,7 +180,7 @@ def filter_events_parallel(
 
     event_iters = itertools.tee(events, len(filters))
 
-    results: List[Generator[trace_model.Event, None, None]] = []
+    results: list[Generator[trace_model.Event, None, None]] = []
     for i, f in enumerate(filters):
         results.append(
             filter_events(
@@ -200,14 +194,14 @@ U = TypeVar("U", bound=trace_model.SchedulingRecord)
 
 
 def filter_records(
-    records: Iterable[trace_model.SchedulingRecord], type_: type[U]
+    records: Iterator[trace_model.SchedulingRecord], type_: type[U]
 ) -> Iterator[U]:
     """Filters SchedulingRecords by type.
 
     Easier for mypy to grok than using types with filter().
 
     Args:
-        records: Iterable of SchedulingRecords to be filtered.
+        records: SchedulingRecords to be filtered.
         type_: The subclass of SchedulingRecord by which to filter.
 
     Yields:
@@ -219,13 +213,13 @@ def filter_records(
 
 
 def total_event_duration(
-    events: Iterable[trace_model.Event],
+    events: Iterator[trace_model.Event],
 ) -> trace_time.TimeDelta:
     """Compute the total duration of all [Event]s in |events|.  This is the end
     of the last event minus the beginning of the first event.
 
     Args:
-      events: The set of events to compute the duration for.
+      events: The events for which to compute the duration.
 
     Returns:
       Total event duration.
@@ -233,7 +227,7 @@ def total_event_duration(
 
     def event_times(
         e: trace_model.Event,
-    ) -> Tuple[trace_time.TimePoint, trace_time.TimePoint]:
+    ) -> tuple[trace_time.TimePoint, trace_time.TimePoint]:
         end: trace_time.TimePoint = e.start
         if (
             isinstance(e, trace_model.AsyncEvent | trace_model.DurationEvent)
@@ -254,10 +248,10 @@ def total_event_duration(
 
 
 def get_arg_values_from_events(
-    events: Iterable[trace_model.Event],
+    events: Iterator[trace_model.Event],
     arg_key: str,
-    arg_types: type | Tuple[type, ...] = object,
-) -> Iterable[Any]:
+    arg_types: type | tuple[type, ...] = object,
+) -> Iterator[Any]:
     """Collect values from the |args| maps in |events|.
 
     Args:
@@ -270,7 +264,7 @@ def get_arg_values_from_events(
         the event's |args| map.
 
     Returns:
-      An [Iterable] of collected values.
+      An iterator of collected values.
     """
 
     def event_to_arg_type(event: trace_model.Event) -> Any:
@@ -288,14 +282,14 @@ def get_arg_values_from_events(
 
 def get_following_flow_events(
     event: trace_model.Event,
-) -> Iterable[trace_model.Event]:
+) -> Iterator[trace_model.Event]:
     """Find all Events that are flow connected and follow |event|.
 
     Args:
       event: The starting event.
 
     Returns:
-      An [Iterable] of flow connected events.
+      An iterator of flow connected events.
     """
     frontier = [event]
     visited: set[trace_model.Event] = set()
@@ -370,7 +364,7 @@ def adjust_to_common_process_start(
     model: trace_model.Model,
     name: str,
     type: type[T],
-    category: Optional[str] = None,
+    category: str | None = None,
 ) -> trace_model.Model:
     """Adjust model to a consistent start time tracking the latest first event recorded from a
     list of processes. The list of processes are selected through matching event flow.
@@ -398,13 +392,9 @@ def adjust_to_common_process_start(
     if begin_event is None:
         raise KeyError(f"Error, expected event with name '{name}'")
 
-    events_in_flow: Iterable[trace_model.Event] = get_following_flow_events(
-        begin_event
-    )
-
     process_ids = set()
     process_ids.add(begin_event.pid)
-    for event in events_in_flow:
+    for event in get_following_flow_events(begin_event):
         process_ids.add(event.pid)
 
     process_matches = [p for p in model.processes if p.pid in process_ids]
@@ -423,11 +413,11 @@ def adjust_to_common_process_start(
 
 
 def standard_metrics_set(
-    values: List[int | float],
+    values: list[int | float],
     label_prefix: str,
     unit: metrics.Unit,
     percentiles: tuple[int, int, int, int, int] = (5, 25, 50, 75, 95),
-    durations: List[float] | None = None,
+    durations: list[float] | None = None,
     doc_prefix: str | None = None,
 ) -> list[metrics.TestCaseResult]:
     """Generates min, max, average and percentiles metrics for the given values.

@@ -9,6 +9,7 @@
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/zx/channel.h>
+#include <lib/zx/time.h>
 #include <stdio.h>
 #include <zircon/status.h>
 #include <zircon/syscalls/port.h>
@@ -16,11 +17,13 @@
 
 #include <future>
 #include <thread>
+#include <vector>
 
 #include <ddktl/fidl.h>
 #include <fbl/auto_lock.h>
 #include <fbl/mutex.h>
 #include <usb/cdc.h>
+#include <usb/descriptors.h>
 #include <usb/usb.h>
 
 #ifndef _ALL_SOURCE
@@ -453,7 +456,7 @@ void Device::QmiInterruptHandler(usb_request_t* request) {
   }
 
   switch (usb_req.bNotification) {
-    case USB_CDC_NC_RESPONSE_AVAILABLE:
+    case fidl::ToUnderlying(fdescriptor::CdcNotification::kResponseAvailable):
       UsbCdcIntHander(packet_size);
       break;
     default:
@@ -465,24 +468,28 @@ void Device::QmiInterruptHandler(usb_request_t* request) {
 
 void Device::UsbCdcIntHander(uint16_t packet_size) {
   zx_status_t status;
-  uint8_t buffer[packet_size];
+  std::vector<uint8_t> buffer(packet_size);
+  size_t actual = 0;
 
-  status = usb_control_in(&usb_, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                          USB_CDC_GET_ENCAPSULATED_RESPONSE, 0, QMI_INTERFACE_NUM, ZX_TIME_INFINITE,
-                          buffer, packet_size, nullptr);
-  if (!qmi_channel_) {
-    zxlogf(WARNING, "qmi-usb-transport: receiving USB CDC frames without a channel");
-    return;
+  status = usb_control_in(&usb_, kClassInterfaceIn,
+                          fidl::ToUnderlying(fdescriptor::CdcRequest::kGetEncapsulatedResponse), 0,
+                          QMI_INTERFACE_NUM, ZX_TIME_INFINITE, buffer.data(), packet_size, &actual);
+  if (status == ZX_OK && actual > 0) {
+    if (!qmi_channel_) {
+      zxlogf(WARNING, "qmi-usb-transport: receiving USB CDC frames without a channel");
+      return;
+    }
+    status =
+        zx_channel_write(qmi_channel_, 0, buffer.data(), static_cast<uint32_t>(actual), nullptr, 0);
+    if (status < 0) {
+      zxlogf(ERROR, "qmi-usb-transport: failed to write message to channel: %s",
+             zx_status_get_string(status));
+    }
+    if (snoop_client_end_) {
+      SnoopQmiMsgSend(buffer.data(), static_cast<uint32_t>(actual),
+                      telephony_snoop::wire::Direction::kFromModem);
+    }
   }
-  status = zx_channel_write(qmi_channel_, 0, buffer, sizeof(buffer), nullptr, 0);
-  if (status < 0) {
-    zxlogf(ERROR, "qmi-usb-transport: failed to write message to channel: %s",
-           zx_status_get_string(status));
-  }
-  if (snoop_client_end_) {
-    SnoopQmiMsgSend(buffer, sizeof(buffer), telephony_snoop::wire::Direction::kFromModem);
-  }
-  return;
 }
 
 zx_handle_t Device::GetQmiChannelPort() { return qmi_channel_port_; }
@@ -545,9 +552,10 @@ int Device::EventLoop(void) {
                zx_status_get_string(status));
         return status;
       }
-      status = usb_control_out(&usb_, USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                               USB_CDC_SEND_ENCAPSULATED_COMMAND, 0, 8, ZX_TIME_INFINITE, buffer,
-                               length);
+      status =
+          usb_control_out(&usb_, kClassInterfaceOut,
+                          fidl::ToUnderlying(fdescriptor::CdcRequest::kSendEncapsulatedCommand), 0,
+                          QMI_INTERFACE_NUM, ZX_TIME_INFINITE, buffer, length);
       if (status != ZX_OK) {
         zxlogf(ERROR, "qmi-usb-transport: got an bad status from usb_control_out: %s",
                zx_status_get_string(status));
@@ -806,13 +814,13 @@ zx_status_t Device::Bind() __TA_NO_THREAD_SAFETY_ANALYSIS {
 
   usb_descriptor_header_t* desc;
   while ((desc = usb_desc_iter_peek(&iter)) != NULL) {
-    if (desc->b_descriptor_type == USB_DT_ENDPOINT) {
+    if (desc->b_descriptor_type == fdescriptor::DescriptorType::kEndpoint) {
       usb_endpoint_descriptor_t* endp = reinterpret_cast<usb_endpoint_descriptor_t*>(
           usb_desc_iter_get_structure(&iter, sizeof(usb_endpoint_descriptor_t)));
       if (endp == NULL) {
         break;
       }
-      if (usb_ep_direction(endp) == USB_ENDPOINT_OUT) {
+      if (usb_ep_direction(endp) == fdescriptor::EndpointDirection::kOut) {
         if (usb_ep_type(endp) == fdescriptor::EndpointType::kBulk) {
           bulk_out_addr = endp->b_endpoint_address;
           bulk_max_packet = usb_ep_max_packet(endp);

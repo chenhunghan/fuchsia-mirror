@@ -5,6 +5,7 @@
 pub const CONTAINER_SENTINEL_BIT: usize = 1;
 
 /// Create a sentinel pointer from a raw pointer.
+#[inline]
 pub fn make_sentinel<T, U>(ptr: *mut U) -> *mut T {
     const {
         assert!(
@@ -16,6 +17,7 @@ pub fn make_sentinel<T, U>(ptr: *mut U) -> *mut T {
 }
 
 /// Create a sentinel pointer from null.
+#[inline]
 pub const fn make_sentinel_null<T>() -> *mut T {
     // In const fn, we can assert directly since it is evaluated in const context
     assert!(
@@ -26,6 +28,7 @@ pub const fn make_sentinel_null<T>() -> *mut T {
 }
 
 /// Turn a sentinel pointer back into a normal pointer.
+#[inline]
 pub fn unmake_sentinel<T, U>(sentinel: *mut U) -> *mut T {
     const {
         assert!(
@@ -37,6 +40,7 @@ pub fn unmake_sentinel<T, U>(sentinel: *mut U) -> *mut T {
 }
 
 /// Test to see if a pointer is a sentinel pointer.
+#[inline]
 pub fn is_sentinel_ptr<T>(ptr: *const T) -> bool {
     const {
         assert!(
@@ -49,6 +53,7 @@ pub fn is_sentinel_ptr<T>(ptr: *const T) -> bool {
 
 /// Test to see if a pointer (which may be a sentinel) is valid.
 /// Valid means it is not null and not a sentinel.
+#[inline]
 pub fn valid_sentinel_ptr<T>(ptr: *const T) -> bool {
     const {
         assert!(

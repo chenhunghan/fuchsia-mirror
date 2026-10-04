@@ -264,6 +264,11 @@ FFI_ALWAYS_INLINE void cpp_handle_get_dispatcher(
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Dispatcher* cpp_handle_get_dispatcher_raw(const Handle* handle) {
+  return handle->dispatcher().get();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_rights_t cpp_handle_get_rights(const Handle* handle) {
   return handle->rights();
 }

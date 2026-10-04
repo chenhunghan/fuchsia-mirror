@@ -1,35 +1,131 @@
 [
     {
-        "gn": "//build/beads/verifications/rust:rust_example_bin.actual(//build/toolchain:host_x64)",
-        "bazel": "//build/beads/verifications/rust:rust_example_bin",
+        "gn": "//build/beads/verifications/rust:beads_rust_example_bin.actual(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_bin",
+        "bazel_config": "host",
         "type": "rustc"
     },
     {
-        "gn": "//build/beads/verifications/rust:rust_example_lib.actual(//build/toolchain:host_x64)",
-        "bazel": "//build/beads/verifications/rust:rust_example_lib",
+        "gn": "//build/beads/verifications/rust:beads_rust_example_bin_with_linker_args.actual(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_bin_with_linker_args",
+        "bazel_config": "host",
         "type": "rustc"
     },
     {
-        "gn": "//build/beads/verifications/cc:c_example_lib(//build/toolchain:host_x64)",
-        "bazel": "//build/beads/verifications/cc:c_example_lib",
+        "gn": "//build/beads/verifications/rust:beads_rust_example_lib.actual(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_lib",
+        "bazel_config": "host",
+        "type": "rustc"
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_c_example_lib(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:beads_c_example_lib",
+        "bazel_config": "host",
         "type": "c_compile",
         "allow_differences": true
     },
     {
-        "gn": "//build/beads/verifications/cc:cc_example_lib(//build/toolchain:host_x64)",
-        "bazel": "//build/beads/verifications/cc:cc_example_lib",
+        "gn": "//build/beads/verifications/cc:beads_cc_example_lib(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:beads_cc_example_lib",
+        "bazel_config": "host",
         "type": "cpp_compile",
         "allow_differences": true
     },
     {
-        "gn": "//build/beads/verifications/cc:asm_example_lib(//build/toolchain:host_x64)",
-        "bazel": "//build/beads/verifications/cc:asm_example_lib",
+        "gn": "//build/beads/verifications/cc:beads_asm_example_lib(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:beads_asm_example_lib",
+        "bazel_config": "host",
         "type": "assemble",
         "allow_differences": true
     },
     {
-        "gn": "//build/beads/verifications/cc:cc_example_bin(//build/toolchain:host_x64)",
-        "bazel": "//build/beads/verifications/cc:cc_example_bin",
+        "gn": "//build/beads/verifications/cc:beads_cc_example_bin(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:beads_cc_example_bin",
+        "bazel_config": "host",
+        "type": "cpp_link",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/rust:beads_rust_example_bin.actual",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_bin",
+        "bazel_config": "fuchsia_platform",
+        "type": "rustc",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/rust:beads_rust_example_lib.actual",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_lib",
+        "bazel_config": "fuchsia_platform",
+        "type": "rustc",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_c_example_lib",
+        "bazel": "//build/beads/verifications/cc:beads_c_example_lib",
+        "bazel_config": "fuchsia_platform",
+        "type": "c_compile",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_cc_example_lib",
+        "bazel": "//build/beads/verifications/cc:beads_cc_example_lib",
+        "bazel_config": "fuchsia_platform",
+        "type": "cpp_compile",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_asm_example_lib",
+        "bazel": "//build/beads/verifications/cc:beads_asm_example_lib",
+        "bazel_config": "fuchsia_platform",
+        "type": "assemble",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_cc_example_bin",
+        "bazel": "//build/beads/verifications/cc:beads_cc_example_bin",
+        "bazel_config": "fuchsia_platform",
+        "type": "cpp_link",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/rust:beads_rust_example_bin.actual",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_bin",
+        "bazel_config": "fuchsia_sdk",
+        "type": "rustc",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/rust:beads_rust_example_lib.actual",
+        "bazel": "//build/beads/verifications/rust:beads_rust_example_lib",
+        "bazel_config": "fuchsia_sdk",
+        "type": "rustc",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_c_example_lib",
+        "bazel": "//build/beads/verifications/cc:beads_c_example_lib",
+        "bazel_config": "fuchsia_sdk",
+        "type": "c_compile",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_cc_example_lib",
+        "bazel": "//build/beads/verifications/cc:beads_cc_example_lib",
+        "bazel_config": "fuchsia_sdk",
+        "type": "cpp_compile",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_asm_example_lib",
+        "bazel": "//build/beads/verifications/cc:beads_asm_example_lib",
+        "bazel_config": "fuchsia_sdk",
+        "type": "assemble",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:beads_cc_example_bin",
+        "bazel": "//build/beads/verifications/cc:beads_cc_example_bin",
+        "bazel_config": "fuchsia_sdk",
         "type": "cpp_link",
         "allow_differences": true
     }

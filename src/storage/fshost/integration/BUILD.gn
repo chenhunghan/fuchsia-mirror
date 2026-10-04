@@ -237,14 +237,80 @@ template("fshost_integration_test_package") {
   #
   # General Integration Tests
   #
-  _integration_component_target = "${target_name}_general"
-  _test_components = [ ":$_integration_component_target" ]
+  _general_component_target = "${target_name}_general"
+  _test_components = [ ":$_general_component_target" ]
 
-  fshost_integration_test_component(_integration_component_target) {
+  fshost_integration_test_component(_general_component_target) {
     fshost_target = _fshost_target
     data_filesystem_format = fshost_options.data_filesystem_format
     data_filesystem_variant = invoker.data_filesystem_variant
-    source_root = "tests/fshost_integration_test.rs"
+    source_root = "tests/general.rs"
+    deps = [
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component",
+      "//src/lib/fuchsia-fs",
+      "//src/storage/crypt/policy",
+      "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+      "//src/storage/lib/blob_writer:blob-writer",
+      "//src/storage/lib/delivery_blob",
+      "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
+      "//src/sys/pkg/lib/fuchsia-merkle",
+      "//third_party/rust_crates:futures",
+    ]
+    if (defined(invoker.extra_deps)) {
+      deps += invoker.extra_deps
+    }
+    if (data_filesystem_variant == "fxblob") {
+      deps += [
+        "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
+        "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates:assert_matches",
+      ]
+    }
+  }
+
+  #
+  # Volume Tests
+  #
+  _volumes_component_target = "${target_name}_volumes"
+  _test_components += [ ":$_volumes_component_target" ]
+
+  fshost_integration_test_component(_volumes_component_target) {
+    fshost_target = _fshost_target
+    data_filesystem_format = fshost_options.data_filesystem_format
+    data_filesystem_variant = invoker.data_filesystem_variant
+    source_root = "tests/volumes.rs"
+    deps = [
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-component",
+      "//src/lib/fuchsia-fs",
+      "//src/storage/crypt/policy",
+      "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+      "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+      "//src/storage/lib/blob_writer:blob-writer",
+      "//src/storage/lib/delivery_blob",
+      "//src/sys/pkg/lib/fuchsia-merkle",
+      "//third_party/rust_crates:regex",
+    ]
+  }
+
+  #
+  # Partition, GPT, and Device Topology Tests
+  #
+  _partitions_component_target = "${target_name}_partitions"
+  _test_components += [ ":$_partitions_component_target" ]
+
+  fshost_integration_test_component(_partitions_component_target) {
+    fshost_target = _fshost_target
+    data_filesystem_format = fshost_options.data_filesystem_format
+    data_filesystem_variant = invoker.data_filesystem_variant
+    source_root = "tests/partitions.rs"
     deps = [
       "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_rust",
       "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
@@ -256,28 +322,71 @@ template("fshost_integration_test_package") {
       "//src/lib/fuchsia-component",
       "//src/lib/fuchsia-fs",
       "//src/storage/crypt/policy",
-      "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
-      "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
-      "//src/storage/lib/blob_writer:blob-writer",
-      "//src/storage/lib/delivery_blob",
-      "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
-      "//src/sys/pkg/lib/fuchsia-merkle",
-      "//third_party/rust_crates:assert_matches",
-      "//third_party/rust_crates:futures",
-      "//third_party/rust_crates:regex",
     ]
-    if (defined(invoker.extra_deps)) {
-      deps += invoker.extra_deps
-    }
     if (data_filesystem_variant == "fxblob") {
-      deps += [
-        "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
+      deps += [ "//src/storage/lib/fs_management/rust:fs_management" ]
+    }
+  }
+
+  #
+  # Ramdisk Tests
+  #
+  _ramdisk_component_target = "${target_name}_ramdisk"
+  _test_components += [ ":$_ramdisk_component_target" ]
+
+  fshost_integration_test_component(_ramdisk_component_target) {
+    fshost_target = _fshost_target
+    data_filesystem_format = fshost_options.data_filesystem_format
+    data_filesystem_variant = invoker.data_filesystem_variant
+    source_root = "tests/ramdisk.rs"
+    deps = [
+      "//src/lib/fuchsia-async",
+      "//src/storage/crypt/policy",
+      "//third_party/rust_crates:futures",
+    ]
+  }
+
+  #
+  # Admin Tests
+  #
+  _admin_component_target = "${target_name}_admin"
+  _test_components += [ ":$_admin_component_target" ]
+
+  fshost_integration_test_component(_admin_component_target) {
+    fshost_target = _fshost_target
+    data_filesystem_format = fshost_options.data_filesystem_format
+    data_filesystem_variant = invoker.data_filesystem_variant
+    source_root = "tests/admin.rs"
+    deps = [
+      "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-fs",
+      "//src/storage/crypt/policy",
+      "//third_party/rust_crates:assert_matches",
+    ]
+    if (data_filesystem_variant == "fxblob") {
+      deps += [ "//src/lib/fidl/rust/fidl" ]
+    }
+  }
+
+  #
+  # Keymint Crypt Policy Tests
+  #
+  if (invoker.data_filesystem_variant == "fxblob") {
+    _keymint_component_target = "${target_name}_keymint"
+    _test_components += [ ":$_keymint_component_target" ]
+
+    fshost_integration_test_component(_keymint_component_target) {
+      fshost_target = _fshost_target
+      data_filesystem_format = fshost_options.data_filesystem_format
+      data_filesystem_variant = invoker.data_filesystem_variant
+      source_root = "tests/keymint.rs"
+      deps = [
         "//sdk/fidl/fuchsia.security.keymint:fuchsia.security.keymint_rust",
-        "//src/lib/diagnostics/reader/rust",
-        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
         "//src/security/lib/fake-keymint",
         "//src/storage/crypt/policy",
-        "//src/storage/lib/fs_management/rust:fs_management",
+        "//third_party/rust_crates:futures",
       ]
     }
   }

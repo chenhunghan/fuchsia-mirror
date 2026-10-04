@@ -4,10 +4,6 @@
 
 import("//build/testing/cc_test_executable.gni")
 
-group("fxl_cli") {
-  public_deps = [ ":cli" ]
-}
-
 cc_test_executable("fxl_unittests") {
   testonly = true
 
@@ -213,4 +209,7 @@ source_set("cli_no_logging") {
     "observer_list.h",
   ]
   public_deps = [ ":fxl" ]
+}
+group("fxl_cli") {
+  public_deps = [ ":cli" ]
 }

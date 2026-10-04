@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_library.gni")
+
+rustc_library("rust") {
+  name = "fake_mmio"
+  edition = "2024"
+  testonly = true
+  with_unit_tests = true
+
+  sources = [
+    "src/cached_vmo.rs",
+    "src/inject.rs",
+    "src/inject/after_store.rs",
+    "src/inject/dispatch.rs",
+    "src/inject/offset.rs",
+    "src/inject/passthrough.rs",
+    "src/inject/range_override.rs",
+    "src/lib.rs",
+    "src/operand.rs",
+  ]
+
+  deps = [
+    "//sdk/lib/driver/mmio/rust:mmio",
+    "//sdk/rust/zx",
+  ]
+
+  configs += [
+    "//build/config/rust/lints:deny_unused_results",
+    "//build/config/rust/lints:clippy_warn_all",
+  ]
+
+  test_deps = [
+    "//src/lib/fuchsia",
+    "//third_party/rust_crates:mockall",
+  ]
+}
+
+# Run with `fx test fake-mmio-rust-unittests`
+fuchsia_unittest_package("fake-mmio-rust-unittests") {
+  deps = [ ":rust_test" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":fake-mmio-rust-unittests",
+    ":rust",
+  ]
+}

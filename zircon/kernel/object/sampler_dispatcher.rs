@@ -10,18 +10,12 @@ use fbl::Canary;
 use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
-use zx_types::{
-    ZX_OBJ_TYPE_SAMPLER, ZX_RIGHT_DUPLICATE, ZX_RIGHT_INSPECT, ZX_RIGHT_TRANSFER, zx_rights_t,
-    zx_sampler_config_t,
-};
+use zx_types::{ZX_DEFAULT_SAMPLER_RIGHTS, ZX_OBJ_TYPE_SAMPLER, zx_rights_t, zx_sampler_config_t};
 
 use super::KernelHandle;
 use super::sampler_dispatcher_ffi::cpp_sampler_dispatcher_create;
 
 use object_constants_rs as object_constants;
-
-/// Default rights assigned to a newly created SamplerDispatcher handle.
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER | ZX_RIGHT_DUPLICATE | ZX_RIGHT_INSPECT;
 
 zr::static_assert_size_and_align!(
     SamplerDispatcherState,
@@ -73,7 +67,7 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 impl SamplerDispatcher {
     /// Returns the default rights for a SamplerDispatcher handle.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_SAMPLER_RIGHTS
     }
 
     /// Creates a new `SamplerDispatcher` with the given configuration.

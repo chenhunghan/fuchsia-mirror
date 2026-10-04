@@ -15,7 +15,7 @@
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 __BEGIN_CDECLS
 
-FFI_ALWAYS_INLINE void cpp_evictor_destroy(Evictor* evictor);
+FFI_ALWAYS_INLINE void cpp_evictor_disable_eviction(Evictor* evictor);
 FFI_ALWAYS_INLINE void cpp_evictor_init(ffi::Uninitialized<Evictor>* evictor);
 
 __END_CDECLS

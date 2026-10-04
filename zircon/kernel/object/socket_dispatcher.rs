@@ -24,30 +24,14 @@ use object_constants_rs::{
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_OBJ_TYPE_SOCKET, ZX_RIGHT_DUPLICATE, ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT,
-    ZX_RIGHT_MANAGE_SOCKET, ZX_RIGHT_READ, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_SIGNAL,
-    ZX_RIGHT_SIGNAL_PEER, ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT, ZX_RIGHT_WRITE, ZX_SOCKET_DATAGRAM,
+    ZX_DEFAULT_SOCKET_RIGHTS, ZX_OBJ_TYPE_SOCKET, ZX_SOCKET_CREATE_MASK, ZX_SOCKET_DATAGRAM,
     ZX_SOCKET_DISPOSITION_WRITE_DISABLED, ZX_SOCKET_DISPOSITION_WRITE_ENABLED,
     ZX_SOCKET_PEER_CLOSED, ZX_SOCKET_PEER_WRITE_DISABLED, ZX_SOCKET_READ_THRESHOLD,
     ZX_SOCKET_READABLE, ZX_SOCKET_WRITABLE, ZX_SOCKET_WRITE_DISABLED, ZX_SOCKET_WRITE_THRESHOLD,
     ZX_USER_SIGNAL_ALL, zx_info_socket_t, zx_rights_t, zx_signals_t,
 };
 
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_GET_PROPERTY
-    | ZX_RIGHT_SET_PROPERTY
-    | ZX_RIGHT_SIGNAL
-    | ZX_RIGHT_SIGNAL_PEER
-    | ZX_RIGHT_MANAGE_SOCKET;
-
 pub const ALLOWED_SIGNALS: u32 = ZX_USER_SIGNAL_ALL;
-
-pub const ZX_SOCKET_CREATE_MASK: u32 = ZX_SOCKET_DATAGRAM;
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -196,7 +180,7 @@ impl_peered_dispatcher_facade_with_state!(
 impl SocketDispatcher {
     /// Returns default rights for a SocketDispatcher.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_SOCKET_RIGHTS
     }
 
     /// Creates a new SocketDispatcher pair and returns their kernel handles and rights.
@@ -229,7 +213,7 @@ impl SocketDispatcher {
         handle0.dispatcher().init_peer(handle1.dispatcher().clone());
         handle1.dispatcher().init_peer(handle0.dispatcher().clone());
 
-        Ok((handle0, handle1, DEFAULT_RIGHTS))
+        Ok((handle0, handle1, ZX_DEFAULT_SOCKET_RIGHTS))
     }
 
     fn on_zero_handles_locked(&self, _token: &ksync::LockToken<'_, PeerHolderMuClass<Self>>) {
@@ -598,7 +582,7 @@ impl SocketDispatcher {
 #[cfg(ktest)]
 #[unittest::suite(name = "socket_dispatcher_rust_tests")]
 mod tests {
-    use super::{DEFAULT_RIGHTS, Disposition, ReadType, SocketDispatcher};
+    use super::{Disposition, ReadType, SocketDispatcher, ZX_DEFAULT_SOCKET_RIGHTS};
     use crate::object::dispatcher::DispatcherOps;
     use crate::user_copy::{UserInPtr, UserOutPtr};
     use crate::user_memory::UserMemory;
@@ -673,7 +657,7 @@ mod tests {
     fn test_create_write_read_close() {
         const SIZE: usize = 3357;
         let (h0, h1, rights) = SocketDispatcher::create(0).expect("failed to create stream socket");
-        expect_eq!(rights, DEFAULT_RIGHTS);
+        expect_eq!(rights, ZX_DEFAULT_SOCKET_RIGHTS);
         let d0 = h0.dispatcher();
         let d1 = h1.dispatcher();
 
@@ -763,7 +747,7 @@ mod tests {
     fn test_datagram_write_read_peek_truncate() {
         let (h0, h1, rights) =
             SocketDispatcher::create(ZX_SOCKET_DATAGRAM).expect("failed to create datagram socket");
-        expect_eq!(rights, DEFAULT_RIGHTS);
+        expect_eq!(rights, ZX_DEFAULT_SOCKET_RIGHTS);
         let d0 = h0.dispatcher();
         let d1 = h1.dispatcher();
 

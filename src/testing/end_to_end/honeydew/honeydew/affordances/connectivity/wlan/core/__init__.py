@@ -448,6 +448,7 @@ class WlanCore(AsyncLazyReady):
         fuchsia_controller: fc_transport.FuchsiaController,
         reboot_affordance: affordances_capable.RebootCapableDevice,
         fuchsia_device_close: affordances_capable.FuchsiaDeviceClose,
+        suspend_resume_affordance: affordances_capable.SuspendResumeCapableDevice,
     ) -> None:
         AsyncLazyReady.__init__(self)
 
@@ -456,8 +457,12 @@ class WlanCore(AsyncLazyReady):
         self._fc_transport = fuchsia_controller
         self._reboot_affordance = reboot_affordance
         self._fuchsia_device_close = fuchsia_device_close
+        self._suspend_resume_affordance = suspend_resume_affordance
 
         self._reboot_affordance.register_for_on_device_boot(self.make_ready)
+        self._suspend_resume_affordance.register_on_device_resume_fn(
+            self.make_ready
+        )
 
     async def make_ready(self) -> None:
         self._device_monitor_proxy = f_wlan_device_service.DeviceMonitorClient(
@@ -545,6 +550,7 @@ class ConnectTransactionContext:
         | f_wlan_sme.ConnectTransactionOnRoamResultRequest
         | f_wlan_sme.ConnectTransactionOnSignalReportRequest
         | f_wlan_sme.ConnectTransactionOnChannelSwitchedRequest
+        | f_wlan_sme.ConnectTransactionOnRssiThresholdBreachedRequest
     ]
 
 
@@ -560,6 +566,7 @@ class ConnectTransactionEventHandler(f_wlan_sme.ConnectTransactionEventHandler):
             | f_wlan_sme.ConnectTransactionOnRoamResultRequest
             | f_wlan_sme.ConnectTransactionOnSignalReportRequest
             | f_wlan_sme.ConnectTransactionOnChannelSwitchedRequest
+            | f_wlan_sme.ConnectTransactionOnRssiThresholdBreachedRequest
         ] = asyncio.Queue()
         self.server_task: asyncio.Task[None] | None = None
 
@@ -600,6 +607,16 @@ class ConnectTransactionEventHandler(f_wlan_sme.ConnectTransactionEventHandler):
     ) -> None:
         logger.debug(
             "ConnectTransaction.OnChannelSwitched() called with %s", request
+        )
+        self.txn_queue.put_nowait(request)
+
+    def on_rssi_threshold_breached(
+        self,
+        request: f_wlan_sme.ConnectTransactionOnRssiThresholdBreachedRequest,
+    ) -> None:
+        logger.debug(
+            "ConnectTransaction.OnRssiThresholdBreached() called with %s",
+            request,
         )
         self.txn_queue.put_nowait(request)
 

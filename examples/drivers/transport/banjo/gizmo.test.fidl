@@ -12,13 +12,13 @@ using zx;
 closed protocol Misc {
     /// Returns a unique identifier for this device.
     strict GetHardwareId() -> (struct {
-        status zx.Status;
+        status zx.Result;
         response uint32;
     });
 
     /// Returns the current device firmware version
     strict GetFirmwareVersion() -> (struct {
-        status zx.Status;
+        status zx.Result;
         major uint32;
         minor uint32;
     });

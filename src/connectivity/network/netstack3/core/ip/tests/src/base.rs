@@ -54,8 +54,8 @@ use netstack3_base::testutil::{
     set_logger_for_test,
 };
 use netstack3_base::{
-    InstantContext as _, IpDeviceAddr, LocalFrameDestination, Mark, MarkDomain, Marks,
-    NetworkParsingContext, NetworkSerializationContext,
+    InstantContext as _, IpDeviceAddr, LocalFrameDestination, Mark, MarkMatcher, MarkMatchers,
+    Marks, NetworkParsingContext, NetworkSerializationContext,
 };
 use netstack3_core::device::{
     DeviceId, EthernetCreationProperties, EthernetLinkDevice, MaxEthernetFrameSize,
@@ -64,6 +64,7 @@ use netstack3_core::device::{
 use netstack3_core::filter::{
     Action, Hook, IpRoutines, NatRoutines, PacketMatcher, Routine, Routines, Rule, Tuple,
 };
+use netstack3_core::ip::MarkDomain;
 use netstack3_core::socket::{ListenerInfo, SocketInfo};
 use netstack3_core::testutil::{
     Ctx, CtxPairExt as _, DEFAULT_INTERFACE_METRIC, FakeBindingsCtx, FakeCtx, FakeCtxBuilder,
@@ -84,9 +85,10 @@ use netstack3_ip::socket::IpSocketContext;
 use netstack3_ip::testutil::IpCounterExpectations;
 use netstack3_ip::{
     self as ip, AddableEntryEither, AddableMetric, AddressStatus, Destination, DropReason,
-    FragmentTimerId, FragmentationCounters, InternalForwarding, IpDeviceIngressStateContext,
-    IpLayerTimerId, Ipv4PresentAddressStatus, Ipv6PresentAddressStatus, NextHop, RawMetric,
-    ReceivePacketAction, ResolveRouteError, ResolvedRoute, RoutableIpAddr,
+    FragmentTimerId, FragmentationCounters, GsoCounters, GsoSourceCounters, InternalForwarding,
+    IpDeviceIngressStateContext, IpLayerTimerId, Ipv4PresentAddressStatus,
+    Ipv6PresentAddressStatus, NextHop, RawMetric, ReceivePacketAction, ResolveRouteError,
+    ResolvedRoute, RoutableIpAddr,
 };
 
 // Some helper functions
@@ -921,6 +923,263 @@ fn test_ip_reassembly_when_forwarding<I: TestIpExt + IpExt>() {
 
     // Make sure there are no more events.
     assert!(net.step().is_idle());
+}
+
+#[netstack3_macros::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+fn forward_coalesced_gso_tcp<I: TestIpExt + IpExt>() {
+    const GSO_SIZE: u16 = 1000;
+    const NUM_SEGMENTS: u16 = 2;
+    const SEQ_NUM: u32 = 1;
+    const PAYLOAD_BYTE: u8 = 0xAB;
+
+    let TestAddrs { subnet: _, local_ip: _, local_mac, remote_ip, remote_mac } = I::TEST_ADDRS;
+    // The packet comes from a host off the local link and is forwarded to
+    // `remote_ip`, which is on-link.
+    let src_ip = I::get_other_remote_ip_address(1);
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(I::TEST_ADDRS).build();
+    let device_id = assert_matches!(<[_; 1]>::try_from(device_ids), Ok([id]) => id);
+    ctx.test_api().set_unicast_forwarding_enabled::<I>(&device_id.clone().into(), true);
+
+    // Construct a coalesced TCP segment carrying `NUM_SEGMENTS` segments'
+    // worth of payload.
+    let payload = vec![PAYLOAD_BYTE; usize::from(NUM_SEGMENTS * GSO_SIZE)];
+    let frame = Buf::new(payload, ..)
+        .wrap_in(packet_formats::tcp::TcpSegmentBuilder::new(
+            *src_ip,
+            *remote_ip,
+            NonZeroU16::new(1234).unwrap(),
+            NonZeroU16::new(80).unwrap(),
+            SEQ_NUM,
+            Some(1),
+            65535,
+        ))
+        .wrap_in(I::PacketBuilder::new(*src_ip, *remote_ip, 64, IpProto::Tcp.into()))
+        .wrap_in(EthernetFrameBuilder::new(*remote_mac, *local_mac, I::ETHER_TYPE, 0))
+        .serialize_vec_outer(&mut NetworkSerializationContext::default())
+        .unwrap()
+        .unwrap_b();
+
+    ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
+        RecvEthernetFrameMeta {
+            device_id: device_id.clone(),
+            parsing_context: NetworkParsingContext::default(),
+            gso_info: Some(netstack3_base::GsoInfo {
+                gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+                ipv4_id_mode: match I::VERSION {
+                    IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
+                    IpVersion::V6 => None,
+                },
+            }),
+        },
+        frame,
+    );
+
+    // The packet is segmented rather than fragmented.
+    IpCounterExpectations::<I> {
+        receive_ip_packet: 1,
+        forward: 1,
+        gso: GsoCounters {
+            forwarded: GsoSourceCounters {
+                segmentation_required: 1,
+                segments: NUM_SEGMENTS.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .assert_counters(&ctx.core_ctx(), &device_id.into());
+
+    // The packet is forwarded as `NUM_SEGMENTS` discrete segments.
+    assert_eq!(ctx.bindings_ctx.take_ethernet_frames().len(), usize::from(NUM_SEGMENTS));
+}
+
+#[netstack3_macros::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+fn forward_coalesced_gso_tcp_oversized_segments<I: TestIpExt + IpExt>() {
+    let fake_config = I::TEST_ADDRS;
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.swap()).build();
+    let TestAddrs { subnet: _, local_ip, local_mac, remote_ip, remote_mac } = fake_config;
+    let device_id = assert_matches!(<[_; 1]>::try_from(device_ids), Ok([id]) => id);
+    ctx.test_api().set_unicast_forwarding_enabled::<I>(&device_id.clone().into(), true);
+
+    // Construct a coalesced TCP segment whose segments don't fit the MTU of the
+    // device they're forwarded to: 4000 bytes of payload with gso_size = 2000.
+    const GSO_SIZE: u16 = 2000;
+    let payload = vec![0xABu8; 2 * usize::from(GSO_SIZE)];
+    let frame = packet::Buf::new(payload, ..)
+        .wrap_in(packet_formats::tcp::TcpSegmentBuilder::new(
+            *remote_ip,
+            *local_ip,
+            NonZeroU16::new(1234).unwrap(),
+            NonZeroU16::new(80).unwrap(),
+            1,
+            Some(1),
+            65535,
+        ))
+        .wrap_in(I::PacketBuilder::new(*remote_ip, *local_ip, 64, IpProto::Tcp.into()))
+        .wrap_in(EthernetFrameBuilder::new(*local_mac, *remote_mac, I::ETHER_TYPE, 0))
+        .serialize_vec_outer(&mut NetworkSerializationContext::default())
+        .unwrap()
+        .unwrap_b();
+
+    ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
+        RecvEthernetFrameMeta {
+            device_id: device_id.clone(),
+            parsing_context: NetworkParsingContext::default(),
+            gso_info: Some(netstack3_base::GsoInfo {
+                gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+                ipv4_id_mode: match I::VERSION {
+                    IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
+                    IpVersion::V6 => None,
+                },
+            }),
+        },
+        frame,
+    );
+
+    let (expected_counters, expected_frames) = match I::VERSION {
+        // Each of the two segments is larger than the MTU, so they're
+        // each fragmented in two after segmenting.
+        IpVersion::V4 => (
+            IpCounterExpectations::<I> {
+                receive_ip_packet: 1,
+                forward: 1,
+                fragmentation: FragmentationCounters {
+                    fragmentation_required: 2,
+                    fragments: 4,
+                    ..Default::default()
+                },
+                gso: GsoCounters {
+                    forwarded: GsoSourceCounters {
+                        segmentation_required: 1,
+                        segments: 2,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            4,
+        ),
+        // Routers don't fragment IPv6 packets (RFC 8200 Section 4.5), so the
+        // first segment fails to send and the packet is dropped without
+        // sending any segments.
+        IpVersion::V6 => (
+            IpCounterExpectations::<I> {
+                receive_ip_packet: 1,
+                forward: 1,
+                mtu_exceeded: 1,
+                fragmentation: FragmentationCounters {
+                    fragmentation_required: 1,
+                    error_not_allowed: 1,
+                    ..Default::default()
+                },
+                gso: GsoCounters {
+                    forwarded: GsoSourceCounters { segmentation_required: 1, ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        ),
+    };
+    expected_counters.assert_counters(&ctx.core_ctx(), &device_id.into());
+    assert_eq!(ctx.bindings_ctx.take_ethernet_frames().len(), expected_frames);
+}
+
+#[netstack3_macros::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+// Unsegmentable frames carrying GSO metadata are a GRO/GSO bug, which debug
+// builds assert on. Release builds fall back to sending the frame whole.
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "GRO or GSO produced a packet that can't be resegmented")
+)]
+fn forward_coalesced_not_segmentable_sent_whole<I: TestIpExt + IpExt>() {
+    let fake_config = I::TEST_ADDRS;
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.swap()).build();
+    let TestAddrs { subnet: _, local_ip, local_mac, remote_ip, remote_mac } = fake_config;
+    let device_id = assert_matches!(<[_; 1]>::try_from(device_ids), Ok([id]) => id);
+    ctx.test_api().set_unicast_forwarding_enabled::<I>(&device_id.clone().into(), true);
+
+    // Construct a frame carrying GSO metadata whose transport protocol can't be
+    // segmented in software, and whose payload doesn't fit the MTU.
+    const GSO_SIZE: u16 = 1000;
+    let payload = vec![0xABu8; 2 * usize::from(GSO_SIZE)];
+    let frame = packet::Buf::new(payload, ..)
+        .wrap_in(UdpPacketBuilder::new(
+            *remote_ip,
+            *local_ip,
+            Some(NonZeroU16::new(1234).unwrap()),
+            NonZeroU16::new(80).unwrap(),
+        ))
+        .wrap_in(I::PacketBuilder::new(*remote_ip, *local_ip, 64, IpProto::Udp.into()))
+        .wrap_in(EthernetFrameBuilder::new(*local_mac, *remote_mac, I::ETHER_TYPE, 0))
+        .serialize_vec_outer(&mut NetworkSerializationContext::default())
+        .unwrap()
+        .unwrap_b();
+
+    ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
+        RecvEthernetFrameMeta {
+            device_id: device_id.clone(),
+            parsing_context: NetworkParsingContext::default(),
+            gso_info: Some(netstack3_base::GsoInfo {
+                gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+                ipv4_id_mode: match I::VERSION {
+                    IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
+                    IpVersion::V6 => None,
+                },
+            }),
+        },
+        frame,
+    );
+
+    // Segmentation fails, so the stack falls back to sending the frame whole. IPv4
+    // fragments it because it doesn't fit the MTU, but IPv6 packets can't be
+    // fragmented when forwarded, so it's dropped.
+    let gso = GsoCounters {
+        forwarded: GsoSourceCounters {
+            segmentation_required: 1,
+            error_not_segmentable: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (expected_counters, expected_frames) = match I::VERSION {
+        IpVersion::V4 => (
+            IpCounterExpectations::<I> {
+                receive_ip_packet: 1,
+                forward: 1,
+                fragmentation: FragmentationCounters {
+                    fragmentation_required: 1,
+                    fragments: 2,
+                    ..Default::default()
+                },
+                gso,
+                ..Default::default()
+            },
+            2,
+        ),
+        IpVersion::V6 => (
+            IpCounterExpectations::<I> {
+                receive_ip_packet: 1,
+                forward: 1,
+                mtu_exceeded: 1,
+                fragmentation: FragmentationCounters {
+                    fragmentation_required: 1,
+                    error_not_allowed: 1,
+                    ..Default::default()
+                },
+                gso,
+                ..Default::default()
+            },
+            0,
+        ),
+    };
+    expected_counters.assert_counters(&ctx.core_ctx(), &device_id.into());
+    assert_eq!(ctx.bindings_ctx.take_ethernet_frames().len(), expected_frames);
 }
 
 enum WhichLinkLocalAddr {
@@ -2326,6 +2585,168 @@ fn test_multicast_forwarding_receive_ip_packet_action<I: IpExt + TestIpExt>() {
         receive_ip_packet_action::<I>(&mut ctx, &dev, mcast_addr),
         ReceivePacketAction::Drop { reason: DropReason::MulticastNoInterest }
     );
+}
+
+/// Tests that multicast forwarding preserves packet metadata (such as marks)
+/// across all forwarded targets, local delivery, and when packets are stashed
+/// in the pending queue awaiting a route.
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+#[test_case(false, false; "forwarding only")]
+#[test_case(true, false; "with local delivery")]
+#[test_case(false, true; "queued packets")]
+fn test_multicast_forwarding_preserves_metadata<I: IpExt + TestIpExt>(
+    local_delivery: bool,
+    queue_packets: bool,
+) {
+    let mut builder = FakeCtxBuilder::default();
+    for _ in 0..3 {
+        let _dev_idx = builder.add_device_with_ip(
+            I::TEST_ADDRS.local_mac,
+            I::TEST_ADDRS.local_ip.get(),
+            I::TEST_ADDRS.subnet,
+        );
+    }
+    let (mut ctx, device_ids) = builder.build();
+    let [dev_eth, other_dev1_eth, other_dev2_eth] =
+        device_ids.try_into().expect("there should be three devices");
+    let dev: DeviceId<_> = dev_eth.into();
+    let other_dev1: DeviceId<_> = other_dev1_eth.clone().into();
+    let other_dev2: DeviceId<_> = other_dev2_eth.clone().into();
+
+    let mcast_addr: I::Addr =
+        I::map_ip((), |()| net_ip_v4!("224.0.1.1"), |()| net_ip_v6!("ff0e::1"));
+
+    // Enable multicast forwarding and install a route forwarding from `dev`
+    // to both `other_dev1` (1st target) and `other_dev2` (2nd target).
+    assert!(ctx.core_api().multicast_forwarding::<I>().enable());
+    ctx.test_api().set_multicast_forwarding_enabled::<I>(&dev, true);
+
+    let key =
+        MulticastRouteKey::<I>::new(I::TEST_ADDRS.remote_ip.get(), mcast_addr.clone()).unwrap();
+    let targets: MulticastRouteTargets<_> = [
+        MulticastRouteTarget { output_interface: other_dev1, min_ttl: NonZeroU8::new(1).unwrap() },
+        MulticastRouteTarget { output_interface: other_dev2, min_ttl: NonZeroU8::new(1).unwrap() },
+    ]
+    .into();
+    let route = MulticastRoute::new_forward(dev.clone(), targets).unwrap();
+    if !queue_packets {
+        assert_eq!(
+            ctx.core_api()
+                .multicast_forwarding::<I>()
+                .add_multicast_route(key.clone(), route.clone()),
+            Ok(None)
+        );
+    }
+
+    // Join the multicast group on `dev` for local delivery.
+    if local_delivery {
+        let Ctx { core_ctx, bindings_ctx } = &mut ctx;
+        ip::device::join_ip_multicast::<I, _, _>(
+            &mut core_ctx.context(),
+            bindings_ctx,
+            &dev,
+            MulticastAddr::new(mcast_addr).unwrap(),
+        );
+    }
+
+    // Create a UDP socket to receive locally delivered packets on `dev`.
+    const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(12345).unwrap();
+    const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(54321).unwrap();
+    let mut udp_api = ctx.core_api().udp::<I>();
+    let receiver = udp_api.create();
+    udp_api.listen(&receiver, None, Some(LOCAL_PORT)).unwrap();
+
+    // Install filter rules so that packets are dropped at local ingress and
+    // egress unless they carry Mark1 == 100.
+    fn drop_unmarked_routines<I: IpExt>() -> Routines<I, FakeBindingsCtx, &'static str> {
+        let drop_unmarked_rule = Rule {
+            matcher: PacketMatcher {
+                mark_matcher: Some(MarkMatchers::new([(
+                    MarkDomain::Mark1,
+                    MarkMatcher::Marked { mask: !0, start: 100, end: 100, invert: true },
+                )])),
+                ..Default::default()
+            },
+            action: Action::Drop,
+            validation_info: "drop packets without mark 100",
+        };
+        Routines {
+            ip: IpRoutines {
+                local_ingress: Hook {
+                    routines: vec![Routine { rules: vec![drop_unmarked_rule.clone()] }],
+                },
+                egress: Hook { routines: vec![Routine { rules: vec![drop_unmarked_rule] }] },
+                ..Default::default()
+            },
+            nat: NatRoutines::default(),
+        }
+    }
+    ctx.core_api()
+        .filter()
+        .set_filter_state(drop_unmarked_routines::<Ipv4>(), drop_unmarked_routines::<Ipv6>())
+        .unwrap();
+
+    const PAYLOAD: &'static [u8] = b"hello";
+    let udp_buf = Buf::new(PAYLOAD.to_vec(), ..)
+        .wrap_in(UdpPacketBuilder::new(
+            I::TEST_ADDRS.remote_ip.get(),
+            mcast_addr,
+            Some(REMOTE_PORT),
+            LOCAL_PORT,
+        ))
+        .wrap_in(<I as packet_formats::ip::IpExt>::PacketBuilder::new(
+            I::TEST_ADDRS.remote_ip.get(),
+            mcast_addr,
+            64,
+            IpProto::Udp.into(),
+        ))
+        .serialize_vec_outer(&mut NetworkSerializationContext::default())
+        .unwrap()
+        .unwrap_b();
+
+    let _ = ctx.bindings_ctx.take_ethernet_frames();
+
+    let marks = Marks::new([(MarkDomain::Mark1, 100)]);
+    ctx.test_api().receive_ip_packet_with_marks::<I, _>(
+        &dev,
+        Some(LocalFrameDestination::Multicast),
+        udp_buf,
+        marks,
+    );
+
+    if queue_packets {
+        // No route matched, so the packet was queued in the pending table rather
+        // than forwarded immediately, and no frames were transmitted.
+        assert_matches!(&ctx.bindings_ctx.take_ethernet_frames()[..], []);
+
+        // Installing the route flushes the pending queue.
+        assert_eq!(
+            ctx.core_api().multicast_forwarding::<I>().add_multicast_route(key, route),
+            Ok(None)
+        );
+    }
+
+    // Forwarding to `other_dev1` and `other_dev2` preserved `marks`, allowing
+    // both forwarded packets to pass egress filtering and be transmitted.
+    assert_matches!(
+        &ctx.bindings_ctx.take_ethernet_frames()[..],
+        [(dev1, _frame1), (dev2, _frame2)] => {
+            assert_eq!(dev1, &other_dev1_eth.downgrade());
+            assert_eq!(dev2, &other_dev2_eth.downgrade());
+        }
+    );
+
+    if local_delivery {
+        // Local delivery on `dev` preserved `marks`, allowing the packet to pass
+        // local_ingress filtering and be delivered to the listening UDP socket.
+        assert_matches!(
+            &ctx.bindings_ctx.take_udp_received(&receiver)[..],
+            [payload] => assert_eq!(payload, PAYLOAD)
+        );
+    } else {
+        assert!(ctx.bindings_ctx.take_udp_received(&receiver)[..].is_empty());
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

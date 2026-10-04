@@ -15,25 +15,8 @@
 #include <src/devices/lib/log/log.h>
 
 namespace driver_manager {
+
 namespace {
-
-SystemPowerState GetSystemPowerState() {
-  zx::result client = component::Connect<fuchsia_system_state::SystemStateTransition>();
-  if (client.is_error()) {
-    fdf_log::error("Failed to connect to StateStateTransition: {}, falling back to default",
-                   client.status_string());
-    return SystemPowerState::kReboot;
-  }
-
-  fidl::Result result = fidl::Call(*client)->GetTerminationSystemState();
-  if (result.is_error()) {
-    fdf_log::error("Failed to get termination system state: {}, falling back to default",
-                   result.error_value().FormatDescription());
-    return SystemPowerState::kReboot;
-  }
-
-  return result->state();
-}
 
 template <typename SyncCompleter>
 fit::callback<void(zx_status_t)> ToCallback(SyncCompleter& completer) {
@@ -72,6 +55,24 @@ zx::result<zx::resource> get_mexec_resource() {
 
 }  // anonymous namespace
 
+SystemPowerState ShutdownManager::GetSystemPowerState() {
+  zx::result client = component::Connect<fuchsia_system_state::SystemStateTransition>();
+  if (client.is_error()) {
+    fdf_log::error("Failed to connect to SystemStateTransition: {}, falling back to default",
+                   client.status_string());
+    return SystemPowerState::kReboot;
+  }
+
+  fidl::Result result = fidl::Call(*client)->GetTerminationSystemState();
+  if (result.is_error()) {
+    fdf_log::error("Failed to get termination system state: {}, falling back to default",
+                   result.error_value().FormatDescription());
+    return SystemPowerState::kReboot;
+  }
+
+  return result->state();
+}
+
 ShutdownManager::ShutdownManager(NodeRemover* node_remover, async_dispatcher_t* dispatcher)
     : node_remover_(node_remover),
       devfs_lifecycle_(
@@ -95,8 +96,8 @@ ShutdownManager::ShutdownManager(NodeRemover* node_remover, async_dispatcher_t* 
     mexec_resource_ = std::move(mexec_resource.value());
   }
   node_remover_->SetOnRemovalTimeoutCallback([&]() {
-    fdf_log::info("Driver timed out during shutdown, issuing syscall to reboot/shutdown");
-    SystemExecute();
+    fdf_log::info("Timed out waiting for nodes to be removed, issuing syscall to reboot/shutdown");
+    ExecuteShutdownStrategy(/*node_removal_timed_out=*/true);
   });
 }
 
@@ -161,7 +162,7 @@ void ShutdownManager::OnPackageShutdownComplete() {
 void ShutdownManager::OnBootShutdownComplete() {
   ZX_ASSERT(shutdown_state_ == State::kBootStopping);
   shutdown_state_ = State::kStopped;
-  SystemExecute();
+  ExecuteShutdownStrategy(/*node_removal_timed_out=*/false);
   for (auto& callback : boot_shutdown_complete_callbacks_) {
     callback(ZX_OK);
   }
@@ -241,7 +242,7 @@ void ShutdownManager::SignalBootShutdown(fit::callback<void(zx_status_t)> cb) {
   }
 }
 
-void ShutdownManager::SystemExecute() {
+void ShutdownManager::ExecuteShutdownStrategy(bool node_removal_timed_out) {
   auto shutdown_system_state = GetSystemPowerState();
   fdf_log::info("Suspend fallback with flags {}", shutdown_system_state);
   const char* what = "zx_system_powerctl";
@@ -249,7 +250,7 @@ void ShutdownManager::SystemExecute() {
   if (!mexec_resource_.is_valid() || !power_resource_.is_valid()) {
     fdf_log::warn("Invalid Power/mexec resources. Assuming test.");
     if (lifecycle_stop_) {
-      exit(0);
+      Exit(0);
     }
     return;
   }
@@ -262,19 +263,16 @@ void ShutdownManager::SystemExecute() {
   fdf_log::info("Executing powerctl.");
   switch (shutdown_system_state) {
     case SystemPowerState::kReboot:
-      status = zx_system_powerctl(power_resource_.get(), ZX_SYSTEM_POWERCTL_REBOOT, nullptr);
+      status = SystemPowerctl(ZX_SYSTEM_POWERCTL_REBOOT);
       break;
     case SystemPowerState::kRebootBootloader:
-      status =
-          zx_system_powerctl(power_resource_.get(), ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER, nullptr);
+      status = SystemPowerctl(ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER);
       break;
     case SystemPowerState::kRebootRecovery:
-      status =
-          zx_system_powerctl(power_resource_.get(), ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY, nullptr);
+      status = SystemPowerctl(ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY);
       break;
     case SystemPowerState::kRebootKernelInitiated:
-      status = zx_system_powerctl(power_resource_.get(),
-                                  ZX_SYSTEM_POWERCTL_ACK_KERNEL_INITIATED_REBOOT, nullptr);
+      status = SystemPowerctl(ZX_SYSTEM_POWERCTL_ACK_KERNEL_INITIATED_REBOOT);
       if (status == ZX_OK) {
         // Sleep indefinitely to give the kernel a chance to reboot the system. This results in a
         // cleaner reboot because it prevents driver_manager from exiting. If driver_manager exits
@@ -291,12 +289,23 @@ void ShutdownManager::SystemExecute() {
       }
       break;
     case SystemPowerState::kPoweroff:
-      status = zx_system_powerctl(power_resource_.get(), ZX_SYSTEM_POWERCTL_SHUTDOWN, nullptr);
+      status = SystemPowerctl(ZX_SYSTEM_POWERCTL_SHUTDOWN);
       break;
     case SystemPowerState::kMexec: {
-      fdf_log::info("About to mexec...");
-      status = mexec_boot(mexec_resource_.get());
-      what = "zx_system_mexec";
+      if (node_removal_timed_out) {
+        // If drivers failed to shut down cleanly, some drivers/hardware may still have active DMA
+        // mapped. Proceeding with mexec (a soft reboot) would boot into the new kernel without a
+        // hardware reset, allowing active DMA to overwrite the new kernel's memory (leading to a
+        // sandbox escape). Fall back to a hard reboot instead to reset the hardware and quiesce
+        // DMA.
+        fdf_log::error(
+            "Timed out waiting for nodes to be removed, rebooting instead of using mexec");
+        status = SystemPowerctl(ZX_SYSTEM_POWERCTL_REBOOT);
+      } else {
+        fdf_log::info("About to mexec...");
+        status = MexecBoot();
+        what = "zx_system_mexec";
+      }
       break;
     }
     case SystemPowerState::kFullyOn:
@@ -312,12 +321,20 @@ void ShutdownManager::SystemExecute() {
     // properly for system state transitions where driver manager needs to go down.
     // Exiting like so, will not run all the destructors and clean things up properly.
     // Instead the main devcoordinator loop should be quit.
-    exit(0);
+    Exit(0);
   }
 
   // Warning - and not an error - as a large number of tests unfortunately rely
   // on this syscall actually failing.
   fdf_log::warn("{}: {}", what, zx_status_get_string(status));
 }
+
+zx_status_t ShutdownManager::SystemPowerctl(uint32_t cmd) {
+  return zx_system_powerctl(power_resource_.get(), cmd, nullptr);
+}
+
+zx_status_t ShutdownManager::MexecBoot() { return mexec_boot(mexec_resource_.get()); }
+
+void ShutdownManager::Exit(int status) { exit(status); }
 
 }  // namespace driver_manager

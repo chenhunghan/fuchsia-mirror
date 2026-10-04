@@ -72,8 +72,8 @@ class TestEnvironment : public fdf_testing::Environment {
                                            std::move(metadata)));
 #else
     fclockimpl::InitMetadata metadata{{.steps{}}};
-    EXPECT_EQ(ZX_OK, incoming.AddFidlMetadata(
-        fclockimpl::InitMetadata::kSerializableName, std::move(metadata));
+    EXPECT_EQ(ZX_OK, incoming.AddFidlMetadata(fclockimpl::InitMetadata::kSerializableName,
+                                              std::move(metadata)));
 #endif
 
     return zx::ok();
@@ -83,6 +83,14 @@ class TestEnvironment : public fdf_testing::Environment {
   void ClearDos() { ClearMmioBuffer(dos_regs_); }
   bool IsHiuDirty() { return IsMmioBufferDirty(hiu_regs_); }
   bool IsDosDirty() { return IsMmioBufferDirty(dos_regs_); }
+  uint32_t GetHiuReg(uint32_t offset) const {
+    auto it = hiu_regs_.values().find(offset / kRegSize);
+    return it != hiu_regs_.values().end() ? static_cast<uint32_t>(it->second) : 0;
+  }
+  uint32_t GetDosReg(uint32_t offset) const {
+    auto it = dos_regs_.values().find(offset / kRegSize);
+    return it != dos_regs_.values().end() ? static_cast<uint32_t>(it->second) : 0;
+  }
 
  private:
   static void ClearMmioBuffer(FakeMmio& mmio) { mmio.values().clear(); }
@@ -246,7 +254,7 @@ TEST_F(DriverTest, ClkTestHiuRegRegion) {
 }
 
 TEST_F(DriverTest, ClkTestDosRegRegion) {
-  /// Make sure that DOS clocks are actually touching the DOS registers.
+  /// Make sure that DOS clocks are actually touching both DOS and HIU registers appropriately.
   fdf::Arena arena('TEST');
 
   driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
@@ -258,8 +266,45 @@ TEST_F(DriverTest, ClkTestDosRegRegion) {
   ASSERT_TRUE(enable_result.ok());
 
   driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
-    ASSERT_FALSE(env.IsHiuDirty());
+    ASSERT_TRUE(env.IsHiuDirty());
     ASSERT_TRUE(env.IsDosDirty());
+    EXPECT_EQ(env.GetHiuReg(kG12bHhiVdecClkCntl), kHhiVdecClkCntlVdecEnableVal);
+    EXPECT_EQ(env.GetDosReg(kG12bDosGclkEn0) & 0x3ffu, 0x3ffu);
+  });
+
+  auto disable_result = client_.buffer(arena)->Disable(g12b_clk::G12B_CLK_DOS_GCLK_VDEC);
+  ASSERT_TRUE(disable_result.ok());
+
+  driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_EQ(env.GetHiuReg(kG12bHhiVdecClkCntl), kHhiVdecClkCntlVdecDisableVal);
+    EXPECT_EQ(env.GetDosReg(kG12bDosGclkEn0) & 0x3ffu, 0u);
+  });
+}
+
+TEST_F(DriverTest, ClkTestHcodecRegRegion) {
+  fdf::Arena arena('TEST');
+
+  driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    env.ClearDos();
+    env.ClearHiu();
+  });
+
+  auto enable_result = client_.buffer(arena)->Enable(g12b_clk::G12B_CLK_DOS_GCLK_HCODEC);
+  ASSERT_TRUE(enable_result.ok());
+
+  driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    ASSERT_TRUE(env.IsHiuDirty());
+    ASSERT_TRUE(env.IsDosDirty());
+    EXPECT_EQ(env.GetHiuReg(kG12bHhiVdecClkCntl), kHhiVdecClkCntlHcodecEnableVal);
+    EXPECT_EQ(env.GetDosReg(kG12bDosGclkEn0) & (0x7fffu << 12u), (0x7fffu << 12u));
+  });
+
+  auto disable_result = client_.buffer(arena)->Disable(g12b_clk::G12B_CLK_DOS_GCLK_HCODEC);
+  ASSERT_TRUE(disable_result.ok());
+
+  driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_EQ(env.GetHiuReg(kG12bHhiVdecClkCntl), kHhiVdecClkCntlHcodecDisableVal);
+    EXPECT_EQ(env.GetDosReg(kG12bDosGclkEn0) & (0x7fffu << 12u), 0u);
   });
 }
 

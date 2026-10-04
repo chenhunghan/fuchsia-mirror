@@ -5,7 +5,7 @@
 //! MMIO regions backed by Fuchsia Virtual Memory Objects.
 
 use crate::memory::Memory;
-use crate::region::MmioRegion;
+use crate::region::{MmioRegion, UnsafeMmio};
 use core::ptr::{NonNull, with_exposed_provenance_mut};
 use zx::{CachePolicy, VmarFlags, Vmo};
 use zx_status::Status;
@@ -101,6 +101,21 @@ impl Drop for VmoMapping {
         // whose safety requirements require the caller to only use this memory while the
         // VmoMapping is alive.
         let _ = unsafe { root_self.unmap(self.map_addr, self.map_size) };
+    }
+}
+
+/// A type capable of mapping a [`zx::Vmo`] and returning an [`MmioRegion`] from
+/// it.
+pub trait VmoMapper: UnsafeMmio + Sized {
+    /// Map the specified memory range of the given Vmo in the root Vmar for
+    /// this process and return an object that maintains the mapping for its
+    /// lifetime.
+    fn map(offset: usize, size: usize, vmo: Vmo) -> Result<MmioRegion<Self>, Status>;
+}
+
+impl VmoMapper for VmoMemory {
+    fn map(offset: usize, size: usize, vmo: Vmo) -> Result<MmioRegion<Self>, Status> {
+        VmoMapping::map(offset, size, vmo)
     }
 }
 

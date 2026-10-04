@@ -15,7 +15,7 @@ closed protocol BadBlock {
     /// blocks. It is recommended to first make call with |bad_blocks_count|
     /// equal to 0 in order to determine how large the |bad_blocks| is.
     strict GetBadBlockList() -> (struct {
-        s zx.Status;
+        s zx.Result;
         bad_blocks vector<uint32>:MAX;
     });
 
@@ -23,6 +23,6 @@ closed protocol BadBlock {
     strict MarkBlockBad(struct {
         block uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };

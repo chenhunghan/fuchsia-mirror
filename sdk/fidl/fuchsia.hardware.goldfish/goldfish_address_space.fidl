@@ -77,7 +77,7 @@ closed protocol AddressSpaceChildDriver {
     strict AllocateBlock(struct {
         size uint64;
     }) -> (resource struct {
-        res zx.Status;
+        res zx.Result;
         paddr uint64;
         vmo zx.Handle:<VMO, optional>;
     });
@@ -85,7 +85,7 @@ closed protocol AddressSpaceChildDriver {
     strict DeallocateBlock(struct {
         paddr uint64;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
     });
 
     /// Claim a region at `[offset, offset + size)` that is a subregion of a
@@ -97,7 +97,7 @@ closed protocol AddressSpaceChildDriver {
         offset uint64;
         size uint64;
     }) -> (resource struct {
-        res zx.Status;
+        res zx.Result;
         vmo zx.Handle:<VMO, optional>;
     });
 
@@ -107,14 +107,14 @@ closed protocol AddressSpaceChildDriver {
     strict UnclaimSharedBlock(struct {
         offset uint64;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
     });
 
     /// Ping (General notification for child drivers)
     strict Ping(struct {
         ping AddressSpaceChildDriverPingMessage;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
         ping AddressSpaceChildDriverPingMessage;
     });
 };

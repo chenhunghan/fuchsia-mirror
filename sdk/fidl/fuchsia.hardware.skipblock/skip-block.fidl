@@ -78,7 +78,7 @@ closed protocol SkipBlock {
     /// The block count can shrink in the event that a bad block is grown. It is
     /// recommended to call this again after a bad block is grown.
     strict GetPartitionInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         partition_info PartitionInfo;
     });
 
@@ -86,7 +86,7 @@ closed protocol SkipBlock {
     strict Read(resource struct {
         op ReadWriteOperation;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Erases and writes the specified blocks from the provided vmo.
@@ -99,7 +99,7 @@ closed protocol SkipBlock {
     strict Write(resource struct {
         op ReadWriteOperation;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         bad_block_grown bool;
     });
 
@@ -116,7 +116,7 @@ closed protocol SkipBlock {
     strict WriteBytes(resource struct {
         op WriteBytesOperation;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         bad_block_grown bool;
     });
 
@@ -139,7 +139,7 @@ closed protocol SkipBlock {
     strict WriteBytesWithoutErase(resource struct {
         op WriteBytesOperation;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

@@ -14,9 +14,10 @@ use crate::vfs::rw_queue::{RwQueue, RwQueueReadGuard, RwQueueWriteGuard};
 use crate::vfs::socket::SocketHandle;
 use crate::vfs::{
     CheckAccessReason, DefaultDirEntryOps, DirEntryOps, FileObject, FileObjectState, FileOps,
-    FileSystem, FileSystemHandle, FileWriteGuardState, FsLockDepType, FsStr, FsString,
-    MAX_LFS_FILESIZE, MountInfo, NamespaceNode, OPathOps, OpenAccessCheck, RecordLockCommand,
-    RecordLockOwner, RecordLocks, WeakFileHandle, checked_add_offset_and_length, inotify_hook,
+    FileSystem, FileSystemHandle, FileWriteGuardMode, FileWriteGuardRef, FileWriteGuardState,
+    FsLockDepType, FsStr, FsString, MAX_LFS_FILESIZE, MountInfo, NamespaceNode, OPathOps,
+    OpenAccessCheck, RecordLockCommand, RecordLockOwner, RecordLocks, WeakFileHandle,
+    checked_add_offset_and_length, inotify_hook,
 };
 use bitflags::bitflags;
 use fuchsia_runtime::UtcInstant;
@@ -176,6 +177,24 @@ pub type FsNodeReleaser = ObjectReleaser<FsNode, FsNodeReleaserAction>;
 pub type FsNodeHandle = Arc<FsNodeReleaser>;
 pub type WeakFsNodeHandle = Weak<FsNodeReleaser>;
 
+bitflags! {
+    /// Flags configuring an fscrypt encryption policy (`fscrypt_policy_v2.flags`).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct FscryptPolicyFlags: u8 {
+        const PAD_8 = uapi::FSCRYPT_POLICY_FLAGS_PAD_8 as u8;
+        const PAD_16 = uapi::FSCRYPT_POLICY_FLAGS_PAD_16 as u8;
+        const DIRECT_KEY = uapi::FSCRYPT_POLICY_FLAG_DIRECT_KEY as u8;
+        const IV_INO_LBLK_64 = uapi::FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64 as u8;
+        const IV_INO_LBLK_32 = uapi::FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32 as u8;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FscryptNodePolicy {
+    pub key_identifier: [u8; 16],
+    pub flags: FscryptPolicyFlags,
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FsNodeInfo {
     pub mode: FileMode,
@@ -191,8 +210,9 @@ pub struct FsNodeInfo {
     pub time_modify: UtcInstant,
     pub casefold: bool,
 
-    // If this node is fscrypt encrypted, stores the id of the user wrapping key used to encrypt it.
-    pub wrapping_key_id: Option<[u8; 16]>,
+    // If this node is fscrypt encrypted, stores the encryption policy (main key identifier and
+    // flags).
+    pub encryption_policy: Option<FscryptNodePolicy>,
 
     // Used to indicate to filesystems that manage timestamps that an access has occurred and to
     // update the node's atime.
@@ -596,6 +616,11 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
     /// Find multiple children nodes in sequence.
     ///
     /// This can be used to pipeline lookups in filesystems that support it.
+    ///
+    /// Each name in `names` is looked up in the node found for the previous name, starting with
+    /// `node`, and the results are returned in the same order as `names`. Lookups stop at the
+    /// first error, so fewer results than `names` may be returned, but at least one result must
+    /// be returned if `names` is not empty.
     fn lookup_pipelined(
         &self,
         _node: &FsNode,
@@ -1234,9 +1259,9 @@ impl FsNode {
         _current_task: &CurrentTask,
         node_info: &FsNodeInfo,
     ) -> Result<(), Errno> {
-        if let Some(wrapping_key_id) = node_info.wrapping_key_id {
+        if let Some(policy) = node_info.encryption_policy {
             let crypt_service = self.fs().crypt_service().ok_or_else(|| errno!(ENOKEY))?;
-            if !crypt_service.contains_key(EncryptionKeyId::from(wrapping_key_id)) {
+            if !crypt_service.contains_key(EncryptionKeyId::from(policy.key_identifier)) {
                 return error!(ENOKEY);
             }
         }
@@ -1638,6 +1663,18 @@ impl FsNode {
         Ok(())
     }
 
+    /// Acquires a [`FileWriteGuardMode`] reservation on this node for the lifetime of the returned
+    /// [`FileWriteGuardRef`].
+    ///
+    /// The internal [`FileWriteGuardState`] mutex is locked only for the duration of the counter
+    /// update and is dropped before returning.
+    pub fn create_write_guard(
+        &self,
+        mode: FileWriteGuardMode,
+    ) -> Result<FileWriteGuardRef<'_>, Errno> {
+        FileWriteGuardRef::new(self, mode)
+    }
+
     pub fn truncate(
         &self,
         current_task: &CurrentTask,
@@ -1654,6 +1691,22 @@ impl FsNode {
             CheckAccessReason::InternalPermissionChecks,
             security::Auditable::Location(std::panic::Location::caller()),
         )?;
+
+        // Per `truncate(2)`:
+        // "ETXTBSY: The file is an executable file that is being executed."
+        // And per `open(2)` (`O_TRUNC` / `ETXTBSY`), which routes truncation through here:
+        // "ETXTBSY: pathname refers to an executable image which is currently being executed
+        // and write access was requested."
+        //
+        // Hold a `FileWriteGuardMode::WriteFile` reservation for the duration of the truncation so
+        // that truncating an actively executing file fails with `ETXTBSY`, and any concurrent
+        // `execve(2)` (`FileWriteGuardMode::ExecMapping`) fails with `ETXTBSY` while truncation is
+        // in flight.
+        // `create_write_guard` drops the `write_guard_state` mutex immediately while keeping the
+        // `WriteFile` reservation active until `_write_guard` is dropped, avoiding lock-order
+        // inversion or self-deadlock when filesystem truncate ops lock `write_guard_state` to check
+        // seals (e.g., `check_no_seal`).
+        let _write_guard = self.create_write_guard(FileWriteGuardMode::WriteFile)?;
 
         let guard = self.ops().append_lock_write(self, current_task)?;
         self.truncate_locked(&guard, current_task, length)
@@ -1763,7 +1816,7 @@ impl FsNode {
             }
         }
 
-        if !mode.is_dir() {
+        if !mode.is_dir() && mode.contains(FileMode::ISGID | FileMode::IXGRP) {
             // https://man7.org/linux/man-pages/man7/inode.7.html says:
             //
             //   For an executable file, the set-group-ID bit causes the
@@ -1772,11 +1825,7 @@ impl FsNode {
             //
             // We need to check whether the current task has permission to create such a file.
             // See a similar check in `FsNode::chmod`.
-            let current_creds = current_task.current_creds();
-            if owner.gid != current_creds.fsgid
-                && !current_creds.is_in_group(owner.gid)
-                && !security::is_task_capable_noaudit(current_task, CAP_FOWNER)
-            {
+            if !can_retain_sgid(current_task, owner.gid) {
                 *mode &= !FileMode::ISGID;
             }
         }
@@ -1943,7 +1992,7 @@ impl FsNode {
         has.gid = info.gid != new_info.gid;
         has.rdev = info.rdev != new_info.rdev;
         has.casefold = info.casefold != new_info.casefold;
-        has.wrapping_key_id = info.wrapping_key_id != new_info.wrapping_key_id;
+        has.encryption_policy = info.encryption_policy != new_info.encryption_policy;
 
         if has.casefold && !self.fs().has_casefold_support() {
             return error!(ENOTSUP);
@@ -1958,7 +2007,7 @@ impl FsNode {
             || has.gid
             || has.rdev
             || has.casefold
-            || has.wrapping_key_id
+            || has.encryption_policy
         {
             self.ops().update_attributes(self, current_task, &new_info, has)?;
         }
@@ -1978,14 +2027,10 @@ impl FsNode {
     ) -> Result<(), Errno> {
         mount.check_readonly_filesystem()?;
         self.update_attributes(current_task, |info| {
-            let current_creds = current_task.current_creds();
-            if info.uid != current_creds.euid {
+            if info.uid != current_task.current_creds().fsuid {
                 security::check_task_capable(current_task, CAP_FOWNER)?;
-            } else if info.gid != current_creds.egid
-                && !current_creds.is_in_group(info.gid)
-                && mode.intersects(FileMode::ISGID)
-                && !security::is_task_capable_noaudit(current_task, CAP_FOWNER)
-            {
+            }
+            if mode.intersects(FileMode::ISGID) && !can_retain_sgid(current_task, info.gid) {
                 mode &= !FileMode::ISGID;
             }
             info.chmod(mode);
@@ -2529,6 +2574,18 @@ impl Releasable for FsNode {
             log_error!("Error on FsNodeOps::forget: {err:?}");
         }
     }
+}
+
+/// Returns whether the `current_task` may set (or keep) the setgid bit on a file with group `gid`.
+///
+/// This is the case if `gid` is the task's fsgid or one of its supplementary groups, or if the
+/// task has `CAP_FSETID`. Note that the egid is intentionally not considered.
+fn can_retain_sgid(current_task: &CurrentTask, gid: gid_t) -> bool {
+    let in_group = {
+        let current_creds = current_task.current_creds();
+        gid == current_creds.fsgid || current_creds.groups.contains(&gid)
+    };
+    in_group || security::check_task_capable(current_task, CAP_FSETID).is_ok()
 }
 
 fn check_access(

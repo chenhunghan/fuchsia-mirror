@@ -159,21 +159,6 @@ pub(crate) enum ChangeEither {
     V6(Change<Ipv6>),
 }
 
-impl ChangeEither {
-    pub(crate) fn global_add(
-        entry: netstack3_core::routes::AddableEntryEither<WeakDeviceId>,
-    ) -> Self {
-        match entry {
-            netstack3_core::routes::AddableEntryEither::V4(entry) => {
-                Self::V4(Change::RouteOp(RouteOp::Add(entry), SetMembership::Global))
-            }
-            netstack3_core::routes::AddableEntryEither::V6(entry) => {
-                Self::V6(Change::RouteOp(RouteOp::Add(entry), SetMembership::Global))
-            }
-        }
-    }
-}
-
 impl<I: Ip> From<Change<I>> for ChangeEither {
     fn from(change: Change<I>) -> Self {
         I::map_ip_in(change, |change| ChangeEither::V4(change), |change| ChangeEither::V6(change))

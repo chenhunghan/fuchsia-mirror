@@ -46,6 +46,7 @@ struct TestEntry {
     os: String,
     package_url: Option<String>,
     component_label: Option<String>,
+    realm: Option<String>,
     package_label: Option<String>,
     package_manifests: Option<Vec<String>>,
     log_settings: Option<LogSettings>,
@@ -418,6 +419,20 @@ fn validate_and_get_test_cml(
     Ok(decl)
 }
 
+fn resolve_test_realm(
+    test_entry: &TestEntry,
+    test_components_map: &HashMap<String, TestComponentsJsonEntry>,
+) -> Option<String> {
+    if let Some(realm) = &test_entry.realm {
+        return Some(realm.clone());
+    }
+    test_entry
+        .component_label
+        .as_ref()
+        .and_then(|label| test_components_map.get(label))
+        .and_then(|c| c.test_component.moniker.clone())
+}
+
 fn run_tool() -> Result<(), Error> {
     let opt = opts::Opt::parse();
     opt.validate()?;
@@ -436,13 +451,7 @@ fn run_tool() -> Result<(), Error> {
     let (successes, errors): (Vec<_>, Vec<_>) = tests_json
         .par_iter()
         .map(|entry| {
-            let realm = match &entry.test.component_label {
-                Some(component_label) => match test_components_map.get(component_label) {
-                    Some(test_component) => test_component.test_component.moniker.clone(),
-                    None => None,
-                },
-                None => None,
-            };
+            let realm = resolve_test_realm(&entry.test, &test_components_map);
             // Construct the base TestListEntry.
             let mut test_list_entry = to_test_list_entry(ToTestListEntryArgs {
                 test_entry: &entry.test,
@@ -1471,5 +1480,43 @@ mod tests {
             "{:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_resolve_test_realm() {
+        let mut map = HashMap::new();
+        map.insert(
+            "//foo:component(//build/toolchain/fuchsia:x64)".to_string(),
+            TestComponentsJsonEntry {
+                test_component: TestComponentEntry {
+                    label: "//foo:component(//build/toolchain/fuchsia:x64)".to_string(),
+                    moniker: Some("/core/testing/system-tests".to_string()),
+                },
+            },
+        );
+
+        // Explicit `realm` in tests.json (e.g. from Bazel `fx_test`) takes precedence.
+        let bazel_entry = TestEntry {
+            realm: Some("/core/testing/starnix-tests".to_string()),
+            ..TestEntry::default()
+        };
+        assert_eq!(
+            resolve_test_realm(&bazel_entry, &map),
+            Some("/core/testing/starnix-tests".to_string())
+        );
+
+        // Falls back to `component_label` lookup in `test_components.json` for GN tests.
+        let gn_entry = TestEntry {
+            component_label: Some("//foo:component(//build/toolchain/fuchsia:x64)".to_string()),
+            ..TestEntry::default()
+        };
+        assert_eq!(
+            resolve_test_realm(&gn_entry, &map),
+            Some("/core/testing/system-tests".to_string())
+        );
+
+        // Hermetic test with neither set returns None.
+        let hermetic_entry = TestEntry::default();
+        assert_eq!(resolve_test_realm(&hermetic_entry, &map), None);
     }
 }

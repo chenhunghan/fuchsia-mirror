@@ -355,6 +355,15 @@ action("all_package_manifests.list") {
     "--paths",
     rebase_path(discoverable_manifests_from_metadata, root_build_dir),
   ]
+
+  # Bazel-defined test packages
+  bazel_test_packages_list = "$root_build_dir/bazel_test_packages.list"
+  deps += [ "//build/bazel/target_tests:bazel_test_packages.list" ]
+  inputs += [ bazel_test_packages_list ]
+  args += [
+    "--paths",
+    rebase_path(bazel_test_packages_list, root_build_dir),
+  ]
 }
 
 if (bazel_product_bundle_target != "") {

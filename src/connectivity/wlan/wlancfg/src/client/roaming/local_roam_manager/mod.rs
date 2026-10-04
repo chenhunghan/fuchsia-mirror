@@ -240,9 +240,10 @@ mod tests {
         // a created roam monitor is holding the receiver end.
         roam_monitor_sender
             .send_signal_report_ind(SignalReportIndication {
-                rssi_dbm: -60,
-                snr_db: 30,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(-60),
+                snr_db: Some(30),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             })
             .expect("error sending data via roam monitor sender");
     }
@@ -278,9 +279,10 @@ mod tests {
         // a created roam monitor is holding the receiver end.
         roam_monitor_sender
             .send_signal_report_ind(SignalReportIndication {
-                rssi_dbm: -60,
-                snr_db: 30,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(-60),
+                snr_db: Some(30),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             })
             .expect("error sending data via roam monitor sender");
 

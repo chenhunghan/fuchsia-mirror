@@ -242,22 +242,29 @@ impl FxBlob {
     }
 
     fn record_page_fault_metric(&self, range: &Range<u64>) {
+        let page_size = zx::system_get_page_size() as u64;
         let chunk_size: u64 = min_chunk_size(&self.compression_info);
+        let pages_per_chunk = chunk_size / page_size;
 
         let first_chunk = range.start / chunk_size;
+        let full_end_chunk = range.end / chunk_size;
+
+        let mut supplied_pages =
+            self.chunks_supplied.test_and_set_range(first_chunk, full_end_chunk) * pages_per_chunk;
+
         // The end of the range may not be chunk aligned if it's the last chunk.
-        let last_chunk = range.end.div_ceil(chunk_size);
+        let trailing_pages = (range.end % chunk_size) / page_size;
+        if trailing_pages > 0 {
+            supplied_pages +=
+                self.chunks_supplied.test_and_set_range(full_end_chunk, full_end_chunk + 1)
+                    * trailing_pages;
+        }
 
-        let supplied_count = self.chunks_supplied.test_and_set_range(first_chunk, last_chunk);
-
-        if supplied_count > 0 {
-            // The counter is expressed in pages, and chunks are a multiple of the page size.  The
-            // last chunk of a blob may be partial, in which case this slightly overestimates.
-            let pages_per_chunk = chunk_size / zx::system_get_page_size() as u64;
+        if supplied_pages > 0 {
             self.handle
                 .owner()
                 .blob_resupplied_count()
-                .increment(supplied_count * pages_per_chunk, Ordering::Relaxed);
+                .increment(supplied_pages, Ordering::Relaxed);
         }
     }
 
@@ -1182,16 +1189,15 @@ mod tests {
             let hash = fixture.write_blob(&data, CompressionMode::Never).await;
 
             let blob = fixture.get_opened_blob(hash).await.unwrap();
-            assert_eq!(blob.chunks_supplied.len(), 4);
             // Nothing has been read yet.
-            assert_eq!(&blob.chunks_supplied.get(), &[false, false, false, false]);
+            assert_eq!(&blob.chunks_supplied.to_vec(4), &[false, false, false, false]);
 
             blob.vmo.read_to_vec::<u8>(4096, 4096).unwrap();
 
-            assert_eq!(&blob.chunks_supplied.get(), &[true, false, false, false]);
+            assert_eq!(&blob.chunks_supplied.to_vec(4), &[true, false, false, false]);
 
             blob.vmo.read_to_vec::<u8>(READ_AHEAD_SIZE * 2 + 4096, READ_AHEAD_SIZE).unwrap();
-            assert_eq!(&blob.chunks_supplied.get(), &[true, false, true, true]);
+            assert_eq!(&blob.chunks_supplied.to_vec(4), &[true, false, true, true]);
 
             // We have loaded pages, but only once each.
             assert_eq!(volume.blob_resupplied_count().read(Ordering::SeqCst), 0);
@@ -1207,9 +1213,13 @@ mod tests {
             ));
             Epoch::global().barrier().await;
 
-            // Two chunks were resupplied, and the counter is expressed in pages.
+            // Two chunks were resupplied (one full chunk and the last chunk which is one page
+            // short), and the counter is expressed in pages.
             let pages_per_chunk = READ_AHEAD_SIZE / zx::system_get_page_size() as u64;
-            assert_eq!(volume.blob_resupplied_count().read(Ordering::SeqCst), 2 * pages_per_chunk);
+            assert_eq!(
+                volume.blob_resupplied_count().read(Ordering::SeqCst),
+                2 * pages_per_chunk - 1
+            );
         }
 
         fixture.close().await;

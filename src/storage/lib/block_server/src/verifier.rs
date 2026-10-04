@@ -5,8 +5,8 @@
 use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
 use fuchsia_sync::Mutex;
 use mapping::{
-    DELIVERY_DATA_SIZE, DeliveryCommand, DeliveryHandler, PENDING_DELIVERY_COMMANDS_CAPACITY,
-    PageRequest, RawDeliveryCommand,
+    DeliveryCommand, DeliveryHandler, PENDING_DELIVERY_COMMANDS_CAPACITY, PageRequest,
+    RawDeliveryCommand,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -46,14 +46,20 @@ impl DeliveryHandler for Verifier {
             verifier: Arc::clone(self),
             key,
             read_range: original_range,
-            write_cursor: 0,
+            read_alignment: 0,
+            committed_len: 0,
             delivered_len: 0,
             data: Vec::new(),
         }
     }
 
     /// Registers a blob's Merkle tree leaf hashes with the verifier via the delivery queue.
-    fn register_blob(&self, key: u64, merkle_leaves: &[[u8; 32]]) -> Result<(), anyhow::Error> {
+    fn register_blob(
+        &self,
+        key: u64,
+        merkle_leaves: &[[u8; 32]],
+        read_alignment: usize,
+    ) -> Result<(), anyhow::Error> {
         let mut sender_guard = self.sender.lock();
         if let Some(sender) = sender_guard.as_mut() {
             let leaf_bytes: &[u8] = merkle_leaves.as_flattened();
@@ -63,6 +69,7 @@ impl DeliveryHandler for Verifier {
                 key,
                 offset: payload.offset(),
                 length: leaf_bytes.len() as u32,
+                read_alignment: read_alignment as u32,
             };
             payload.commit(cmd.into())?;
         }
@@ -76,8 +83,11 @@ pub struct Buffer {
     verifier: Arc<Verifier>,
     key: u64,
     read_range: Range<u64>,
-    // Write cursor into `self.data` advanced by calls to [`DataBuffer::commit`].
-    write_cursor: usize,
+    // Alignment boundary (matching the blob's `read_alignment`) at which data is flushed to the
+    // verifier queue.
+    read_alignment: usize,
+    // Bytes committed into `self.data` so far via calls to [`DataBuffer::commit`].
+    committed_len: usize,
     // Bytes delivered to the verifier queue so far.
     delivered_len: usize,
     data: Vec<u8>,
@@ -127,20 +137,20 @@ impl DataBuffer for Buffer {
     /// Panics if `prepare()` has not been called prior to accessing this method.
     fn mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
         assert!(!self.data.is_empty(), "prepare must be called before accessing mut_ptr_slice");
-        MutPtrByteSlice::from(&mut self.data[self.write_cursor..])
+        MutPtrByteSlice::from(&mut self.data[self.committed_len..])
     }
 
     fn commit(&mut self, size: usize) -> Result<(), ChunkedArchiveError> {
-        self.write_cursor += size;
+        self.committed_len += size;
 
-        // Deliver complete DELIVERY_DATA_SIZE chunks to the verifier queue as data is committed.
-        while self.write_cursor - self.delivered_len >= DELIVERY_DATA_SIZE {
-            self.deliver_chunk(DELIVERY_DATA_SIZE)?;
+        // Deliver complete `read_alignment` chunks to the verifier queue as data is committed.
+        while self.committed_len - self.delivered_len >= self.read_alignment {
+            self.deliver_chunk(self.read_alignment)?;
         }
 
         // Deliver any trailing remainder once the entire prepared range has been committed.
-        if self.write_cursor == self.data.len() && self.delivered_len < self.write_cursor {
-            self.deliver_chunk(self.write_cursor - self.delivered_len)?;
+        if self.committed_len == self.data.len() && self.delivered_len < self.committed_len {
+            self.deliver_chunk(self.committed_len - self.delivered_len)?;
         }
 
         Ok(())
@@ -148,9 +158,15 @@ impl DataBuffer for Buffer {
 }
 
 impl PageRequest for Buffer {
-    fn prepare(&mut self, read_range: Range<u64>) -> Result<(), ChunkedArchiveError> {
+    fn prepare(
+        &mut self,
+        read_range: Range<u64>,
+        read_alignment: usize,
+    ) -> Result<(), ChunkedArchiveError> {
         assert!(self.data.is_empty(), "prepare must only be called once");
+        assert!(read_alignment > 0, "read_alignment must be non-zero");
         self.read_range = read_range;
+        self.read_alignment = read_alignment;
         let len = (self.read_range.end - self.read_range.start) as usize;
         self.data = vec![0u8; len];
         Ok(())
@@ -160,7 +176,8 @@ impl PageRequest for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mapping::DELIVERY_DATA_COMMAND;
+    use mapping::{DELIVERY_DATA_COMMAND, TARGET_READ_AHEAD_SIZE};
+    use test_case::test_case;
 
     #[fuchsia::test]
     fn test_verifier_buffer_incremental_commit() {
@@ -175,7 +192,7 @@ mod tests {
         let key = 42u64;
 
         let mut request = verifier.get_page_request(key, 0..8192);
-        request.prepare(0..8192).expect("prepare");
+        request.prepare(0..8192, TARGET_READ_AHEAD_SIZE as usize).expect("prepare");
 
         // Fill first page (4096 bytes) with 0xAA
         let page1_data = vec![0xAAu8; 4096];
@@ -221,7 +238,7 @@ mod tests {
         let key = 43u64;
 
         let mut request = verifier.get_page_request(key, 0..5000);
-        request.prepare(0..5000).expect("prepare");
+        request.prepare(0..5000, TARGET_READ_AHEAD_SIZE as usize).expect("prepare");
 
         let data = vec![0xCCu8; 5000];
 
@@ -245,9 +262,15 @@ mod tests {
         msg.pop().expect("pop msg");
     }
 
+    #[test_case(32 * 1024, 128 * 1024; "zstd_32k_read_128k")]
+    #[test_case(48 * 1024, 96 * 1024; "zstd_48k_read_96k")]
+    #[test_case(152 * 1024, 152 * 1024; "zstd_152k_read_152k")]
     #[fuchsia::test]
-    fn test_verifier_buffer_delivery_data_size_chunking() {
-        let total_size = DELIVERY_DATA_SIZE * 2;
+    fn test_verifier_buffer_delivery_data_size_chunking(
+        zstd_chunk_size: usize,
+        read_alignment: usize,
+    ) {
+        let total_size = read_alignment * 2;
         let delivery_queue = zx::Vmo::create(total_size as u64 + 65536).unwrap();
         let mut receiver = vmo_fifo::Receiver::<RawDeliveryCommand>::new(
             delivery_queue.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
@@ -259,37 +282,38 @@ mod tests {
         let key = 44u64;
 
         let mut request = verifier.get_page_request(key, 0..total_size as u64);
-        request.prepare(0..total_size as u64).expect("prepare");
+        request.prepare(0..total_size as u64, read_alignment).expect("prepare");
 
-        let chunk_32k = vec![0x55u8; 32 * 1024];
+        let chunk = vec![0x55u8; zstd_chunk_size];
+        let chunks_per_read = read_alignment / zstd_chunk_size;
 
-        // Push 3 chunks of 32 KiB (96 KiB) - less than DELIVERY_DATA_SIZE
-        for _ in 0..3 {
-            request.mut_ptr_slice().subslice_mut(0..32 * 1024).copy_from_slice(&chunk_32k);
-            request.commit(32 * 1024).expect("commit");
+        // Push `chunks_per_read - 1` chunks - less than `read_alignment`
+        for _ in 0..(chunks_per_read - 1) {
+            request.mut_ptr_slice().subslice_mut(0..zstd_chunk_size).copy_from_slice(&chunk);
+            request.commit(zstd_chunk_size).expect("commit");
         }
         assert!(receiver.is_empty());
 
-        // Push 4th chunk (now 128 KiB == DELIVERY_DATA_SIZE)
-        request.mut_ptr_slice().subslice_mut(0..32 * 1024).copy_from_slice(&chunk_32k);
-        request.commit(32 * 1024).expect("commit");
+        // Push the final chunk of the first `read_alignment` window
+        request.mut_ptr_slice().subslice_mut(0..zstd_chunk_size).copy_from_slice(&chunk);
+        request.commit(zstd_chunk_size).expect("commit");
 
-        // 1st 128 KiB message delivered
+        // 1st `read_alignment` message delivered
         let msg1 = receiver.peek().expect("msg1");
         assert_eq!(msg1.target_offset, 0);
-        assert_eq!(msg1.length, DELIVERY_DATA_SIZE as u32);
+        assert_eq!(msg1.length, read_alignment as u32);
         msg1.pop().expect("pop msg1");
 
-        // Push remaining 4 chunks (another 128 KiB)
-        for _ in 0..4 {
-            request.mut_ptr_slice().subslice_mut(0..32 * 1024).copy_from_slice(&chunk_32k);
-            request.commit(32 * 1024).expect("commit");
+        // Push remaining `chunks_per_read` chunks (second `read_alignment` window)
+        for _ in 0..chunks_per_read {
+            request.mut_ptr_slice().subslice_mut(0..zstd_chunk_size).copy_from_slice(&chunk);
+            request.commit(zstd_chunk_size).expect("commit");
         }
 
-        // 2nd 128 KiB message delivered
+        // 2nd `read_alignment` message delivered
         let msg2 = receiver.peek().expect("msg2");
-        assert_eq!(msg2.target_offset, DELIVERY_DATA_SIZE as u64);
-        assert_eq!(msg2.length, DELIVERY_DATA_SIZE as u32);
+        assert_eq!(msg2.target_offset, read_alignment as u64);
+        assert_eq!(msg2.length, read_alignment as u32);
         msg2.pop().expect("pop msg2");
     }
 
@@ -301,8 +325,8 @@ mod tests {
 
         let key = 46u64;
         let mut request = verifier.get_page_request(key, 0..8192);
-        request.prepare(0..4096).expect("first prepare");
-        let _ = request.prepare(0..8192);
+        request.prepare(0..4096, TARGET_READ_AHEAD_SIZE as usize).expect("first prepare");
+        let _ = request.prepare(0..8192, TARGET_READ_AHEAD_SIZE as usize);
     }
 
     #[fuchsia::test]
@@ -333,7 +357,7 @@ mod tests {
 
         let verifier = Arc::new(Verifier::new(delivery_queue));
         let mut request = verifier.get_page_request(key, 0..8192);
-        request.prepare(0..8192).expect("prepare");
+        request.prepare(0..8192, TARGET_READ_AHEAD_SIZE as usize).expect("prepare");
 
         let page1_data = vec![0xAAu8; 4096];
         request.mut_ptr_slice().subslice_mut(0..4096).copy_from_slice(&page1_data);
@@ -362,12 +386,13 @@ mod tests {
         let key = 42u64;
         let leaves = [[0xABu8; 32], [0xCDu8; 32]];
 
-        verifier.register_blob(key, &leaves).expect("register_blob failed");
+        verifier.register_blob(key, &leaves, 96 * 1024).expect("register_blob failed");
 
         let msg = receiver.peek().expect("peek msg");
         assert_eq!(msg.opcode, mapping::DELIVERY_REGISTER_BLOB_COMMAND);
         assert_eq!(msg.key, key);
         assert_eq!(msg.length, 64);
+        assert_eq!(msg.read_alignment, 96 * 1024);
         let mut buf = vec![0u8; 64];
         msg.payload_slice(msg.offset, msg.length).copy_to_slice(&mut buf);
         assert_eq!(&buf[..32], &[0xABu8; 32]);

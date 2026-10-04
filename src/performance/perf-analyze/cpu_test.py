@@ -57,7 +57,7 @@ class CpuPluginTest(unittest.TestCase):
                         "avg_duration_ms": 0.05,
                     },
                 ]
-            elif "Processing Rate" in sql or "effective_load_pct" in sql:
+            elif "Rate:CPU" in sql or "effective_load_pct" in sql:
                 return [
                     {
                         "cpu": 0,
@@ -306,7 +306,7 @@ class CpuPluginTest(unittest.TestCase):
         mock_tp.get_tables.return_value = self.all_tables
 
         def run_query_mock(sql: str) -> list[dict[str, Any]]:
-            if "LIMIT 1" in sql and "Processing Rate:CPU:%" in sql:
+            if "LIMIT 1" in sql and "Rate:CPU:%" in sql:
                 # Probe query finds no kernel:power tracks
                 return []
             if "running_pct" in sql:

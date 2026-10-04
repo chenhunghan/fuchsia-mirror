@@ -587,6 +587,18 @@ zx_status_t SdmmcBlockDevice::ReadWriteWithRetries(std::vector<block_server::Req
   if (st != ZX_OK) {
     fdf::error("do_txn error: {}", zx_status_get_string(st));
     properties_.io_errors_.Add(1);
+
+    if (!is_sd_) {
+      std::array<uint8_t, MMC_EXT_CSD_SIZE> ext_csd;
+      zx_status_t ext_csd_st = sdmmc_->MmcSendExtCsd(ext_csd);
+      if (ext_csd_st == ZX_OK) {
+        memset(&ext_csd[MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_START], 0,
+               MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_SIZE);
+        properties_.ext_csd_.Set({ext_csd.begin(), ext_csd.end()});
+        properties_.ext_csd_timestamp_.Set(zx::clock::get_monotonic().get());
+      }
+      properties_.ext_csd_status_.Set(zx_status_get_string(ext_csd_st));
+    }
   }
 
   fdf::debug("do_txn complete");
@@ -1493,20 +1505,37 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
 
 void SdmmcBlockDevice::ProgramKey(ProgramKeyRequestView request,
                                   ProgramKeyCompleter::Sync& completer) {
+  PartitionDevice* user_data_partition = nullptr;
+  for (const auto& partition : child_partition_devices_) {
+    if (partition->partition() == USER_DATA_PARTITION) {
+      user_data_partition = partition.get();
+      break;
+    }
+  }
+  if (!user_data_partition) {
+    completer.ReplyError(ZX_ERR_BAD_STATE);
+    return;
+  }
+
   fdf::Arena arena(kArenaTag);
-  auto result = inline_encryption_client_.buffer(arena)->ProgramKey(request->wrapped_key,
-                                                                    request->data_unit_size);
+  auto result = inline_encryption_client_.buffer(arena)->ProgramKeySlot(request->wrapped_key,
+                                                                        request->data_unit_size);
   if (!result.ok()) {
-    fdf::error("Transport error when sending ProgramKey: {}", result.status_string());
+    fdf::error("Transport error when sending ProgramKeySlot: {}", result.status_string());
     completer.ReplyError(result.status());
     return;
   }
   if (result->is_error()) {
-    fdf::error("ProgramKey failed: {}", zx_status_get_string(result->error_value()));
+    fdf::error("ProgramKeySlot failed: {}", zx_status_get_string(result->error_value()));
     completer.ReplyError(result->error_value());
     return;
   }
-  completer.ReplySuccess(result->value()->slot);
+  zx::result<zx::eventpair> key_token = user_data_partition->RegisterKeySlot(result->value()->slot);
+  if (key_token.is_error()) {
+    completer.ReplyError(key_token.error_value());
+  } else {
+    completer.ReplySuccess(std::move(key_token.value()));
+  }
 }
 void SdmmcBlockDevice::DeriveRawSecret(DeriveRawSecretRequestView request,
                                        DeriveRawSecretCompleter::Sync& completer) {

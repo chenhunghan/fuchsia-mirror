@@ -186,27 +186,48 @@ pub trait AsKPrintUnsignedInt {
 }
 
 macro_rules! impl_unsigned_int {
-    ($($t:ty),*) => {
+    ($($t:ty => $ut:ty),*) => {
         $(
             impl AsKPrintUnsignedInt for $t {
                 #[inline(always)]
                 fn as_c_ulonglong(&self) -> core::ffi::c_ulonglong {
-                    *self as core::ffi::c_ulonglong
+                    (*self as $ut) as core::ffi::c_ulonglong
                 }
             }
             impl AsKPrintUnsignedInt for &$t {
                 #[inline(always)]
                 fn as_c_ulonglong(&self) -> core::ffi::c_ulonglong {
-                    **self as core::ffi::c_ulonglong
+                    (**self as $ut) as core::ffi::c_ulonglong
                 }
             }
         )*
     };
 }
 
-impl_unsigned_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, bool);
+impl_unsigned_int!(
+    u8 => u8,
+    u16 => u16,
+    u32 => u32,
+    u64 => u64,
+    usize => usize,
+    i8 => u8,
+    i16 => u16,
+    i32 => u32,
+    i64 => u64,
+    isize => usize,
+    bool => u8
+);
 
-/// Trait implemented by pointer types formatted with `%p`.
+/// Computes the field width for the `"0x"` prefix in space-padded
+/// alternate hex formatting (`%*s%llx`) so that the total output width
+/// (leading spaces + 2-byte prefix + hex digits) is at least `width`.
+#[inline(always)]
+pub const fn hex_alt_prefix_width(val: core::ffi::c_ulonglong, width: usize) -> core::ffi::c_int {
+    let digits = (core::ffi::c_ulonglong::BITS - (val | 1).leading_zeros()).div_ceil(4) as usize;
+    width.saturating_sub(digits) as core::ffi::c_int
+}
+
+/// Trait implemented by pointer types formatted with `{:p}` / `{:#p}`.
 pub trait AsKPrintPointer {
     fn as_c_ptr_void(&self) -> *const core::ffi::c_void;
 }

@@ -9,7 +9,7 @@ import lib_for_test
 
 
 class FooTest(unittest.TestCase):
-    def test_foo(self):
+    def test_foo(self) -> None:
         self.assertEqual(lib_for_test.foo(), 42)
 
 

@@ -155,7 +155,7 @@ closed protocol ControlDevice {
         vmo zx.Handle:VMO;
         create_params CreateColorBuffer2Params;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
         hw_address_page_offset int32;
     });
 
@@ -193,7 +193,7 @@ closed protocol ControlDevice {
     strict GetBufferHandle(resource struct {
         vmo zx.Handle:VMO;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
         id uint32;
         type BufferHandleType;
     });

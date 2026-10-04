@@ -210,8 +210,9 @@ tests to make fewer assumptions about their runtime environment, which means
 that they’re runnable even in the most basic build configurations
 ([bringup builds][build-bringup]) without the component framework or advanced
 network features. These tests are built into the
-[Zircon Boot Image (ZBI)][glossary.zbi]. It’s possible to run these tests such
-that no other programs run in usermode, which helps isolate kernel bugs.
+[Zircon Boot Image (ZBI)][glossary.zircon-boot-image]. It’s possible to run
+these tests such that no other programs run in usermode, which helps isolate
+kernel bugs.
 
 Some kernel behaviors cannot be tested from the outside, so they’re tested with
 code that compiles into the kernel image and runs in kernelspace. These tests
@@ -350,7 +351,7 @@ See also:
 [gidl]: /tools/fidl/gidl/README.md
 [glossary.capability-routing]: /docs/glossary/README.md#capability-routing
 [glossary.realm]: /docs/glossary/README.md#realm
-[glossary.zbi]: /docs/glossary/README.md#zircon-boot-image
+[glossary.zircon-boot-image]: /docs/glossary/README.md#zircon-boot-image
 [inspect]: /docs/development/diagnostics/inspect/README.md
 [inspect-codelab]: /docs/development/diagnostics/inspect/codelab.md
 [inspect-validator]: /docs/reference/diagnostics/inspect/validator/README.md

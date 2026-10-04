@@ -35,7 +35,7 @@ class IoBufferSharedRegionDispatcher final : public Dispatcher {
 
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_IOB_SHARED_REGION; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
-  bool is_waitable() const final { return true; }
+  bool is_waitable() const final { return ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS & ZX_RIGHT_WAIT; }
 
   zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
     return UserSignalSelfSolo(this, clear_mask, set_mask, 0);

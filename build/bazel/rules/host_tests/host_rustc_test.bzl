@@ -4,7 +4,7 @@
 
 """Macros for defining `host_test()` targets for Rust binaries."""
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load(":host_test.bzl", "host_test")
 load(":host_test_data.bzl", "host_test_data_files")
@@ -72,7 +72,7 @@ def wrap_host_rust_test(
         test_label = test_label,
         test_args = test_args,
         data = test_data,
-        target_compatible_with = HOST_CONSTRAINTS,
+        target_compatible_with = HOST_OS_CONSTRAINTS,
         visibility = visibility,
     )
 

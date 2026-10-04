@@ -256,15 +256,16 @@ impl Drop for RseqScope {
 
 /// Register the current thread for restartable sequences.
 ///
+/// Returns an [`Rseq`] handle for the newly registered thread.
+///
 /// # Panics
 ///
-/// Panics if the maximum number of supported threads (`MAX_THREADS`) has been
-/// exhausted, or if setting the thread RSEQ via syscall fails.
-pub fn rseq_register_thread() {
-    let already_registered = RSEQ.with(|rseq| !rseq.get().is_null());
-    if already_registered {
-        return;
-    }
+/// Panics if the thread is already registered, if the maximum number of supported
+/// threads (`MAX_THREADS`) has been exhausted, or if setting the thread RSEQ via syscall fails.
+pub fn rseq_register_thread() -> Rseq {
+    RSEQ.with(|rseq| {
+        assert!(rseq.get().is_null(), "thread already registered");
+    });
 
     let (vmo_handle, slot, abi) = {
         let mut allocator = ALLOCATOR.lock();
@@ -285,36 +286,45 @@ pub fn rseq_register_thread() {
     RSEQ.with(|rseq| {
         rseq.set(abi);
     });
+
+    Rseq { abi: NonNull::new(abi).expect("RSEQ slot pointer must be non-null") }
 }
 
 /// Register the current thread for restartable sequences with an initial critical section.
+///
+/// Returns an [`Rseq`] handle for the newly registered thread.
 ///
 /// # Panics
 ///
 /// Panics if the thread is already registered, if the maximum number of supported
 /// threads (`MAX_THREADS`) has been exhausted, or if setting the thread RSEQ via syscall fails.
-pub fn rseq_register_thread_with_cs(critical_section: RseqCriticalSection) {
-    rseq_register_thread();
-    // SAFETY: `rseq_register_thread()` just registered the current thread, and the temporary
-    // `Rseq` handle does not outlive this call.
-    unsafe { Rseq::get() }.set_critical_section(critical_section);
+pub fn rseq_register_thread_with_cs(critical_section: RseqCriticalSection) -> Rseq {
+    let rseq = rseq_register_thread();
+    rseq.set_critical_section(critical_section);
+    rseq
 }
 
 /// Unregister the current thread from the restartable sequence.
 ///
 /// # Panics
 ///
-/// Panics if unsetting the thread RSEQ via syscall fails.
-pub fn rseq_unregister_thread() {
+/// Panics if the thread is not registered, or if unsetting the thread RSEQ via syscall fails.
+///
+/// # Safety
+///
+/// Any previously obtained `Rseq` handles for this thread must not be used after calling this
+/// function.
+pub unsafe fn rseq_unregister_thread() {
     let abi = RSEQ.with(|rseq| rseq.take());
-    if abi.is_null() {
-        return;
-    }
+    assert!(!abi.is_null(), "thread not registered");
 
+    // SAFETY: Passing zeroes clears the current thread's RSEQ registration in Zircon.
     let status = unsafe { zx::sys::zx_thread_set_rseq(0, 0, 0) };
     zx::Status::ok(status).expect("failed to unregister thread from RSEQ");
 
     // Zero out the struct to let Zircon's zero-page scanner reclaim the page.
+    // SAFETY: `abi` was allocated for this thread's RSEQ slot and is non-null. The kernel
+    // has unregistered the thread, so no concurrent accesses to this memory remain.
     unsafe {
         std::ptr::write_volatile(abi, mem::zeroed());
     }
@@ -398,21 +408,30 @@ mod tests {
         fn drop(&mut self) {
             RSEQ.with(|rseq| {
                 if !rseq.get().is_null() {
-                    rseq_unregister_thread();
+                    // SAFETY: The test guard is dropped when the test finishes or cleans up,
+                    // and no Rseq handles are retained after this drop.
+                    unsafe {
+                        rseq_unregister_thread();
+                    }
                 }
             });
         }
     }
 
     #[test]
-    fn test_double_registration() {
+    #[should_panic = "thread already registered"]
+    fn test_double_registration_panics() {
         let _guard = TestRegistrationGuard::new();
         rseq_register_thread();
     }
 
     #[test]
-    fn test_unregistered_unregister() {
-        rseq_unregister_thread();
+    #[should_panic = "thread not registered"]
+    fn test_unregistered_unregister_panics() {
+        // SAFETY: Testing unregister on an unregistered thread panics before performing any unsafe operations.
+        unsafe {
+            rseq_unregister_thread();
+        }
     }
 
     #[test]

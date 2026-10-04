@@ -71,6 +71,10 @@ std::vector<Redaction> BuildRedactions(
   absl::string_view match;
 
   while (RE2::FindAndConsume(&text_view, regexp, &match)) {
+    if (match.empty()) {
+      continue;
+    }
+
     const bool has_prefix =
         std::any_of(ignore_prefixes.begin(), ignore_prefixes.end(),
                     [&text, &match](const std::string_view ignore_prefix) {
@@ -81,7 +85,7 @@ std::vector<Redaction> BuildRedactions(
                              ignore_prefix == std::string_view(prefix_start, ignore_prefix.size());
                     });
 
-    if (!match.empty() && !has_prefix) {
+    if (!has_prefix) {
       const std::string replacement = build_redacted(std::string(match));
       redactions.push_back(Redaction{
           // We're working with pointers, but want a relative position within |text| so we need to

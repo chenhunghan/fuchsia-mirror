@@ -8,12 +8,17 @@ import logging
 import os
 import platform
 import re
+import time
 
 from honeydew import errors
 from honeydew.auxiliary_devices.usb_power_hub import usb_power_hub
-from honeydew.utils import host_shell
+from honeydew.utils import common, host_shell
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+DEFAULT_BUS_ID_LOOKUP_ATTEMPTS: int = 5
+DEFAULT_BUS_ID_LOOKUP_TIMEOUT_SEC: float = 10.0
+_BUS_ID_LOOKUP_RETRY_INTERVAL_SEC: float = 1.0
 
 
 class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
@@ -24,19 +29,30 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
     and virtual/emulated testbeds where physical power hubs are not available.
 
     Note on permissions:
-        Writing to the authorized file requires write access that a regular
-        user does not have by default. Install the required udev rules with
-        //src/tests/end_to_end/usb/lib/disconnect/udev.sh, which grants
-        access without needing `sudo` at test time.
+        Writing to `/sys/bus/usb/devices/<bus_id>/authorized` requires write
+        access that a regular user does not have by default. Run
+        //src/tests/end_to_end/usb/lib/disconnect/udev.sh (or the at-desk
+        runner //src/tests/end_to_end/usb/lib/disconnect/run_usb_virtual_disconnect_test_at_desk.sh,
+        which invokes `udev.sh`) to install the host udev rules (`sudo` is only
+        prompted on first-time setup) so `power_off()`/`power_on()` can toggle
+        `authorized` at test time without `sudo`.
 
     Args:
         target_serial: The serial number of the Fuchsia device. Used for
             discovery to match against connected USB devices.
+        bus_id_lookup_attempts: Maximum number of times `power_off()` looks up
+            the bus ID before giving up, to tolerate the DUT still
+            re-enumerating right after a previous reconnect.
+        bus_id_lookup_timeout_sec: Maximum total time in seconds `power_off()`
+            spends retrying the bus ID lookup. Retries stop at whichever of
+            the attempts or this timeout is reached first.
     """
 
     def __init__(
         self,
         target_serial: str | None = None,
+        bus_id_lookup_attempts: int = DEFAULT_BUS_ID_LOOKUP_ATTEMPTS,
+        bus_id_lookup_timeout_sec: float = DEFAULT_BUS_ID_LOOKUP_TIMEOUT_SEC,
     ) -> None:
         super().__init__()
         if platform.system() != "Linux":
@@ -45,17 +61,57 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
             )
 
         self._target_serial = target_serial
+        self._bus_id_lookup_attempts = bus_id_lookup_attempts
+        self._bus_id_lookup_timeout_sec = bus_id_lookup_timeout_sec
         self._usb_bus_id: str = self._find_usb_bus_id()
 
-        if not re.match(r"^[a-zA-Z0-9.-]+$", self._usb_bus_id):
-            raise ValueError(f"Invalid usb_bus_id format: {self._usb_bus_id}")
+        if not common.is_infra() and not os.access(
+            f"/sys/bus/usb/devices/{self._usb_bus_id}/authorized", os.W_OK
+        ):
+            msg = (
+                "Host udev rules for virtual USB disconnect are not installed "
+                f"or /sys/bus/usb/devices/{self._usb_bus_id}/authorized is not "
+                "writable. Run //src/tests/end_to_end/usb/lib/disconnect/udev.sh "
+                "or //src/tests/end_to_end/usb/lib/disconnect/run_usb_virtual_disconnect_test_at_desk.sh "
+                "first."
+            )
+            _LOGGER.error(msg)
+            raise usb_power_hub.UsbPowerHubError(msg)
 
     def power_off(self, port: int | None = None) -> None:
         """Deauthorizes (virtually unplugs) the USB device.
 
+        The bus ID is looked up again before each unplug, since the DUT may
+        have re-enumerated on a different port path (e.g. moved to another
+        port or a hub renumbered) since the last call. The lookup is retried
+        per `bus_id_lookup_attempts` and `bus_id_lookup_timeout_sec` in case
+        the DUT is still re-enumerating. `power_on()` reuses the bus ID
+        resolved here.
+
         Args:
             port: None. Not used by this implementation.
         """
+        end_time = time.monotonic() + self._bus_id_lookup_timeout_sec
+        for attempt in range(1, self._bus_id_lookup_attempts + 1):
+            try:
+                self._usb_bus_id = self._find_usb_bus_id()
+                break
+            except ValueError as err:
+                if (
+                    attempt == self._bus_id_lookup_attempts
+                    or time.monotonic() >= end_time
+                ):
+                    raise usb_power_hub.UsbPowerHubError(
+                        f"USB bus ID lookup failed after {attempt} attempt(s): "
+                        f"{err}"
+                    ) from err
+                _LOGGER.warning(
+                    "USB bus ID lookup attempt %d/%d failed: %s. Retrying...",
+                    attempt,
+                    self._bus_id_lookup_attempts,
+                    err,
+                )
+                time.sleep(_BUS_ID_LOOKUP_RETRY_INTERVAL_SEC)
         _LOGGER.info("Virtually unplugging USB device %s...", self._usb_bus_id)
         cmd: list[str] = [
             "sh",
@@ -139,4 +195,7 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
                 f"Multiple USB devices found: {matching_devices}. "
                 "Please specify target_serial explicitly."
             )
-        return matching_devices[0]
+        usb_bus_id = matching_devices[0]
+        if not re.match(r"^[a-zA-Z0-9.-]+$", usb_bus_id):
+            raise ValueError(f"Invalid usb_bus_id format: {usb_bus_id}")
+        return usb_bus_id

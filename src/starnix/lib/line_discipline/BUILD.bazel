@@ -1,0 +1,128 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "line_discipline",
+    srcs = [
+        "lib.rs",
+        "testing/mod.rs",
+    ],
+    crate_root = "lib.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:derivative"],
+    test_deps = ["//src/lib/fuchsia"],
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
+    with_unit_tests = True,
+    deps = [
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:utf8parse",
+    ],
+)
+
+# Note: testing/scenarios_list.json is strict JSON parsed by GN's read_file()
+# and Python's json.load(), so it cannot contain LINT.IfChange comments.
+# @bazel2gn:skip
+_SCENARIOS = [
+    # LINT.IfChange
+    "basic_backspace",
+    "canon_echo_ctl",
+    "canon_kill_line",
+    "canon_simple_echo",
+    "canon_word_erase",
+    "echo_extended",
+    "echo_nl",
+    "echo_prt",
+    "echo_prt_two_chars",
+    "echonl_echoprt",
+    "echoprt_backspace_multi_aln",
+    "echoprt_backspace_multi_nl",
+    "echoprt_backspace_multi_space",
+    "echoprt_backspace_nl_aln",
+    "echoprt_backspace_nl_nl",
+    "echoprt_backspace_nl_space",
+    "echoprt_kill",
+    "echoprt_kill_nl_aln",
+    "echoprt_word_erase",
+    "echoprt_word_erase_nl_aln",
+    "echoprt_word_erase_nl_nl",
+    "echoprt_word_erase_space",
+    "echoprt_word_erase_tab",
+    "echoprt_word_erase_typing",
+    "flush_sigint",
+    "flush_sigint_after_newline",
+    "flush_sigint_after_newline_separate_writes",
+    "flush_sigquit",
+    "flush_sigsusp",
+    "input_icrnl_prec",
+    "input_igncr",
+    "input_inlcr",
+    "input_inlcr_icrnl_swap",
+    "iuclc_simple",
+    "iutf8_backspace",
+    "ixany_basic",
+    "ixon_basic",
+    "no_iutf8_backspace",
+    "noflsh_echoctl_mixed",
+    "noflsh_sigint",
+    "noflsh_sigquit",
+    "noflsh_sigsusp",
+    "olcuc_simple",
+    "output_direct_ocrnl",
+    "output_direct_onlret_onocr",
+    "output_ocrnl",
+    "output_ocrnl_explicit",
+    "output_onlret",
+    "output_onocr",
+    "output_xtabs",
+    "packet_mode_basic",
+    "tcflush_packet_mode",
+    "tciflush",
+    "tciflush_buffer_full",
+    "tciflush_canon",
+    "tcioflush",
+    "tcioflush_canon",
+    "tcoflush",
+    "vdiscard_basic",
+    "veol2_basic",
+    "veol2_no_iexten",
+    "veol_basic",
+    "vlnext_basic",
+    "vlnext_echoctl",
+    "vlnext_no_echoctl",
+    "vreprint_basic",
+    # LINT.ThenChange(testing/scenarios_list.json, BUILD.gn)
+]
+
+# @bazel2gn:skip
+genrule(
+    name = "generate_scenarios_rs",
+    srcs = ["testing/generated/%s.json" % s for s in _SCENARIOS] + [
+        "testing/trace_generator.py",
+    ],
+    outs = ["testing/scenarios.rs"],
+    # The traces are checked-in sources, not build outputs. Genrule commands
+    # run from the execution root, where this package's sources are under
+    # package_name().
+    cmd = "python3 $(location testing/trace_generator.py) --generate-rs --output $@ --trace-dir " + package_name() + "/testing/generated --names " + " ".join(_SCENARIOS),
+)
+
+rustc_test(
+    name = "line_discipline_scenarios_test",
+    srcs = [
+        ":testing/scenarios.rs",  # @bazel2gn:path_overwrite:$target_gen_dir/testing/scenarios.rs
+    ],
+    crate_root = ":testing/scenarios.rs",  # @bazel2gn:raw_overwrite:"$target_gen_dir/testing/scenarios.rs"
+    data = [":generate_scenarios_rs"],
+    edition = "2024",
+    deps = [
+        ":line_discipline",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

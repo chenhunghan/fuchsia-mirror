@@ -180,6 +180,22 @@ impl HandleOwner {
             out.assume_init()
         }
     }
+
+    /// Returns a borrowed reference to the handle's dispatcher without incrementing its reference
+    /// count.
+    #[inline]
+    pub fn dispatcher_ref(&self) -> &Dispatcher {
+        // SAFETY: `self.ptr` is a valid non-null handle pointer that owns a reference to its
+        // dispatcher for the duration of `&self`.
+        unsafe { &*cpp_handle_get_dispatcher_raw(self.ptr.as_ptr()) }
+    }
+
+    /// Returns a borrowed `HandleRef` referencing this handle.
+    #[inline]
+    pub fn as_ref(&self) -> HandleRef<'_> {
+        // SAFETY: `self.ptr` is a valid owned handle pointer for the lifetime of `&self`.
+        unsafe { HandleRef::from_raw(self.ptr) }
+    }
 }
 
 impl Drop for HandleOwner {
@@ -210,9 +226,25 @@ impl<'a> HandleRef<'a> {
     }
 
     /// Checks if this handle has the requested rights.
+    #[inline]
     pub fn has_rights(&self, rights: zx_rights_t) -> bool {
         // SAFETY: `self.ptr` is guaranteed to be a valid handle pointer protected by the handle table lock.
         unsafe { cpp_handle_has_rights(self.ptr.as_ptr(), rights) }
+    }
+
+    /// Returns the rights associated with this handle.
+    #[inline]
+    pub fn rights(&self) -> zx_rights_t {
+        // SAFETY: `self.ptr` is guaranteed to be a valid handle pointer protected by the handle table lock.
+        unsafe { cpp_handle_get_rights(self.ptr.as_ptr()) }
+    }
+
+    /// Duplicates this handle with the given rights.
+    pub fn dup(&self, rights: zx_rights_t) -> Result<HandleOwner, Status> {
+        // SAFETY: `self.ptr` is guaranteed to be a valid non-null handle pointer.
+        let raw = unsafe { cpp_handle_dup(self.ptr.as_ptr(), rights) };
+        // SAFETY: `cpp_handle_dup` returns a valid new raw handle or null.
+        unsafe { HandleOwner::from_raw(raw).ok_or(Status::NO_MEMORY) }
     }
 
     /// Returns a reference-counted pointer to the handle's dispatcher.
@@ -225,7 +257,17 @@ impl<'a> HandleRef<'a> {
         }
     }
 
+    /// Returns a borrowed reference to the handle's dispatcher without incrementing its reference
+    /// count.
+    #[inline]
+    pub fn dispatcher_ref(&self) -> &'a Dispatcher {
+        // SAFETY: `self.ptr` is a valid handle pointer for lifetime `'a`, and the handle owns a
+        // reference to its dispatcher for at least `'a`.
+        unsafe { &*cpp_handle_get_dispatcher_raw(self.ptr.as_ptr()) }
+    }
+
     /// Returns the raw pointer to the handle.
+    #[inline]
     pub fn as_ptr(&self) -> *const core::ffi::c_void {
         self.ptr.as_ptr()
     }
@@ -265,6 +307,14 @@ unsafe extern "C" {
         handle: *const core::ffi::c_void,
         out_dispatcher: *mut MaybeUninit<RefPtr<Dispatcher>>,
     );
+
+    /// Retrieves a borrowed pointer to the handle's dispatcher without incrementing its reference
+    /// count.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must point to a valid `Handle`.
+    fn cpp_handle_get_dispatcher_raw(handle: *const core::ffi::c_void) -> *const Dispatcher;
 
     /// Returns the rights of the handle.
     ///

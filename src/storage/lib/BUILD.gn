@@ -45,6 +45,7 @@ group("tests") {
     "units:tests",
     "vfs/cpp:tests",
     "vfs/rust:tests",
+    "vmo-blob:tests",
     "vmo-fifo:tests",
     "watchdog:tests",
   ]

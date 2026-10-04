@@ -74,8 +74,8 @@ should be migrated to:
 
 ```bazel
 # BUILD.bazel
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -83,7 +83,7 @@ rustc_binary(
     name = "tool_bin",
     srcs = ["src/main.rs"],
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//third_party/rust_crates/vendor:anyhow",
     ],
@@ -130,14 +130,14 @@ When migrating Rust subtools and plugins in `//src/developer/ffx/`, use the spec
 - **Subtools (`ffx_tool`)** (from `//src/developer/ffx/build:ffx_tool.bzl`):
 
   ```bazel
-  load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+  load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
   load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
 
   ffx_tool(
       name = "ffx_<subtool>_tool",
       srcs = ["src/main.rs"],
       edition = "2024",
-      target_compatible_with = HOST_CONSTRAINTS,
+      target_compatible_with = HOST_OS_CONSTRAINTS,
       deps = [
           ":ffx_<plugin>",
           "//src/developer/ffx/lib/fho:lib",
@@ -147,7 +147,7 @@ When migrating Rust subtools and plugins in `//src/developer/ffx/`, use the spec
   ```
 
   - **Target name**: Match the GN target name (e.g. `ffx_sdk_tool`) so `bazel2gn` generates the matching GN target name without mangling.
-  - **Host constraints**: Always set `target_compatible_with = HOST_CONSTRAINTS` so `bazel2gn` wraps the target in `if (is_host)` in GN. Supported natively by `bazel2gn` (do not add `# @bazel2gn:skip`).
+  - **Host constraints**: Always set `target_compatible_with = HOST_OS_CONSTRAINTS` (see [`target_compatible_with.md`](../../../../references/target_compatible_with.md)) so `bazel2gn` wraps the target in `if (is_host)` in GN. Supported natively by `bazel2gn` (do not add `# @bazel2gn:skip`).
   - **Plugin dependency**: Depend directly on `:ffx_<plugin>` (the execution library), not `:ffx_<plugin>_suite`.
 
 - **Plugins (`ffx_plugin`)** (from `//src/developer/ffx/build:ffx_plugin.bzl`):
@@ -170,8 +170,8 @@ When migrating Rust subtools and plugins in `//src/developer/ffx/`, use the spec
   - **Unit tests**: Use `with_unit_tests = True` and `test_deps = [...]`.
   - **Frontend integration**: For built-in/required plugins, add `"//src/developer/ffx/plugins/<plugin>:ffx_<plugin>"` to `plugin_deps` in `//src/developer/ffx/frontends/ffx/BUILD.bazel`.
 
-- **Cross-toolchain `ffx` libraries (`HOST_CONSTRAINTS`)**:
-  Several internal libraries under `//src/developer/ffx/lib/` (e.g., `compat_info`) are built for both host and Fuchsia target devices. Do **not** set `target_compatible_with = HOST_CONSTRAINTS` on cross-toolchain libraries.
+- **Cross-toolchain `ffx` libraries (`target_compatible_with`)**:
+  Several internal libraries under `//src/developer/ffx/lib/` (e.g., `compat_info`) are built for both host and Fuchsia target devices. Do **not** set `target_compatible_with = HOST_OS_CONSTRAINTS` on cross-toolchain libraries.
 
 #### Verifying `ffx` Migrations
 

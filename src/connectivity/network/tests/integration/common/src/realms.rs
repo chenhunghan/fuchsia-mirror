@@ -85,7 +85,6 @@ impl NetstackVersion {
                 fnet_interfaces::StateMarker::PROTOCOL_NAME,
                 fnet_multicast_admin::Ipv4RoutingTableControllerMarker::PROTOCOL_NAME,
                 fnet_multicast_admin::Ipv6RoutingTableControllerMarker::PROTOCOL_NAME,
-                fnet_name::DnsServerWatcherMarker::PROTOCOL_NAME,
                 fnet_neighbor::ControllerMarker::PROTOCOL_NAME,
                 fnet_neighbor::ViewMarker::PROTOCOL_NAME,
                 fnet_root::InterfacesMarker::PROTOCOL_NAME,
@@ -117,6 +116,7 @@ impl NetstackVersion {
             NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
             | NetstackVersion::ProdNetstack2 => &common_services_and!(
                 fnet_filter_deprecated::FilterMarker::PROTOCOL_NAME,
+                fnet_name::DnsServerWatcherMarker::PROTOCOL_NAME,
                 fnet_stack::LogMarker::PROTOCOL_NAME,
             ),
             NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => &common_services_and!(
@@ -140,19 +140,6 @@ impl NetstackVersion {
             Self::Netstack2 { .. } | Self::ProdNetstack2 => false,
         }
     }
-}
-
-/// An extension trait for [`Netstack`].
-pub trait NetstackExt {
-    /// Whether to use the out of stack DHCP client for the given Netstack.
-    const USE_OUT_OF_STACK_DHCP_CLIENT: bool;
-}
-
-impl<N: Netstack> NetstackExt for N {
-    const USE_OUT_OF_STACK_DHCP_CLIENT: bool = match Self::VERSION {
-        NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => true,
-        NetstackVersion::Netstack2 { .. } | NetstackVersion::ProdNetstack2 => false,
-    };
 }
 
 /// The NetCfg version.
@@ -289,7 +276,6 @@ pub enum KnownServiceProvider {
         agent: ManagementAgent,
         config: ManagerConfig,
         use_dhcp_server: bool,
-        use_out_of_stack_dhcp_client: bool,
         socket_proxy_type: SocketProxyType,
     },
     SecureStash,
@@ -460,7 +446,6 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                 agent,
                 use_dhcp_server,
                 config,
-                use_out_of_stack_dhcp_client,
                 socket_proxy_type: _,
             } => {
                 let enable_dhcpv6 = match config {
@@ -507,15 +492,14 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                                 enable_dhcpv6,
                             ),
                         )))
-                        .chain(std::iter::once(fnetemul::Capability::ChildDep(
-                            or_void_protocol_dep::<fnet_dhcp::ClientProviderMarker>(
-                                constants::dhcp_client::COMPONENT_NAME,
-                                *use_out_of_stack_dhcp_client,
-                            ),
-                        )))
                         .chain(
                             [
                                 fnetemul::Capability::LogSink(fnetemul::Empty {}),
+                                fnetemul::Capability::ChildDep(protocol_dep::<
+                                    fnet_dhcp::ClientProviderMarker,
+                                >(
+                                    constants::dhcp_client::COMPONENT_NAME,
+                                )),
                                 fnetemul::Capability::ChildDep(protocol_dep::<
                                     fnet_filter::ControlMarker,
                                 >(
@@ -553,11 +537,6 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                                 )),
                                 fnetemul::Capability::ChildDep(protocol_dep::<
                                     fnet_routes_admin::RuleTableV6Marker,
-                                >(
-                                    constants::netstack::COMPONENT_NAME,
-                                )),
-                                fnetemul::Capability::ChildDep(protocol_dep::<
-                                    fnet_name::DnsServerWatcherMarker,
                                 >(
                                     constants::netstack::COMPONENT_NAME,
                                 )),
@@ -764,7 +743,6 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                 exposes: Some(vec![
                     fposix_socket::ProviderMarker::PROTOCOL_NAME.to_string(),
                     fposix_socket_raw::ProviderMarker::PROTOCOL_NAME.to_string(),
-                    fnp_socketproxy::StarnixNetworksMarker::PROTOCOL_NAME.to_string(),
                 ]),
                 uses: Some(fnetemul::ChildUses::Capabilities(vec![
                     fnetemul::Capability::ChildDep(protocol_dep::<fposix_socket::ProviderMarker>(
@@ -778,12 +756,6 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                     fnetemul::Capability::ChildDep(fnetemul::ChildDep {
                         is_weak: Some(true),
                         ..protocol_dep::<fnp_properties::NetworksMarker>(
-                            constants::netcfg::COMPONENT_NAME,
-                        )
-                    }),
-                    fnetemul::Capability::ChildDep(fnetemul::ChildDep {
-                        is_weak: Some(true),
-                        ..protocol_dep::<fnp_socketproxy::NetworkRegistryMarker>(
                             constants::netcfg::COMPONENT_NAME,
                         )
                     }),

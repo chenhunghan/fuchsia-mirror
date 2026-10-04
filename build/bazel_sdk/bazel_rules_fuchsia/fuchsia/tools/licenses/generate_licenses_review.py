@@ -11,13 +11,19 @@ import shutil
 import zipfile
 from sys import stderr
 
-from fuchsia.tools.licenses.classification_types import *
-from fuchsia.tools.licenses.spdx_types import *
+from fuchsia.tools.licenses.classification_types import (
+    LicensesClassifications,
+)
+from fuchsia.tools.licenses.spdx_types import (
+    SpdxDocument,
+    SpdxExtractedLicensingInfo,
+    SpdxIndex,
+)
 
 _VERBOSE = True
 
 
-def _log(*kwargs):
+def _log(*kwargs: object) -> None:
     if _VERBOSE:
         print(*kwargs, file=stderr)
 
@@ -38,7 +44,7 @@ def _dependents_string(
 
 def _packages_homepages(
     license: SpdxExtractedLicensingInfo, spdx_index: SpdxIndex
-) -> str:
+) -> list[str]:
     return [
         p.homepage
         for p in spdx_index.get_packages_by_license(license)
@@ -59,7 +65,7 @@ def _write_summary_csv(
     spdx_index: SpdxIndex,
     classifications: LicensesClassifications,
     output_path: str,
-):
+) -> None:
     """The summary CSV has a row for original license text, aggregates all the identifications and conditions in the text"""
     with open(output_path, "w") as csvfile:
         writer = csv.DictWriter(
@@ -201,7 +207,7 @@ def _write_detailed_csv(
     spdx_index: SpdxIndex,
     classifications: LicensesClassifications,
     output_path: str,
-):
+) -> None:
     """The detailed CSV has a row for every identified license snippet, and includes the snippet text"""
     with open(output_path, "w") as csvfile:
         writer = csv.DictWriter(
@@ -300,7 +306,7 @@ def _write_detailed_csv(
                     writer.writerow(row)
 
 
-def _zip_everything(output_dir_path: str, output_zip_path: str):
+def _zip_everything(output_dir_path: str, output_zip_path: str) -> None:
     _log("zipping license review material")
     with zipfile.ZipFile(output_zip_path, mode="w") as archive:
         for root, _, files in os.walk(output_dir_path):
@@ -311,7 +317,7 @@ def _zip_everything(output_dir_path: str, output_zip_path: str):
                 )
 
 
-def main():
+def main() -> None:
     """Parses arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(

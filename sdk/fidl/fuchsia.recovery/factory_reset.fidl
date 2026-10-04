@@ -12,6 +12,6 @@ closed protocol FactoryReset {
     /// Request an immediate factory reset. If unsuccessful will return an
     /// error.
     strict Reset() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

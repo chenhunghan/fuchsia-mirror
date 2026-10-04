@@ -64,6 +64,33 @@ pub fn trace_state() -> TraceState {
     }
 }
 
+/// Requests that the trace engine flush its buffers immediately, even if they are not yet full.
+/// Only has effect in streaming mode.
+///
+/// Returns `Ok(())` if the trace engine is in `TRACE_STARTED` or `TRACE_STOPPING` state.
+/// Returns `Err(zx::Status::BAD_STATE)` if tracing is stopped.
+#[cfg(fuchsia_api_level_at_least = "31")]
+#[inline]
+pub fn flush_buffer() -> Result<(), zx::Status> {
+    // SAFETY:
+    // Obligation: `trace_engine_flush_buffer` must be safe to call.
+    // Artifact facts:
+    // - `trace_engine_flush_buffer` is an FFI function defined in `libtrace-engine/handler.h`.
+    // Semantic premises:
+    // - The `libtrace-engine` C documentation states that `trace_engine_flush_buffer` is fully
+    //   thread-safe and may be called at any time without external synchronization, regardless
+    //   of the engine's initialization or shutdown state. It returns `ZX_ERR_BAD_STATE` if
+    //   tracing is stopped or not streaming.
+    // Derivation:
+    // - The thread-safe nature of the C implementation covers any potential race between
+    //   checking trace engine state and making the FFI call, ensuring no undefined behavior
+    //   or data races occur if the engine shuts down concurrently.
+    // Result:
+    // - The FFI call is safe.
+    let status = unsafe { sys::trace_engine_flush_buffer() };
+    zx::Status::ok(status)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum BufferingMode {
@@ -2914,6 +2941,9 @@ mod sys {
         pub fn trace_context_get_buffering_mode(
             context: *const trace_context_t,
         ) -> trace_buffering_mode_t;
+
+        #[cfg(fuchsia_api_level_at_least = "31")]
+        pub fn trace_engine_flush_buffer() -> zx_status_t;
     }
 }
 

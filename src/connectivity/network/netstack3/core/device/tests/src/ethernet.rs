@@ -28,6 +28,7 @@ use netstack3_core::testutil::{
 };
 use netstack3_device::socket::DeviceSocketMetadata;
 use netstack3_device::testutil::{DeviceCounterExpectations, IPV6_MIN_IMPLIED_MAX_FRAME_SIZE};
+use netstack3_ip::DeviceIpLayerMetadata;
 use netstack3_ip::device::{IpDeviceStateContext, StableSlaacAddressConfiguration};
 use netstack3_ip::testutil::IpCounterExpectations;
 use packet::{Buf, FragmentedBuffer as _, NestableSerializer as _, Serializer as _};
@@ -187,7 +188,11 @@ fn test_send_frame() {
     let body_len = body.len();
     api.send_frame::<_, EthernetLinkDevice>(
         &sock,
-        DeviceSocketMetadata { device_id: eth_device, metadata: None },
+        DeviceSocketMetadata {
+            device_id: eth_device,
+            metadata: None,
+            ip_layer_metadata: DeviceIpLayerMetadata::empty(),
+        },
         body,
     )
     .expect("send frame");

@@ -157,16 +157,13 @@ pub fn get_arena_info(
 }
 
 /// Returns the static `PageQueues` instance associated with the PMM.
+#[inline]
 pub fn page_queues() -> &'static PageQueues {
-    // SAFETY: No preconditions.
-    let queues = unsafe { bindings::cpp_pmm_page_queues() };
-    let queues: *const PageQueues = queues.cast();
-    // SAFETY: `cpp_pmm_page_queues` returns a valid static pointer to the global PmmNode's
-    // PageQueues.
-    unsafe { queues.as_ref_unchecked() }
+    node().page_queues()
 }
 
 /// Returns a reference to the global `PmmNode` instance.
+#[inline]
 pub fn node() -> &'static PmmNode {
     unsafe { &PMM_NODE }
 }

@@ -338,14 +338,24 @@ func execute(
 				cleanupCtx, cancel = context.WithTimeout(context.Background(), 7*time.Second)
 				defer cancel()
 			}
+			// Check that we can connect to the target before running snapshot
+			// and fail fast if we can't.
+			if err := t.Reconnect(cleanupCtx); err != nil {
+				return err
+			}
 			if err := t.RunSnapshot(cleanupCtx, opts.SnapshotFile); err != nil {
 				// This error usually has a different root cause that gets masked when we
 				// return this error. Log it so we can keep track of it, but don't fail.
-				logger.Errorf(cleanupCtx, err.Error())
+				logger.Errorf(cleanupCtx, "%s", err)
+			}
+			// Check connection again before ensuring sinks in case we lose
+			// connection after running the snapshot.
+			if err := t.Reconnect(cleanupCtx); err != nil {
+				return err
 			}
 			if err := t.EnsureSinks(cleanupCtx, sinks, outputs); err != nil {
 				// Same story, log it but don't fail.
-				logger.Errorf(cleanupCtx, err.Error())
+				logger.Errorf(cleanupCtx, "%s", err)
 			}
 			if ctx.Err() != nil {
 				// If the original context was cancelled, just return the context error.

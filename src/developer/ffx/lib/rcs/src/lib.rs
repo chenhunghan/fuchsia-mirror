@@ -15,7 +15,6 @@ use fdomain_fuchsia_sys2::{
 };
 use fidl_fuchsia_developer_ffx as ffx;
 use futures::StreamExt;
-use std::convert::Infallible;
 use std::time::{Duration, Instant};
 use timeout::timeout;
 
@@ -57,18 +56,10 @@ pub enum KnockRcsError {
     FidlError(#[from] fidl::Error),
     #[error("FDomain error {0:?}")]
     FDomainError(#[from] fdomain_client::Error),
-    #[error("Creating FIDL channel: {0:?}")]
-    ChannelError(#[from] fidl::handle::Status),
     #[error("Connecting to RCS {0:?}")]
     RcsConnectCapabilityError(ConnectCapabilityError),
     #[error("Could not knock service from RCS")]
     FailedToKnock,
-}
-
-impl From<Infallible> for KnockRcsError {
-    fn from(_value: Infallible) -> Self {
-        unreachable!()
-    }
 }
 
 /// Attempts to "knock" RCS.
@@ -84,10 +75,6 @@ pub async fn knock_rcs(rcs_proxy: &RemoteControlProxy) -> Result<(), ffx::Target
         }
         KnockRcsError::FDomainError(e) => {
             log::warn!("FDomain error: {:?}", e);
-            ffx::TargetConnectionError::FidlCommunicationError
-        }
-        KnockRcsError::ChannelError(e) => {
-            log::warn!("RCS connect channel err: {:?}", e);
             ffx::TargetConnectionError::FidlCommunicationError
         }
         KnockRcsError::RcsConnectCapabilityError(c) => {

@@ -596,7 +596,8 @@ void UsbFunction::SetInterface(uint8_t interface, uint8_t alt_setting,
 
 // TODO(https://fxbug.dev/493657863): This call should be async like
 // SetConfigured and SetInterface once we can guarantee a single-dispatch of
-// USB_RECIP_DEVICE requests to bound functions.
+// RequestRecipient::kDevice requests to
+// bound functions.
 zx::result<std::vector<uint8_t>> UsbFunction::Control(const fdescriptor::wire::UsbSetup& setup,
                                                       cpp20::span<uint8_t> write_buffer) {
   TRACE_DURATION("usb-peripheral", __func__);
@@ -775,7 +776,7 @@ std::optional<std::vector<uint8_t>> UsbFunction::GetEndpointsForInterface(
             reinterpret_cast<const uint8_t*>(end)) {
       break;
     }
-    if (header->b_descriptor_type == USB_DT_INTERFACE) {
+    if (header->b_descriptor_type == fdescriptor::DescriptorType::kInterface) {
       if (header->b_length >= sizeof(usb_interface_descriptor_t)) {
         const auto* desc = reinterpret_cast<const usb_interface_descriptor_t*>(header);
         cur_interface = desc->b_interface_number;
@@ -784,7 +785,7 @@ std::optional<std::vector<uint8_t>> UsbFunction::GetEndpointsForInterface(
         cur_interface.reset();
         cur_alt.reset();
       }
-    } else if (header->b_descriptor_type == USB_DT_ENDPOINT) {
+    } else if (header->b_descriptor_type == fdescriptor::DescriptorType::kEndpoint) {
       if (cur_interface == interface_num && cur_alt == alt_setting) {
         if (header->b_length >= sizeof(usb_endpoint_descriptor_t)) {
           const auto* desc = reinterpret_cast<const usb_endpoint_descriptor_t*>(header);

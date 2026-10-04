@@ -4,15 +4,17 @@
 # found in the LICENSE file.
 
 import argparse
+import datetime
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from fuchsia.tools.fuchsia_task_lib import Terminal
 
 
-def run(*command):
+def run(*command: str | Path) -> str:
     try:
         # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
         # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE
@@ -31,15 +33,14 @@ def run(*command):
         raise e
 
 
-def run_checked(*command):
+def run_checked(*command: str | Path) -> bool:
     try:
         # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
         # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE
         # inheritance which can confuse child Python processes.
-        env = dict(kwargs.get("env", os.environ))
+        env = dict(os.environ)
         env.pop("RUNFILES_DIR", None)
         env.pop("RUNFILES_MANIFEST_FILE", None)
-        kwargs["env"] = env
 
         subprocess.run(
             command,
@@ -52,17 +53,17 @@ def run_checked(*command):
         return False
 
 
-def print_title(msg):
+def print_title(msg: str) -> None:
     print(f'\n{Terminal.bold("-- {} --".format(msg))}\n')
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parses arguments."""
     parser = argparse.ArgumentParser()
 
-    def path_arg(type="file"):
-        def arg(path):
-            path = Path(path)
+    def path_arg(type: str = "file") -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             if path.is_file() != (type == "file") or path.is_dir() != (
                 type == "directory"
             ):
@@ -131,18 +132,18 @@ def parse_args():
 
 
 class Emulator:
-    def __init__(self, active, name):
+    def __init__(self, active: bool, name: str) -> None:
         self.active = active
         self.name = name
 
 
 class BuildInfo:
-    def __init__(self, sdk_version, product_config):
+    def __init__(self, sdk_version: str, product_config: str) -> None:
         self.sdk_version = sdk_version
         self.product_config = product_config
 
 
-def all_emulators(args):
+def all_emulators(args: argparse.Namespace) -> list[Emulator]:
     raw_emulators = run(args.ffx, "emu", "list")
     if not raw_emulators:
         return []
@@ -155,22 +156,24 @@ def all_emulators(args):
     return emulators
 
 
-def all_package_repo_names(args):
+def all_package_repo_names(args: argparse.Namespace) -> list[str]:
     repos = json.loads(run(args.ffx, "--machine", "JSON", "repository", "list"))
     return [repo["name"] for repo in repos]
 
 
-def target_reachable(args, target):
+def target_reachable(args: argparse.Namespace, target: str) -> bool:
     return run_checked(
         args.ffx, "--target", target, "target", "wait", "-t", "5"
     )
 
 
-def get_current_default_target(args):
+def get_current_default_target(args: argparse.Namespace) -> str:
     return run(args.ffx, "target", "default", "get")
 
 
-def is_repo_registered_with_target(args, repo, target):
+def is_repo_registered_with_target(
+    args: argparse.Namespace, repo: str, target: str
+) -> bool:
     # target repository list does not support JSON output so we have to parse the output.
     # this is fragile so migrate once json is supported.
     output = run(args.ffx, "target", "repository", "list")
@@ -185,9 +188,11 @@ def is_repo_registered_with_target(args, repo, target):
     return False
 
 
-def build_info_for_target(args, target):
+def build_info_for_target(
+    args: argparse.Namespace, target: str
+) -> BuildInfo | None:
     if not target_reachable(args, target):
-        return ""
+        return None
 
     result = json.loads(
         run(args.ffx, "--machine", "json", "--target", target, "target", "show")
@@ -199,7 +204,7 @@ def build_info_for_target(args, target):
     return BuildInfo(sdk_version=sdk_version, product_config=product_config)
 
 
-def is_product_bundle_downloaded(args):
+def is_product_bundle_downloaded(args: argparse.Namespace) -> bool:
     # product list does not support JSON output so we have to parse the output.
     # this is fragile so migrate once json is supported.
     output = run(args.ffx, "product", "list")
@@ -210,7 +215,7 @@ def is_product_bundle_downloaded(args):
     return False
 
 
-def show_header(args):
+def show_header(args: argparse.Namespace) -> None:
     sdk_version = run(args.ffx, "sdk", "version")
     print("")
     print(
@@ -219,7 +224,12 @@ def show_header(args):
     print(f"  -  Current SDK Version: {sdk_version}")
 
 
-def show_target_summary(args, current_default_target, print_pass, print_fail):
+def show_target_summary(
+    args: argparse.Namespace,
+    current_default_target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     print_title("Checking Target Status")
     if current_default_target:
         print_pass(f'default target set to "{current_default_target}"')
@@ -255,8 +265,12 @@ def show_target_summary(args, current_default_target, print_pass, print_fail):
 
 
 def show_emulator_status(
-    args, emulator, default_target, print_pass, print_fail
-):
+    args: argparse.Namespace,
+    emulator: str,
+    default_target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     print_title('Checking status of emulator "{}"'.format(emulator))
     if emulator == default_target:
         print_pass(f'expected emulator "{emulator}" is the default target')
@@ -268,7 +282,12 @@ def show_emulator_status(
     show_reachability_of_target(args, emulator, print_pass, print_fail)
 
 
-def show_reachability_of_target(args, target, print_pass, print_fail):
+def show_reachability_of_target(
+    args: argparse.Namespace,
+    target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     is_reachable = target_reachable(args, target)
     if is_reachable:
         print_pass(f"{target} is running and reachable")
@@ -277,9 +296,15 @@ def show_reachability_of_target(args, target, print_pass, print_fail):
         print_fail(f"{target} is not running")
 
 
-def show_build_info_status(args, target, print_pass, print_fail):
+def show_build_info_status(
+    args: argparse.Namespace,
+    target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     build_info = build_info_for_target(args, target)
     if args.expected_sdk_version:
+        assert build_info is not None
         try:
             datetime.datetime.fromisoformat(build_info.sdk_version)
             print(f'Cannot determine SDK version for "{target}"')
@@ -295,6 +320,7 @@ def show_build_info_status(args, target, print_pass, print_fail):
                 )
 
     if args.expected_product_name:
+        assert build_info is not None
         expected_product_config = args.expected_product_name.split(".")[0]
         if build_info.product_config == expected_product_config:
             print_pass(
@@ -306,7 +332,12 @@ def show_build_info_status(args, target, print_pass, print_fail):
             )
 
 
-def show_package_repo_status(args, default_target, print_pass, print_fail):
+def show_package_repo_status(
+    args: argparse.Namespace,
+    default_target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     print_title("Checking status of package repositories")
     print(f'{Terminal.bold("Known Package Repositories:")}')
 
@@ -336,8 +367,12 @@ def show_package_repo_status(args, default_target, print_pass, print_fail):
 
 
 def show_status_of_repository_registration(
-    args, repo, default_target, print_pass, print_fail
-):
+    args: argparse.Namespace,
+    repo: str,
+    default_target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     if is_repo_registered_with_target(args, repo, default_target):
         print_pass(
             f'package repository "{repo}" is registered with the default target'
@@ -358,7 +393,12 @@ def show_status_of_repository_registration(
             )
 
 
-def show_product_bundle_status(args, default_target, print_pass, print_fail):
+def show_product_bundle_status(
+    args: argparse.Namespace,
+    default_target: str,
+    print_pass: Callable[[str], None],
+    print_fail: Callable[[str], None],
+) -> None:
     if not args.expected_product_bundle:
         return
 
@@ -388,15 +428,15 @@ def show_product_bundle_status(args, default_target, print_pass, print_fail):
     )
 
 
-def main():
+def main() -> None:
     args = parse_args()
     default_target = get_current_default_target(args)
-    failures = []
+    failures: list[str] = []
 
-    def print_pass(msg):
+    def print_pass(msg: str) -> None:
         print(f' {Terminal.green("PASS")} - {msg}')
 
-    def print_fail(msg):
+    def print_fail(msg: str) -> None:
         failures.append(msg)
         print(f' {Terminal.red("FAIL")} - {msg}')
 

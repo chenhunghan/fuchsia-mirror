@@ -8,6 +8,8 @@ use display_utils::{Coordinator, DisplayId, PixelFormat, TEST_UTILITY_CLIENT_PRI
 use futures::future::{FutureExt, TryFutureExt};
 use futures::select;
 use rgb::Rgb888;
+use std::num::NonZero;
+use std::time::Duration;
 
 mod commands;
 mod draw;
@@ -79,6 +81,23 @@ struct SquaresArgs {
     /// ID of the display to play the animation on
     #[argh(positional)]
     id: Option<u64>,
+
+    /// stress test: total number of frames in each power-on / power-off cycle
+    /// while the animation keeps running. Disabled by default.
+    #[argh(option)]
+    power_cycle_frame_count: Option<NonZero<u64>>,
+
+    /// stress test: number of frames to keep rendering and committing while
+    /// the display is off in each cycle. Requires --power-cycle-frame-count
+    /// and must be less than the total cycle frame count. Defaults to 60.
+    #[argh(option)]
+    power_cycle_off_frame_count: Option<NonZero<u64>>,
+
+    /// maximum time (in milliseconds) to wait for a committed configuration's
+    /// vsync while the display is on before logging a warning. Defaults to
+    /// 1000.
+    #[argh(option, default = "NonZero::new(1000).unwrap()")]
+    vsync_timeout_ms: NonZero<u64>,
 }
 
 /// Play a multilayer double buffered animation using fence synchronization.
@@ -88,6 +107,11 @@ struct MultiLayerSquaresArgs {
     /// ID of the display to play the animation on
     #[argh(positional)]
     id: Option<u64>,
+
+    /// number of full-screen layers to composite, from 2 to the display's
+    /// maximum layer count. Defaults to 2.
+    #[argh(option, default = "2")]
+    layer_count: usize,
 }
 
 /// Test the display's actual frame rate.
@@ -148,10 +172,17 @@ async fn main() -> Result<(), Error> {
                     .await
             }
             SubCommands::Squares(args) => {
-                commands::squares(&coordinator, args.id.map(DisplayId)).await
+                let power_cycle = runner::PowerCycle::try_new(
+                    args.power_cycle_frame_count,
+                    args.power_cycle_off_frame_count,
+                )?;
+                let vsync_timeout = Duration::from_millis(args.vsync_timeout_ms.get());
+                commands::squares(&coordinator, args.id.map(DisplayId), power_cycle, vsync_timeout)
+                    .await
             }
             SubCommands::MultiLayerSquares(args) => {
-                commands::multilayer_squares(&coordinator, args.id.map(DisplayId)).await
+                commands::multilayer_squares(&coordinator, args.id.map(DisplayId), args.layer_count)
+                    .await
             }
             SubCommands::FrameRateTest(args) => {
                 commands::frame_rate_test(

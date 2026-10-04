@@ -46,6 +46,9 @@ type ShutdownReason = flexible enum {
     OUT_OF_MEMORY = 10;
 
     /// The Netstack component is changing versions.
+    // TODO(https://fxbug.dev/42081574): Delete this reason once API Version 33
+    // is retired.
+    @available(removed=NEXT)
     NETSTACK_MIGRATION = 11;
 
     /// An Android-initiated shutdown reason that Starnix doesn't recognize.

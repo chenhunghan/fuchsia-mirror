@@ -6,6 +6,8 @@
 
 #include "src/devices/usb/drivers/usb-virtual-bus/usb-virtual-bus.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_virtual_bus {
 
 void UsbVirtualDevice::on_fidl_error(fidl::UnbindInfo error) {
@@ -65,7 +67,7 @@ void UsbVirtualDevice::ConfigureEndpoint(ConfigureEndpointRequest& request,
     completer.Reply(zx::error(ZX_ERR_INVALID_ARGS));
     return;
   }
-  bus_->ep(index).max_packet_size_ = usb_ep_max_packet2(request.ep_descriptor());
+  bus_->ep(index).max_packet_size_ = usb_ep_max_packet(request.ep_descriptor());
   completer.Reply(zx::ok());
 }
 
@@ -118,11 +120,11 @@ void UsbVirtualDevice::CancelAll(CancelAllRequest& request, CancelAllCompleter::
 void UsbVirtualDevice::GetHardwareInfo(GetHardwareInfoCompleter::Sync& completer) {
   constexpr uint16_t kMaxPacketSizeLimit = 65535;
   std::vector<fuchsia_hardware_usb_dci::SupportedEndpointInfo> supported_types(3);
-  supported_types[0].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+  supported_types[0].endpoint_type(fdescriptor::EndpointType::kBulk);
   supported_types[0].max_packet_size_limit(kMaxPacketSizeLimit);
-  supported_types[1].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt);
+  supported_types[1].endpoint_type(fdescriptor::EndpointType::kInterrupt);
   supported_types[1].max_packet_size_limit(kMaxPacketSizeLimit);
-  supported_types[2].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous);
+  supported_types[2].endpoint_type(fdescriptor::EndpointType::kIsochronous);
   supported_types[2].max_packet_size_limit(kMaxPacketSizeLimit);
 
   std::vector<fuchsia_hardware_usb_dci::EndpointInfo> endpoints;

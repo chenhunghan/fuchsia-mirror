@@ -281,7 +281,7 @@ void ClockDevice::handle_unknown_method(
 
 zx_status_t ClockDevice::Init(const std::shared_ptr<fdf::Namespace>& incoming,
                               const std::shared_ptr<fdf::OutgoingDirectory>& outgoing,
-                              std::optional<int32_t> node_id,
+                              std::string child_name, std::optional<int32_t> node_id,
                               const fidl::ClientEnd<fuchsia_driver_framework::Node>& parent_node,
                               bool report_initial_conditions) {
   zx::result clock_impl = incoming->Connect<fuchsia_hardware_clockimpl::Service::Device>();
@@ -298,11 +298,7 @@ zx_status_t ClockDevice::Init(const std::shared_ptr<fdf::Namespace>& incoming,
 
   clock_impl_.Bind(std::move(clock_impl.value()), fdf::Dispatcher::GetCurrent()->get());
 
-  if (!node_id.has_value()) {
-    child_name_ = std::format("clock-{}", id_);
-  } else {
-    child_name_ = std::format("clock-{}_{}", id_, static_cast<uint32_t>(node_id.value()));
-  }
+  child_name_ = std::move(child_name);
 
   auto node_offers = std::vector{
       fdf::MakeOffer2<fuchsia_hardware_clock::Service>(child_name_),
@@ -685,12 +681,29 @@ zx_status_t ClockDriver::CreateClockDevices(
     return ZX_OK;
   }
 
+  // Name each node after its clock id. If several nodes refer to the same clock, add a suffix with
+  // the node's position among them so that the names don't depend on the global node ids.
+  std::unordered_map<uint32_t, uint32_t> clock_id_counts;
+  for (const auto& node : clock_nodes.value()) {
+    if (node.clock_id().has_value()) {
+      clock_id_counts[node.clock_id().value()]++;
+    }
+  }
+  std::unordered_map<uint32_t, uint32_t> clock_id_ordinals;
+
   for (const auto& node : clock_nodes.value()) {
     if (!node.clock_id().has_value()) {
       fdf::error("Clock ID Metadata has an entry with no clock id");
       return ZX_ERR_INVALID_ARGS;
     }
     const uint32_t clock_id = node.clock_id().value();
+
+    std::string child_name;
+    if (clock_id_counts[clock_id] == 1) {
+      child_name = std::format("clock-{}", clock_id);
+    } else {
+      child_name = std::format("clock-{}-{}", clock_id, clock_id_ordinals[clock_id]++);
+    }
 
     // Prefer to use the name provided by the impl driver, but if one doesn't exist, use the
     // name provided by the device tree. If neither are there, use "<anonymous>".
@@ -709,8 +722,9 @@ zx_status_t ClockDriver::CreateClockDevices(
     // server property which cannot be moved.
     auto clock_device = std::make_unique<ClockDevice>(
         GetOrCreateRateBuffer(clock_id), GetOrCreateEnableBuffer(clock_id), this, clock_id, name);
-    zx_status_t status = clock_device->Init(incoming, outgoing(), node.node_id(), this->node(),
-                                            !reported_initial_conditions.contains(clock_id));
+    zx_status_t status =
+        clock_device->Init(incoming, outgoing(), std::move(child_name), node.node_id(),
+                           this->node(), !reported_initial_conditions.contains(clock_id));
     if (status != ZX_OK) {
       fdf::error("Failed to initialize clock device: {}", zx_status_get_string(status));
       return status;

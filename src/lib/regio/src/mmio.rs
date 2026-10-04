@@ -31,7 +31,7 @@ impl<Layout, Access> Offset<Layout, Access> {
 
 impl<Layout, Access> Clone for Offset<Layout, Access> {
     fn clone(&self) -> Self {
-        Self { value: self.value, _marker: PhantomData }
+        *self
     }
 }
 
@@ -153,7 +153,7 @@ impl<T, Access: Accessible> MmioPtr<T, Access> {
 
 impl<T, Access: Accessible> Clone for MmioPtr<T, Access> {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData)
+        *self
     }
 }
 

@@ -202,6 +202,20 @@ pub async fn delete_sealing_key(key_blob: &[u8]) -> Result<(), Error> {
     Ok(kms_stateless::delete_sealing_key(key_blob).await?)
 }
 
+/// Returns true if `err` was caused by a failure to connect to or communicate with the keymint
+/// service.
+pub fn is_key_service_unavailable(err: &Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<kms_stateless::SealingKeysError>(),
+            Some(
+                kms_stateless::SealingKeysError::ConnectToProtocol(_)
+                    | kms_stateless::SealingKeysError::Fidl(_)
+            )
+        )
+    })
+}
+
 #[derive(Debug)]
 pub enum KeySource {
     /// An insecure static key is used.

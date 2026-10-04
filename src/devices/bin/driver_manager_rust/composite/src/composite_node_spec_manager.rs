@@ -5,15 +5,14 @@
 use crate::{CompositeManagerBridge, CompositeNodeSpec};
 use driver_manager_bind::{BindSpecResult, CompositeNodeAndDriver};
 use driver_manager_node::Node;
+use fidl_fuchsia_driver_development as fdd;
+use fidl_fuchsia_driver_framework as fdf;
+use fuchsia_async as fasync;
 use futures::channel::oneshot;
 use log::{error, warn};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Weak;
-use {
-    fidl_fuchsia_driver_development as fdd, fidl_fuchsia_driver_framework as fdf,
-    fuchsia_async as fasync,
-};
 
 pub struct CompositeNodeSpecManager {
     bridge: Box<dyn CompositeManagerBridge>,
@@ -99,11 +98,10 @@ impl CompositeNodeSpecManager {
                 }
             };
 
-            let (name, parents) = match (&spec_info.name, &spec_info.parents, &spec_info.parents2) {
-                (Some(name), Some(parents), None) => (name, parents.len()),
-                (Some(name), None, Some(parents)) => (name, parents.len()),
+            let (name, parents) = match (&spec_info.name, &spec_info.parents2) {
+                (Some(name), Some(parents)) => (name, parents.len()),
                 _ => {
-                    warn!("CompositeNodeSpec missing name or parents.");
+                    warn!("CompositeNodeSpec missing name or parents2.");
                     continue;
                 }
             };

@@ -11,11 +11,11 @@ use fuchsia_sync::{MappedMutexGuard, Mutex, MutexGuard};
 use futures::{Future, FutureExt as _, TryStreamExt as _};
 use slab::Slab;
 use std::borrow::{Borrow, Cow};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZero;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use storage_device::buffer::Buffer;
 
 pub mod async_interface;
@@ -175,6 +175,49 @@ impl DecompressionInfo {
             (self.mapping.base + self.uncompressed_range.start as usize) as *mut u8,
             (self.uncompressed_range.end - self.uncompressed_range.start) as usize,
         )
+    }
+}
+
+struct RegisteredHwKey {
+    hw_slot: u8,
+    /// Retained to keep the server peer of the eventpair alive and to detect when all client
+    /// handles to the key token have been closed (`EVENTPAIR_PEER_CLOSED`).
+    server_ep: zx::EventPair,
+}
+
+/// Server-wide registry mapping minted inline encryption key tokens (keyed by the retained server
+/// endpoint's KOID) to hardware key slots.
+#[derive(Default)]
+pub struct KeyRegistry {
+    keys: Mutex<HashMap<zx::Koid, RegisteredHwKey>>,
+}
+
+impl KeyRegistry {
+    /// Mints a new `zx::EventPair` key token for `hw_slot` and records it in the registry.
+    pub fn register_key_slot(&self, hw_slot: u8) -> Result<zx::EventPair, zx::Status> {
+        let (server_ep, client_ep) = zx::EventPair::create();
+        let server_koid = server_ep.koid()?;
+        let key = RegisteredHwKey { hw_slot, server_ep };
+        let mut keys = self.keys.lock();
+        // Opportunistically prune entries whose client tokens have all been closed, or any existing
+        // entry for `hw_slot` in case the hardware key slot was reclaimed and re-registered.
+        keys.retain(|_, k| {
+            k.hw_slot != hw_slot
+                && matches!(
+                    k.server_ep.wait_one(
+                        zx::Signals::EVENTPAIR_PEER_CLOSED,
+                        zx::MonotonicInstant::INFINITE_PAST,
+                    ),
+                    zx::WaitResult::TimedOut(_)
+                )
+        });
+        keys.insert(server_koid, key);
+        Ok(client_ep)
+    }
+
+    /// Looks up the hardware slot for a presented client token's peer (`server_koid`).
+    fn get(&self, server_koid: zx::Koid) -> Option<u8> {
+        self.keys.lock().get(&server_koid).map(|k| k.hw_slot)
     }
 }
 
@@ -558,6 +601,9 @@ pub trait SessionManager: 'static {
 
     /// Returns the active requests.
     fn active_requests(&self) -> &ActiveRequests<Self::Session>;
+
+    /// Returns the key registry.
+    fn key_registry(&self) -> &KeyRegistry;
 }
 
 /// A helper trait for converting various types into an `Orchestrator`.
@@ -576,6 +622,13 @@ impl<SM: SessionManager> BlockServer<SM> {
 
     pub fn session_manager(&self) -> &SM {
         self.orchestrator.as_ref().borrow()
+    }
+
+    /// Registers a hardware inline encryption key slot with this server and returns a token
+    /// (`zx::EventPair`) that clients can pass to `fuchsia.storage.block/Session.RegisterKey`
+    /// to obtain a session-scoped slot for FIFO requests.
+    pub fn register_key_slot(&self, hw_slot: u8) -> Result<zx::EventPair, zx::Status> {
+        self.session_manager().key_registry().register_key_slot(hw_slot)
     }
 
     /// Called to process requests for fuchsia.storage.block.Block.
@@ -892,6 +945,20 @@ impl RegisteredVmo {
     }
 }
 
+/// Tracks the hardware inline encryption key slots authorized for a single block session.
+#[derive(Default)]
+struct SessionKeySlots([AtomicU64; 4]);
+
+impl SessionKeySlots {
+    fn insert(&self, slot: u8) {
+        self.0[usize::from(slot) / 64].fetch_or(1 << (slot % 64), Ordering::Relaxed);
+    }
+
+    fn contains(&self, slot: u8) -> bool {
+        (self.0[usize::from(slot) / 64].load(Ordering::Relaxed) & (1 << (slot % 64))) != 0
+    }
+}
+
 struct SessionHelper<SM: SessionManager> {
     orchestrator: Arc<SM::Orchestrator>,
     offset_map: OffsetMap,
@@ -899,6 +966,7 @@ struct SessionHelper<SM: SessionManager> {
     block_size: u32,
     peer_fifo: zx::Fifo<BlockFifoResponse, BlockFifoRequest>,
     vmos: Mutex<BTreeMap<u16, RegisteredVmo>>,
+    keys: SessionKeySlots,
 }
 
 struct VmoMapping {
@@ -953,6 +1021,7 @@ impl<SM: SessionManager> SessionHelper<SM> {
                 block_size,
                 peer_fifo,
                 vmos: Mutex::default(),
+                keys: SessionKeySlots::default(),
             },
             fifo,
         ))
@@ -960,6 +1029,33 @@ impl<SM: SessionManager> SessionHelper<SM> {
 
     fn session_manager(&self) -> &SM {
         self.orchestrator.as_ref().borrow()
+    }
+
+    /// Validates `key_token` against the server's `KeyRegistry` and authorizes this session to use
+    /// the corresponding hardware key slot.
+    fn register_key(&self, key_token: zx::EventPair) -> Result<u8, zx::Status> {
+        let registry = self.session_manager().key_registry();
+        let info = key_token.basic_info()?;
+        let hw_slot = registry.get(info.related_koid).ok_or(zx::Status::ACCESS_DENIED)?;
+        self.keys.insert(hw_slot);
+        Ok(hw_slot)
+    }
+
+    /// Validates that `slot` has been registered on this session and returns `InlineCryptoOptions`,
+    /// or `ACCESS_DENIED` if the slot was not registered on this session.
+    fn resolve_inline_crypto(
+        &self,
+        flags: BlockIoFlag,
+        slot: u8,
+        dun: u64,
+    ) -> Result<InlineCryptoOptions, zx::Status> {
+        if !flags.contains(BlockIoFlag::INLINE_ENCRYPTION_ENABLED) {
+            return Ok(InlineCryptoOptions { is_enabled: false, dun: 0, slot: 0 });
+        }
+        if !self.keys.contains(slot) {
+            return Err(zx::Status::ACCESS_DENIED);
+        }
+        Ok(InlineCryptoOptions { is_enabled: true, dun, slot })
     }
 
     async fn handle_request(
@@ -1018,6 +1114,10 @@ impl<SM: SessionManager> SessionHelper<SM> {
                 };
                 SM::on_attach_vmo(self.orchestrator.clone(), &vmo).await?;
                 responder.send(Ok(&fblock::VmoId { id: vmo_id }))?;
+                Ok(HandleRequestResult::Ok)
+            }
+            fblock::SessionRequest::RegisterKey { key_token, responder } => {
+                responder.send(self.register_key(key_token).map_err(zx::Status::into_raw))?;
                 Ok(HandleRequestResult::Ok)
             }
             fblock::SessionRequest::Close { responder } => {
@@ -1079,20 +1179,20 @@ impl<SM: SessionManager> SessionHelper<SM> {
                             .checked_mul(self.block_size as u64)
                             .ok_or(zx::Status::OUT_OF_RANGE)?,
                         options: ReadOptions {
-                            inline_crypto: InlineCryptoOptions {
-                                is_enabled: flags.contains(BlockIoFlag::INLINE_ENCRYPTION_ENABLED),
-                                dun: request.dun,
-                                slot: request.slot,
-                            },
+                            inline_crypto: self.resolve_inline_crypto(
+                                flags,
+                                request.slot,
+                                request.dun,
+                            )?,
                         },
                     },
                     BlockOpcode::Write => {
                         let mut options = WriteOptions {
-                            inline_crypto: InlineCryptoOptions {
-                                is_enabled: flags.contains(BlockIoFlag::INLINE_ENCRYPTION_ENABLED),
-                                dun: request.dun,
-                                slot: request.slot,
-                            },
+                            inline_crypto: self.resolve_inline_crypto(
+                                flags,
+                                request.slot,
+                                request.dun,
+                            )?,
                             ..WriteOptions::default()
                         };
                         if flags.contains(BlockIoFlag::FORCE_ACCESS) {
@@ -4769,5 +4869,190 @@ mod tests {
 
         futures::join!(server_fut, client_fut);
         assert_eq!(interface.attached_vmos.load(Ordering::Relaxed), 0);
+    }
+
+    #[fuchsia::test]
+    async fn test_inline_crypto_key_registration_and_access_control() {
+        struct CryptoInterface {
+            last_hw_slot: Mutex<Option<u8>>,
+        }
+        impl super::async_interface::Interface for CryptoInterface {
+            fn get_info(&self) -> Cow<'_, DeviceInfo> {
+                Cow::Owned(test_device_info())
+            }
+            async fn read(
+                &self,
+                _device_block_offset: u64,
+                _block_count: u32,
+                _vmo: &Arc<zx::Vmo>,
+                _vmo_offset: u64,
+                opts: ReadOptions,
+                _trace_flow_id: TraceFlowId,
+            ) -> Result<(), zx::Status> {
+                *self.last_hw_slot.lock() =
+                    opts.inline_crypto.is_enabled.then_some(opts.inline_crypto.slot);
+                Ok(())
+            }
+            async fn write(
+                &self,
+                _device_block_offset: u64,
+                _block_count: u32,
+                _vmo: &Arc<zx::Vmo>,
+                _vmo_offset: u64,
+                opts: WriteOptions,
+                _trace_flow_id: TraceFlowId,
+            ) -> Result<(), zx::Status> {
+                *self.last_hw_slot.lock() =
+                    opts.inline_crypto.is_enabled.then_some(opts.inline_crypto.slot);
+                Ok(())
+            }
+            async fn flush(&self, _trace_flow_id: TraceFlowId) -> Result<(), zx::Status> {
+                Ok(())
+            }
+            async fn trim(
+                &self,
+                _device_block_offset: u64,
+                _block_count: u32,
+                _trace_flow_id: TraceFlowId,
+            ) -> Result<(), zx::Status> {
+                Ok(())
+            }
+        }
+
+        let interface = Arc::new(CryptoInterface { last_hw_slot: Mutex::new(None) });
+        let block_server = Arc::new(BlockServer::new(BLOCK_SIZE, interface.clone()));
+
+        let (proxy, stream) = fidl::endpoints::create_proxy_and_stream::<fblock::BlockMarker>();
+        let server_clone = block_server.clone();
+        let server_fut = async move {
+            let _ = server_clone.handle_requests(stream).await;
+        };
+
+        let client_fut = async move {
+            let (session1, server1) = fidl::endpoints::create_proxy::<fblock::SessionMarker>();
+            proxy.open_session(server1).unwrap();
+            let mut fifo1 = fasync::Fifo::from_fifo(session1.get_fifo().await.unwrap().unwrap());
+            let (mut reader1, mut writer1) = fifo1.async_io();
+            let vmo1 = zx::Vmo::create(4096).unwrap();
+            let vmo_id1 = session1
+                .attach_vmo(vmo1.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+
+            // 1. Using an unregistered slot in a FIFO request must fail with ACCESS_DENIED.
+            writer1
+                .write_entries(&BlockFifoRequest {
+                    command: BlockFifoCommand {
+                        opcode: BlockOpcode::Read.into_primitive(),
+                        flags: BlockIoFlag::INLINE_ENCRYPTION_ENABLED.bits(),
+                        ..Default::default()
+                    },
+                    reqid: 1,
+                    vmoid: vmo_id1.id,
+                    length: 1,
+                    slot: 42,
+                    dun: 7,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let mut resp = BlockFifoResponse::default();
+            reader1.read_entries(&mut resp).await.unwrap();
+            assert_eq!(zx::Status::ok(resp.status), Err(zx::Status::ACCESS_DENIED));
+
+            // 2. Registering an un-minted EventPair must fail with ACCESS_DENIED.
+            let (_forged_a, forged_b) = zx::EventPair::create();
+            assert_eq!(
+                session1.register_key(forged_b).await.unwrap(),
+                Err(zx::Status::ACCESS_DENIED.into_raw())
+            );
+
+            // 3. Mint a valid key slot (hw_slot = 42) and register it on session1.
+            let client_ep = block_server.register_key_slot(42).unwrap();
+            let client_ep_dup = client_ep.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+            let session_slot = session1.register_key(client_ep).await.unwrap().unwrap();
+            assert_eq!(session_slot, 42);
+
+            writer1
+                .write_entries(&BlockFifoRequest {
+                    command: BlockFifoCommand {
+                        opcode: BlockOpcode::Read.into_primitive(),
+                        flags: BlockIoFlag::INLINE_ENCRYPTION_ENABLED.bits(),
+                        ..Default::default()
+                    },
+                    reqid: 2,
+                    vmoid: vmo_id1.id,
+                    length: 1,
+                    slot: session_slot,
+                    dun: 7,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            reader1.read_entries(&mut resp).await.unwrap();
+            assert_eq!(zx::Status::ok(resp.status), Ok(()));
+            assert_eq!(*interface.last_hw_slot.lock(), Some(42));
+
+            // 4. A second session that hasn't registered the key must be denied for both slot 0
+            // and 42.
+            let (session2, server2) = fidl::endpoints::create_proxy::<fblock::SessionMarker>();
+            proxy.open_session(server2).unwrap();
+            let mut fifo2 = fasync::Fifo::from_fifo(session2.get_fifo().await.unwrap().unwrap());
+            let (mut reader2, mut writer2) = fifo2.async_io();
+            let vmo2 = zx::Vmo::create(4096).unwrap();
+            let vmo_id2 = session2
+                .attach_vmo(vmo2.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            for bad_slot in [0u8, 42u8] {
+                writer2
+                    .write_entries(&BlockFifoRequest {
+                        command: BlockFifoCommand {
+                            opcode: BlockOpcode::Read.into_primitive(),
+                            flags: BlockIoFlag::INLINE_ENCRYPTION_ENABLED.bits(),
+                            ..Default::default()
+                        },
+                        reqid: 3,
+                        vmoid: vmo_id2.id,
+                        length: 1,
+                        slot: bad_slot,
+                        dun: 7,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                reader2.read_entries(&mut resp).await.unwrap();
+                assert_eq!(zx::Status::ok(resp.status), Err(zx::Status::ACCESS_DENIED));
+            }
+
+            // 5. Registering a duplicate of `client_ep` on `session2` authorizes `session2` to use
+            // the key.
+            let session2_slot = session2.register_key(client_ep_dup).await.unwrap().unwrap();
+            assert_eq!(session2_slot, 42);
+            writer2
+                .write_entries(&BlockFifoRequest {
+                    command: BlockFifoCommand {
+                        opcode: BlockOpcode::Read.into_primitive(),
+                        flags: BlockIoFlag::INLINE_ENCRYPTION_ENABLED.bits(),
+                        ..Default::default()
+                    },
+                    reqid: 4,
+                    vmoid: vmo_id2.id,
+                    length: 1,
+                    slot: session2_slot,
+                    dun: 7,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            reader2.read_entries(&mut resp).await.unwrap();
+            assert_eq!(zx::Status::ok(resp.status), Ok(()));
+
+            drop(proxy);
+        };
+
+        futures::join!(server_fut, client_fut);
     }
 }

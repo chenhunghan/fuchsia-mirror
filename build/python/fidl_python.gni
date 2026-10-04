@@ -131,12 +131,12 @@ template("fidl_python") {
       # the dynamic Python bindings would have to point to the new location,
       # causing similar dissonance.
       library_deps = [
-        "//src/developer/ffx/lib/fuchsia-controller:fidl_bindings",
-        "//src/developer/ffx/lib/fuchsia-controller:fuchsia_controller_py",
+        "//src/developer/fuchsia-controller:fidl_bindings",
+        "//src/developer/fuchsia-controller:fuchsia_controller_py",
       ]
       data_deps = [
         ":${fidl_target}_host_test_data",
-        "//src/developer/ffx/lib/fuchsia-controller/tests:fuchsia_controller_test_data",
+        "//src/developer/fuchsia-controller/tests:fuchsia_controller_test_data",
       ]
       if (defined(invoker.public_deps)) {
         foreach(dep, invoker.public_deps) {

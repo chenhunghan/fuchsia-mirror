@@ -2,13 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/components.gni")
 import("//build/rust/rustc_library.gni")
+
+group("tests") {
+  testonly = true
+  deps = [ ":starnix-functionfs-tests" ]
+}
 
 rustc_library("functionfs") {
   name = "starnix-modules-functionfs"
   edition = "2024"
   version = "0.1.0"
   source_root = "lib.rs"
+  with_unit_tests = true
+
+  # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+  exclude_toolchain_tags = [
+    "asan",
+    "hwasan",
+  ]
 
   sources = [ "lib.rs" ]
 
@@ -17,6 +30,7 @@ rustc_library("functionfs") {
   deps = [
     "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
     "//src/lib/fdio/rust:fdio",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
@@ -30,4 +44,20 @@ rustc_library("functionfs") {
     "//third_party/rust_crates:futures-util",
     "//third_party/rust_crates:zerocopy",
   ]
+
+  test_deps = [
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+    "//src/lib/fuchsia",
+  ]
+}
+
+fuchsia_unittest_package("starnix-functionfs-tests") {
+  manifest = "meta/starnix_functionfs_tests.cml"
+  deps = [ ":functionfs_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+  test_type = "starnix"
 }

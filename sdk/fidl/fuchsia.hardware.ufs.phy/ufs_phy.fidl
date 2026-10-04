@@ -43,5 +43,5 @@ open protocol UfsPhy {
 
 service Service {
     phy client_end:UfsPhy;
-    inline_crypto client_end:fuchsia.hardware.inlineencryption.Device;
+    inline_crypto client_end:fuchsia.hardware.inlineencryption.Controller;
 };

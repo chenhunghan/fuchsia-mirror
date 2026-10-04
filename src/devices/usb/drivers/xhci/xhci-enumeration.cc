@@ -13,10 +13,13 @@
 #include <optional>
 
 #include <fbl/ref_ptr.h>
+#include <usb/descriptors.h>
 
 #include "src/devices/usb/drivers/xhci/registers.h"
 #include "src/devices/usb/drivers/xhci/usb-xhci.h"
 #include "src/devices/usb/drivers/xhci/xhci-context.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_xhci {
 
@@ -28,10 +31,10 @@ fpromise::promise<usb_device_descriptor_t, zx_status_t> GetDeviceDescriptor(UsbX
   usb_request_t* request = request_wrapper->request();
   request->header.device_id = slot_id - 1;
   request->header.ep_address = 0;
-  request->setup.bm_request_type = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
-  request->setup.w_value = USB_DT_DEVICE << 8;
+  request->setup.bm_request_type = kStandardDeviceIn;
+  request->setup.w_value = usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice);
   request->setup.w_index = 0;
-  request->setup.b_request = USB_REQ_GET_DESCRIPTOR;
+  request->setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor);
   request->setup.w_length = length;
   request->direct = true;
   return hci->UsbHciRequestQueue(std::move(*request_wrapper))
@@ -49,7 +52,7 @@ fpromise::promise<usb_device_descriptor_t, zx_status_t> GetDeviceDescriptor(UsbX
           fdf::error("GetDeviceDescriptor request expected {} bytes, got {}", length, actual);
           return fpromise::error(ZX_ERR_IO);
         }
-        if (descriptor.b_descriptor_type != USB_DT_DEVICE) {
+        if (descriptor.b_descriptor_type != fdescriptor::DescriptorType::kDevice) {
           fdf::error("GetDeviceDescriptor got bad descriptor type: {}",
                      descriptor.b_descriptor_type);
           return fpromise::error(ZX_ERR_IO);
@@ -186,7 +189,7 @@ fpromise::promise<void, zx_status_t> EnumerateDevice(UsbXhci* hci, uint8_t port,
           fdf::error("Device speed is invalid.");
           return fpromise::make_error_promise<>(ZX_ERR_BAD_STATE);
         }
-        if (speed.value() != USB_SPEED_SUPER) {
+        if (speed.value() != fdescriptor::UsbSpeed::kSuper) {
           // See USB 2.0 specification (revision 2.0) section 9.2.6
           return hci->Timeout(kPrimaryInterrupter, zx::deadline_after(zx::msec(10)))
               .discard_value();
@@ -208,7 +211,7 @@ fpromise::promise<void, zx_status_t> EnumerateDevice(UsbXhci* hci, uint8_t port,
           fdf::error("Device speed is invalid.");
           return fpromise::make_error_promise<zx_status_t>(ZX_ERR_BAD_STATE);
         }
-        if (speed.value() != USB_SPEED_FULL) {
+        if (speed.value() != fdescriptor::UsbSpeed::kFull) {
           return fpromise::make_result_promise<void, zx_status_t>(fpromise::ok());
         }
         return hci->SetMaxPacketSizeCommand(*state->slot, max_packet_size)

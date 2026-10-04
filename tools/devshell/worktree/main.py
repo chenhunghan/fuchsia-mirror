@@ -9,10 +9,13 @@ import sys
 from subcommands import add as add_cmd
 from subcommands import list as list_cmd
 from subcommands import locate as locate_cmd
+from subcommands import metrics as metrics_cmd
 from subcommands import pool_add as pool_add_cmd
 from subcommands import pool_list as pool_list_cmd
 from subcommands import pool_remove as pool_remove_cmd
 from subcommands import remove as remove_cmd
+from worktree import WorktreeState
+from worktree_metrics import WorktreeMetricsTracker
 from worktree_pool import WorktreePool
 
 
@@ -24,6 +27,7 @@ def main() -> None:
             "Workflow:\n"
             "  • fx worktree add <name>     Create a new worktree.\n"
             "  • fx worktree remove <name>  Remove a worktree.\n"
+            "  • fx worktree metrics        Display worktree usage metrics.\n"
             "\n"
             "Advanced (Internal Pool Management):\n"
             "  For performance, worktrees are transparently backed by a pool of reusable checkouts.\n"
@@ -98,6 +102,16 @@ def main() -> None:
     )
     parser_list.add_argument("--json", action="store_true", help="Output JSON")
 
+    # Subcommand 'metrics'
+    parser_metrics = subparsers.add_parser(
+        "metrics",
+        help="Display local worktree usage metrics and statistics",
+        description="Display time-weighted average, peak, and minimum worktree usage statistics.",
+    )
+    parser_metrics.add_argument(
+        "--json", action="store_true", help="Output raw JSON metrics"
+    )
+
     # Subcommand 'add'
     parser_add = subparsers.add_parser(
         "add",
@@ -147,6 +161,8 @@ def main() -> None:
             locate_cmd.run(args, pool)
         elif args.subcommand == "list":
             list_cmd.run(args, pool)
+        elif args.subcommand == "metrics":
+            metrics_cmd.run(args, pool)
         elif args.subcommand == "add":
             add_cmd.run(args, pool)
         elif args.subcommand == "remove":
@@ -159,6 +175,33 @@ def main() -> None:
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        _record_metrics_safely(pool)
+
+
+def _record_metrics_safely(pool: WorktreePool) -> None:
+    try:
+        worktrees = pool.get_worktrees()
+        total_count = len(worktrees)
+        leased_count = sum(
+            1 for wt in worktrees if wt.get_state() == WorktreeState.LEASED
+        )
+        built_recently_count = sum(
+            1 for wt in worktrees if wt.is_built_recently(max_age_days=7)
+        )
+        not_built_recently_count = total_count - built_recently_count
+        tracker = WorktreeMetricsTracker(pool.jiri_root, pool.fuchsia_dir)
+        tracker.record_state(
+            current_total=total_count,
+            current_leased=leased_count,
+            current_built_recently=built_recently_count,
+            current_not_built_recently=not_built_recently_count,
+        )
+    except Exception as e:
+        print(
+            f"Warning: Failed to record worktree metrics: {e}",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

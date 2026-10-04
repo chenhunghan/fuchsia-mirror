@@ -58,9 +58,10 @@ mod test {
             monitor
                 .handle_roam_trigger_data(RoamTriggerData::SignalReportInd(
                     fidl_internal::SignalReportIndication {
-                        rssi_dbm: -100,
-                        snr_db: 0,
-                        tx_rate_500kbps: 0
+                        rssi_dbm: Some(-100),
+                        snr_db: Some(0),
+                        tx_rate_500kbps: Some(0),
+                        ..Default::default()
                     },
                 ))
                 .await,

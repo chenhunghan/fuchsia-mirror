@@ -6,7 +6,7 @@
 import io
 import os
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 # Standard ELF constants.
 ELFMAG = b"\x7fELF"
@@ -18,7 +18,7 @@ SHT_SYMTAB = 2
 SHT_STRTAB = 3
 
 
-def _roundup4(size):
+def _roundup4(size: int) -> int:
     """Round |size| to 4 byte alignment."""
     return (size + 3) // 4 * 4
 
@@ -50,29 +50,33 @@ class ElfInput(object):
         self._log_func = log_func
         self._elf_bits = 64
 
-    def close(self):
+    def close(self) -> None:
         self._input.close()
 
     @property
-    def size(self):
+    def size(self) -> int:
         """Return input ELF size in bytes."""
         return self._input_size
 
     @staticmethod
-    def open_file(path: str, **kwargs):
+    def open_file(
+        path: str, *, log_func: Callable[[str], None] | None = None
+    ) -> "ElfInput":
         """Return  ElfInput instance for a file path."""
         file_size = os.path.getsize(path)
-        return ElfInput(open(path, "rb"), file_size, path, **kwargs)
+        return ElfInput(open(path, "rb"), file_size, path, log_func=log_func)
 
     @staticmethod
-    def open_memory(data: bytes, *kwargs):
+    def open_memory(
+        data: bytes, *, log_func: Callable[[str], None] | None = None
+    ) -> "ElfInput":
         """Return ElfInput instance for a memory buffer."""
-        return ElfInput(io.BytesIo(data), len(data), "input", **kwargs)
+        return ElfInput(io.BytesIO(data), len(data), "input", log_func=log_func)
 
     def is_elf64(self) -> bool:
         """Return true if instance is an ELF64 file."""
         header = self._try_read(ELF64_HEADER_SIZE)
-        if len(header) != ELF64_HEADER_SIZE:
+        if header is None or len(header) != ELF64_HEADER_SIZE:
             return False
         if header[: len(ELFMAG)] != ELFMAG:
             return False  # Not an ELF file.
@@ -80,7 +84,7 @@ class ElfInput(object):
             return False
         return True
 
-    def ensure_elf64(self):
+    def ensure_elf64(self) -> "ElfInput | None":
         """Ensure the input is ELF64, on success return self, or None on failure."""
         if self.is_elf64():
             return self
@@ -115,7 +119,7 @@ class ElfInput(object):
 
     # Implementation details
 
-    def _log(self, msg):
+    def _log(self, msg: str) -> None:
         if self._log_func:
             self._log_func(msg)
 
@@ -133,7 +137,7 @@ class ElfInput(object):
         self._input.seek(pos)
         return self._read(size)
 
-    def _unpack_from(self, format: str, offset: int):
+    def _unpack_from(self, format: str, offset: int) -> tuple[int, ...]:
         self._input.seek(offset)
         data = self._read(struct.calcsize(format))
         return struct.unpack(format, data)
@@ -157,7 +161,7 @@ class ElfInput(object):
         # if the section is a debug one.
         string_table_func = self._get_elf64_string_table_func()
 
-        def filter_debug_section(sh_pos, sh_size):
+        def filter_debug_section(sh_pos: int, sh_size: int) -> bool:
             sh_name_index = self._unpack_from("I", sh_pos)[0]
             sh_name = string_table_func(sh_name_index)
             self._log(
@@ -172,7 +176,7 @@ class ElfInput(object):
         """Return True if this file is stripped, i.e. has no local symbols."""
         string_table_func = self._get_elf64_string_table_func()
 
-        def filter_symtab_section(sh_pos, sh_size):
+        def filter_symtab_section(sh_pos: int, sh_size: int) -> bool:
             sh_type = self._unpack_from("I", sh_pos + 4)[0]
             sh_name_index = self._unpack_from("I", sh_pos)[0]
             sh_name = string_table_func(sh_name_index)
@@ -184,7 +188,7 @@ class ElfInput(object):
 
         return not any(self._filter_elf64_sections(filter_symtab_section))
 
-    def _get_elf64_string_table_func(self):
+    def _get_elf64_string_table_func(self) -> Callable[[int], str]:
         """Return a callable function that can convert a name_index into a
         string using the ELF64 string table from the input, if any."""
         # Index of string table in section table.
@@ -209,12 +213,12 @@ class ElfInput(object):
 
         sh_offset, sh_size = self._unpack_from("QQ", pos + 0x18)
 
-        def string_table_func(name_index):
+        def string_table_func(name_index: int) -> str:
             result = ""
             pos = name_index
             while pos < sh_size:
                 b = self._read_at(sh_offset + pos, 1)[0]
-                if b == b"\0":
+                if b == 0:
                     break
                 result += chr(b)
                 pos += 1
@@ -223,11 +227,13 @@ class ElfInput(object):
         return string_table_func
 
     @staticmethod
-    def _no_string_table_func(name_index):
+    def _no_string_table_func(name_index: int) -> str:
         # Special function used when there is no string table.
         return "<MISSING_STRING_TABLE>"
 
-    def _filter_elf64_sections(self, section_filter):
+    def _filter_elf64_sections(
+        self, section_filter: Callable[[int, int], bool]
+    ) -> Iterator[bool]:
         """Generate list of section information in an ELF64 file.
 
         Args:
@@ -249,7 +255,9 @@ class ElfInput(object):
             yield section_filter(pos, pos + e_shentsize)
             pos += e_shentsize
 
-    def _list_elf_notes(self, pos: int, size: int):
+    def _list_elf_notes(
+        self, pos: int, size: int
+    ) -> Iterator[tuple[str, bytes, int]]:
         """Generate (name, desc, type) notes from an ELF note section.
 
         Args:
@@ -275,7 +283,7 @@ class ElfInput(object):
 
             pos = next_pos
 
-    def _list_elf64_program_headers(self):
+    def _list_elf64_program_headers(self) -> Iterator[tuple[int, int, int]]:
         """Generate (type, offset, size) tuples listing program headers in an ELF64 file."""
         e_phoff = self._unpack_from("Q", 0x20)[0]
         e_phentsize, e_phnum = self._unpack_from("HH", 0x36)

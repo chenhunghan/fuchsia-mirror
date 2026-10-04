@@ -985,6 +985,7 @@ void Client::SetDisplayPowerMode(SetDisplayPowerModeRequestView request,
   if (!display_configs_it.IsValid()) {
     fdf::warn("SetDisplayPowerMode called with unknown display ID: {}", display_id.value());
     completer.ReplyError(ZX_ERR_NOT_FOUND);
+    return;
   }
 
   const display::PowerMode power_mode(request->power_mode);

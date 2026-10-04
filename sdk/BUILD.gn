@@ -1015,7 +1015,6 @@ if (current_toolchain == default_toolchain) {
         # `//src/developer/ffx:ffx_bin`.
 
         "//src/developer/ffx/lib/e2e_emu:isolated_emulator_data",
-        "//src/developer/ffx/lib/fuchsia-controller/tests:core_sdk_host_test_data",
         "//src/developer/ffx/lib/profiler/tests:ffx_profiler_lib_e2e_test_emulator_data",
         "//src/developer/ffx/lib/symbolize/tests:ffx_symbolize_lib_e2e_test_emulator_data",
         "//src/developer/ffx/lib/target_net/tests:ffx_target_net_lib_e2e_test_emulator_data",
@@ -1027,6 +1026,7 @@ if (current_toolchain == default_toolchain) {
         "//src/developer/ffx/plugins/target/package/explore/tests:verify_ffx_target_package_explore_emulator_data",
         "//src/developer/ffx/plugins/target/ssh:ffx_target_ssh_e2e_tests_emulator_data",
         "//src/developer/ffx/tools/power:ffx_power_system_activity_application_activity_e2e_tests_emulator_data",
+        "//src/developer/fuchsia-controller/tests:core_sdk_host_test_data",
         "//tools/dupefinder/tests/e2e:verify_dupefinder_e2e_emulator_data",
         "//vendor/*",
       ]

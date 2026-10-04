@@ -665,8 +665,12 @@ void WlanInterface::MacGetFeatures(fuchsia_hardware_network_driver::Features* ou
 
 void WlanInterface::MacSetMode(fuchsia_hardware_network::wire::MacFilterMode mode,
                                cpp20::span<const ::fuchsia_net::wire::MacAddress> multicast_macs) {
-  zx_status_t status = ZX_OK;
   std::shared_lock<std::shared_mutex> guard(lock_);
+  if (wdev_ == nullptr) {
+    BRCMF_WARN("Interface not available, ignoring MacSetMode");
+    return;
+  }
+  zx_status_t status = ZX_OK;
   switch (mode) {
     case fuchsia_hardware_network::wire::MacFilterMode::kMulticastFilter:
       status = brcmf_if_set_multicast_promisc(wdev_->netdev, false);

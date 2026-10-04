@@ -26,7 +26,7 @@ closed protocol DeviceManager {
         key vector<uint8>:MAX_KEY_SIZE;
         slot uint8;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Attempts to unseal the device by using the provided master key to unwrap
@@ -42,7 +42,7 @@ closed protocol DeviceManager {
         key vector<uint8>:MAX_KEY_SIZE;
         slot uint8;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Seals the device, causing any previously-created child zxcrypt Device to
@@ -51,7 +51,7 @@ closed protocol DeviceManager {
     /// Returns `ZX_ERR_BAD_STATE` if the device is already sealed.
     /// Returns `ZX_OK` on success.
     strict Seal() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Shreds the device, permanently overwriting the keys that would allow
@@ -62,6 +62,6 @@ closed protocol DeviceManager {
     /// Returns `ZX_OK` on success.
     /// Returns other errors if operations on the underlying block device return errors.
     strict Shred() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

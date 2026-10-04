@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"go.fuchsia.dev/fuchsia/tools/build"
+	"go.fuchsia.dev/fuchsia/tools/debug/elflib"
 )
 
 // LINT.IfChange(ExportedDebugSymbol)
@@ -106,6 +107,9 @@ func debugSymbolUploads(outputDir string, outputNamespace, debugNamespace, build
 
 		// We upload all debug binaries to a flat namespace.
 		debugSrc := filepath.Join(outputDir, debugEntry.Debug)
+		if err := elflib.NewBinaryFileRef(debugSrc, id).Verify(); err != nil {
+			return nil, err
+		}
 		uploads = append(uploads, Upload{
 			Source:      debugSrc,
 			Destination: fmt.Sprintf("%s/%s.debug", debugNamespace, id),
@@ -125,6 +129,9 @@ func debugSymbolUploads(outputDir string, outputNamespace, debugNamespace, build
 		})
 		if debugEntry.Stripped != "" {
 			strippedSrc := filepath.Join(outputDir, debugEntry.Stripped)
+			if err := elflib.NewBinaryFileRef(strippedSrc, id).Verify(); err != nil {
+				return nil, err
+			}
 			uploads = append(uploads, Upload{
 				Source:      strippedSrc,
 				Destination: fmt.Sprintf("%s/%s/executable", buildidNamespace, id),

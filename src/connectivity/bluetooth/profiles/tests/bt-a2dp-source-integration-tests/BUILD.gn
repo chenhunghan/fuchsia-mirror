@@ -21,6 +21,7 @@ rustc_test("tests_bin") {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component-test",
     "//src/lib/testing/fixture",
+    "//src/sys/lib/cm_rust",
     "//third_party/rust_crates:futures",
   ]
 
@@ -51,9 +52,8 @@ fuchsia_test_package("bt-a2dp-source-integration-tests") {
   }
 
   deps = [
-    # The A2DP component with only source enabled.
+    # The A2DP component.
     "//src/connectivity/bluetooth/profiles/bt-a2dp:component",
-    "//src/connectivity/bluetooth/profiles/bt-a2dp:source_only_config",
 
     # Mock Piconet Server for the `bredr.Profile` service.
     "//src/connectivity/bluetooth/testing/mock-piconet-server:component",

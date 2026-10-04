@@ -418,10 +418,8 @@ impl Node for ObjectDirectory {
             Immutable {
                 protocols: fio::NodeProtocolKinds::DIRECTORY,
                 abilities: fio::Operations::GET_ATTRIBUTES
-                    | fio::Operations::UPDATE_ATTRIBUTES
                     | fio::Operations::ENUMERATE
-                    | fio::Operations::TRAVERSE
-                    | fio::Operations::MODIFY_DIRECTORY,
+                    | fio::Operations::TRAVERSE,
                 id: id
             }
         ))
@@ -438,10 +436,15 @@ impl Directory for ObjectDirectory {
     ) {
         flags.to_object_request(server_end).handle(|object_request| {
             match path.next_with_ref() {
-                (_, Some(name)) => {
+                (remaining_path, Some(name)) => {
+                    if !remaining_path.is_empty() {
+                        return Err(Status::NOT_DIR);
+                    }
                     // Lookup an object by id and return it.
-                    let name = name.to_owned();
-                    let object_id = name.parse().unwrap_or(INVALID_OBJECT_ID);
+                    let object_id = name.parse().map_err(|_| Status::NOT_FOUND)?;
+                    if object_id == INVALID_OBJECT_ID {
+                        return Err(Status::NOT_FOUND);
+                    }
                     vfs::file::serve(
                         InternalFile::new(object_id, self.store.clone()),
                         scope,
@@ -467,10 +470,15 @@ impl Directory for ObjectDirectory {
         object_request: ObjectRequestRef<'_>,
     ) -> Result<(), Status> {
         match path.next_with_ref() {
-            (_, Some(name)) => {
+            (remaining_path, Some(name)) => {
+                if !remaining_path.is_empty() {
+                    return Err(Status::NOT_DIR);
+                }
                 // Lookup an object by id and return it.
-                let name = name.to_owned();
-                let object_id = name.parse().unwrap_or(INVALID_OBJECT_ID);
+                let object_id = name.parse().map_err(|_| Status::NOT_FOUND)?;
+                if object_id == INVALID_OBJECT_ID {
+                    return Err(Status::NOT_FOUND);
+                }
                 vfs::file::serve(
                     InternalFile::new(object_id, self.store.clone()),
                     scope,
@@ -751,6 +759,7 @@ mod tests {
     use fidl_fuchsia_fs_startup::CreateOptions;
     use fidl_fuchsia_io as fio;
     use fuchsia_fs::directory::{read_file, readdir};
+    use futures::StreamExt;
     use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
     use vfs::ToObjectRequest;
     use vfs::directory::entry::OpenRequest;
@@ -1070,6 +1079,147 @@ mod tests {
                     .await
                     .unwrap();
             assert_ne!(initial_root_store_info, updated_root_store_info);
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_internal_file_operations() {
+        let fixture = TestFixture::new().await;
+        {
+            let store = fixture.fs().root_parent_store();
+            let journal_oid = fixture.fs().super_block_header().journal_object_id;
+            let internal_file = InternalFile::new(journal_oid, Arc::downgrade(&store));
+
+            assert_eq!(
+                internal_file.entry_info(),
+                vfs::directory::entry::EntryInfo::new(journal_oid, fio::DirentType::File)
+            );
+            assert_eq!(internal_file.query_filesystem(), Err(zx::Status::NOT_SUPPORTED));
+            assert_eq!(internal_file.open_file(&FileOptions::default()).await, Ok(()));
+            assert_eq!(internal_file.truncate(0).await, Err(zx::Status::NOT_SUPPORTED));
+            assert_eq!(
+                internal_file.update_attributes(fio::MutableNodeAttributes::default()).await,
+                Err(zx::Status::NOT_SUPPORTED)
+            );
+            assert_eq!(internal_file.sync(SyncMode::Normal).await, Ok(()));
+            assert_eq!(internal_file.write_at(0, b"test").await, Err(zx::Status::NOT_SUPPORTED));
+            assert_eq!(internal_file.append(b"test").await, Err(zx::Status::NOT_SUPPORTED));
+
+            let size = internal_file.get_size().await.unwrap();
+            assert!(size > 0);
+
+            let attrs =
+                internal_file.get_attributes(fio::NodeAttributesQuery::all()).await.unwrap();
+            assert_eq!(attrs.immutable_attributes.id, Some(journal_oid));
+            assert_eq!(attrs.immutable_attributes.content_size, Some(size));
+
+            // Test aligned and unaligned read_at, plus read past EOF.
+            let mut buf = [0u8; 64];
+            let read_len = internal_file.read_at(0, &mut buf).await.unwrap();
+            assert_eq!(read_len, 64);
+
+            let mut unaligned_buf = [0u8; 32];
+            let unaligned_len = internal_file.read_at(13, &mut unaligned_buf).await.unwrap();
+            assert_eq!(unaligned_len, 32);
+            assert_eq!(&buf[13..45], &unaligned_buf[..]);
+
+            let eof_len = internal_file.read_at(size + 4096, &mut buf).await.unwrap();
+            assert_eq!(eof_len, 0);
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_object_directory_and_journal_read() {
+        let fixture = TestFixture::new().await;
+        {
+            let debug_dir = create_debug_directory(fixture.fs(), fixture.volumes_directory());
+            let (debug_dir_proxy, _scope) = serve_debug_dir(debug_dir);
+
+            let objects_dir = open_dir(&debug_dir_proxy, "root_parent_store/objects").await;
+            let entries = readdir(&objects_dir).await.unwrap();
+            let journal_oid_str = fixture.fs().super_block_header().journal_object_id.to_string();
+            assert!(entries.iter().any(|e| e.name == journal_oid_str));
+
+            let (_, attrs) = objects_dir
+                .get_attributes(
+                    fio::NodeAttributesQuery::ID
+                        | fio::NodeAttributesQuery::PROTOCOLS
+                        | fio::NodeAttributesQuery::ABILITIES,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(attrs.id, Some(fixture.fs().root_parent_store().store_object_id()));
+            assert_eq!(
+                attrs.abilities,
+                Some(
+                    fio::Operations::GET_ATTRIBUTES
+                        | fio::Operations::ENUMERATE
+                        | fio::Operations::TRAVERSE
+                )
+            );
+
+            // Opening non-numeric or INVALID_OBJECT_ID ("0") names should fail at open time.
+            assert!(
+                fuchsia_fs::directory::open_file(&objects_dir, "not_a_number", fio::PERM_READABLE)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                fuchsia_fs::directory::open_file(&objects_dir, "0", fio::PERM_READABLE)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                fuchsia_fs::directory::open_file(
+                    &objects_dir,
+                    &format!("{journal_oid_str}/subpath"),
+                    fio::PERM_READABLE
+                )
+                .await
+                .is_err()
+            );
+
+            // Open the journal object directly via the objects directory.
+            let (file_proxy, server_end) = create_proxy::<fio::FileMarker>();
+            objects_dir
+                .open(
+                    &journal_oid_str,
+                    fio::PERM_READABLE | fio::Flags::PROTOCOL_FILE,
+                    &Default::default(),
+                    server_end.into_channel(),
+                )
+                .unwrap();
+            let data = file_proxy.read(64).await.unwrap().unwrap();
+            assert_eq!(data.len(), 64);
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_handle_debug_request() {
+        let fixture = TestFixture::new().await;
+        {
+            let (proxy, mut stream) =
+                fidl::endpoints::create_proxy_and_stream::<fidl_fuchsia_fxfs::DebugMarker>();
+            let fs = fixture.fs().clone();
+            let volumes = fixture.volumes_directory().clone();
+
+            let server_task = fuchsia_async::Task::spawn(async move {
+                while let Some(Ok(req)) = stream.next().await {
+                    handle_debug_request(fs.clone(), volumes.clone(), req).await.unwrap();
+                }
+            });
+
+            proxy.compact().await.unwrap().unwrap();
+            proxy.stop_profile_tasks().await.unwrap().unwrap();
+            proxy.clear_caches().await.unwrap().unwrap();
+            assert!(proxy.delete_profile("nonexistent_vol", "prof").await.unwrap().is_err());
+
+            drop(proxy);
+            server_task.await;
         }
         fixture.close().await;
     }

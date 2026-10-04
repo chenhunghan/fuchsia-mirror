@@ -3,8 +3,10 @@
 # found in the LICENSE file.
 
 import("//build/assembly/board_input_bundle.gni")
+import("//build/assembly/board_input_bundle_set.gni")
 import("//build/bazel/assembly/bazel_board_configuration.gni")
 import("//build/bazel/bazel_inputs.gni")
+import("//build/info/info.gni")
 import("//zircon/tools/zbi/zbi_item.gni")
 
 assert(current_toolchain == default_toolchain,
@@ -21,6 +23,7 @@ bazel_board_configuration("arm64") {
 group("arm64.bazel_input") {
   testonly = true
   deps = [
+    ":arm64_bibs.bazel_input",
     ":main_bundle.bazel_inputs",
     ":qemu_psci_cpu_suspend_states.bazel_inputs",
     "//boards/emulation/virtio:virtio.bazel_inputs",
@@ -95,4 +98,12 @@ zbi_item("qemu_psci_cpu_suspend_states") {
 
 bazel_input_file("qemu_psci_cpu_suspend_states.bazel_inputs") {
   generator = ":qemu_psci_cpu_suspend_states"
+}
+
+board_input_bundle_set("arm64_bibs") {
+  board_input_bundles = [
+    ":main_bundle",
+    "//boards/emulation/virtio",
+  ]
+  version = build_info_version
 }

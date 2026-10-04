@@ -1,0 +1,31 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.usb.descriptor;
+
+/// USB Human Interface Device Class setup request codes.
+type HidRequest = flexible enum : uint8 {
+    GET_REPORT = 0x01;
+    GET_IDLE = 0x02;
+    GET_PROTOCOL = 0x03;
+    SET_REPORT = 0x09;
+    SET_IDLE = 0x0a;
+    SET_PROTOCOL = 0x0b;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB HID subclass codes.
+type HidSubclass = flexible enum : uint8 {
+    BOOT = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB HID protocol codes.
+type HidProtocol = flexible enum : uint8 {
+    KBD = 0x01;
+    MOUSE = 0x02;
+    @unknown
+    UNDEFINED = 0xee;
+};

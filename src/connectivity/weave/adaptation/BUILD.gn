@@ -61,7 +61,7 @@ openweave_adaptation_layer("adaptation") {
     "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_cpp",
     "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_hlcpp",
     "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_hlcpp",
-    "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_hlcpp",
+    "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_cpp",
     "//sdk/fidl/fuchsia.weave:fuchsia.weave_hlcpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/inspect/component/cpp",

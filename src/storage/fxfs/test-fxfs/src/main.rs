@@ -62,8 +62,9 @@ async fn mount_user_volume(
     starnix_exposed_dir: ServerEnd<DirectoryMarker>,
     volumes_directory: &Arc<VolumesDirectory>,
     mounted_volume: &Mutex<Option<MountedVolume>>,
+    device: Arc<dyn storage_device::Device>,
 ) -> Result<[u8; 16], Error> {
-    let remote_crypt = Arc::new(RemoteCrypt::new(crypt));
+    let remote_crypt = Arc::new(RemoteCrypt::new_with_device(crypt, device));
     let vol = match volumes_directory
         .mount_volume(USER_VOLUME_NAME, Some(remote_crypt.clone() as Arc<dyn Crypt>), false)
         .await
@@ -138,8 +139,9 @@ async fn create_user_volume(
     starnix_exposed_dir: ServerEnd<DirectoryMarker>,
     volumes_directory: &Arc<VolumesDirectory>,
     mounted_volume: &Mutex<Option<MountedVolume>>,
+    device: Arc<dyn storage_device::Device>,
 ) -> Result<[u8; 16], Error> {
-    let remote_crypt = Arc::new(RemoteCrypt::new(crypt));
+    let remote_crypt = Arc::new(RemoteCrypt::new_with_device(crypt, device));
     let vol = mounted_volume.lock().take();
     if let Some(vol) = vol {
         volumes_directory.lock().await.unmount(vol.store_id).await.context("unmount failed")?;
@@ -222,12 +224,16 @@ async fn handle_starnix_volume_provider_requests(
     mut stream: StarnixVolumeProviderRequestStream,
     volumes_directory: Arc<VolumesDirectory>,
     mounted_volume: Arc<Mutex<Option<MountedVolume>>>,
+    device: Arc<dyn storage_device::Device>,
 ) {
     while let Some(Ok(request)) = stream.next().await {
         match request {
             StarnixVolumeProviderRequest::Check { crypt, responder } => {
                 let res = volumes_directory
-                    .check_volume(USER_VOLUME_NAME, Some(Arc::new(RemoteCrypt::new(crypt))))
+                    .check_volume(
+                        USER_VOLUME_NAME,
+                        Some(Arc::new(RemoteCrypt::new_with_device(crypt, device.clone()))),
+                    )
                     .await;
                 responder
                     .send(res.map_err(|err| {
@@ -242,12 +248,24 @@ async fn handle_starnix_volume_provider_requests(
                 log::info!(mode:?; "volume provider mount");
                 let res = match mode {
                     fidl_fuchsia_fshost::MountMode::MaybeCreate => {
-                        mount_user_volume(crypt, exposed_dir, &volumes_directory, &mounted_volume)
-                            .await
+                        mount_user_volume(
+                            crypt,
+                            exposed_dir,
+                            &volumes_directory,
+                            &mounted_volume,
+                            device.clone(),
+                        )
+                        .await
                     }
                     fidl_fuchsia_fshost::MountMode::AlwaysCreate => {
-                        create_user_volume(crypt, exposed_dir, &volumes_directory, &mounted_volume)
-                            .await
+                        create_user_volume(
+                            crypt,
+                            exposed_dir,
+                            &volumes_directory,
+                            &mounted_volume,
+                            device.clone(),
+                        )
+                        .await
                     }
                 };
                 let res = match res {
@@ -361,11 +379,13 @@ async fn main() -> Result<(), Error> {
             vfs::service::host({
                 let volumes_directory = volumes_directory.clone();
                 let mounted_volume = mounted_volume.clone();
+                let device = filesystem.device();
                 move |stream| {
                     handle_starnix_volume_provider_requests(
                         stream,
                         volumes_directory.clone(),
                         mounted_volume.clone(),
+                        device.clone(),
                     )
                 }
             }),

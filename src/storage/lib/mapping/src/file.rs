@@ -21,17 +21,20 @@ use std::sync::Arc;
 use vmo_fifo::Message;
 use zx::sys::zx_page_request_command_t::ZX_PAGER_VMO_READ;
 
-/// Default readahead size used for streaming reads and decompression (128 KiB).
-pub const READ_AHEAD_SIZE: u64 = 128 * 1024;
+/// Target readahead and Merkle verification size (128 KiB), matching Fxfs.
+///
+/// Uncompressed and encrypted files always use this size. For compressed files, the effective size
+/// is adjusted so that each readahead window aligns to a whole number of compression chunks.
+pub const TARGET_READ_AHEAD_SIZE: u64 = 128 * 1024;
 
-/// Calculates the readahead size for a given chunk size, rounding down `suggested_read_ahead_size`
-/// to a multiple of `chunk_size`, or returning `chunk_size` if it is larger than
-/// `suggested_read_ahead_size`.
-pub fn read_ahead_size_for_chunk_size(chunk_size: u64, suggested_read_ahead_size: u64) -> u64 {
-    if chunk_size >= suggested_read_ahead_size {
-        chunk_size
+/// Calculates the readahead size for a given `compression_chunk_size`, rounding down
+/// `target_read_ahead_size` to a multiple of `compression_chunk_size`, or returning
+/// `compression_chunk_size` if it is larger than `target_read_ahead_size`.
+fn read_ahead_size_for_chunk_size(compression_chunk_size: u64, target_read_ahead_size: u64) -> u64 {
+    if compression_chunk_size >= target_read_ahead_size {
+        compression_chunk_size
     } else {
-        (suggested_read_ahead_size / chunk_size) * chunk_size
+        (target_read_ahead_size / compression_chunk_size) * compression_chunk_size
     }
 }
 
@@ -130,6 +133,17 @@ impl File {
         }
     }
 
+    /// Returns the read-ahead window size in bytes for this file, which also serves as the
+    /// fixed read size for Merkle verification of blobs.
+    pub fn read_ahead_size(&self) -> u64 {
+        match &self.transform {
+            Transform::Compressed(info) => {
+                read_ahead_size_for_chunk_size(info.chunk_size(), TARGET_READ_AHEAD_SIZE)
+            }
+            Transform::None | Transform::Encrypted(_) => TARGET_READ_AHEAD_SIZE,
+        }
+    }
+
     /// Streams and decodes the uncompressed range requested by `page_request`, applying readahead.
     pub fn read_range(
         self: &Arc<Self>,
@@ -147,19 +161,14 @@ impl File {
             return;
         }
 
-        let read_ahead_size = match &self.transform {
-            Transform::Compressed(info) => {
-                read_ahead_size_for_chunk_size(info.chunk_size(), READ_AHEAD_SIZE)
-            }
-            Transform::None | Transform::Encrypted(_) => READ_AHEAD_SIZE,
-        };
+        let read_ahead_size = self.read_ahead_size();
 
         let read_range = (original_range.start / read_ahead_size) * read_ahead_size
             ..std::cmp::min(
                 original_range.end.next_multiple_of(read_ahead_size),
                 page_aligned_size,
             );
-        if page_request.prepare(read_range.clone()).is_err() {
+        if page_request.prepare(read_range.clone(), read_ahead_size as usize).is_err() {
             return;
         }
 
@@ -288,8 +297,14 @@ pub trait DeliveryHandler: Send + Sync + 'static {
     /// Produces a [`PageRequest`] to receive decompressed or uncompressed page data.
     fn get_page_request(self: &Arc<Self>, key: u64, range: Range<u64>) -> Self::Request;
 
-    /// Registers a blob's Merkle tree leaf hashes with the downstream verifier.
-    fn register_blob(&self, _key: u64, _merkle_leaves: &[[u8; 32]]) -> Result<(), Error> {
+    /// Registers a blob's Merkle tree leaf hashes and delivery read alignment with the
+    /// downstream verifier.
+    fn register_blob(
+        &self,
+        _key: u64,
+        _merkle_leaves: &[[u8; 32]],
+        _read_alignment: usize,
+    ) -> Result<(), Error> {
         Ok(())
     }
 
@@ -399,9 +414,15 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
         &self.service
     }
 
-    /// Registers a blob's Merkle tree leaf hashes with the downstream delivery handler.
-    pub fn register_blob(&self, key: u64, merkle_leaves: &[[u8; 32]]) -> Result<(), Error> {
-        self.delivery_handler.register_blob(key, merkle_leaves)
+    /// Registers a blob's Merkle tree leaf hashes and delivery read alignment with the
+    /// downstream delivery handler.
+    pub fn register_blob(
+        &self,
+        key: u64,
+        merkle_leaves: &[[u8; 32]],
+        read_alignment: usize,
+    ) -> Result<(), Error> {
+        self.delivery_handler.register_blob(key, merkle_leaves, read_alignment)
     }
 
     // Handles a page request from `PagerThread`.
@@ -527,6 +548,16 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
     #[cfg(test)]
     pub fn is_loading(&self, key: u64) -> bool {
         matches!(self.map.lock().get(&key), Some(FileEntry::Loading(_)))
+    }
+
+    /// Returns `true` if `key` is currently in the loading state with at least one queued page
+    /// request.
+    #[cfg(test)]
+    pub fn has_queued_page_requests(&self, key: u64) -> bool {
+        matches!(
+            self.map.lock().get(&key),
+            Some(FileEntry::Loading(slot)) if !slot.requests.is_empty()
+        )
     }
 
     /// Returns `true` if `key` is currently in the loaded state.
@@ -764,15 +795,19 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
             let guard = LoadingFileGuard { files: Some(files.clone()), key };
             let files_clone = files.clone();
             read_blob_metadata(service.as_ref(), &metadata_extents, stored_size, move |metadata| {
-                if let Err(error) = files_clone.register_blob(key, &metadata.merkle_leaves) {
-                    log::error!(error:?; "Failed to register blob {key}");
-                    return;
-                }
                 let file = Arc::new(File::new(
                     data_extents,
                     metadata.uncompressed_size,
                     metadata.compression_info.into(),
                 ));
+                if let Err(error) = files_clone.register_blob(
+                    key,
+                    &metadata.merkle_leaves,
+                    file.read_ahead_size() as usize,
+                ) {
+                    log::error!(error:?; "Failed to register blob {key}");
+                    return;
+                }
                 guard.commit(file);
             });
             Ok(())
@@ -1066,10 +1101,10 @@ mod tests {
         let (page_request, rx) = TestVecBuffer::new_with_range(4096..8192);
         file.read_range(&service, page_request);
 
-        assert_eq!(rx.commits(), vec![(0, READ_AHEAD_SIZE as usize)]);
+        assert_eq!(rx.commits(), vec![(0, TARGET_READ_AHEAD_SIZE as usize)]);
         assert_eq!(
-            &rx.output()[..READ_AHEAD_SIZE as usize],
-            &expected_data[..READ_AHEAD_SIZE as usize]
+            &rx.output()[..TARGET_READ_AHEAD_SIZE as usize],
+            &expected_data[..TARGET_READ_AHEAD_SIZE as usize]
         );
     }
 
@@ -1091,10 +1126,10 @@ mod tests {
         let (page_request, rx) = TestVecBuffer::new_with_range(135168..139264);
         file.read_range(&service, page_request);
 
-        assert_eq!(rx.commits(), vec![(READ_AHEAD_SIZE, READ_AHEAD_SIZE as usize)]);
+        assert_eq!(rx.commits(), vec![(TARGET_READ_AHEAD_SIZE, TARGET_READ_AHEAD_SIZE as usize)]);
         assert_eq!(
-            &rx.output()[..READ_AHEAD_SIZE as usize],
-            &expected_data[READ_AHEAD_SIZE as usize..2 * READ_AHEAD_SIZE as usize]
+            &rx.output()[..TARGET_READ_AHEAD_SIZE as usize],
+            &expected_data[TARGET_READ_AHEAD_SIZE as usize..2 * TARGET_READ_AHEAD_SIZE as usize]
         );
     }
 
@@ -1118,7 +1153,7 @@ mod tests {
         let (page_request, rx) = TestVecBuffer::new_with_range(135168..139264);
         file.read_range(&service, page_request);
 
-        let expected_start = READ_AHEAD_SIZE;
+        let expected_start = TARGET_READ_AHEAD_SIZE;
         let page_aligned_size = uncompressed_size.next_multiple_of(BLOCK_SIZE);
         let expected_len = (page_aligned_size - expected_start) as usize;
         assert_eq!(rx.commits(), vec![(expected_start, expected_len)]);
@@ -1503,14 +1538,19 @@ mod tests {
         let service = DelayedBlockService::new(device_data);
         let registered = Arc::new(std::sync::Mutex::new(None));
         let registered_clone = registered.clone();
-        struct TestRegisterHandler(Arc<std::sync::Mutex<Option<(u64, Vec<[u8; 32]>)>>>);
+        struct TestRegisterHandler(Arc<std::sync::Mutex<Option<(u64, Vec<[u8; 32]>, usize)>>>);
         impl DeliveryHandler for TestRegisterHandler {
             type Request = TestVecBuffer;
             fn get_page_request(self: &Arc<Self>, _key: u64, _range: Range<u64>) -> Self::Request {
                 TestVecBuffer::new(4096).0
             }
-            fn register_blob(&self, key: u64, leaves: &[[u8; 32]]) -> Result<(), Error> {
-                *self.0.lock().unwrap() = Some((key, leaves.to_vec()));
+            fn register_blob(
+                &self,
+                key: u64,
+                leaves: &[[u8; 32]],
+                read_alignment: usize,
+            ) -> Result<(), Error> {
+                *self.0.lock().unwrap() = Some((key, leaves.to_vec(), read_alignment));
                 Ok(())
             }
         }
@@ -1567,13 +1607,15 @@ mod tests {
 
         // Once the block read completes and metadata is decoded, verify that:
         // - The file transitioned out of "loading" and is committed into `Files`.
-        // - The `register_blob` callback was invoked with the expected key and Merkle leaves.
+        // - The `register_blob` callback was invoked with the expected key, Merkle leaves, and
+        //   read_alignment.
         assert!(!files.is_loading(42));
         assert!(files.get_file(42).is_some());
-        let (reg_key, reg_leaves) =
+        let (reg_key, reg_leaves, reg_read_alignment) =
             registered.lock().unwrap().take().expect("registered callback called");
         assert_eq!(reg_key, 42);
         assert_eq!(reg_leaves, vec![leaf1, leaf2]);
+        assert_eq!(reg_read_alignment, TARGET_READ_AHEAD_SIZE as usize);
     }
 
     #[fuchsia::test]
@@ -1604,7 +1646,11 @@ mod tests {
             }
         }
         impl PageRequest for DroppingBuffer {
-            fn prepare(&mut self, _range: Range<u64>) -> Result<(), ChunkedArchiveError> {
+            fn prepare(
+                &mut self,
+                _range: Range<u64>,
+                _read_alignment: usize,
+            ) -> Result<(), ChunkedArchiveError> {
                 Ok(())
             }
         }
@@ -1769,6 +1815,12 @@ mod tests {
                 let _ = vmo_blob_clone.read(&mut b, 0);
             });
 
+            // Wait until the page request arrives and is queued in the loading entry before
+            // completing the metadata read.
+            while !files.has_queued_page_requests(42) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
             // Complete metadata block read; this will insert the file and immediately
             // drain queued page requests.
             service.wait_and_trigger_sync();
@@ -1778,7 +1830,10 @@ mod tests {
         service.wait_and_trigger_sync();
 
         // Check if page request made during metadata read was serviced!
-        assert!(!rx.commits().is_empty(), "Page request made during metadata read was dropped!");
+        assert!(
+            !rx.wait_for_commits(1).is_empty(),
+            "Page request made during metadata read was dropped!"
+        );
     }
 
     #[fuchsia::test]
@@ -1854,8 +1909,10 @@ mod tests {
             let _ = vmo_blob_clone.read(&mut b, 0);
         });
 
-        // Wait briefly to ensure page request arrives and is queued as pending mapping in `files`.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Wait until the page request arrives and is queued as pending mapping in `files`.
+        while !files.has_queued_page_requests(42) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         std::thread::scope(|s| {
             let msg = receiver.peek().unwrap();
@@ -1872,7 +1929,10 @@ mod tests {
         service.wait_and_trigger_sync();
 
         // Check if page request made before mapping command was serviced!
-        assert!(!rx.commits().is_empty(), "Page request made before mapping command was dropped!");
+        assert!(
+            !rx.wait_for_commits(1).is_empty(),
+            "Page request made before mapping command was dropped!"
+        );
     }
 
     #[fuchsia::test]
@@ -2048,10 +2108,10 @@ mod tests {
         let (page_request, rx) = TestVecBuffer::new_with_range(135168..139264);
         file.read_range(&service, page_request);
 
-        assert_eq!(rx.commits(), vec![(READ_AHEAD_SIZE, READ_AHEAD_SIZE as usize)]);
+        assert_eq!(rx.commits(), vec![(TARGET_READ_AHEAD_SIZE, TARGET_READ_AHEAD_SIZE as usize)]);
         assert_eq!(
-            &rx.output()[..READ_AHEAD_SIZE as usize],
-            &expected_data[READ_AHEAD_SIZE as usize..2 * READ_AHEAD_SIZE as usize]
+            &rx.output()[..TARGET_READ_AHEAD_SIZE as usize],
+            &expected_data[TARGET_READ_AHEAD_SIZE as usize..2 * TARGET_READ_AHEAD_SIZE as usize]
         );
     }
 
@@ -2199,7 +2259,12 @@ mod tests {
             fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
                 TestVecBuffer::new_with_range(range).0
             }
-            fn register_blob(&self, _key: u64, _merkle_leaves: &[[u8; 32]]) -> Result<(), Error> {
+            fn register_blob(
+                &self,
+                _key: u64,
+                _merkle_leaves: &[[u8; 32]],
+                _read_alignment: usize,
+            ) -> Result<(), Error> {
                 panic!("register_blob should not be called for encrypted files");
             }
         }
@@ -2282,7 +2347,7 @@ mod tests {
     #[fuchsia::test]
     fn test_queued_page_request_does_not_deadlock_single_completion_thread() {
         // 128 KiB of blob data (> 64 KiB buffer pool) + 1 block (4 KiB) of metadata.
-        let data_size = READ_AHEAD_SIZE as usize;
+        let data_size = TARGET_READ_AHEAD_SIZE as usize;
         let encoded_metadata = serialize_metadata(&BlobMetadata {
             merkle_leaves: MerkleLeaves::new(),
             format: BlobFormat::Uncompressed,
@@ -2291,7 +2356,7 @@ mod tests {
         device_data[data_size..data_size + encoded_metadata.len()]
             .copy_from_slice(&encoded_metadata);
 
-        // 64 KiB buffer pool (< 128 KiB READ_AHEAD_SIZE).
+        // 64 KiB buffer pool (< 128 KiB TARGET_READ_AHEAD_SIZE).
         let block_service = DelayedBlockService::new_with_pool_capacity(device_data, 64 * 1024);
 
         let (page_request, rx) = TestVecBuffer::new_with_range(0..4096);
@@ -2303,9 +2368,11 @@ mod tests {
         ));
         let _pager_thread = files.spawn_pager_thread();
 
-        let data_extents = Extents::try_new([Extent::new(0..READ_AHEAD_SIZE, Some(0))], 0).unwrap();
+        let data_extents =
+            Extents::try_new([Extent::new(0..TARGET_READ_AHEAD_SIZE, Some(0))], 0).unwrap();
         let meta_extents =
-            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(READ_AHEAD_SIZE))], 0).unwrap();
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(TARGET_READ_AHEAD_SIZE))], 0)
+                .unwrap();
 
         let blob_key = 200;
 
@@ -2316,7 +2383,7 @@ mod tests {
         read_blob_metadata(
             block_service.as_ref(),
             &meta_extents,
-            READ_AHEAD_SIZE,
+            TARGET_READ_AHEAD_SIZE,
             move |metadata| {
                 let file = Arc::new(File::new(
                     data_extents,
@@ -2328,8 +2395,9 @@ mod tests {
         );
 
         // Queue a page request while txn 0 is still pending. Because `File::read_range` expands
-        // page requests to `READ_AHEAD_SIZE` (128 KiB) and the buffer pool is 64 KiB, servicing
-        // this request requires two sequential 64 KiB buffer allocations (txn 1 and txn 2).
+        // page requests to `TARGET_READ_AHEAD_SIZE` (128 KiB) and the buffer pool is 64 KiB,
+        // servicing this request requires two sequential 64 KiB buffer allocations (txn 1 and
+        // txn 2).
         files.handle_page_request(blob_key, 0..4096);
 
         // Complete txn 0 (metadata) followed by txn 1 and txn 2 (the two 64 KiB data chunks) on a
@@ -2348,7 +2416,7 @@ mod tests {
 
         // Verify that the 128 KiB readahead was split into two 64 KiB block reads (matching the
         // 64 KiB pool capacity) and both chunks were committed to the pager.
-        assert_eq!(rx.commits(), vec![(0, 65536), (65536, 65536)]);
+        assert_eq!(rx.wait_for_commits(2), vec![(0, 65536), (65536, 65536)]);
         // Verify that the full 128 KiB of blob data was copied into the page request's buffer.
         assert_eq!(rx.output(), vec![0xabu8; data_size]);
     }

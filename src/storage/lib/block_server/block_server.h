@@ -192,6 +192,11 @@ class BlockServer {
 
   void SendReply(RequestId, zx::result<>) const;
 
+  // Registers a hardware inline encryption key slot with this server and returns a token
+  // (client end of an eventpair) that clients can pass to
+  // `fuchsia.storage.block/Session.RegisterKey` to obtain a session-scoped slot for FIFO requests.
+  zx::result<zx::eventpair> RegisterKeySlot(uint8_t hw_slot) const;
+
  private:
   Interface* interface_ = nullptr;
   mutable std::mutex mutex_;

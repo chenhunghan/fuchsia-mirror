@@ -28,8 +28,18 @@ void MesonGate::Disable() {
   }
 }
 
-void MesonGate::EnableHw() { mmio_.SetBits32(mask_, offset_); }
+void MesonGate::EnableHw() {
+  if (hiu_mask_ != 0) {
+    hiu_mmio_.ModifyBits32(hiu_enable_val_, hiu_mask_, hiu_reg_);
+  }
+  mmio_.SetBits32(mask_, offset_);
+}
 
-void MesonGate::DisableHw() { mmio_.ClearBits32(mask_, offset_); }
+void MesonGate::DisableHw() {
+  mmio_.ClearBits32(mask_, offset_);
+  if (hiu_mask_ != 0) {
+    hiu_mmio_.ModifyBits32(hiu_disable_val_, hiu_mask_, hiu_reg_);
+  }
+}
 
 }  // namespace vim3_clock

@@ -37,8 +37,8 @@ constexpr int kTabSize = 4;
 constexpr int kNetlinkBufSize = 4096;
 
 constexpr char kSuccessKey[] = "audit_success";
-constexpr char kExpectedFailureKey[] = "audit_failure";
-constexpr char kSkipKey[] = "audit_skip";
+constexpr char kExpectedFailureKey[] = "audit-failure";
+constexpr char kSkipKey[] = "audit-skip";
 constexpr char kTestNameKey[] = "name";
 constexpr char kTestAuditExpectationsKey[] = "audit_expectations";
 constexpr char kExpectationsFile[] = "data/audit_expectations/audit_expectations.json";

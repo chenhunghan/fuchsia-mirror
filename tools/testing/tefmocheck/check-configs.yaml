@@ -814,22 +814,6 @@ failure_mode_checks:
   attribute_to_test: true
   add_tag: true
 
-# General ffx error check.
-- kind: "string_in_log"
-  string: "botanist FATAL: FFX command failed"
-  log_types: ["swarmingOutputType"]
-
-- kind: "string_in_log"
-  string: "botanist ERROR: FFX command failed"
-  log_types: ["swarmingOutputType"]
-  skip_passed_task: true
-
-# For https://fxbug.dev/42134411.
-# This error usually happens due to an SSH failure, so that error should take precedence.
-- kind: "string_in_log"
-  string: "botanist ERROR: failed to run snapshot over ssh"
-  log_types: ["swarmingOutputType"]
-
 # For https://fxbug.dev/338520852 and similar issues.
 # This is caused by lacewing tests which fail to harness the device.
 - kind: "string_in_log"
@@ -917,7 +901,7 @@ failure_mode_checks:
   string: "FFX Library Error: NoFDomainClient"
   log_types: ["swarmingOutputType"]
   skip_all_passed_tests: true
-# LINT.ThenChange(//src/developer/ffx/lib/fuchsia-controller/src/lib_context.rs:no_fdomain_client)
+# LINT.ThenChange(//src/developer/fuchsia-controller/src/lib_context.rs:no_fdomain_client)
 
 # For https://fxbug.dev/505825178
 - kind: "string_in_log"
@@ -928,6 +912,24 @@ failure_mode_checks:
 # For b/532222717
 - kind: "string_in_log"
   string: "mobly.signals.TestFailure: Details=Conne[57 chars]code=92, is_credential_rejected=False, is_reconnect=False)) != Conne[57 chars]code=<StatusCode.SUCCESS: 0>, is_credential_re[29 chars]lse)), Extras=None"
+  log_types: ["swarmingOutputType"]
+
+# General ffx error check. Keep near the end of Category 3 so more specific
+# test, SSH, and FFX checks above take precedence.
+- kind: "string_in_log"
+  string: "botanist FATAL: FFX command failed"
+  log_types: ["swarmingOutputType"]
+
+- kind: "string_in_log"
+  string: "botanist ERROR: FFX command failed"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+# For https://fxbug.dev/42134411.
+# This error usually happens due to an SSH or device failure, so those errors
+# should take precedence.
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to run snapshot over ssh"
   log_types: ["swarmingOutputType"]
 
 # ==============================================================================

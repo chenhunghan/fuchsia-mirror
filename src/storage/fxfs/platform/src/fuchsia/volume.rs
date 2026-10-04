@@ -2728,7 +2728,10 @@ mod tests {
                     .expect("add_wrapping_key failed");
                 crypt_dir
                     .update_attributes(&fio::MutableNodeAttributes {
-                        wrapping_key_id: Some(WRAPPING_KEY_ID),
+                        encryption_policy: Some(fio::FscryptPolicy {
+                            key_identifier: WRAPPING_KEY_ID,
+                            flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
+                        }),
                         ..Default::default()
                     })
                     .await

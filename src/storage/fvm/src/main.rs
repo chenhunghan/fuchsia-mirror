@@ -4276,7 +4276,7 @@ mod tests {
                         }
                         CryptRequest::UnwrapKey { responder, .. } => {
                             let unwrapped = vec![0; 80];
-                            responder.send(Ok(&unwrapped)).unwrap();
+                            responder.send(Ok((&unwrapped, None))).unwrap();
                         }
                         _ => panic!("Unexpected request"),
                     }

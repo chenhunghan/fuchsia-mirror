@@ -95,7 +95,7 @@ mod tests {
         (proxy, task)
     }
 
-    #[fasync::run_singlethreaded(test)]
+    #[fuchsia::test]
     async fn test_run_identify_host_text_success() {
         let response = rcs::IdentifyHostResponse {
             nodename: Some("mock-nodename".to_string()),
@@ -125,7 +125,7 @@ mod tests {
         assert!(output.contains("F Release:           33"));
     }
 
-    #[fasync::run_singlethreaded(test)]
+    #[fuchsia::test]
     async fn test_run_identify_host_json_success() {
         let response = rcs::IdentifyHostResponse {
             nodename: Some("mock-json-nodename".to_string()),
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(parsed["f_release"], 33);
     }
 
-    #[fasync::run_singlethreaded(test)]
+    #[fuchsia::test]
     async fn test_run_identify_host_pretty_json_success() {
         let response = rcs::IdentifyHostResponse {
             nodename: Some("mock-json-nodename".to_string()),
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(parsed["f_release"], 33);
     }
 
-    #[fasync::run_singlethreaded(test)]
+    #[fuchsia::test]
     async fn test_run_identify_host_error_response() {
         let (proxy, _task) = spawn_mock_rcs(Err(rcs::IdentifyHostError::GetDeviceNameFailed));
         let args = args::IdentifyHostArgs { format: args::OutputFormat::Text };

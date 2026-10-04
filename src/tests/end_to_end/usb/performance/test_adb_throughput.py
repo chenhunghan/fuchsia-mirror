@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 """ADB Throughput Performance Test."""
 
+import asyncio
 import logging
 import os
 import pathlib
@@ -27,6 +28,10 @@ _DEFAULT_STORAGE_FILE_SIZE_BYTES: int = 50_000_000
 _DEVICE_TMP_FILE_PATH: str = "/tmp/adb_perf_test.bin"
 _DEVICE_STORAGE_FILE_PATH: str = "/data/local/tmp/adb_perf_storage.bin"
 
+# Settling delay after boot/initialization to let CPU utilization calm down
+# before starting throughput benchmarks.
+_BOOT_SETTLE_DELAY_SECONDS: float = 10.0
+
 
 class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
     """Measures ADB push and pull throughput over USB using both storage-isolated and storage-backed transfers."""
@@ -37,6 +42,13 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
         # Ensure ADB is supported and enabled on this device before starting the test
         # (raises NotSupportedError or NotEnabledError otherwise).
         _ = self.dut.adb
+
+        # Allow background boot services and Starnix initialization to settle so benchmarks
+        # are not affected by boot-time CPU contention.
+        _LOGGER.info(
+            f"Waiting {_BOOT_SETTLE_DELAY_SECONDS}s for system activity to settle after boot..."
+        )
+        await asyncio.sleep(_BOOT_SETTLE_DELAY_SECONDS)
 
         # Configurable transfer sizes from test parameters in BUILD.gn
         self._ram_file_size_bytes = int(

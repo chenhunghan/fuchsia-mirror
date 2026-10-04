@@ -17,6 +17,8 @@
 
 #include "src/camera/drivers/usb_video/descriptors.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace camera::usb_video {
 
 // Information about the vendor and product that can be gleaned from the USB

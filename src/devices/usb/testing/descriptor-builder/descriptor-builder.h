@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <vector>
 
+#include <usb/descriptors.h>
 #include <usb/usb.h>
 
 namespace usb {
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 static void VectorAppend(std::vector<uint8_t>& vector, const void* data, size_t size) {
   vector.insert(vector.end(), static_cast<const uint8_t*>(data),
                 static_cast<const uint8_t*>(data) + size);
@@ -33,13 +35,29 @@ class EndpointBuilder {
                            bool in) {
     base_desc_.bm_attributes = endpoint_type;
     base_desc_.b_length = sizeof(base_desc_);
-    base_desc_.b_descriptor_type = USB_DT_ENDPOINT;
+    base_desc_.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint);
     base_desc_.b_endpoint_address =
         EpIndexToAddress(endpoint_index + (in ? kInEndpointStart : kOutEndpointStart));
   }
 
+  explicit EndpointBuilder(uint8_t config_num, fdescriptor::EndpointType endpoint_type,
+                           uint8_t endpoint_index, fdescriptor::EndpointDirection direction)
+      : EndpointBuilder(config_num, static_cast<uint8_t>(endpoint_type), endpoint_index,
+                        direction == fdescriptor::EndpointDirection::kIn) {}
+
   void set_max_packet_size(uint16_t max_packet_size) {
     base_desc_.w_max_packet_size = max_packet_size;
+  }
+
+  void AddSsCompanion(const usb_ss_ep_comp_descriptor_t& comp) { VectorAppend(descriptors_, comp); }
+  void AddSsCompanion(const void* desc, size_t desc_length) {
+    VectorAppend(descriptors_, desc, desc_length);
+  }
+  void AddSsIsochCompanion(const usb_ss_isoch_ep_comp_descriptor_t& comp) {
+    VectorAppend(descriptors_, comp);
+  }
+  void AddSsIsochCompanion(const void* desc, size_t desc_length) {
+    VectorAppend(descriptors_, desc, desc_length);
   }
 
   std::vector<uint8_t> Generate() const {
@@ -61,7 +79,7 @@ class InterfaceBuilder {
   explicit InterfaceBuilder(uint8_t config_num, uint8_t alt_setting = 0) {
     base_desc_.b_num_endpoints = 0;
     base_desc_.b_length = sizeof(base_desc_);
-    base_desc_.b_descriptor_type = USB_DT_INTERFACE;
+    base_desc_.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface);
     base_desc_.b_alternate_setting = alt_setting;
   }
 
@@ -96,7 +114,7 @@ class ConfigurationBuilder {
     base_desc_.b_length = sizeof(base_desc_);
     // Total length is calculated in Generate()
     base_desc_.w_total_length = 0;
-    base_desc_.b_descriptor_type = USB_DT_CONFIG;
+    base_desc_.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kConfiguration);
   }
 
   void AddInterface(const InterfaceBuilder& builder) {
@@ -134,7 +152,7 @@ class DeviceDescriptorBuilder {
   explicit DeviceDescriptorBuilder() {
     base_desc_.b_num_configurations = 0;
     base_desc_.b_length = sizeof(base_desc_);
-    base_desc_.b_descriptor_type = USB_DT_DEVICE;
+    base_desc_.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
   }
 
   void set_vendor_id(uint16_t vendor_id) { base_desc_.id_vendor = vendor_id; }

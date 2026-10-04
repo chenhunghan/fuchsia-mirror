@@ -40,7 +40,7 @@ def depfile_list(paths: Sequence[str]) -> str:
     return " ".join(depfile_quote(p) for p in paths)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--hermetic-inputs-file",
@@ -76,7 +76,12 @@ def main():
     # If command is a Python script, invoke it through the same interpreter.
     tool = cmd_args[0]
     if tool.endswith((".py", ".pyz")):
-        cmd_args = [sys.executable, "-S"] + cmd_args
+        cmd_args = [
+            sys.executable,
+            "-S",
+            "-W",
+            "error::SyntaxWarning",
+        ] + cmd_args
 
     # Run the command.
     try:

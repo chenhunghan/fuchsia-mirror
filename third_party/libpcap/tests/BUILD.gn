@@ -32,6 +32,6 @@ fuchsia_test_package("tests") {
   deps = [
     # The tests depend `fuchsia.posix.socket/Provider` and
     # `fuchsia.posix.socket.packet/Provider` which the netstack exposes.
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
   ]
 }

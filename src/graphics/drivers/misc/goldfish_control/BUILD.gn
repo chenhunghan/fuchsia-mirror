@@ -32,6 +32,7 @@ common_deps = [
   "//sdk/lib/component/outgoing/cpp",
   "//sdk/lib/driver/runtime:driver_runtime_cpp",
   "//sdk/lib/fit-promise",
+  "//src/devices/bind/fuchsia:fuchsia_cpp",
   "//src/devices/lib/driver",
   "//src/devices/lib/driver:driver_runtime",
   "//src/devices/lib/goldfish/pipe_headers",

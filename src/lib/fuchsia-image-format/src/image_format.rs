@@ -2,12 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{anyhow, format_err, Error};
+use anyhow::{Error, anyhow, format_err};
+use fidl_fuchsia_images2 as fimages2;
 use fidl_fuchsia_math::{RectU, SizeU};
-use {
-    fidl_fuchsia_images2 as fimages2, fidl_fuchsia_sysmem as fsysmem,
-    fidl_fuchsia_sysmem2 as fsysmem2,
-};
+use fidl_fuchsia_sysmem as fsysmem;
+use fidl_fuchsia_sysmem2 as fsysmem2;
 
 use super::linux_drm::DRM_FORMAT_MOD_LINEAR;
 use super::round_up_to_increment;
@@ -361,7 +360,7 @@ pub fn image_format_minimum_row_bytes_2(
     if *constraints.require_bytes_per_row_at_pixel_boundary.as_ref().unwrap_or(&false) {
         let stride_bytes_per_width_pixel = *maybe_stride_bytes_per_width_pixel.as_ref().ok_or_else(|| format_err!("stride_bytes_per_width_pixel required when require_bytes_per_row_at_pixel_boundary true"))?;
         bytes_per_row_divisor =
-            num::integer::lcm(bytes_per_row_divisor, stride_bytes_per_width_pixel);
+            num_integer::lcm(bytes_per_row_divisor, stride_bytes_per_width_pixel);
     }
     let bytes_per_row_divisor = bytes_per_row_divisor;
 
@@ -814,10 +813,12 @@ mod tests {
             sysmem1_pixel_format_type_from_images2_pixel_format(fimages2::PixelFormat::B8G8R8A8)
                 .unwrap()
         );
-        assert!(sysmem1_pixel_format_type_from_images2_pixel_format(
-            fimages2::PixelFormat::from_primitive_allow_unknown(1189673091)
-        )
-        .is_err());
+        assert!(
+            sysmem1_pixel_format_type_from_images2_pixel_format(
+                fimages2::PixelFormat::from_primitive_allow_unknown(1189673091)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -900,10 +901,12 @@ mod tests {
             sysmem1_color_space_type_from_images2_color_space(fimages2::ColorSpace::Rec709)
                 .unwrap()
         );
-        assert!(sysmem1_color_space_type_from_images2_color_space(
-            fimages2::ColorSpace::from_primitive_allow_unknown(1189673091)
-        )
-        .is_err());
+        assert!(
+            sysmem1_color_space_type_from_images2_color_space(
+                fimages2::ColorSpace::from_primitive_allow_unknown(1189673091)
+            )
+            .is_err()
+        );
     }
 
     #[test]

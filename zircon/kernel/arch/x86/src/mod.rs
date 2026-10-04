@@ -15,6 +15,7 @@ pub mod pv;
 pub mod registers;
 pub mod suspend;
 pub mod system_topology;
+pub mod vm;
 pub mod x86;
 
 /// Architecture-specific saved normal mode state for x86_64.
@@ -189,34 +190,6 @@ zr::static_assert!(core::mem::offset_of!(SyscallRegs, rsp) == 136);
 #[allow(unused_imports)]
 pub use arch_types_bindings::{GeneralRegsSource, UserEntryState};
 
-/// Checks if a virtual address is accessible to user mode on x86_64.
-///
-/// This address refers to userspace if it is in the lower half of the
-/// canonical addresses (i.e., if all of the bits in the canonical address
-/// mask are zero).
-#[inline]
-pub fn is_user_accessible(va: usize) -> bool {
-    // See [intel/vol1]: 3.3.7.1 Canonical Addressing, and
-    // [amd/vol1]: 2.1.3 Canonical Address Form.
-    const X86_VADDR_BITS: usize = 48;
-    const X86_CANONICAL_ADDRESS_MASK: usize = !((1usize << (X86_VADDR_BITS - 1)) - 1);
-    (va & X86_CANONICAL_ADDRESS_MASK) == 0
-}
-
-/// Checks if a virtual address is in canonical form on x86_64.
-///
-/// An address is canonical if bits [N - 1, 63] are all either 0 (the low half of
-/// canonical addresses) or all 1 (the high half of canonical addresses).
-#[inline]
-pub fn is_vaddr_canonical(va: u64) -> bool {
-    // See [intel/vol1]: 3.3.7.1 Canonical Addressing, and
-    // [amd/vol1]: 2.1.3 Canonical Address Form.
-    const X86_VADDR_BITS: usize = 48;
-    const X86_CANONICAL_ADDRESS_MASK: u64 = !((1u64 << (X86_VADDR_BITS - 1)) - 1);
-    ((va & X86_CANONICAL_ADDRESS_MASK) == 0)
-        || ((va & X86_CANONICAL_ADDRESS_MASK) == X86_CANONICAL_ADDRESS_MASK)
-}
-
 /// Virtual address where the kernel address space begins.
 /// Below this is the user address space.
 pub const KERNEL_ASPACE_BASE: usize = 0xffffff8000000000; // -512GB
@@ -246,25 +219,10 @@ zr::static_assert!(
 
 pub const MMU_GUEST_SIZE_SHIFT: usize = aspace_bindings::MMU_GUEST_SIZE_SHIFT as usize;
 
-/// Returns whether `va` is within the kernel address space.
-#[inline]
-pub fn is_kernel_address(va: usize) -> bool {
-    va >= KERNEL_ASPACE_BASE && va.wrapping_sub(KERNEL_ASPACE_BASE) < KERNEL_ASPACE_SIZE
-}
-
-/// Userspace threads can only set an entry point to userspace addresses, or
-/// the null pointer (for testing a thread that will always fail).
-///
-/// See docs/concepts/kernel/sysret_problem.md for more details.
-#[inline]
-pub fn is_valid_user_pc(pc: usize) -> bool {
-    (pc == 0) || (is_user_accessible(pc) && is_vaddr_canonical(pc as u64))
-}
-
 /// Validates the x86_64 register state before entering restricted mode.
 pub fn validate_state_pre_restricted_entry(state: &zx_restricted_state_t) -> Result<(), Status> {
     // validate that RIP is within user space
-    if !is_user_accessible(state.ip as usize) {
+    if !vm::is_user_accessible(state.ip as usize) {
         ltracef!("fail due to bad ip {:#x}\n", state.ip);
         return Err(Status::BAD_STATE);
     }
@@ -276,11 +234,11 @@ pub fn validate_state_pre_restricted_entry(state: &zx_restricted_state_t) -> Res
     }
 
     // fs and gs base must be canonical
-    if !is_vaddr_canonical(state.fs_base) {
+    if !vm::is_vaddr_canonical(state.fs_base as usize) {
         ltracef!("fail due to bad fs base {:#x}\n", state.fs_base);
         return Err(Status::BAD_STATE);
     }
-    if !is_vaddr_canonical(state.gs_base) {
+    if !vm::is_vaddr_canonical(state.gs_base as usize) {
         ltracef!("fail due to bad gs base {:#x}\n", state.gs_base);
         return Err(Status::BAD_STATE);
     }
@@ -631,6 +589,7 @@ pub unsafe extern "C" fn rust_arch_dump(state: *const zx_restricted_state_t) {
 /// Architecture unit tests for x86.
 #[unittest::suite(name = "x86")]
 mod x86_tests {
+    use super::vm::{is_kernel_address, is_user_accessible, is_valid_user_pc};
     use unittest::{assert_err, assert_false, assert_ok, assert_true};
 
     /// Tests `is_user_accessible`.

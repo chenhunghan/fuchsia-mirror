@@ -1,0 +1,10 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+declare_args() {
+  # Enables the embedded driver-lab in-situ debugging library in DFv2 drivers.
+  # Strictly defaults to is_debug so release/production (user) builds compile
+  # the embedded server to a no-op and omit outgoing service handlers.
+  enable_driver_lab = is_debug
+}

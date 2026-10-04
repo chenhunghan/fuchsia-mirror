@@ -337,8 +337,11 @@ class SimFirmware {
   void SetResumeHook(fit::function<zx_status_t()> resume_hook) {
     resume_hook_ = std::move(resume_hook);
   }
-  void SetRecoveryHook(fit::function<void()> recovery_hook) {
+  void SetRecoveryHook(fit::function<zx_status_t()> recovery_hook) {
     recovery_hook_ = std::move(recovery_hook);
+  }
+  void SetCommandHook(fit::function<void(uint32_t cmd)> command_hook) {
+    command_hook_ = std::move(command_hook);
   }
 
   // Allow simulation to set CapabilityIovars
@@ -377,7 +380,7 @@ class SimFirmware {
 
   zx_status_t BusSuspend();
   zx_status_t BusResume();
-  void BusRecovery();
+  zx_status_t BusRecovery();
 
   std::optional<drivers::components::Frame> GetRxFrame();
   void SetHighWmeRxErrorRate() { wme_high_rx_fail_ = true; }
@@ -447,6 +450,8 @@ class SimFirmware {
    * ssid - ssid - non-zero length indicates AP start else AP stop
    * ap_started - indicates if ap has been started or stopped
    * clients - List of associated clients (mac address)
+   * link_event_id - Event ID for scheduled AP start link event
+   * started_event_id - Event ID for scheduled AP started event
    */
   struct ApConfig {
     uint32_t infra_mode;
@@ -455,6 +460,8 @@ class SimFirmware {
     brcmf_ssid_le ssid;
     bool ap_started;
     std::list<std::shared_ptr<Client>> clients;
+    std::optional<uint64_t> link_event_id;
+    std::optional<uint64_t> started_event_id;
   };
 
   /* This structure contains the variables related to an iface entry in SIM FW.
@@ -624,11 +631,15 @@ class SimFirmware {
                                                           size_t* offset_out);
 
   // Wrap the buffer in an event and send back to the driver over the bus
-  void SendEventToDriver(size_t payload_size, std::shared_ptr<std::vector<uint8_t>> buffer_in,
-                         uint32_t event_type, uint32_t status, uint16_t ifidx,
-                         char* ifname = nullptr, uint16_t flags = 0, uint32_t reason = 0,
-                         std::optional<wlan::common::MacAddr> addr = {},
-                         std::optional<zx::duration> delay = {});
+  //
+  // If delay is provided, this will return the event_id. Otherwise, this returns std::nullopt.
+  std::optional<uint64_t> SendEventToDriver(size_t payload_size,
+                                            std::shared_ptr<std::vector<uint8_t>> buffer_in,
+                                            uint32_t event_type, uint32_t status, uint16_t ifidx,
+                                            char* ifname = nullptr, uint16_t flags = 0,
+                                            uint32_t reason = 0,
+                                            std::optional<wlan::common::MacAddr> addr = {},
+                                            std::optional<zx::duration> delay = {});
 
   // Send received frame over the bus to the driver
   void SendFrameToDriver(uint16_t ifidx, size_t payload_size, const std::vector<uint8_t>& buffer_in,
@@ -756,7 +767,8 @@ class SimFirmware {
 
   fit::function<zx_status_t()> suspend_hook_;
   fit::function<zx_status_t()> resume_hook_;
-  fit::function<void()> recovery_hook_;
+  fit::function<zx_status_t()> recovery_hook_;
+  fit::function<void(uint32_t cmd)> command_hook_;
 };
 
 }  // namespace wlan::brcmfmac

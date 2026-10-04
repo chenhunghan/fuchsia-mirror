@@ -71,7 +71,6 @@ rustc_library("lib") {
 fuchsia_component_manifest("manifest") {
   component_name = "system-update-committer"
   manifest = "meta/system-update-committer.cml"
-  restricted_features = [ "delivery_type" ]
 }
 
 fuchsia_structured_config_rust_lib("system_update_committer_config") {

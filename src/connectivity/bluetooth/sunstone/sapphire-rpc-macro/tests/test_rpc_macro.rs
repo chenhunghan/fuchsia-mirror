@@ -206,7 +206,8 @@ where
 #[test]
 fn test_rpc_macro_complex_generics_and_where_clause() {
     let array = [10, 20, 30, 40];
-    let mut channel = RpcChannel::<ComplexServiceRpc<'_, i32, 4>, TestCfg>::new();
+    // `'a` is not part of any endpoint signature, so it is left out of the RPC type.
+    let mut channel = RpcChannel::<ComplexServiceRpc<i32, 4>, TestCfg>::new();
     let (client_handle, server_handle) = channel.split();
     let client = ComplexServiceClient::new(client_handle);
     let client2 = client.clone();
@@ -254,6 +255,122 @@ fn test_rpc_macro_pure_const_generic() {
 
         s.block_on(async {
             assert_eq!(client.get_capacity().await.unwrap(), 64);
+        });
+    });
+}
+
+trait Prefixed<'p> {
+    fn prefix(&self) -> &'p str;
+}
+
+struct StaticPrefix;
+
+impl Prefixed<'static> for StaticPrefix {
+    fn prefix(&self) -> &'static str {
+        "static"
+    }
+}
+
+struct TypeBoundService<P> {
+    prefixed: P,
+}
+
+#[rpc]
+impl<'p, P: Prefixed<'p> + 'static> TypeBoundService<P> {
+    async fn prefix_len(&self) -> usize {
+        self.prefixed.prefix().len()
+    }
+}
+
+#[test]
+fn test_rpc_macro_keeps_lifetime_used_in_type_bound() {
+    // `'p` only appears in the bound on `P`, so it stays in the RPC type.
+    let mut channel = RpcChannel::<TypeBoundServiceRpc<'static, StaticPrefix>, TestCfg>::new();
+    let (client_handle, server_handle) = channel.split();
+    let client = TypeBoundServiceClient::new(client_handle);
+
+    let server = TypeBoundService { prefixed: StaticPrefix };
+
+    BoundedExecutor::new(TestExecutor::new(), |s| {
+        s.spawn(async {
+            while let Ok((req, responder)) = server_handle.recv().await {
+                server.route_request(req, responder).await;
+            }
+        });
+
+        s.block_on(async {
+            assert_eq!(client.prefix_len().await.unwrap(), 6);
+        });
+    });
+}
+
+struct WhereClauseService<P> {
+    prefixed: P,
+}
+
+#[rpc]
+impl<'p, P> WhereClauseService<P>
+where
+    P: Prefixed<'p> + 'static,
+{
+    async fn prefix(&self) -> String {
+        self.prefixed.prefix().to_string()
+    }
+}
+
+#[test]
+fn test_rpc_macro_keeps_lifetime_used_in_where_clause() {
+    // `'p` only appears in the where clause, so it stays in the RPC type.
+    let mut channel = RpcChannel::<WhereClauseServiceRpc<'static, StaticPrefix>, TestCfg>::new();
+    let (client_handle, server_handle) = channel.split();
+    let client = WhereClauseServiceClient::new(client_handle);
+
+    let server = WhereClauseService { prefixed: StaticPrefix };
+
+    BoundedExecutor::new(TestExecutor::new(), |s| {
+        s.spawn(async {
+            while let Ok((req, responder)) = server_handle.recv().await {
+                server.route_request(req, responder).await;
+            }
+        });
+
+        s.block_on(async {
+            assert_eq!(client.prefix().await.unwrap(), "static");
+        });
+    });
+}
+
+struct OutlivesService<'a: 'b, 'b> {
+    prefix: &'b str,
+    _suffix: core::marker::PhantomData<&'a str>,
+}
+
+#[rpc]
+impl<'a: 'b, 'b> OutlivesService<'a, 'b> {
+    async fn join(&self, suffix: &'a str) -> String {
+        format!("{}_{}", self.prefix, suffix)
+    }
+}
+
+#[test]
+fn test_rpc_macro_drops_bound_on_pruned_lifetime() {
+    let prefix = String::from("prefix");
+    // `'b` is only held by the server, so the RPC type keeps `'a` without its `'a: 'b` bound.
+    let mut channel = RpcChannel::<OutlivesServiceRpc<'static>, TestCfg>::new();
+    let (client_handle, server_handle) = channel.split();
+    let client = OutlivesServiceClient::new(client_handle);
+
+    let server = OutlivesService { prefix: &prefix, _suffix: core::marker::PhantomData };
+
+    BoundedExecutor::new(TestExecutor::new(), |s| {
+        s.spawn(async {
+            while let Ok((req, responder)) = server_handle.recv().await {
+                server.route_request(req, responder).await;
+            }
+        });
+
+        s.block_on(async {
+            assert_eq!(client.join("suffix").await.unwrap(), "prefix_suffix");
         });
     });
 }

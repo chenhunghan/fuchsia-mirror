@@ -86,7 +86,7 @@ pub fn ip_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     let IpTestArgs { ip_ident, net_types, emit_test } = parse_macro_input!(attr as IpTestArgs);
 
     let item = parse_macro_input!(input as syn::ItemFn);
-    let syn::ItemFn { mut attrs, vis, sig, block } = item;
+    let syn::ItemFn { mut attrs, vis, sig, block, modifiers: _ } = item;
     if let Some(variadic) = &sig.variadic {
         return Error::new(variadic.dots.spans[0], format!("ip_test entry may not be variadic"))
             .to_compile_error()
@@ -353,11 +353,12 @@ impl TraitToConcreteVisit {
             let mut segments = path.segments.iter();
             if segments.next().is_some_and(|p| &p.ident == type_ident) {
                 let remaining_path = segments.cloned().collect::<Vec<_>>();
-                let TypePath { path: new_path, qself: new_qself } = if remaining_path.is_empty() {
-                    parse_quote!(#concrete)
-                } else {
-                    parse_quote!(<#concrete as #trait_path>::#(#remaining_path)::*)
-                };
+                let TypePath { attrs: _, path: new_path, qself: new_qself } =
+                    if remaining_path.is_empty() {
+                        parse_quote!(#concrete)
+                    } else {
+                        parse_quote!(<#concrete as #trait_path>::#(#remaining_path)::*)
+                    };
                 *path = new_path;
                 *qself = new_qself;
             }
@@ -374,7 +375,7 @@ impl VisitMut for TraitToConcreteVisit {
     }
 
     fn visit_type_path_mut(&mut self, i: &mut TypePath) {
-        let TypePath { qself, path } = i;
+        let TypePath { attrs: _, qself, path } = i;
         self.update_type_path(qself, path);
 
         visit_mut::visit_type_path_mut(self, i)

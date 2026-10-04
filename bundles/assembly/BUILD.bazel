@@ -516,11 +516,6 @@ assembly_input_bundle(
         },
         {
             "set": "bootfs",
-            "package_target": "//bundles/assembly/bazel_inputs/src/devices/ml/drivers/usb-harriet:package",
-            "driver_components": ["meta/usb-harriet.cm"],
-        },
-        {
-            "set": "bootfs",
             "package_target": "//bundles/assembly/bazel_inputs/src/devices/serial/drivers/usb-cdc-acm:package",
             "driver_components": ["meta/usb-cdc-acm.cm"],
         },
@@ -2276,7 +2271,7 @@ assembly_input_bundle(
 assembly_input_bundle(
     name = "factory_reset_trigger",
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/recovery/factory-reset-trigger",
+        "//src/recovery/factory-reset-trigger",
     ],
     core_shards = [
         "//src/recovery/factory-reset-trigger:meta/factory-reset-trigger.core_shard.cml",

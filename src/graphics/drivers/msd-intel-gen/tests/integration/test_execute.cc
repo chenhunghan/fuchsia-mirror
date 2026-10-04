@@ -28,8 +28,10 @@ class TestExecuteWithCount : public testing::TestWithParam<uint32_t> {
     ASSERT_EQ(MAGMA_STATUS_OK, magma_device_query(base_.device(), kMagmaIntelGenQueryExtraPageCount,
                                                   nullptr, &extra_page_count_));
 
-    ASSERT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection_, &context_ids_[0]));
-    ASSERT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection_, &context_ids_[1]));
+    ASSERT_EQ(MAGMA_STATUS_OK, magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM,
+                                                                &context_ids_[0]));
+    ASSERT_EQ(MAGMA_STATUS_OK, magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM,
+                                                                &context_ids_[1]));
   }
 
   void TearDown() override {

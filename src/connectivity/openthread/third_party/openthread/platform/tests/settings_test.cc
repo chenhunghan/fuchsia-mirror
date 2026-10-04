@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 #include <openthread/platform/settings.h>
 
+#include "src/lib/files/file.h"
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
+#include "thread_config_manager.h"
 
 static constexpr size_t kTestDataSize = 60;
 
@@ -164,4 +166,23 @@ TEST_F(SettingsTest, VerifyDeleteByType) {
 
   EXPECT_EQ(otPlatSettingsDelete(instance, 0, 0), OT_ERROR_NOT_FOUND);
   EXPECT_EQ(otPlatSettingsGet(instance, 0, 0, NULL, NULL), OT_ERROR_NOT_FOUND);
+}
+
+TEST_F(SettingsTest, InitWithInvalidJsonRoot) {
+  // Wipe and Deinit first to clean up the default setup
+  otPlatSettingsWipe(instance);
+  otPlatSettingsDeinit(instance);
+
+  // Write invalid json (e.g. array) to the config file path
+  std::string invalid_json = "[]";
+  ASSERT_TRUE(files::WriteFile(kThreadSettingsPath, invalid_json.c_str(), invalid_json.size()));
+
+  // Init settings - it should parse the file, detect it's not an object,
+  // log a warning, and reset to an empty object instead of crashing.
+  otPlatSettingsInit(instance, NULL, 0);
+
+  // Verify that it starts empty (e.g. get returns NOT_FOUND)
+  uint8_t value[10];
+  uint16_t length = sizeof(value);
+  EXPECT_EQ(otPlatSettingsGet(instance, 0, 0, value, &length), OT_ERROR_NOT_FOUND);
 }

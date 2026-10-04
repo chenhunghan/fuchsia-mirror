@@ -235,6 +235,38 @@ class BazelTargetInfosMapTest(unittest.TestCase):
         assert bar_info is not None
         self.assertFalse(bar_info.update_rust_project)
 
+    def test_copy_debug_symbols(self) -> None:
+        from bazel_action_utils import BazelTargetInfosMap
+
+        def entry(name: str, **extra: T.Any) -> dict[str, T.Any]:
+            return {
+                "type": "file",
+                "bazel_target": f"//src:{name}",
+                "bazel_platform_label": "//build/bazel/platforms:host",
+                "bazel_platform_config": "host",
+                "ninja_depfile": f"obj/src/{name}.d",
+                "gn_targets_manifest": "gen/gn_targets.manifest",
+                "stamp_path": f"obj/src/{name}.stamp",
+                "bazel_file": name,
+                "ninja_file": name,
+                "update_rust_project": False,
+                **extra,
+            }
+
+        target_map = BazelTargetInfosMap(
+            [
+                entry("foo", copy_debug_symbols=True),
+                entry("bar", copy_debug_symbols=False),
+                entry("baz"),
+            ]
+        )
+        for name, expected in [("foo", True), ("bar", False), ("baz", False)]:
+            info = target_map.get_info(
+                f"//src:{name}", "//build/bazel/platforms:host"
+            )
+            assert info is not None
+            self.assertEqual(info.copy_debug_symbols, expected, name)
+
     def test_extra_bazel_targets_file(self) -> None:
         from bazel_action_utils import BazelTargetInfosMap
 

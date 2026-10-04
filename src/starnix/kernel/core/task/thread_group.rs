@@ -45,7 +45,7 @@ use starnix_uapi::{
     ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, SA_NOCLDWAIT, SI_TKILL, SI_USER, SIG_IGN, errno,
     error, itimerval, pid_t, rlimit, tid_t,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -126,6 +126,13 @@ pub struct ThreadGroupMutableState {
     /// The signal this process generates on exit.
     pub exit_signal: Option<Signal>,
 
+    /// Parent death [`Signal`] of this process, set by `prctl(PR_SET_PDEATHSIG)`.
+    ///
+    /// Cleared on `fork(2)`, upon changes to effective or filesystem UID/GID, and
+    /// during `execve(2)` if the executed file is set-user-ID, set-group-ID, or
+    /// has associated capabilities.
+    parent_death_signal: Option<Signal>,
+
     /// The tasks in the thread group.
     ///
     /// The references to Task is weak to prevent cycles as Task have a Arc reference to their
@@ -136,11 +143,9 @@ pub struct ThreadGroupMutableState {
 
     /// The children of this thread group.
     ///
-    /// The references to ThreadGroup is weak to prevent cycles as ThreadGroup have a Arc reference
-    /// to their parent.
-    /// It is still expected that these weak references are always valid, as thread groups must unregister
+    /// Holds `Pid` references to prevent cycles. Child thread groups must unregister
     /// themselves before they are deleted.
-    pub children: BTreeMap<pid_t, Weak<ThreadGroup>>,
+    pub children: HashSet<Pid>,
 
     /// Child tasks that have exited, but not yet been waited for.
     pub zombie_children: Vec<OwnedRef<ZombieProcess>>,
@@ -342,34 +347,69 @@ impl Drop for ThreadGroup {
             state
                 .parent
                 .as_ref()
-                .and_then(|p| p.0.upgrade().as_ref().map(|p| p
-                    .read()
-                    .children
-                    .get(&self.leader.id)
-                    .is_none()))
+                .and_then(|p| p
+                    .thread_group
+                    .upgrade()
+                    .map(|p| !p.read().children.contains(&self.leader)))
                 .unwrap_or(true)
         );
     }
 }
 
-/// A wrapper around a `Weak<ThreadGroup>` that expects the underlying `Weak` to always be
-/// valid. The wrapper will check this at runtime during creation and upgrade.
-pub struct ThreadGroupParent(Weak<ThreadGroup>);
+/// Parent process reference for a [`ThreadGroup`], tracking both the parent
+/// [`ThreadGroup`] and, prior to reparenting, the specific [`Task`] within that
+/// parent that created the child process.
+#[derive(Clone)]
+pub struct ThreadGroupParent {
+    /// Weak reference to the current parent [`ThreadGroup`].
+    thread_group: Weak<ThreadGroup>,
 
-impl ThreadGroupParent {
-    pub fn new(t: Weak<ThreadGroup>) -> Self {
-        debug_assert!(t.upgrade().is_some());
-        Self(t)
-    }
-
-    pub fn upgrade(&self) -> Arc<ThreadGroup> {
-        self.0.upgrade().expect("ThreadGroupParent references must always be valid")
-    }
+    /// Specific [`Task`] within the original parent [`ThreadGroup`] that created this child
+    /// process, or `None` once the child has been reparented to an ancestor reaper.
+    creator_task: Option<Weak<Task>>,
 }
 
-impl Clone for ThreadGroupParent {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+impl ThreadGroupParent {
+    /// Creates a [`ThreadGroupParent`] referencing `thread_group`, defaulting `creator_task`
+    /// to the leader [`Task`] of `thread_group`.
+    ///
+    /// When a child process is created by a specific thread via `clone(2)` / `fork(2)`, callers
+    /// override `creator_task` via [`Self::set_creator_task`] with the actual creating [`Task`]
+    /// (or the inherited `creator_task` when `CLONE_PARENT` is specified).
+    pub fn new(thread_group: Weak<ThreadGroup>) -> Self {
+        let upgraded = thread_group.upgrade();
+        debug_assert!(upgraded.is_some());
+        let creator_task =
+            upgraded.and_then(|tg| tg.leader.get_task().ok()).map(|t| t.weak_self.clone());
+        Self { thread_group, creator_task }
+    }
+
+    /// Creates a [`ThreadGroupParent`] for a child reparented to `thread_group` after its
+    /// previous parent process terminated.
+    ///
+    /// Sets `creator_task` to `None` so that subsequent `PR_SET_PDEATHSIG` delivery is triggered
+    /// only if `thread_group` is a subreaper and only when `thread_group` itself terminates as a
+    /// process, rather than when individual threads within the reaper exit.
+    pub(super) fn from_reaper(thread_group: Weak<ThreadGroup>) -> Self {
+        debug_assert!(thread_group.upgrade().is_some());
+        Self { thread_group, creator_task: None }
+    }
+
+    /// Upgrades the parent reference to an [`Arc<ThreadGroup>`].
+    pub fn upgrade(&self) -> Arc<ThreadGroup> {
+        self.thread_group.upgrade().expect("ThreadGroupParent references must always be valid")
+    }
+
+    /// Returns the specific [`Task`] in the original parent [`ThreadGroup`] that created this
+    /// process, or `None` if this process has been reparented.
+    pub(super) fn creator_task(&self) -> Option<&Weak<Task>> {
+        self.creator_task.as_ref()
+    }
+
+    /// Sets the [`Task`] in the parent [`ThreadGroup`] whose termination triggers
+    /// `PR_SET_PDEATHSIG` delivery for this child process.
+    pub(super) fn set_creator_task(&mut self, creator_task: Option<Weak<Task>>) {
+        self.creator_task = creator_task;
     }
 }
 
@@ -527,8 +567,13 @@ impl ThreadGroup {
                         .as_ref()
                         .map(|p| ThreadGroupParent::new(p.base.weak_self.clone())),
                     exit_signal,
+                    // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+                    //
+                    //   The parent-death signal setting is cleared for the child of a
+                    //   fork(2).
+                    parent_death_signal: None,
                     tasks: HashSet::new(),
-                    children: BTreeMap::new(),
+                    children: HashSet::new(),
                     zombie_children: vec![],
                     zombie_ptracees: ZombiePtracees::new(),
                     deferred_zombie_ptracers: vec![],
@@ -553,7 +598,7 @@ impl ThreadGroup {
 
             if let Some(mut parent) = parent {
                 thread_group.next_seccomp_filter_id.reset(parent.base.next_seccomp_filter_id.get());
-                parent.children.insert(thread_group.leader.id, weak_self.clone());
+                parent.children.insert(thread_group.leader.clone());
                 process_group.insert(&thread_group);
             };
             thread_group
@@ -698,6 +743,21 @@ impl ThreadGroup {
             let parent = self.read().parent.clone();
             let reaper = self.find_reaper();
 
+            // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+            //
+            //   The parent-death signal is sent upon subsequent termination of the
+            //   parent thread and also upon termination of each subreaper process
+            //   (see PR_SET_CHILD_SUBREAPER(2const)) to which the caller is
+            //   subsequently reparented.  If the parent thread and all ancestor
+            //   subreapers have already terminated by the time of the
+            //   PR_SET_PDEATHSIG operation, then no parent-death signal is sent to
+            //   the caller.
+            //
+            //   The parent-death signal is process-directed (see signal(7)) and, if
+            //   the child installs a handler using the sigaction(2) SA_SIGINFO flag,
+            //   the si_pid field of the siginfo_t argument of the handler contains
+            //   the PID of the terminating parent process.
+            let mut children_to_signal = Vec::new();
             {
                 // Reparent the children.
                 if let Some(reaper) = reaper {
@@ -709,8 +769,8 @@ impl ThreadGroup {
                         // strictly top-down traversal in the process tree, avoiding cycles.
                         let _token = allow_subclass();
                         let mut state = self.write();
-                        for (_pid, weak_child) in std::mem::take(&mut state.children) {
-                            if let Some(child) = weak_child.upgrade() {
+                        for child_pid in std::mem::take(&mut state.children) {
+                            if let Ok(child) = child_pid.get_thread_group() {
                                 // This allow_subclass is safe because we lock the reaper (an
                                 // ancestor) before locking `self` and its children. Lock ordering
                                 // follows strictly top-down traversal in the process tree, avoiding
@@ -718,10 +778,18 @@ impl ThreadGroup {
                                 let _token = allow_subclass();
                                 let mut child_state = child.write();
 
+                                if let Some(signal) = child_state
+                                    .parent_death_signal_for_exiting_task(
+                                        task,
+                                        state.is_child_subreaper,
+                                    )
+                                {
+                                    children_to_signal.push((child.clone(), signal));
+                                }
                                 child_state.exit_signal = Some(SIGCHLD);
                                 child_state.parent =
-                                    Some(ThreadGroupParent::new(Arc::downgrade(&reaper)));
-                                reaper_state.children.insert(child.leader.id, weak_child);
+                                    Some(ThreadGroupParent::from_reaper(Arc::downgrade(&reaper)));
+                                reaper_state.children.insert(child_pid);
                             }
                         }
                         reaper_state.zombie_children.append(&mut state.zombie_children);
@@ -730,11 +798,28 @@ impl ThreadGroup {
                 } else {
                     // If we don't have a reaper then just drop the zombies.
                     let mut state = self.write();
+                    for child_pid in std::mem::take(&mut state.children) {
+                        if let Ok(child) = child_pid.get_thread_group() {
+                            // This allow_subclass is safe because we lock `self` (the parent)
+                            // before locking its children.
+                            let _token = allow_subclass();
+                            let mut child_state = child.write();
+                            if let Some(signal) = child_state.parent_death_signal_for_exiting_task(
+                                task,
+                                state.is_child_subreaper,
+                            ) {
+                                children_to_signal.push((child.clone(), signal));
+                            }
+                            child_state.parent = None;
+                        }
+                    }
                     for zombie in state.zombie_children.drain(..) {
                         zombie.release(&mut pids);
                     }
                 }
             }
+
+            self.send_parent_death_signals(task, children_to_signal);
 
             // Clear the `parent` reference now that children have been re-`parent`ed.
             self.write().parent = None;
@@ -780,6 +865,46 @@ impl ThreadGroup {
             }
 
             self.write().set_exited();
+        } else {
+            // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+            //
+            //   The "parent" in this case is considered to be the thread that created
+            //   this process.  In other words, the signal will be sent when that thread
+            //   terminates (via, for example, pthread_exit(3)), rather than after all of
+            //   the threads in the parent process terminate.
+            let mut children_to_signal = Vec::new();
+            for child in state.children() {
+                // This allow_subclass is safe because we lock `self` (the parent) before
+                // locking its children.
+                let _token = allow_subclass();
+                let child_state = child.read();
+                if let Some(signal) = child_state.parent_death_signal_for_exiting_task(
+                    task, /* parent_is_subreaper = */ false,
+                ) {
+                    children_to_signal.push((child.clone(), signal));
+                }
+            }
+            std::mem::drop(state);
+            self.send_parent_death_signals(task, children_to_signal);
+        }
+    }
+
+    fn send_parent_death_signals(
+        &self,
+        task: &Arc<Task>,
+        children_to_signal: Vec<(Arc<ThreadGroup>, Signal)>,
+    ) {
+        let uid = task.real_creds().uid;
+        for (child, signal) in children_to_signal {
+            // `PR_SET_PDEATHSIG(2const)` requires `si_pid` in `siginfo_t` to contain the PID
+            // of the terminating parent process. In `sigaction(2)`, `si_pid` and `si_uid`
+            // reside in the `_kill` union variant (`SignalDetail::Kill`), which is decoded
+            // when `si_code` is `SI_USER` (0), matching the `si_code` observed on Linux.
+            child.write().send_signal(SignalInfo::with_detail(
+                signal,
+                SI_USER as i32,
+                SignalDetail::Kill { pid: self.leader.clone(), uid },
+            ));
         }
     }
 
@@ -815,7 +940,7 @@ impl ThreadGroup {
     ) {
         let mut state = self.write();
 
-        state.children.remove(&zombie.task.get_pid());
+        state.children.remove(&zombie.task.pid);
         state.deferred_zombie_ptracers.retain(|dzp| dzp.tracee_pid != zombie.task.pid);
 
         let exit_signal = zombie.exit_signal;
@@ -892,7 +1017,7 @@ impl ThreadGroup {
                         tracee,
                         tracee_pgid,
                     ));
-                    parent_state.children.remove(&tracee.get_pid());
+                    parent_state.children.remove(&tracee.pid);
                 }
 
                 // Tell the tracer that there is a notification pending.
@@ -908,7 +1033,7 @@ impl ThreadGroup {
         } else if self == parent {
             // The tracer is the parent and has already consumed the parent
             // notification.  No further action required.
-            parent.write().children.remove(&tracee.tid.id);
+            state.children.remove(&tracee.pid);
             zombie.release(pids);
             return None;
         }
@@ -1404,7 +1529,7 @@ impl ThreadGroup {
                     } else {
                         {
                             let mut state = tg.write();
-                            state.children.remove(&z.task.get_pid());
+                            state.children.remove(&z.task.pid);
                             state
                                 .deferred_zombie_ptracers
                                 .retain(|dzp| dzp.tracee_pid != z.task.pid);
@@ -1796,6 +1921,36 @@ pub enum WaitableChildResult {
 
 #[apply(state_implementation!)]
 impl ThreadGroupMutableState<Base = ThreadGroup> {
+    /// Returns the parent-death [`Signal`] configured for this process via `PR_SET_PDEATHSIG`.
+    pub fn parent_death_signal(&self) -> Option<Signal> {
+        self.parent_death_signal
+    }
+
+    /// Sets or clears the parent-death [`Signal`] for this process.
+    pub fn set_parent_death_signal(&mut self, signal: Option<Signal>) {
+        self.parent_death_signal = signal;
+    }
+
+    /// Returns the parent-death [`Signal`] to deliver to this child when `exiting_task` in its
+    /// parent [`ThreadGroup`] terminates, or `None` if no signal should be delivered.
+    ///
+    /// Prior to reparenting (`creator_task` is `Some`), the signal is delivered only when the
+    /// specific creating [`Task`] exits. Once reparented to an ancestor reaper (`creator_task` is
+    /// `None`), the signal is delivered only if the terminating parent is a subreaper
+    /// (`parent_is_subreaper` is `true` on final process exit).
+    fn parent_death_signal_for_exiting_task(
+        &self,
+        exiting_task: &Arc<Task>,
+        parent_is_subreaper: bool,
+    ) -> Option<Signal> {
+        let should_signal =
+            self.parent.as_ref().is_some_and(|parent| match parent.creator_task() {
+                Some(creator_task) => Weak::ptr_eq(creator_task, &exiting_task.weak_self),
+                None => parent_is_subreaper,
+            });
+        should_signal.then_some(self.parent_death_signal).flatten()
+    }
+
     pub fn leader(&self) -> pid_t {
         self.base.leader.id
     }
@@ -1829,10 +1984,13 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         }
     }
 
+    /// Returns the running child thread groups.
+    ///
+    /// A `Pid` in `self.children` may not resolve to a `ThreadGroup` while a child is in the
+    /// middle of task creation (before `PidTableGuard::add_task`) or exit (between
+    /// `PidTableGuard::kill_process` and removing itself from `parent.children`).
     pub fn children(&self) -> impl Iterator<Item = Arc<ThreadGroup>> + '_ {
-        self.children.values().map(|v| {
-            v.upgrade().expect("Weak references to processes in ThreadGroup must always be valid")
-        })
+        self.children.iter().flat_map(|pid| pid.get_thread_group().ok())
     }
 
     pub fn tasks(&self) -> Vec<Arc<Task>> {
@@ -1976,9 +2134,7 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         // If wait_for_exited flag is disabled or no exited children were found we look for running
         // children.
         let mut selected_children = self
-            .children
-            .values()
-            .map(|t| t.upgrade().unwrap())
+            .children()
             .filter(|tg| filter_children_by_pid_selector(&tg))
             .filter(|tg| filter_children_by_waiting_options(&tg))
             .peekable();
@@ -2253,7 +2409,11 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ptrace::ptrace_traceme;
     use crate::testing::*;
+    use starnix_syscalls::SUCCESS;
+    use starnix_uapi::user_address::UserRef;
+    use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
 
     #[::fuchsia::test]
     async fn test_setsid() {
@@ -2404,12 +2564,101 @@ mod test {
             let task3 = task2.clone_task_for_test(0, None);
 
             assert_eq!(task3.thread_group().read().get_ppid(), task2.tid.id);
+            assert!(current_task.thread_group().read().children.contains(&task1.pid));
+            assert!(task1.thread_group().read().children.contains(&task2.pid));
+            assert!(task2.thread_group().read().children.contains(&task3.pid));
 
             task2.thread_group().kill(ExitStatus::Exit(0), None);
             std::mem::drop(task2);
 
             // Task3 parent should be current_task.
             assert_eq!(task3.thread_group().read().get_ppid(), current_task.tid.id);
+            assert!(current_task.thread_group().read().children.contains(&task3.pid));
+            assert!(!task1.thread_group().read().children.contains(&task3.pid));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_thread_group_children_lifecycle() {
+        spawn_kernel_and_run(async |current_task| {
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child1_pid = child1.pid.clone();
+            let child2_pid = child2.pid.clone();
+
+            assert!(current_task.thread_group().read().children.contains(&child1_pid));
+            assert!(current_task.thread_group().read().children.contains(&child2_pid));
+
+            let children_pids: HashSet<Pid> =
+                current_task.thread_group().read().children().map(|tg| tg.leader.clone()).collect();
+            assert!(children_pids.contains(&child1_pid));
+            assert!(children_pids.contains(&child2_pid));
+
+            child1.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(child1);
+
+            assert!(child1_pid.get_thread_group().is_err());
+            assert!(!current_task.thread_group().read().children.contains(&child1_pid));
+            assert!(current_task.thread_group().read().children.contains(&child2_pid));
+            let children_pids: HashSet<Pid> =
+                current_task.thread_group().read().children().map(|tg| tg.leader.clone()).collect();
+            assert!(!children_pids.contains(&child1_pid));
+            assert!(children_pids.contains(&child2_pid));
+
+            child2.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(child2);
+
+            assert!(child2_pid.get_thread_group().is_err());
+            assert!(current_task.thread_group().read().children.is_empty());
+            assert_eq!(current_task.thread_group().read().children().count(), 0);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ptrace_unspawned_child_drop() {
+        spawn_kernel_and_run(async |current_task| {
+            let mut child = create_task(current_task.kernel(), "tracee");
+            let child_pid = child.pid.clone();
+            assert!(current_task.thread_group().read().children.contains(&child_pid));
+
+            assert_eq!(ptrace_traceme(&mut child), Ok(SUCCESS));
+            child.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(child);
+
+            assert!(!current_task.thread_group().read().children.contains(&child_pid));
+            assert!(current_task.thread_group().read().zombie_children.is_empty());
+
+            // Also verify the case where an unspawned non-leader thread in a multi-threaded child
+            // (`tracee.tid != tracee.pid`) is traced by its parent and exits last.
+            let child_leader = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child_pid = child_leader.pid.clone();
+            let mut child_thread: AutoReleasableTask = child_leader
+                .clone_task(
+                    (CLONE_THREAD | CLONE_SIGHAND | CLONE_VM) as u64,
+                    None,
+                    UserRef::default(),
+                    UserRef::default(),
+                    UserRef::default(),
+                )
+                .expect("failed to create thread")
+                .into();
+            assert_ne!(child_thread.tid, child_pid);
+            assert_eq!(child_thread.pid, child_pid);
+            assert!(current_task.thread_group().read().children.contains(&child_pid));
+
+            // Exit the leader thread first so `child_thread` is the last task in the thread group.
+            child_leader.write().set_exit_status(ExitStatus::Exit(0));
+            std::mem::drop(child_leader);
+            assert!(current_task.thread_group().read().children.contains(&child_pid));
+
+            assert_eq!(ptrace_traceme(&mut child_thread), Ok(SUCCESS));
+            child_thread.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(child_thread);
+
+            assert!(!current_task.thread_group().read().children.contains(&child_pid));
+            assert!(current_task.thread_group().read().zombie_children.is_empty());
         })
         .await;
     }

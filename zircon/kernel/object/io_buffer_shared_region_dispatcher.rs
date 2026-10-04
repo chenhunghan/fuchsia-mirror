@@ -32,18 +32,9 @@ use object_constants_rs::{
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_IOB_SHARED_REGION_UPDATED, ZX_OBJ_TYPE_IOB_SHARED_REGION, ZX_RIGHT_DUPLICATE,
-    ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_SIGNAL,
-    ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT, zx_iovec_t, zx_rights_t, zx_status_t,
+    ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS, ZX_IOB_SHARED_REGION_UPDATED,
+    ZX_OBJ_TYPE_IOB_SHARED_REGION, zx_iovec_t, zx_rights_t, zx_status_t,
 };
-
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_GET_PROPERTY
-    | ZX_RIGHT_SET_PROPERTY
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_SIGNAL;
 
 zr::static_assert_size_and_align!(
     IoBufferSharedRegionDispatcherState,
@@ -127,7 +118,7 @@ unsafe extern "C" {
 impl IoBufferSharedRegionDispatcher {
     /// Returns default rights for `IoBufferSharedRegionDispatcher`.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS
     }
 
     /// Creates a new `IoBufferSharedRegionDispatcher`.
@@ -167,7 +158,7 @@ impl IoBufferSharedRegionDispatcher {
         }?;
         handle.dispatcher().state().vmo.set_user_id(handle.dispatcher().get_koid());
 
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS))
     }
 
     /// Returns the underlying `VmObject` of the shared region.
@@ -219,9 +210,7 @@ impl IoBufferSharedRegionDispatcher {
             return Err(Status::NO_SPACE);
         }
 
-        // SAFETY: `base` is page-aligned and points to valid mapped kernel memory for the
-        // lifetime of `self`, and `Header` contains only atomic fields.
-        let header = unsafe { &*(self.state().base.0 as *const Header) };
+        let header = self.state().base.0 as *const Header;
         let get_ptr =
             |offset: usize| -> *mut u8 { (self.state().base.0 + page::SIZE + offset) as *mut u8 };
 
@@ -229,14 +218,19 @@ impl IoBufferSharedRegionDispatcher {
             let fault = {
                 ksync::lock!(let guard = self.state().lock.lock());
 
-                // TODO(https://fxbug.dev/551552519): Should head and tail use volatile atomics?
                 // Relaxed ordering because only the kernel modifies this value while holding the
                 // dispatcher lock.
-                let head = header.head.load(Ordering::Relaxed) as usize;
+                // SAFETY: `header` is page-aligned and points to valid mapped kernel memory for the
+                // lifetime of `self`.
+                let head = unsafe { (&raw const (*header).head).load_volatile(Ordering::Relaxed) }
+                    as usize;
                 // Acquire ordering so that the following writes are not reordered before this load
                 // since otherwise it is possible that we will overwrite a message that userspace
                 // has not finished reading yet.
-                let tail = header.tail.load(Ordering::Acquire) as usize;
+                // SAFETY: `header` is page-aligned and points to valid mapped kernel memory for the
+                // lifetime of `self`.
+                let tail = unsafe { (&raw const (*header).tail).load_volatile(Ordering::Acquire) }
+                    as usize;
 
                 if tail > head
                     || usize::MAX - head < rounded_message_size
@@ -254,7 +248,7 @@ impl IoBufferSharedRegionDispatcher {
                     // SAFETY: `get_ptr(offset)` points to mapped kernel memory and is 8-byte
                     // aligned because `base` is page-aligned, and both `head` and `buffer_size` are
                     // multiples of 8.
-                    unsafe { ptr::write(get_ptr(offset).cast(), val) };
+                    unsafe { ptr::write_volatile(get_ptr(offset).cast(), val) };
                     offset = (offset + size_of_val(&val)) % buffer_size;
                 };
                 write_u64(tag);
@@ -303,7 +297,18 @@ impl IoBufferSharedRegionDispatcher {
                         // Release ordering so that the previous writes are not reordered after this
                         // store since otherwise it is possible for userspace to read old data when
                         // it notices the change in head value.
-                        header.head.fetch_add(rounded_message_size as u64, Ordering::Release);
+                        //
+                        // Only the kernel modifies `head` and all updates are serialized by the
+                        // dispatcher lock.
+                        //
+                        // SAFETY: `header` is page-aligned and points to valid mapped kernel memory
+                        // for the lifetime of `self`.
+                        unsafe {
+                            (&raw const (*header).head).store_volatile(
+                                (head + rounded_message_size) as u64,
+                                Ordering::Release,
+                            );
+                        }
                         self.update_state_with_strobe_locked(
                             guard.token(),
                             0,
@@ -326,7 +331,7 @@ impl IoBufferSharedRegionDispatcher {
 #[cfg(ktest)]
 #[unittest::suite(name = "io_buffer_shared_region_dispatcher_rust_tests")]
 mod tests {
-    use super::{DEFAULT_RIGHTS, IoBufferSharedRegionDispatcher};
+    use super::{IoBufferSharedRegionDispatcher, ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS};
     use unittest::{expect_eq, expect_ok, expect_true};
 
     /// Tests creating and querying an `IoBufferSharedRegionDispatcher`.
@@ -335,7 +340,7 @@ mod tests {
         let size = (page::SIZE * 2) as u64;
         let (handle, rights) =
             IoBufferSharedRegionDispatcher::create(size).expect("failed to create shared region");
-        expect_eq!(rights, DEFAULT_RIGHTS);
+        expect_eq!(rights, ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS);
 
         let disp = handle.dispatcher();
         expect_true!(disp.get_koid() != 0);

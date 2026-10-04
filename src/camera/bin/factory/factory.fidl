@@ -44,7 +44,7 @@ closed protocol Controller {
     strict CaptureFrames(struct {
         dir_path string;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         image_info fuchsia.images.ImageInfo;
     });
 
@@ -59,7 +59,7 @@ closed protocol Controller {
     strict DisplayToScreen(struct {
         stream_index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };
 
@@ -77,7 +77,7 @@ closed protocol Isp {
     ///                 `ZX_ERR_NOT_SUPPORTED` if the camera module does not have an OTP.
     /// - response `otp_data` A handle to a VMO containing the requested OTP data.
     strict GetOtpData() -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         byte_count uint64;
         otp_data zx.Handle:VMO;
     });
@@ -90,7 +90,7 @@ closed protocol Isp {
     ///                 `ZX_ERR_NOT_SUPPORTED` if the sensor does not support this feature.
     /// - response `temp` The sensor's operating temperature (in degrees Celsius).
     strict GetSensorTemperature() -> (struct {
-        s zx.Status;
+        s zx.Result;
         temp int32;
     });
 

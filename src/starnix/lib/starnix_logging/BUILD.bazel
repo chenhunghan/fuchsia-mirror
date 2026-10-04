@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_build_info//:args.bzl",
+    "starnix_enable_trace_and_debug_logs_in_release",
+)
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_logging",
+    srcs = [
+        "src/core_dump_list.rs",
+        "src/lib.rs",
+        "src/logging.rs",
+        "src/not_found.rs",
+        "src/stubs.rs",
+        "src/trace.rs",
+    ],
+    crate_features = ["trace_and_debug_logs_in_release"] if starnix_enable_trace_and_debug_logs_in_release else [],
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = [
+        "//src/starnix/kernel:__subpackages__",
+        "//src/starnix/lib:__subpackages__",
+        "//src/starnix/modules:__subpackages__",
+        "//src/starnix/runner/lib/kernel_manager:__pkg__",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/contrib/stubs:inspect_stubs",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_task_command",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:flyweights",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:regex-lite",
+    ],
+)
+
+# Declared as a separate rustc_test instead of `with_unit_tests = True` so unit
+# test code uses the test-flavored lint config rather than production lints.
+rustc_test(
+    name = "starnix_logging_lib_test",
+    srcs = [
+        "src/core_dump_list.rs",
+        "src/lib.rs",
+        "src/logging.rs",
+        "src/not_found.rs",
+        "src/stubs.rs",
+        "src/trace.rs",
+    ],
+    crate_features = ["trace_and_debug_logs_in_release"] if starnix_enable_trace_and_debug_logs_in_release else [],
+    edition = "2024",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/contrib/stubs:inspect_stubs",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_task_command",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:flyweights",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:regex-lite",
+    ],
+)

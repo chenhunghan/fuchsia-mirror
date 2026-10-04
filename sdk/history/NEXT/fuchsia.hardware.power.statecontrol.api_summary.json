@@ -157,11 +157,6 @@
     },
     {
         "kind": "enum/member",
-        "name": "fuchsia.hardware.power.statecontrol/ShutdownReason.NETSTACK_MIGRATION",
-        "value": "11"
-    },
-    {
-        "kind": "enum/member",
         "name": "fuchsia.hardware.power.statecontrol/ShutdownReason.OUT_OF_MEMORY",
         "value": "10"
     },

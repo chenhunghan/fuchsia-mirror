@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::node_remover::NodeRemover;
+use async_trait::async_trait;
 use fidl_fuchsia_diagnostics as fdiagnostics;
 use fidl_fuchsia_kernel as fkernel;
 use fidl_fuchsia_process_lifecycle as flifecycle;
@@ -20,6 +21,87 @@ use zx::sys::{
     ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER, ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY,
     ZX_SYSTEM_POWERCTL_SHUTDOWN,
 };
+
+/// System power operations.
+#[async_trait(?Send)]
+pub trait SystemPower {
+    /// Returns the current system power state.
+    async fn get_system_power_state(&self) -> fsystem_state::SystemPowerState;
+
+    /// Executes a system power control command (e.g. reboot, shutdown).
+    fn system_powerctl(&self, cmd: u32) -> Result<(), zx::Status>;
+
+    /// Performs an mexec boot into a new kernel.
+    fn mexec_boot(&self) -> Result<(), anyhow::Error>;
+
+    /// Returns true if the necessary power and mexec resources are available.
+    fn has_resources(&self) -> bool;
+
+    /// Exits the process.
+    fn exit(&self, status: i32);
+}
+
+/// Real implementation of [`SystemPower`] that makes actual system calls.
+pub struct RealSystemPower {
+    power_resource: Option<zx::Resource>,
+    mexec_resource: Option<zx::Resource>,
+}
+
+impl RealSystemPower {
+    pub fn new(power_resource: Option<zx::Resource>, mexec_resource: Option<zx::Resource>) -> Self {
+        Self { power_resource, mexec_resource }
+    }
+}
+
+#[async_trait(?Send)]
+impl SystemPower for RealSystemPower {
+    async fn get_system_power_state(&self) -> fsystem_state::SystemPowerState {
+        get_system_power_state().await
+    }
+
+    fn system_powerctl(&self, cmd: u32) -> Result<(), zx::Status> {
+        let Some(power_resource) = &self.power_resource else {
+            return Err(zx::Status::INVALID_ARGS);
+        };
+        zx::Status::ok(unsafe {
+            zx::sys::zx_system_powerctl(power_resource.raw_handle(), cmd, std::ptr::null())
+        })
+    }
+
+    fn mexec_boot(&self) -> Result<(), anyhow::Error> {
+        let Some(mexec_resource) = &self.mexec_resource else {
+            return Err(anyhow::anyhow!("No mexec resource"));
+        };
+        mexec_boot::mexec_boot(zx::Unowned::new(mexec_resource)).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn has_resources(&self) -> bool {
+        self.power_resource.is_some() && self.mexec_resource.is_some()
+    }
+
+    fn exit(&self, status: i32) {
+        std::process::exit(status);
+    }
+}
+
+#[async_trait(?Send)]
+impl<T: SystemPower + ?Sized> SystemPower for Rc<T> {
+    async fn get_system_power_state(&self) -> fsystem_state::SystemPowerState {
+        (**self).get_system_power_state().await
+    }
+    fn system_powerctl(&self, cmd: u32) -> Result<(), zx::Status> {
+        (**self).system_powerctl(cmd)
+    }
+    fn mexec_boot(&self) -> Result<(), anyhow::Error> {
+        (**self).mexec_boot()
+    }
+    fn has_resources(&self) -> bool {
+        (**self).has_resources()
+    }
+    fn exit(&self, status: i32) {
+        (**self).exit(status)
+    }
+}
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum State {
@@ -73,13 +155,12 @@ struct ShutdownManagerState {
     lifecycle_stop: bool,
 }
 
-pub struct ShutdownManager {
+pub struct ShutdownManager<P: SystemPower + 'static = RealSystemPower> {
     node_remover: Rc<dyn NodeRemover>,
-    power_resource: Option<zx::Resource>,
-    mexec_resource: Option<zx::Resource>,
     log_flush: Option<fdiagnostics::LogFlusherProxy>,
     internal_state: RefCell<ShutdownManagerState>,
     scope: fasync::Scope,
+    system_power: P,
 }
 
 fn get_power_resource() -> Result<zx::Resource, anyhow::Error> {
@@ -112,8 +193,9 @@ async fn get_system_power_state() -> fsystem_state::SystemPowerState {
     }
 }
 
-impl ShutdownManager {
-    pub fn new(node_remover: Rc<dyn NodeRemover>) -> Rc<Self> {
+impl ShutdownManager<RealSystemPower> {
+    /// Creates a [`ShutdownManager`] from the FIDL services available in the incoming namespace.
+    pub fn from_incoming(node_remover: Rc<dyn NodeRemover>) -> Rc<Self> {
         let power_resource = get_power_resource()
             .inspect_err(|e| {
                 info!("Failed to get power resource, assuming test environment: {}", e)
@@ -127,7 +209,16 @@ impl ShutdownManager {
         let log_flush = connect_to_protocol::<fdiagnostics::LogFlusherMarker>()
             .inspect_err(|e| error!("Failed to connect to LogFlusher: {}", e))
             .ok();
+        Self::new(node_remover, RealSystemPower::new(power_resource, mexec_resource), log_flush)
+    }
+}
 
+impl<P: SystemPower + 'static> ShutdownManager<P> {
+    pub fn new(
+        node_remover: Rc<dyn NodeRemover>,
+        system_power: P,
+        log_flush: Option<fdiagnostics::LogFlusherProxy>,
+    ) -> Rc<Self> {
         let shutdown_manager = Rc::new(Self {
             node_remover: node_remover.clone(),
             internal_state: RefCell::new(ShutdownManagerState {
@@ -137,19 +228,20 @@ impl ShutdownManager {
                 boot_shutdown_complete_callbacks: Vec::new(),
                 lifecycle_stop: false,
             }),
-            power_resource,
-            mexec_resource,
             log_flush,
             scope: fasync::Scope::new_with_name("shutdown_manager"),
+            system_power,
         });
 
         let weak_manager = Rc::downgrade(&shutdown_manager);
         node_remover.set_on_removal_timeout_callback(Box::new(move || {
             if let Some(strong_manager) = weak_manager.upgrade() {
-                info!("Driver timed out during shutdown, issuing syscall to reboot/shutdown");
+                info!(
+                    "Timed out waiting for nodes to be removed, issuing syscall to reboot/shutdown"
+                );
                 let strong_manager_clone = strong_manager.clone();
                 strong_manager.scope.spawn_local(async move {
-                    strong_manager_clone.system_execute().await;
+                    strong_manager_clone.execute_shutdown_strategy(true).await;
                 });
             }
         }));
@@ -272,7 +364,7 @@ impl ShutdownManager {
             assert_eq!(internal_state.state, State::BootStopping);
             internal_state.state = State::Stopped;
         }
-        self.system_execute().await;
+        self.execute_shutdown_strategy(false).await;
         let mut internal_state = self.internal_state.borrow_mut();
         for sender in internal_state.boot_shutdown_complete_callbacks.drain(..) {
             let _ = sender.send(Ok(()));
@@ -334,22 +426,20 @@ impl ShutdownManager {
         rx.await.unwrap_or(Err(zx::Status::INTERNAL))
     }
 
-    async fn system_execute(&self) {
-        let shutdown_system_state = get_system_power_state().await;
-        info!("Suspend fallback with flags {:?}", shutdown_system_state);
-        let mut what = "zx_system_powerctl";
-
-        let (Some(mexec_resource), Some(power_resource)) =
-            (&self.mexec_resource, &self.power_resource)
-        else {
+    async fn execute_shutdown_strategy(&self, node_removal_timed_out: bool) {
+        if !self.system_power.has_resources() {
             warn!("Invalid Power/mexec resources. Assuming test.");
             let internal_state = self.internal_state.borrow();
             if internal_state.lifecycle_stop {
                 info!("Exiting driver manager gracefully");
-                std::process::exit(0);
+                self.system_power.exit(0);
             }
             return;
-        };
+        }
+
+        let shutdown_system_state = self.system_power.get_system_power_state().await;
+        info!("Suspend fallback with flags {:?}", shutdown_system_state);
+        let mut what = "zx_system_powerctl";
 
         info!("Flushing logs.");
         if let Some(log_flush) = &self.log_flush
@@ -360,35 +450,19 @@ impl ShutdownManager {
 
         info!("Executing powerctl.");
         let status = match shutdown_system_state {
-            fsystem_state::SystemPowerState::Reboot => zx::Status::ok(unsafe {
-                zx::sys::zx_system_powerctl(
-                    power_resource.raw_handle(),
-                    ZX_SYSTEM_POWERCTL_REBOOT,
-                    std::ptr::null(),
-                )
-            }),
-            fsystem_state::SystemPowerState::RebootBootloader => zx::Status::ok(unsafe {
-                zx::sys::zx_system_powerctl(
-                    power_resource.raw_handle(),
-                    ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER,
-                    std::ptr::null(),
-                )
-            }),
-            fsystem_state::SystemPowerState::RebootRecovery => zx::Status::ok(unsafe {
-                zx::sys::zx_system_powerctl(
-                    power_resource.raw_handle(),
-                    ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY,
-                    std::ptr::null(),
-                )
-            }),
+            fsystem_state::SystemPowerState::Reboot => {
+                self.system_power.system_powerctl(ZX_SYSTEM_POWERCTL_REBOOT)
+            }
+            fsystem_state::SystemPowerState::RebootBootloader => {
+                self.system_power.system_powerctl(ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER)
+            }
+            fsystem_state::SystemPowerState::RebootRecovery => {
+                self.system_power.system_powerctl(ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY)
+            }
             fsystem_state::SystemPowerState::RebootKernelInitiated => {
-                let status = zx::Status::ok(unsafe {
-                    zx::sys::zx_system_powerctl(
-                        power_resource.raw_handle(),
-                        ZX_SYSTEM_POWERCTL_ACK_KERNEL_INITIATED_REBOOT,
-                        std::ptr::null(),
-                    )
-                });
+                let status = self
+                    .system_power
+                    .system_powerctl(ZX_SYSTEM_POWERCTL_ACK_KERNEL_INITIATED_REBOOT);
                 if status.is_ok() {
                     // sleep indefinitely
                     loop {
@@ -400,22 +474,30 @@ impl ShutdownManager {
                 }
                 status
             }
-            fsystem_state::SystemPowerState::Poweroff => zx::Status::ok(unsafe {
-                zx::sys::zx_system_powerctl(
-                    power_resource.raw_handle(),
-                    ZX_SYSTEM_POWERCTL_SHUTDOWN,
-                    std::ptr::null(),
-                )
-            }),
+            fsystem_state::SystemPowerState::Poweroff => {
+                self.system_power.system_powerctl(ZX_SYSTEM_POWERCTL_SHUTDOWN)
+            }
 
             fsystem_state::SystemPowerState::Mexec => {
-                info!("About to mexec...");
-                match mexec_boot::mexec_boot(zx::Unowned::new(mexec_resource)) {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        error!("mexec_boot failed: {}", e);
-                        what = "zx_system_mexec";
-                        Err(zx::Status::INTERNAL)
+                if node_removal_timed_out {
+                    // If drivers failed to shut down cleanly, some drivers/hardware may still have
+                    // active DMA mapped. Proceeding with mexec (a soft reboot) would boot into the
+                    // new kernel without a hardware reset, allowing active DMA to overwrite the new
+                    // kernel's memory (leading to a sandbox escape). Fall back to a hard reboot
+                    // instead to reset the hardware and quiesce DMA.
+                    error!(
+                        "Timed out waiting for nodes to be removed, rebooting instead of using mexec"
+                    );
+                    self.system_power.system_powerctl(ZX_SYSTEM_POWERCTL_REBOOT)
+                } else {
+                    info!("About to mexec...");
+                    match self.system_power.mexec_boot() {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            error!("mexec_boot failed: {}", e);
+                            what = "zx_system_mexec";
+                            Err(zx::Status::INTERNAL)
+                        }
                     }
                 }
             }
@@ -429,9 +511,332 @@ impl ShutdownManager {
         let internal_state = self.internal_state.borrow();
         if internal_state.lifecycle_stop {
             info!("Exiting driver manager gracefully");
-            std::process::exit(0);
+            self.system_power.exit(0);
         }
 
         warn!("{}: {status:?}", what);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockNodeRemover {
+        timeout_callback: RefCell<Option<Box<dyn Fn()>>>,
+        shutdown_all_tx: RefCell<Option<oneshot::Sender<()>>>,
+        received_shutdown_all_request_tx: RefCell<Option<oneshot::Sender<()>>>,
+        received_shutdown_all_request_rx: RefCell<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl MockNodeRemover {
+        fn new() -> Self {
+            let (tx, rx) = oneshot::channel();
+            Self {
+                timeout_callback: RefCell::new(None),
+                shutdown_all_tx: RefCell::new(None),
+                received_shutdown_all_request_tx: RefCell::new(Some(tx)),
+                received_shutdown_all_request_rx: RefCell::new(Some(rx)),
+            }
+        }
+
+        fn complete_shutdown_all(&self) {
+            if let Some(tx) = self.shutdown_all_tx.borrow_mut().take() {
+                let _ = tx.send(());
+            }
+        }
+
+        fn timeout_node_removal(&self) {
+            if let Some(cb) = self.timeout_callback.borrow().as_ref() {
+                cb();
+            }
+        }
+
+        async fn wait_for_shutdown_all_request(&self) {
+            let rx = self.received_shutdown_all_request_rx.borrow_mut().take().unwrap();
+            let _ = rx.await;
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl NodeRemover for MockNodeRemover {
+        async fn shutdown_all_drivers(&self) {
+            if let Some(tx) = self.received_shutdown_all_request_tx.borrow_mut().take() {
+                let _ = tx.send(());
+            }
+            let (tx, rx) = oneshot::channel();
+            *self.shutdown_all_tx.borrow_mut() = Some(tx);
+            let _ = rx.await;
+        }
+        async fn shutdown_pkg_drivers(&self) {}
+        fn set_on_removal_timeout_callback(&self, callback: Box<dyn Fn()>) {
+            *self.timeout_callback.borrow_mut() = Some(callback);
+        }
+    }
+
+    struct MockSystemPower {
+        state: fsystem_state::SystemPowerState,
+        system_powerctl_called: RefCell<bool>,
+        system_powerctl_cmd: RefCell<Option<u32>>,
+        system_powerctl_tx: RefCell<Option<oneshot::Sender<()>>>,
+        system_powerctl_rx: RefCell<Option<oneshot::Receiver<()>>>,
+        mexec_called: RefCell<bool>,
+        mexec_tx: RefCell<Option<oneshot::Sender<()>>>,
+        mexec_rx: RefCell<Option<oneshot::Receiver<()>>>,
+        exit_called: RefCell<bool>,
+        exit_tx: RefCell<Option<oneshot::Sender<()>>>,
+        exit_rx: RefCell<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl MockSystemPower {
+        fn new(state: fsystem_state::SystemPowerState) -> Self {
+            let (p_tx, p_rx) = oneshot::channel();
+            let (m_tx, m_rx) = oneshot::channel();
+            let (e_tx, e_rx) = oneshot::channel();
+            Self {
+                state,
+                system_powerctl_called: RefCell::new(false),
+                system_powerctl_cmd: RefCell::new(None),
+                system_powerctl_tx: RefCell::new(Some(p_tx)),
+                system_powerctl_rx: RefCell::new(Some(p_rx)),
+                mexec_called: RefCell::new(false),
+                mexec_tx: RefCell::new(Some(m_tx)),
+                mexec_rx: RefCell::new(Some(m_rx)),
+                exit_called: RefCell::new(false),
+                exit_tx: RefCell::new(Some(e_tx)),
+                exit_rx: RefCell::new(Some(e_rx)),
+            }
+        }
+
+        // Blocks until the shutdown manager calls `system_powerctl()`.
+        async fn wait_for_system_powerctl(&self) {
+            let rx = self.system_powerctl_rx.borrow_mut().take().unwrap();
+            let _ = rx.await;
+        }
+
+        // Blocks until the shutdown manager calls `mexec_boot()`.
+        async fn wait_for_mexec_boot(&self) {
+            let rx = self.mexec_rx.borrow_mut().take().unwrap();
+            let _ = rx.await;
+        }
+
+        // Blocks until the shutdown manager calls `exit()`.
+        async fn wait_for_exit(&self) {
+            let rx = self.exit_rx.borrow_mut().take().unwrap();
+            let _ = rx.await;
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl SystemPower for MockSystemPower {
+        async fn get_system_power_state(&self) -> fsystem_state::SystemPowerState {
+            self.state
+        }
+
+        fn system_powerctl(&self, cmd: u32) -> Result<(), zx::Status> {
+            *self.system_powerctl_called.borrow_mut() = true;
+            *self.system_powerctl_cmd.borrow_mut() = Some(cmd);
+            if let Some(tx) = self.system_powerctl_tx.borrow_mut().take() {
+                let _ = tx.send(());
+            }
+            Ok(())
+        }
+
+        fn mexec_boot(&self) -> Result<(), anyhow::Error> {
+            *self.mexec_called.borrow_mut() = true;
+            if let Some(tx) = self.mexec_tx.borrow_mut().take() {
+                let _ = tx.send(());
+            }
+            Ok(())
+        }
+
+        fn has_resources(&self) -> bool {
+            true
+        }
+
+        fn exit(&self, _status: i32) {
+            *self.exit_called.borrow_mut() = true;
+            if let Some(tx) = self.exit_tx.borrow_mut().take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    struct FakeLogFlusher {
+        flushed: RefCell<bool>,
+    }
+
+    impl FakeLogFlusher {
+        fn new() -> Self {
+            Self { flushed: RefCell::new(false) }
+        }
+    }
+
+    async fn serve_log_flusher(
+        fake_log_flusher: Rc<FakeLogFlusher>,
+        mut stream: fdiagnostics::LogFlusherRequestStream,
+    ) -> Result<(), fidl::Error> {
+        while let Some(request) = stream.try_next().await? {
+            if let fdiagnostics::LogFlusherRequest::WaitUntilFlushed { responder } = request {
+                *fake_log_flusher.flushed.borrow_mut() = true;
+                responder.send()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn setup_log_flusher(
+        scope: &fasync::Scope,
+    ) -> (fdiagnostics::LogFlusherProxy, Rc<FakeLogFlusher>) {
+        let (proxy, stream) = fidl::endpoints::create_proxy::<fdiagnostics::LogFlusherMarker>();
+        let fake = Rc::new(FakeLogFlusher::new());
+        let fake_clone = fake.clone();
+        scope.spawn_local(async move {
+            if let Err(e) = serve_log_flusher(fake_clone, stream.into_stream()).await {
+                error!("Error serving LogFlusher: {}", e);
+            }
+        });
+        (proxy, fake)
+    }
+
+    async fn run_shutdown_manager_test<F, Fut>(state: fsystem_state::SystemPowerState, test: F)
+    where
+        F: FnOnce(flifecycle::LifecycleProxy, Rc<MockNodeRemover>, Rc<MockSystemPower>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let node_remover = Rc::new(MockNodeRemover::new());
+        let system_power = Rc::new(MockSystemPower::new(state));
+
+        let scope = fasync::Scope::new();
+        let (log_flush_proxy, fake_log_flusher) = setup_log_flusher(&scope);
+
+        let shutdown_manager =
+            ShutdownManager::new(node_remover.clone(), system_power.clone(), Some(log_flush_proxy));
+
+        let (lifecycle_proxy, stream) =
+            fidl::endpoints::create_proxy::<flifecycle::LifecycleMarker>();
+        let (tx, rx) = oneshot::channel::<ShutdownSender>();
+
+        let self_clone = shutdown_manager.clone();
+        shutdown_manager.scope.spawn_local(async move {
+            if let Ok(sender) = rx.await {
+                self_clone.internal_state.borrow_mut().lifecycle_stop = true;
+                let status = self_clone.signal_boot_shutdown().await;
+                let _ = sender.send(status);
+            }
+        });
+        let lifecycle_server = Rc::new(LifecycleServer::new(tx));
+        shutdown_manager.scope.spawn_local(async move {
+            if let Err(e) = lifecycle_server.serve(stream.into_stream()).await {
+                error!("Error serving Lifecycle in test: {}", e);
+            }
+        });
+
+        test(lifecycle_proxy, node_remover, system_power).await;
+
+        assert!(*fake_log_flusher.flushed.borrow());
+    }
+
+    // Verifies the shutdown manager correctly removes all nodes when stopping and calls
+    // `mexec_boot()` when in the mexec power-system state.
+    #[fuchsia::test]
+    async fn test_mexec_normal() {
+        run_shutdown_manager_test(
+            fsystem_state::SystemPowerState::Mexec,
+            |lifecycle_proxy, node_remover, system_power| async move {
+                // Tell the shutdown manager to stop and shutdown all nodes.
+                lifecycle_proxy.stop().unwrap();
+
+                // Wait for the node remover to receive the request to shutdown all nodes.
+                node_remover.wait_for_shutdown_all_request().await;
+
+                // Complete the node-removal request.
+                node_remover.complete_shutdown_all();
+
+                // Wait for the shutdown manager to complete and call `mexec_boot()`.
+                system_power.wait_for_mexec_boot().await;
+
+                // Wait for the shutdown manager to exit.
+                system_power.wait_for_exit().await;
+
+                // The shutdown manager should call `mexec_boot()` and not `system_powerctl()`
+                // because its system-power state was set to mexec.
+                assert!(*system_power.mexec_called.borrow());
+                assert!(!*system_power.system_powerctl_called.borrow());
+                assert!(*system_power.exit_called.borrow());
+            },
+        )
+        .await;
+    }
+
+    // Verifies that if the node remover times out then the system falls back to a system reboot
+    // instead of mexec.
+    #[fuchsia::test]
+    async fn test_mexec_timeout() {
+        run_shutdown_manager_test(
+            fsystem_state::SystemPowerState::Mexec,
+            |lifecycle_proxy, node_remover, system_power| async move {
+                // Tell the shutdown manager to stop and shutdown all nodes.
+                lifecycle_proxy.stop().unwrap();
+
+                // Wait for the node remover to receive the request to shutdown all nodes.
+                node_remover.wait_for_shutdown_all_request().await;
+
+                // Triggers the event that the node remover has timed out waiting for nodes to be removed.
+                node_remover.timeout_node_removal();
+
+                // Wait for the shutdown manager to complete and call `system_powerctl()`.
+                system_power.wait_for_system_powerctl().await;
+
+                // Wait for the shutdown manager to exit.
+                system_power.wait_for_exit().await;
+
+                // Node remover timed out and so `system_powerctl()` should be called instead of
+                // `mexec_boot()`.
+                assert!(*system_power.system_powerctl_called.borrow());
+                assert_eq!(
+                    Some(ZX_SYSTEM_POWERCTL_REBOOT),
+                    *system_power.system_powerctl_cmd.borrow()
+                );
+                assert!(!*system_power.mexec_called.borrow());
+                assert!(*system_power.exit_called.borrow());
+            },
+        )
+        .await;
+    }
+
+    // Verifies the shutdown manager correctly removes all nodes when stopping and reboots the
+    // system when in the reboot power-system state.
+    #[fuchsia::test]
+    async fn test_reboot_normal() {
+        run_shutdown_manager_test(
+            fsystem_state::SystemPowerState::Reboot,
+            |lifecycle_proxy, node_remover, system_power| async move {
+                // Tell the shutdown manager to stop and shutdown all nodes.
+                lifecycle_proxy.stop().unwrap();
+
+                // Wait for the node remover to receive the request to shutdown all nodes.
+                node_remover.wait_for_shutdown_all_request().await;
+
+                // Complete the node-removal request.
+                node_remover.complete_shutdown_all();
+
+                // Wait for the shutdown manager to complete and call `system_powerctl()`.
+                system_power.wait_for_system_powerctl().await;
+
+                // Wait for the shutdown manager to exit.
+                system_power.wait_for_exit().await;
+
+                // The shutdown manager should call `system_powerctl(ZX_SYSTEM_POWERCTL_REBOOT)`.
+                assert!(*system_power.system_powerctl_called.borrow());
+                assert_eq!(
+                    Some(ZX_SYSTEM_POWERCTL_REBOOT),
+                    *system_power.system_powerctl_cmd.borrow()
+                );
+                assert!(!*system_power.mexec_called.borrow());
+                assert!(*system_power.exit_called.borrow());
+            },
+        )
+        .await;
     }
 }

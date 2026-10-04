@@ -92,6 +92,9 @@ class ThreadLockState {
   // Attempts to add the given lock class to the acquired lock list. Lock
   // ordering and other checks are performed here.
   void Acquire(AcquiredLockEntry* lock_entry) {
+    if constexpr (!kLockValidationEnabled) {
+      return;
+    }
     if (ValidatorLockClassState::IsTrackingDisabled(lock_entry->id()))
       return;
 
@@ -170,6 +173,9 @@ class ThreadLockState {
 
   // Removes the given lock entry from the acquired lock list.
   void Release(AcquiredLockEntry* entry) {
+    if constexpr (!kLockValidationEnabled) {
+      return;
+    }
     if (ValidatorLockClassState::IsTrackingDisabled(entry->id()))
       return;
 
@@ -265,6 +271,9 @@ class ThreadLockState {
 
 // Defined after ThreadLockState because of dependency on its methods.
 inline void AcquiredLockEntry::Replace(AcquiredLockEntry* target) {
+  if constexpr (!kLockValidationEnabled) {
+    return;
+  }
   LockFlags flags = ValidatorLockClassState::Get(id_)->flags();
   ThreadLockState::Get(flags)->Replace(target, this);
 }

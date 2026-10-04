@@ -30,8 +30,8 @@ _LOCAL_FUCHSIA_SDK_DIRECTORY = "LOCAL_FUCHSIA_SDK_DIRECTORY"
 _LOCAL_FUCHSIA_IDK_DIRECTORY = "LOCAL_FUCHSIA_IDK_DIRECTORY"
 
 def _instantiate_local_path(ctx, manifests):
-    local_paths = ctx.attr.local_paths
-    for local_path in local_paths:
+    local_sdks = []
+    for local_path in ctx.attr.local_paths:
         # Copies the SDK from a local Fuchsia platform build.
         if local_path[0] == "@":
             # Assume this is a file path inside the repository, e.g. @fuchsia_idk//:BUILD.bazel
@@ -41,6 +41,15 @@ def _instantiate_local_path(ctx, manifests):
             local_sdk_path = workspace_path(ctx, local_path)
             ctx.report_progress("Copying local SDK from %s" % local_sdk_path)
             local_sdk = ctx.path(local_sdk_path)
+        local_sdks.append(local_sdk)
+
+    for local_sdk_repo in ctx.attr.local_idk_repos:
+        # Assume this is a target at the root of the repository, e.g. @fuchsia_idk//:BUILD.bazel.
+        local_sdk = ctx.path(local_sdk_repo).dirname
+        ctx.report_progress("Copying local IDK from %s" % local_sdk)
+        local_sdks.append(local_sdk)
+
+    for local_sdk in local_sdks:
         if not local_sdk.exists:
             fail("Cannot find SDK in local directory: %s\n\nPlease build it with\n\n\t\t'fx build //sdk:final_fuchsia_sdk' or similar." % local_sdk)
 
@@ -153,7 +162,7 @@ def _fuchsia_sdk_repository_impl(ctx):
     if _LOCAL_FUCHSIA_IDK_DIRECTORY in ctx.os.environ:
         copy_content_strategy = "symlink"
         _instantiate_local_idk(ctx, manifests)
-    elif ctx.attr.local_paths:
+    elif ctx.attr.local_paths or ctx.attr.local_idk_repos:
         copy_content_strategy = "symlink"
         _instantiate_local_path(ctx, manifests)
     else:
@@ -196,6 +205,16 @@ Loads a particular version of the Fuchsia IDK.
         ),
         "local_paths": attr.string_list(
             doc = "Paths to local SDK directories.",
+        ),
+        "local_idk_repos": attr.label_list(
+            doc = """Repositories containing local IDK directories.
+
+            Each label must be in the root package of the repository, e.g.
+            `@fuchsia_idk` (shorthand for `@fuchsia_idk//:fuchsia_idk`); the
+            repository's root directory is used as the IDK. Unlike
+            `@repo`-prefixed entries in `local_paths`, these are resolved with
+            the caller's repo mapping, so apparent repository names work.
+            """,
         ),
         "local_sdk_version_file": attr.label(
             doc = "An optional file used to mark the version of the SDK pointed to by local_paths.",

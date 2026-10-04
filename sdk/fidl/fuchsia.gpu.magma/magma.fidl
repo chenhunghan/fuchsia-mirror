@@ -134,7 +134,7 @@ closed protocol TestDevice {
     compose CombinedDevice;
 
     strict GetUnitTestStatus() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -621,7 +621,7 @@ service PowerService {
 @available(added=HEAD)
 closed protocol TestDevice2 {
     strict GetUnitTestStatus() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

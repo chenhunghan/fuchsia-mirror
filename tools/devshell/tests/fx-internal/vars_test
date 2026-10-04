@@ -761,4 +761,5 @@ TEST_fx-wait-ignoring-signals_trap_restoration() {
   # Restore default INT trap for the test environment
   trap - INT
 }
+
 BT_RUN_TESTS "$@"

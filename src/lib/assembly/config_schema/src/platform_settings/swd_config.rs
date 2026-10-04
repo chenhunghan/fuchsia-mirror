@@ -43,9 +43,12 @@ pub struct SwdConfig {
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub trust_store: SwdTrustStore,
+
+    /// If set, system-updater will file a crash report if a successful update takes longer than
+    /// this number of seconds (excluding waiting for reboot).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excessive_update_duration_seconds: Option<u32>,
 }
-
-
 
 /// The trust store to use for SWD.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
@@ -88,7 +91,6 @@ pub enum VerificationFailureAction {
     Reboot,
     Disabled,
 }
-
 
 /// Configuration for the Omaha Client
 #[derive(Default, Clone, Debug, Deserialize, Serialize, PartialEq, JsonSchema, WalkPaths)]
@@ -183,6 +185,7 @@ mod tests {
               "policy": "unrestricted",
               "on_verification_failure": "reboot",
               "tuf_config_paths": ["/path/to/tuf_config.json"],
+              "excessive_update_duration_seconds": 3600,
             }
         "#;
 
@@ -205,6 +208,7 @@ mod tests {
                 })),
                 on_verification_failure: VerificationFailureAction::Reboot,
                 tuf_config_paths: vec!["/path/to/tuf_config.json".into()],
+                excessive_update_duration_seconds: Some(3600),
                 ..Default::default()
             }
         );

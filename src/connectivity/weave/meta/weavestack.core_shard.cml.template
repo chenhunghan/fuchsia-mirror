@@ -60,7 +60,7 @@
                 // Weavestack no longer needs it.
                 "fuchsia.net.root.Interfaces",
                 "fuchsia.net.routes.State",
-                "fuchsia.net.stack.Stack",
+                "fuchsia.net.routes.admin.RouteTableV6",
                 "fuchsia.posix.socket.Provider",
             ],
             from: "#network",

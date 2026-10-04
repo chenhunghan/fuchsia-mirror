@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import argparse
+import json
 import sys
 from typing import Any
 
@@ -34,7 +35,23 @@ async def stop_daemon() -> int:
     manager = DaemonManager(socket_path=UDS_PATH)
     try:
         await manager.stop()
+        print(
+            json.dumps(
+                {
+                    "success": True,
+                    "message": "Daemon stopped",
+                }
+            )
+        )
         return 0
     except Exception as e:
-        print(f"Error stopping daemon: {e}", file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "message": f"Error stopping daemon: {e}",
+                }
+            ),
+            file=sys.stderr,
+        )
         return 1

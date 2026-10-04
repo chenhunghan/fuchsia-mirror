@@ -70,7 +70,7 @@ TEST_F(UsbInspectTest, TestDciInspect) {
   dci.Init(inspector.GetRoot(), "dci_test");
   dci.UpdateState("kPeripheralReady");
   dci.UpdateConnectionStatus(true, USB_SPEED_SUPER);
-  dci.UpdateUsbMode(USB_MODE_PERIPHERAL);
+  dci.UpdateUsbMode(UsbMode::kPeripheral);
 
   auto hierarchy = ReadInspect(inspector);
 

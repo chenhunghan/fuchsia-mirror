@@ -914,8 +914,7 @@ def subprocess_call(
     Returns:
       returncode, stdout (text), stderr (text)
     """
-    loop = asyncio.get_event_loop()
-    result = loop.run_until_complete(
+    return asyncio.run(
         _stream_subprocess(
             cmd=cmd,
             stdin=stdin,
@@ -925,7 +924,6 @@ def subprocess_call(
             **kwargs,
         )
     )
-    return result
 
 
 # end of subprocess_call section

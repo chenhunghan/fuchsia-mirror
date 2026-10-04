@@ -46,6 +46,7 @@ unsafe impl<B> Send for OpaqueRefCountedFacade<B> {}
 unsafe impl<B> Sync for OpaqueRefCountedFacade<B> {}
 
 impl<B: HasRefCount> HasRefCount for OpaqueRefCountedFacade<B> {
+    #[inline]
     fn ref_count(&self) -> &RefCounted {
         // SAFETY: OpaqueRefCountedFacade<B> is at offset 0 of the facade struct.
         unsafe {
@@ -56,6 +57,7 @@ impl<B: HasRefCount> HasRefCount for OpaqueRefCountedFacade<B> {
 }
 
 unsafe impl<B: Recyclable> Recyclable for OpaqueRefCountedFacade<B> {
+    #[inline]
     unsafe fn recycle(ptr: NonNull<Self>) {
         unsafe {
             B::recycle(ptr.cast::<B>());
@@ -76,6 +78,7 @@ pub unsafe trait IsOpaqueRefCounted: Deref + Sized {
 }
 
 impl<T: IsOpaqueRefCounted> HasRefCount for T {
+    #[inline]
     fn ref_count(&self) -> &RefCounted {
         let base_ptr = self.deref() as *const T::Target as *const T::TargetBase;
         // SAFETY: T is a facade struct for a C++ object that inherits from T::TargetBase.
@@ -84,6 +87,7 @@ impl<T: IsOpaqueRefCounted> HasRefCount for T {
 }
 
 unsafe impl<T: IsOpaqueRefCounted> Recyclable for T {
+    #[inline]
     unsafe fn recycle(ptr: NonNull<Self>) {
         unsafe {
             let base_ptr = ptr.cast::<T::TargetBase>();
@@ -127,6 +131,7 @@ macro_rules! impl_opaque_ref_counted_facade {
         }
 
         impl $crate::HasRefCount for $name {
+            #[inline]
             fn ref_count(&self) -> &$crate::RefCounted {
                 // SAFETY: `$name` represents a C++ `fbl::RefCounted` object whose ref count is at
                 // offset 0.
@@ -136,6 +141,7 @@ macro_rules! impl_opaque_ref_counted_facade {
 
         // SAFETY: `$name` represents a C++ `fbl::RefCounted` object.
         unsafe impl $crate::Recyclable for $name {
+            #[inline]
             unsafe fn recycle(ptr: core::ptr::NonNull<Self>) {
                 // SAFETY: `ptr` was constructed from `RefPtr::into_raw` on a valid `$name` facade.
                 unsafe {
@@ -157,6 +163,7 @@ macro_rules! impl_opaque_ref_counted_facade {
         }
 
         impl $crate::HasRefCount for $name {
+            #[inline]
             fn ref_count(&self) -> &$crate::RefCounted {
                 // SAFETY: `$get_ref_counted_fn` returns a valid pointer to the C++
                 // `fbl::RefCounted` subobject of `$name`.
@@ -169,6 +176,7 @@ macro_rules! impl_opaque_ref_counted_facade {
 
         // SAFETY: `$name` represents a C++ `fbl::RefCounted` object.
         unsafe impl $crate::Recyclable for $name {
+            #[inline]
             unsafe fn recycle(ptr: core::ptr::NonNull<Self>) {
                 // SAFETY: `ptr` was constructed from `RefPtr::into_raw` on a valid `$name` facade.
                 unsafe {

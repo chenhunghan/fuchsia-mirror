@@ -74,11 +74,12 @@ pub fn sys_stream_writev(
 
     let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_WRITE)?;
     let user_data = make_user_in_iovec(vector, vector_count);
-    let actual = if (options & ZX_STREAM_APPEND) != 0 {
-        stream.append_vector(user_data)?
+    let (status, actual) = if (options & ZX_STREAM_APPEND) != 0 {
+        stream.append_vector(user_data)
     } else {
-        stream.write_vector(user_data)?
+        stream.write_vector(user_data)
     };
+    status?;
 
     if !out_actual.is_null() {
         out_actual.write(actual)?;
@@ -105,7 +106,8 @@ pub fn sys_stream_writev_at(
     }
 
     let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_WRITE)?;
-    let actual = stream.write_vector_at(make_user_in_iovec(vector, vector_count), offset)?;
+    let (status, actual) = stream.write_vector_at(make_user_in_iovec(vector, vector_count), offset);
+    status?;
 
     if !out_actual.is_null() {
         out_actual.write(actual)?;
@@ -131,7 +133,8 @@ pub fn sys_stream_readv(
     }
 
     let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_READ)?;
-    let actual = stream.read_vector(make_user_out_iovec(vector, vector_count))?;
+    let (status, actual) = stream.read_vector(make_user_out_iovec(vector, vector_count));
+    status?;
 
     if !out_actual.is_null() {
         out_actual.write(actual)?;
@@ -158,7 +161,8 @@ pub fn sys_stream_readv_at(
     }
 
     let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_READ)?;
-    let actual = stream.read_vector_at(make_user_out_iovec(vector, vector_count), offset)?;
+    let (status, actual) = stream.read_vector_at(make_user_out_iovec(vector, vector_count), offset);
+    status?;
 
     if !out_actual.is_null() {
         out_actual.write(actual)?;

@@ -16,16 +16,18 @@ import inspect as py_inspect
 import json
 import logging
 import pathlib
-from typing import (
-    Any,
-    Callable,
-    Iterable,
+from collections.abc import (
+    Collection,
     Mapping,
     MutableMapping,
     MutableSequence,
+    Sequence,
+)
+from typing import (
+    Any,
+    Callable,
     NotRequired,
     Self,
-    Sequence,
     TypeAlias,
     TypedDict,
 )
@@ -131,7 +133,7 @@ class TestCaseResult:
 
     @staticmethod
     def write_fuchsiaperf_json(
-        results: Iterable["TestCaseResult"],
+        results: Collection["TestCaseResult"],
         test_suite: str,
         output_path: pathlib.Path,
     ) -> None:

@@ -12,7 +12,7 @@ use derivative::Derivative;
 use lru::LruCache;
 use net_types::ip::{Ip, IpVersionMarker};
 use netstack3_base::{
-    CoreTimerContext, Inspectable, Inspector, Instant as _, LocalFrameDestination,
+    CoreTimerContext, Inspectable, Inspector, Instant as _, LocalFrameDestination, Marks,
     StrongDeviceIdentifier as _, WeakDeviceIdentifier,
 };
 use packet::{Buf, ParseBufferMut};
@@ -104,20 +104,23 @@ impl<I: IpLayerIpExt, D: WeakDeviceIdentifier, BC: MulticastForwardingBindingsCo
         dev: &D::Strong,
         frame_dst: Option<LocalFrameDestination>,
         max_fragment_len: Option<usize>,
+        marks: Marks,
     ) -> QueuePacketOutcome
     where
         B: SplitByteSlice,
     {
         let was_empty = self.table.is_empty();
         let outcome = if let Some(queue) = self.table.get_mut(&key) {
-            match queue.try_push(|| QueuedPacket::new(dev, packet, frame_dst, max_fragment_len)) {
+            match queue
+                .try_push(|| QueuedPacket::new(dev, packet, frame_dst, max_fragment_len, marks))
+            {
                 Ok(()) => QueuePacketOutcome::QueuedInExistingQueue,
                 Err(PacketQueueFullError) => QueuePacketOutcome::ExistingQueueFull,
             }
         } else {
             let mut queue = PacketQueue::new(bindings_ctx);
             queue
-                .try_push(|| QueuedPacket::new(dev, packet, frame_dst, max_fragment_len))
+                .try_push(|| QueuedPacket::new(dev, packet, frame_dst, max_fragment_len, marks))
                 .expect("newly instantiated queue must have capacity");
 
             let prev = self.table.put(key, queue);
@@ -283,6 +286,8 @@ pub struct QueuedPacket<I: Ip, D: WeakDeviceIdentifier> {
     /// The maximum size fragment that was used to reassemble this packet when
     /// it ingressed the stack. None if IP reassembly was not performed.
     pub(crate) max_fragment_len: Option<usize>,
+    /// Marks attached to the packet on ingress.
+    pub(crate) marks: Marks,
 }
 
 impl<I: IpLayerIpExt, D: WeakDeviceIdentifier> QueuedPacket<I, D> {
@@ -291,12 +296,14 @@ impl<I: IpLayerIpExt, D: WeakDeviceIdentifier> QueuedPacket<I, D> {
         packet: &I::Packet<B>,
         frame_dst: Option<LocalFrameDestination>,
         max_fragment_len: Option<usize>,
+        marks: Marks,
     ) -> Self {
         QueuedPacket {
             device: device.downgrade(),
             packet: ValidIpPacketBuf::new(packet),
             frame_dst,
             max_fragment_len,
+            marks,
         }
     }
 }
@@ -343,7 +350,9 @@ mod tests {
     use netstack3_base::testutil::{
         FakeInstant, FakeTimerCtxExt, FakeWeakDeviceId, MultipleDevicesId,
     };
-    use netstack3_base::{CounterContext, InstantContext, StrongDeviceIdentifier, TimerContext};
+    use netstack3_base::{
+        CounterContext, InstantContext, MarkDomain, StrongDeviceIdentifier, TimerContext,
+    };
     use packet::ParseBuffer;
     use static_assertions::const_assert;
     use test_case::test_case;
@@ -383,6 +392,10 @@ mod tests {
                 _,
             >::new::<FakeCoreCtx<I, MultipleDevicesId>>(&mut bindings_ctx);
 
+        // Use a non-default value so that the `expected_packet` comparison
+        // below actually exercises round-tripping `marks` through the queue.
+        let marks = Marks::new([(MarkDomain::Mark1, 100)]);
+
         // The first packet gets a new queue.
         assert_eq!(
             pending_table.try_queue_packet(
@@ -392,6 +405,7 @@ mod tests {
                 &DEV,
                 frame_dst,
                 max_fragment_len,
+                marks,
             ),
             QueuePacketOutcome::QueuedInNewQueue
         );
@@ -405,6 +419,7 @@ mod tests {
                     &DEV,
                     frame_dst,
                     max_fragment_len,
+                    marks,
                 ),
                 QueuePacketOutcome::QueuedInExistingQueue
             );
@@ -418,6 +433,7 @@ mod tests {
                 &DEV,
                 frame_dst,
                 max_fragment_len,
+                marks,
             ),
             QueuePacketOutcome::ExistingQueueFull
         );
@@ -431,6 +447,7 @@ mod tests {
                 &DEV,
                 frame_dst,
                 max_fragment_len,
+                marks,
             ),
             QueuePacketOutcome::QueuedInNewQueue
         );
@@ -438,7 +455,7 @@ mod tests {
         // Based on the calls above, `key1` should have a full queue, `key2`
         // should have a queue with only 1 packet, and `key3` shouldn't have
         // a queue.
-        let expected_packet = QueuedPacket::new(&DEV, &packet, frame_dst, max_fragment_len);
+        let expected_packet = QueuedPacket::new(&DEV, &packet, frame_dst, max_fragment_len, marks);
         let queue =
             pending_table.remove(&key1, &mut bindings_ctx).expect("key1 should have a queue");
         assert_eq!(queue.queue.len(), PACKET_QUEUE_LEN);
@@ -485,6 +502,7 @@ mod tests {
                 dev,
                 frame_dst,
                 max_fragment_len,
+                Marks::default(),
             )
         })
     }

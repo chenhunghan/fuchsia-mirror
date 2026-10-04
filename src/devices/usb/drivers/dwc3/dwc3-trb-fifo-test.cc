@@ -36,6 +36,7 @@ class TrbFifoTest : public testing::TestWithParam<bool> {
  protected:
   class TTrbFifo : public TrbFifo {
    public:
+    using TrbFifo::buffer_;
     using TrbFifo::first_;
     using TrbFifo::GetPhys;
     using TrbFifo::last_;
@@ -104,6 +105,51 @@ TEST_P(TrbFifoTest, ReInitTest) {
 
   ASSERT_EQ(fifo_.write_, fifo_.first_);
   ASSERT_EQ(fifo_.read_, fifo_.first_);
+
+  CheckLinkTRB();
+}
+
+TEST_P(TrbFifoTest, ReInitSameCacheOptionClearsTrbControls) {
+  const dma_buffer::ContiguousBuffer* prev_buffer = fifo_.buffer_.get();
+  ASSERT_NE(prev_buffer, nullptr);
+
+  dwc3_trb_t* trb = fifo_.write_;
+  trb->control = TRB_HWO;
+  fifo_.Write(fifo_.write_);
+  fifo_.AdvanceWrite();
+  (fifo_.last_ - 1)->control = TRB_HWO;
+  ASSERT_NE(fifo_.write_, fifo_.first_);
+  ASSERT_EQ(fifo_.first_->control, static_cast<uint32_t>(TRB_HWO));
+  ASSERT_EQ((fifo_.last_ - 1)->control, static_cast<uint32_t>(TRB_HWO));
+
+  ASSERT_TRUE(fifo_.Init(bti_, GetParam()).is_ok());
+
+  EXPECT_EQ(fifo_.buffer_.get(), prev_buffer);
+  EXPECT_EQ(fifo_.TotalSlots(), (kBufferSize / sizeof(dwc3_trb_t)) - 1);
+  EXPECT_EQ(fifo_.write_, fifo_.first_);
+  EXPECT_EQ(fifo_.read_, fifo_.first_);
+  EXPECT_EQ(fifo_.first_->control, 0u);
+  EXPECT_EQ((fifo_.last_ - 1)->control, 0u);
+
+  CheckLinkTRB();
+}
+
+TEST_P(TrbFifoTest, ReInitDifferentCacheOptionReallocatesBuffer) {
+  fifo_.first_->control = TRB_HWO;
+  fifo_.AdvanceWrite();
+  ASSERT_NE(fifo_.write_, fifo_.first_);
+
+  const bool new_cached = !GetParam();
+  ASSERT_TRUE(fifo_.Init(bti_, new_cached).is_ok());
+
+  const dma_buffer::CacheOptions expected_cache_options =
+      new_cached ? dma_buffer::CacheOptions::kEnabled : dma_buffer::CacheOptions::kDisabled;
+  ASSERT_NE(fifo_.buffer_, nullptr);
+  EXPECT_EQ(fifo_.buffer_->cache_options(), expected_cache_options);
+  EXPECT_EQ(fifo_.TotalSlots(), (kBufferSize / sizeof(dwc3_trb_t)) - 1);
+  EXPECT_EQ(fifo_.write_, fifo_.first_);
+  EXPECT_EQ(fifo_.read_, fifo_.first_);
+  EXPECT_EQ(fifo_.first_->control, 0u);
 
   CheckLinkTRB();
 }

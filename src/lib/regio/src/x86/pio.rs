@@ -51,7 +51,7 @@ impl<Base, Access: Accessible> PortIo<Base, Access> {
 
 impl<Base, Access: Accessible> Clone for PortIo<Base, Access> {
     fn clone(&self) -> Self {
-        Self { port: self.port, _marker: PhantomData }
+        *self
     }
 }
 

@@ -13,6 +13,7 @@ source_set("hypervisor") {
   sources = [
     "aspace.cc",
     "cpu.cc",
+    "guest_ffi.cc",
     "ktrace.cc",
     "trap_map.cc",
   ]

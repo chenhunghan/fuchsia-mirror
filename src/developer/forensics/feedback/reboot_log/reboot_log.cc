@@ -4,7 +4,6 @@
 
 #include "src/developer/forensics/feedback/reboot_log/reboot_log.h"
 
-#include <lib/fit/defer.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <algorithm>
@@ -203,36 +202,41 @@ void ExtractZirconRebootInfo(const std::string& path, HwShutdownReason* out_hw_r
   }
 }
 
-// Prints |reboot_log| with the DLOG removed. Returns the removed DLOG, if present.
-std::optional<std::string> ExtractDlogAndLogRebootLog(const std::string& reboot_log) {
-  auto fallback_log =
-      fit::defer([&reboot_log] { FX_LOGS(INFO) << "Reboot info:\n"
-                                               << reboot_log; });
+// Removes the DLOG from |zircon_reboot_log|, if present, replacing it with a note pointing to the
+// snapshot file where the DLOG dump can be found. Returns the removed DLOG, if present.
+std::optional<std::string> ExtractDlog(std::optional<std::string>* zircon_reboot_log) {
+  if (!zircon_reboot_log->has_value()) {
+    return std::nullopt;
+  }
 
-  const size_t begin_header_pos = reboot_log.find(kBeginDlog);
+  const size_t begin_header_pos = (*zircon_reboot_log)->find(kBeginDlog);
   if (begin_header_pos == std::string::npos) {
     return std::nullopt;
   }
 
   const size_t payload_begin = begin_header_pos + kBeginDlog.size();
-  const size_t payload_end = reboot_log.find(kEndDlog, begin_header_pos);
+  const size_t payload_end = (*zircon_reboot_log)->find(kEndDlog, payload_begin);
 
+  const std::string raw_dlog =
+      (payload_end == std::string::npos)
+          ? (*zircon_reboot_log)->substr(payload_begin)
+          : (*zircon_reboot_log)->substr(payload_begin, payload_end - payload_begin);
+  const std::string post_dlog = (payload_end == std::string::npos)
+                                    ? "\n"
+                                    : (*zircon_reboot_log)->substr(payload_end + kEndDlog.size());
+
+  *zircon_reboot_log =
+      fxl::StringPrintf("%sDLOG dump can be found in the snapshot file: %s%s",
+                        (*zircon_reboot_log)->substr(0, begin_header_pos).c_str(),
+                        feedback_data::kAttachmentLogKernelPrevious, post_dlog.c_str());
+
+  std::string dlog(fxl::TrimString(raw_dlog, " \f\n\r\t\v"));
   if (payload_end == std::string::npos) {
-    // For some reason the DLOG dump started, but never finished.
-    return std::nullopt;
+    FX_LOGS(WARNING) << "DLOG dump was truncated";
+    dlog.append("\n--- DLOG DUMP TRUNCATED ---");
   }
 
-  const size_t end_footer_pos = payload_end + kEndDlog.size();
-
-  fallback_log.cancel();
-  FX_LOGS(INFO) << "Reboot info:\n"
-                << reboot_log.substr(0, begin_header_pos)
-                << "DLOG dump can be found in the snapshot file: "
-                << feedback_data::kAttachmentLogKernelPrevious << reboot_log.substr(end_footer_pos);
-
-  const std::string dlog = reboot_log.substr(payload_begin, payload_end - payload_begin);
-
-  return std::string(fxl::TrimString(dlog, " \f\n\r\t\v"));
+  return dlog;
 }
 
 std::optional<GracefulShutdownInfo> ExtractLegacyGracefulRebootInfo(
@@ -397,8 +401,12 @@ RebootLog RebootLog::ParseRebootLog(const std::string& zircon_reboot_log_path,
                     fallback_uptime, fallback_runtime);
 
   if (first_component_instance) {
-    const std::optional<std::string> dlog = ExtractDlogAndLogRebootLog(reboot_log);
+    const std::optional<std::string> dlog = ExtractDlog(&zircon_reboot_log);
     PersistDlog(dlog, redactor, previous_boot_kernel_log_path);
+    FX_LOGS(INFO) << "Reboot info:\n"
+                  << MakeRebootLog(zircon_reboot_log, graceful_info,
+                                   final_shutdown_info.ToRebootReasonString(), fallback_uptime,
+                                   fallback_runtime);
 
     if (!files::WriteFile(final_shutdown_info_path, final_shutdown_info.ToJson())) {
       FX_LOGS(ERROR) << "Failed to persist FinalShutdownInfo";

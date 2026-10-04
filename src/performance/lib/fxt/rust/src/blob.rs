@@ -366,7 +366,7 @@ mod tests {
             FxtBuilder::new(header)
                 .atom(format_header.0.to_le_bytes())
                 .atom(1024u64.to_le_bytes())
-                .atom(FxtBuilder::new(arg_header).build())
+                .atom_words(FxtBuilder::new(arg_header).build())
                 .atom(payload.len().to_le_bytes())
                 .atom(payload)
                 .build(),

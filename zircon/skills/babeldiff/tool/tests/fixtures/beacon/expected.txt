@@ -1,0 +1,186 @@
+babeldiff: 7 pairs, 0 issues, 3 notes; 0 C++ and 0 Rust functions unpaired
+legend: = same  ~ note  ! issue  < only in C++  > only in Rust
+
+==== BeaconDispatcher::Subscribe  <->  BeaconDispatcher::subscribe
+  C++   zircon/kernel/object/beacon_dispatcher.cc:41-55
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:20-35
+  via   C++ now calls FFI shim rust_beacon_dispatcher_subscribe  zircon/kernel/object/beacon_dispatcher_ffi.rs:10-27
+  similarity 0.86, 0 issues, 1 note
+
+    41 zx_status_t BeaconDispatcher::Subscribe(uint64_t key, uint32_t* out_ind… =     20 pub fn subscribe(&self, key: u64) -> Result<u32, Status> {
+    42   Guard<CriticalMutex> guard{get_lock()};                                =     21     ksync::lock!(let mut guard = self.lock());
+    43   if (subscriber_count_ >= kMaxSubscribers) {                            =     22     if guard.subscriber_count >= MAX_SUBSCRIBERS {
+    44     return ZX_ERR_NO_RESOURCES;                                          =     23         return Err(Status::NO_RESOURCES);
+    46   // Keys must be unique so that Unsubscribe can find them.              =     25     // Keys must be unique so that Unsubscribe can find them.
+    47   for (uint32_t i = 0; i < subscriber_count_; i++) {                     =     26     for i in 0..guard.subscriber_count {
+    48     if (subscribers_[i] == key) {                                        =     27         if guard.subscribers[i as usize] == key {
+    49       return ZX_ERR_ALREADY_EXISTS;                                      =     28             return Err(Status::ALREADY_EXISTS);
+                                                                                >     31     let index = guard.subscriber_count;
+    52   subscribers_[subscriber_count_] = key;                                 =     32     guard.subscribers[index as usize] = key;
+                                                                                >     33     guard.subscriber_count += 1;
+        ^ ~ statement only in Rust
+    53   *out_index = subscriber_count_++;                                      =     34     Ok(index)
+    54   return ZX_OK;
+
+  errors   same
+           C++:  NO_RESOURCES, ALREADY_EXISTS
+           Rust: NO_RESOURCES, ALREADY_EXISTS
+  locks    same
+           C++:  lock
+           Rust: lock
+  flow     if 2, loop 1, return 3
+  comments 1 C++ comment: 1 identical, 0 reworded, 0 missing in Rust
+  findings
+    ~ - | beacon_dispatcher.rs:33  statement only in Rust
+
+==== BeaconDispatcher::Unsubscribe  <->  BeaconDispatcher::unsubscribe
+  C++   zircon/kernel/object/beacon_dispatcher.cc:57-67
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:37-49
+  via   C++ now calls FFI shim rust_beacon_dispatcher_unsubscribe  zircon/kernel/object/beacon_dispatcher_ffi.rs:29-35
+  similarity 0.89, 0 issues, 2 notes
+
+    57 zx_status_t BeaconDispatcher::Unsubscribe(uint64_t key) {                =     37 pub fn unsubscribe(&self, key: u64) -> Result<(), Status> {
+    58   Guard<CriticalMutex> guard{get_lock()};                                =     38     ksync::lock!(let mut guard = self.lock());
+    59   for (uint32_t i = 0; i < subscriber_count_; i++) {                     =     39     for i in 0..guard.subscriber_count {
+    60     if (subscribers_[i] == key) {                                        =     40         if guard.subscribers[i as usize] == key {
+    61       // Swap the last subscriber into the hole.                         =     41             // Swap the last subscriber into the hole.
+                                                                                >     42             guard.subscriber_count -= 1;
+        ^ ~ statement only in Rust
+    62       subscribers_[i] = subscribers_[--subscriber_count_];               =     43             let last = guard.subscribers[guard.subscriber_count as usiz…
+                                                                                >     44             guard.subscribers[i as usize] = last;
+        ^ ~ statement only in Rust
+    63       return ZX_OK;                                                      =     45             return Ok(());
+    66   return ZX_ERR_NOT_FOUND;                                               =     48     Err(Status::NOT_FOUND)
+
+  errors   same
+           C++:  NOT_FOUND
+           Rust: NOT_FOUND
+  locks    same
+           C++:  lock
+           Rust: lock
+  flow     if 1, loop 1, return 2
+  comments 1 C++ comment: 1 identical, 0 reworded, 0 missing in Rust
+  findings
+    ~ - | beacon_dispatcher.rs:42  statement only in Rust
+    ~ - | beacon_dispatcher.rs:44  statement only in Rust
+
+==== BeaconDispatcher::Flash  <->  BeaconDispatcher::flash
+  C++   zircon/kernel/object/beacon_dispatcher.cc:69-88
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:51-61
+  via   C++ now calls FFI shim rust_beacon_dispatcher_flash  zircon/kernel/object/beacon_dispatcher_ffi.rs:37-40
+  similarity 0.97, 0 issues, 0 notes
+
+    69 zx_status_t BeaconDispatcher::Flash(uint32_t mode) {                     =     51 pub fn flash(&self, mode: u32) -> Result<(), Status> {
+    70   zx_status_t status = CheckMode(mode);                                  =     52     Self::check_mode(mode)?;
+    71   if (status != ZX_OK) {
+    72     return status;
+    73   }
+    74   Guard<CriticalMutex> guard{get_lock()};                                =     53     ksync::lock!(let mut guard = self.lock());
+    75   switch (mode) {                                                        =     54     match mode {
+    76     case ZX_BEACON_MODE_ONCE:                                            =     55         ZX_BEACON_MODE_ONCE => guard.flashes += 1,
+    77       flashes_++;                                                        =
+    79     case ZX_BEACON_MODE_REPEAT:                                          =     56         ZX_BEACON_MODE_REPEAT | ZX_BEACON_MODE_BURST => guard.flashes +…
+    80     case ZX_BEACON_MODE_BURST:
+    81       flashes_ += kBurstLength;                                          =
+    83     default:                                                             =     57         _ => return Err(Status::NOT_SUPPORTED),
+    84       return ZX_ERR_NOT_SUPPORTED;                                       =
+    86   UpdateStateLocked(0u, ZX_BEACON_FLASHED);                              =     59     self.update_state_locked(&mut guard, 0, ZX_BEACON_FLASHED);
+    87   return ZX_OK;                                                          =     60     Ok(())
+
+  errors   same
+           C++:  ?, NOT_SUPPORTED
+           Rust: ?, NOT_SUPPORTED
+  locks    same
+           C++:  lock
+           Rust: lock
+  flow     switch 4, return 2
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== BeaconDispatcher::CheckMode  <->  BeaconDispatcher::check_mode
+  C++   zircon/kernel/object/beacon_dispatcher.cc:90-93
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:63-65
+  why   same class and method name
+  similarity 0.95, 0 issues, 0 notes
+
+    91 zx_status_t BeaconDispatcher::CheckMode(uint32_t mode) {                 =     63 fn check_mode(mode: u32) -> Result<(), Status> {
+    92   return mode <= ZX_BEACON_MODE_MAX ? ZX_OK : ZX_ERR_INVALID_ARGS;       =     64     if mode <= ZX_BEACON_MODE_MAX { Ok(()) } else { Err(Status::INVALID…
+
+  errors   same
+           C++:  INVALID_ARGS
+           Rust: INVALID_ARGS
+  locks    same
+  flow     if 1, else 1, return 2
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== BeaconDispatcher::GetSubscriber  <->  BeaconDispatcher::get_subscriber
+  C++   zircon/kernel/object/beacon_dispatcher.cc:95-103
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:67-75
+  via   C++ now calls FFI shim rust_beacon_dispatcher_get_subscriber  zircon/kernel/object/beacon_dispatcher_ffi.rs:42-59
+  similarity 0.79, 0 issues, 0 notes
+
+                                                                                >     67 /// # Safety
+                                                                                      68 ///
+                                                                                      69 /// Nothing here is unsafe; the section exists to test that babeldiff
+                                                                                      70 /// expects safety documentation in Rust.
+    95 zx_status_t BeaconDispatcher::GetSubscriber(uint32_t index, uint64_t* o… =     71 pub fn get_subscriber(&self, index: u32) -> Result<u64, Status> {
+    96   Guard<CriticalMutex> guard{get_lock()};                                =     72     ksync::lock!(let guard = self.lock());
+    97   const uint64_t* key = FindLocked(index);                               =     73     let key = self.find_locked(&guard, index).ok_or(Status::OUT_OF_RANG…
+    98   if (!key) {
+    99     return ZX_ERR_OUT_OF_RANGE;
+   100   }
+   101   *out_key = *key;                                                       =     74     Ok(*key)
+   102   return ZX_OK;
+
+  errors   same
+           C++:  OUT_OF_RANGE?
+           Rust: OUT_OF_RANGE?
+  locks    same
+           C++:  lock
+           Rust: lock
+  flow     return 1
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== BeaconDispatcher::FlashCount  <->  BeaconDispatcher::flash_count
+  C++   zircon/kernel/object/beacon_dispatcher.cc:105-108
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:77-82
+  via   C++ now calls FFI shim rust_beacon_dispatcher_flash_count  zircon/kernel/object/beacon_dispatcher_ffi.rs:61-64
+  similarity 0.72, 0 issues, 0 notes
+
+   105 uint64_t BeaconDispatcher::FlashCount() const {                          =     77 pub fn flash_count(&self) -> u64 {
+   106   Guard<CriticalMutex> guard{&lock_};                                    =     78     ksync::lock!(let guard = self.lock.lock());
+                                                                                >     79     let token = guard.token();
+                                                                                >     80     // SAFETY: `token` proves the lock is held.
+   107   return flashes_;                                                       =     81     unsafe { *self.flashes.get(&token) }
+
+  errors   same
+  locks    same
+           C++:  lock
+           Rust: lock
+  flow     return 1
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== BeaconDispatcher::FindLocked  <->  BeaconDispatcher::find_locked
+  C++   zircon/kernel/object/beacon_dispatcher.cc:110-112
+  Rust  zircon/kernel/object/beacon_dispatcher.rs:84-92
+  why   same class and method name
+  similarity 0.87, 0 issues, 0 notes
+
+   110 const uint64_t* BeaconDispatcher::FindLocked(uint32_t index) const {     =     84 fn find_locked<'a>(&self, guard: &'a StateLockGuard<'_>, index: u32) ->…
+   111   return index < subscriber_count_ ? &subscribers_[index] : nullptr;     =     85     if index < guard.subscriber_count {
+                                                                                >     86         // SAFETY: `index` is below `subscriber_count`, which never exc…
+                                                                                      87         // length.
+                                                                                =     88         Some(unsafe { guard.subscribers.get_unchecked(index as usize) })
+                                                                                =     89     } else {
+                                                                                =     90         None
+
+  errors   same
+  locks    same
+  flow     if 1, else 1, return 2
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== FFI shims
+  rust_beacon_dispatcher_subscribe -> BeaconDispatcher::subscribe  zircon/kernel/object/beacon_dispatcher_ffi.rs:10-27
+  rust_beacon_dispatcher_unsubscribe -> BeaconDispatcher::unsubscribe  zircon/kernel/object/beacon_dispatcher_ffi.rs:29-35
+  rust_beacon_dispatcher_flash -> BeaconDispatcher::flash  zircon/kernel/object/beacon_dispatcher_ffi.rs:37-40
+  rust_beacon_dispatcher_get_subscriber -> BeaconDispatcher::get_subscriber  zircon/kernel/object/beacon_dispatcher_ffi.rs:42-59
+  rust_beacon_dispatcher_flash_count -> BeaconDispatcher::flash_count  zircon/kernel/object/beacon_dispatcher_ffi.rs:61-64

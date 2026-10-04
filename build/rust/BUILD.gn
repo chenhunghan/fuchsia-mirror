@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_build_action.gni")
 import("//build/config/fuchsia/target_api_level_range.gni")
 import("//build/testing/host_test_data.gni")
 import("config.gni")
@@ -104,10 +105,7 @@ if (current_toolchain != default_toolchain) {
     ]
   }
 } else {
-  project_json = "$root_build_dir/project.json"
-  api_level_cfg_flags = "$root_build_dir/rust_api_level_cfg_flags.txt"
-
-  action("cargo_toml_gen") {
+  bazel_build_action("cargo_toml_gen") {
     testonly = true
 
     # Nothing in-tree should depend on Cargo files.
@@ -129,36 +127,26 @@ if (current_toolchain != default_toolchain) {
       # via --with-host or `host_labels`, and specifying the fuchsia toolchain:
       "//:host",
     ]
-    script = "generate_cargo.py"
-    sources = []
-    inputs = [
-      project_json,
-      "//third_party/rust_crates/Cargo.toml",
-      api_level_cfg_flags,
-    ]
-    hermetic_deps = false
 
-    outputs = [ "$root_build_dir/cargo/generate_cargo.stamp" ]
-    args = [
-      rebase_path(project_json, root_build_dir),
-      "--root_build_dir",
-      ".",
-      "--fuchsia_dir",
-      rebase_path("//", root_build_dir),
-      "--api_level_cfg_flags",
-      rebase_path(api_level_cfg_flags, root_build_dir),
-    ]
+    bazel_target = "//build/rust:cargo_toml_gen"
+    bazel_config = "host"
     deps = [
-      "//build/rust:api_level_cfg_flags",
-      "//tools/gn_desc:gn_project_json",
+      ":api_level_cfg_flags.bazel_input",
+      "//tools/gn_desc:project_json.bazel_input",
     ]
-    metadata = {
-      # Hint to ninja that this action takes about 30 seconds, so that it's
-      # appropriately weighted in the calculation of the critical path for
-      # a build.
-      ninja_edge_weights =
-          [ rebase_path(outputs[0], root_build_dir) + ",30000" ]
-    }
+
+    ninja_base_dir = root_build_dir
+    directory_outputs = [
+      {
+        bazel_dir = "{{BAZEL_TARGET_OUT_DIR}}/{{BAZEL_TARGET_NAME}}"
+        ninja_dir = "cargo"
+        tracked_files = [
+          "rust_targets.json",
+          "rustdoc_targets.json",
+          "rustdoc_host_targets.json",
+        ]
+      },
+    ]
   }
 }
 
@@ -176,6 +164,11 @@ generated_file("api_level_cfg_flags") {
   foreach(level, greater_fuchsia_api_levels) {
     contents += [ "--cfg=fuchsia_api_level_less_than=\"${level}\"" ]
   }
+}
+
+bazel_input_file("api_level_cfg_flags.bazel_input") {
+  generator = ":api_level_cfg_flags"
+  testonly = true
 }
 
 # Multiple integration tests rely on having a Rust toolchain available on the

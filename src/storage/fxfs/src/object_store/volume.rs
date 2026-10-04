@@ -166,9 +166,9 @@ impl RootVolume {
         let objects_to_delete = self.delete_volume_impl(volume_name, &mut transaction).await?;
         transaction.commit_with_callback(|_| callback()).await.context("commit")?;
         // Tombstone the deleted objects.
-        let root_store = self.filesystem.root_store();
+        let root_store_id = self.filesystem.root_store().store_object_id();
         for object_id in &objects_to_delete {
-            root_store.tombstone_object(*object_id, Options::default(), None).await?;
+            self.filesystem.tombstone_object(root_store_id, *object_id, None).await?;
         }
         Ok(())
     }
@@ -820,6 +820,86 @@ mod tests {
             assert_eq!(store.tree.get_earliest_version(), LATEST_VERSION);
         }
 
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_delete_volume_borrows_and_returns_metadata_space() {
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root
+            .new_volume("vol", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let dir = Directory::open(&store, store.root_directory_object_id()).await.expect("open");
+        for i in 0..200 {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            dir.create_child_file(&mut transaction, &format!("f_{i}"))
+                .await
+                .expect("create_child_file failed");
+            transaction.commit().await.expect("commit failed");
+        }
+
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.journal().pause_compactions().await;
+
+        // Dirty and flush `store` while compactions are paused so its new layer file in
+        // `root_store` consumes space from `metadata_reservation` that has not yet been reconciled
+        // by a full journal compaction.
+        {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            dir.create_child_file(&mut transaction, "extra")
+                .await
+                .expect("create_child_file failed");
+            transaction.commit().await.expect("commit failed");
+        }
+        store.flush().await.expect("flush failed");
+        std::mem::drop(dir);
+        std::mem::drop(store);
+
+        let metadata_before = fs.object_manager().metadata_reservation().amount();
+
+        // Reserve all remaining free space in the allocator so that `delete_volume` must borrow
+        // metadata space rather than reserving new space from the allocator.
+        let mut reservations = Vec::new();
+        let mut chunk = 16 * 1024 * 1024;
+        while chunk >= 4096 {
+            if let Some(r) = fs.allocator().reserve(None, chunk) {
+                reservations.push(r);
+            } else {
+                chunk /= 2;
+            }
+        }
+
+        let (_, transaction) = root
+            .acquire_transaction_for_remove_volume("vol", [], false)
+            .await
+            .expect("acquire_transaction_for_remove_volume failed");
+        root.delete_volume("vol", transaction, || {}).await.expect("delete_volume failed");
+
+        let metadata_after = fs.object_manager().metadata_reservation().amount();
+        assert!(
+            metadata_after > metadata_before,
+            "delete_volume should return tombstoned root_store layer blocks to \
+             metadata_reservation (before: {metadata_before}, after: {metadata_after})"
+        );
+
+        std::mem::drop(reservations);
+        fs.journal().resume_compactions();
         fs.close().await.expect("close failed");
     }
 }

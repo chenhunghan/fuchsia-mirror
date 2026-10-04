@@ -302,6 +302,45 @@ TEST_F(AmlClockTest, G12aEnableDos) {
   EnableClock(g12a_clk::CLK_DOS_GCLK_VDEC);
 
   EXPECT_EQ(0x3ffu, dos_data.Read32(0x3f01 * sizeof(uint32_t)));
+  EXPECT_EQ(kHhiVdecClkCntlVdecEnableVal, actual.Read32(kHhiVdecClkCntl));
+
+  DisableClock(g12a_clk::CLK_DOS_GCLK_VDEC);
+  EXPECT_EQ(0u, dos_data.Read32(kDosGclkEn0));
+  EXPECT_EQ(kHhiVdecClkCntlVdecDisableVal, actual.Read32(kHhiVdecClkCntl));
+}
+
+TEST_F(AmlClockTest, Sm1EnableDos) {
+  auto buffer = fdf_testing::CreateMmioBuffer(S905D3_HIU_LENGTH);
+  auto actual = buffer.View(0);
+
+  auto [dos_data, dos_buffer] = MakeDosbusMmio();
+  InitDriver(std::move(buffer), std::move(dos_buffer), PDEV_DID_AMLOGIC_SM1_CLK);
+
+  EnableClock(sm1_clk::CLK_DOS_GCLK_VDEC);
+
+  EXPECT_EQ(0x3ffu, dos_data.Read32(sm1_clk::kDosGclkEn0));
+  EXPECT_EQ(kHhiVdecClkCntlVdecEnableVal, actual.Read32(kHhiVdecClkCntl));
+
+  DisableClock(sm1_clk::CLK_DOS_GCLK_VDEC);
+  EXPECT_EQ(0u, dos_data.Read32(sm1_clk::kDosGclkEn0));
+  EXPECT_EQ(kHhiVdecClkCntlVdecDisableVal, actual.Read32(kHhiVdecClkCntl));
+}
+
+TEST_F(AmlClockTest, G12bEnableHcodec) {
+  auto buffer = fdf_testing::CreateMmioBuffer(A311D_HIU_LENGTH);
+  auto actual = buffer.View(0);
+
+  auto [dos_data, dos_buffer] = MakeDosbusMmio();
+  InitDriver(std::move(buffer), std::move(dos_buffer), PDEV_DID_AMLOGIC_G12B_CLK);
+
+  EnableClock(g12b_clk::G12B_CLK_DOS_GCLK_HCODEC);
+
+  EXPECT_EQ(0x7fffu << 12u, dos_data.Read32(kG12bDosGclkEn0));
+  EXPECT_EQ(kHhiVdecClkCntlHcodecEnableVal, actual.Read32(kHhiVdecClkCntl));
+
+  DisableClock(g12b_clk::G12B_CLK_DOS_GCLK_HCODEC);
+  EXPECT_EQ(0u, dos_data.Read32(kG12bDosGclkEn0));
+  EXPECT_EQ(kHhiVdecClkCntlHcodecDisableVal, actual.Read32(kHhiVdecClkCntl));
 }
 
 TEST_F(AmlClockTest, G12bEnableAudio) {

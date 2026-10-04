@@ -13,6 +13,8 @@
 #include <lib/zbitl/image.h>
 
 #include <array>
+#include <string>
+#include <string_view>
 
 #include <zxtest/zxtest.h>
 
@@ -476,6 +478,107 @@ TEST(RebootReasonItemTest, PmicBrownoutReasons) {
              *reason == ZBI_HW_REBOOT_REASON_BROWNOUT;
     }));
   }
+}
+
+// The bootloader may write values into bootconfig unquoted, which bootconfig syntax parses as
+// arrays. The full value must be reconstructed.
+TEST(RebootReasonItemTest, BootconfigUnquotedRebootCold) {
+  constexpr std::string_view kBootconfigData = "androidboot.bootreason:=reboot,cold\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+
+  std::array<std::byte, 512> image_buffer;
+  zbitl::Image<std::span<std::byte>> image(image_buffer);
+  ASSERT_TRUE(image.clear().is_ok());
+
+  boot_shim::BootShim<boot_shim::RebootReasonItem> shim("test-shim", stdout);
+  shim.Get<boot_shim::RebootReasonItem>().Init(props, shim.shim_name());
+
+  ASSERT_TRUE(shim.AppendItems(image).is_ok());
+
+  ASSERT_TRUE(HasZbiItem(image, [](const zbi_header_t& header, zbitl::ByteView payload) {
+    EXPECT_GE(payload.size_bytes(), sizeof(zbi_hw_reboot_reason_t));
+    auto* reason = reinterpret_cast<const zbi_hw_reboot_reason_t*>(payload.data());
+    return header.type == ZBI_TYPE_HW_REBOOT_REASON &&
+           (payload.size_bytes() >= sizeof(zbi_hw_reboot_reason_t)) &&
+           *reason == ZBI_HW_REBOOT_REASON_COLD;
+  }));
+}
+
+// Sub-reasons appended to a known reason refine, but do not change, it.
+TEST(RebootReasonItemTest, BootconfigUnquotedWatchdogApc) {
+  constexpr std::string_view kBootconfigData = "androidboot.bootreason:=watchdog,apc\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+
+  std::array<std::byte, 512> image_buffer;
+  zbitl::Image<std::span<std::byte>> image(image_buffer);
+  ASSERT_TRUE(image.clear().is_ok());
+
+  boot_shim::BootShim<boot_shim::RebootReasonItem> shim("test-shim", stdout);
+  shim.Get<boot_shim::RebootReasonItem>().Init(props, shim.shim_name());
+
+  ASSERT_TRUE(shim.AppendItems(image).is_ok());
+
+  ASSERT_TRUE(HasZbiItem(image, [](const zbi_header_t& header, zbitl::ByteView payload) {
+    EXPECT_GE(payload.size_bytes(), sizeof(zbi_hw_reboot_reason_t));
+    auto* reason = reinterpret_cast<const zbi_hw_reboot_reason_t*>(payload.data());
+    return header.type == ZBI_TYPE_HW_REBOOT_REASON &&
+           (payload.size_bytes() >= sizeof(zbi_hw_reboot_reason_t)) &&
+           *reason == ZBI_HW_REBOOT_REASON_WATCHDOG;
+  }));
+}
+
+// A known reason only matches on a ',' boundary.
+TEST(RebootReasonItemTest, PrefixRequiresSeparator) {
+  constexpr std::string_view kBootconfigData = "androidboot.bootreason:=reboot,coldx\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);
+  boot_shim::BootProperties props("", bootconfig);
+
+  std::array<std::byte, 512> image_buffer;
+  zbitl::Image<std::span<std::byte>> image(image_buffer);
+  ASSERT_TRUE(image.clear().is_ok());
+
+  boot_shim::BootShim<boot_shim::RebootReasonItem> shim("test-shim", stdout);
+  shim.Get<boot_shim::RebootReasonItem>().Init(props, shim.shim_name());
+
+  ASSERT_TRUE(shim.AppendItems(image).is_ok());
+
+  ASSERT_FALSE(HasZbiItem(image, [](const zbi_header_t& header, zbitl::ByteView payload) {
+    return header.type == ZBI_TYPE_HW_REBOOT_REASON;
+  }));
+}
+
+// Values longer than the buffer still match on their prefix.
+TEST(RebootReasonItemTest, BootconfigLongValue) {
+  std::string bootconfig_data = "androidboot.bootreason:=reboot,cold";
+  for (int i = 0; i < 200; ++i) {
+    bootconfig_data += ",abcdefgh";
+  }
+  bootconfig_data += "\n";
+
+  linux_boot_config::LinuxBootConfig bootconfig(bootconfig_data);
+  boot_shim::BootProperties props("", bootconfig);
+
+  std::array<std::byte, 512> image_buffer;
+  zbitl::Image<std::span<std::byte>> image(image_buffer);
+  ASSERT_TRUE(image.clear().is_ok());
+
+  boot_shim::BootShim<boot_shim::RebootReasonItem> shim("test-shim", stdout);
+  shim.Get<boot_shim::RebootReasonItem>().Init(props, shim.shim_name());
+
+  ASSERT_TRUE(shim.AppendItems(image).is_ok());
+
+  ASSERT_TRUE(HasZbiItem(image, [](const zbi_header_t& header, zbitl::ByteView payload) {
+    EXPECT_GE(payload.size_bytes(), sizeof(zbi_hw_reboot_reason_t));
+    auto* reason = reinterpret_cast<const zbi_hw_reboot_reason_t*>(payload.data());
+    return header.type == ZBI_TYPE_HW_REBOOT_REASON &&
+           (payload.size_bytes() >= sizeof(zbi_hw_reboot_reason_t)) &&
+           *reason == ZBI_HW_REBOOT_REASON_COLD;
+  }));
 }
 
 }  // namespace

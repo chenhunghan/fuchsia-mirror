@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::{fmt, mem};
-use zx_status_ext::StatusExt;
+use zx::StatusExt;
 
 use crate::runtime::{EHandle, PacketReceiver, ReceiverRegistration};
 

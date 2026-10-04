@@ -9,11 +9,8 @@ import dataclasses
 import itertools
 import logging
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, MutableSequence, Sequence
 from typing import (
-    Iterable,
-    Iterator,
-    MutableSequence,
     NotRequired,
     Self,
     TypeAlias,
@@ -26,7 +23,7 @@ from trace_processing import trace_metrics, trace_model, trace_time, trace_utils
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _CPU_USAGE_EVENT_NAME = "cpu_usage"
-_PROCESSING_RATE_EVENT_NAME = "Processing Rate"
+_RATE_EVENT_NAME = "Rate"
 # The kernel reports processing rates where 1000 represents 100% capacity.
 # This constant is used as a default value when rate events are missing.
 _DEFAULT_PROCESSING_RATE = 1000.0
@@ -71,7 +68,7 @@ class VirtualProcessingSlice:
 class CpuProcessingRateTimeline:
     """Encapsulates the processing rate shifts for a single CPU core."""
 
-    def __init__(self, rates: Iterable[ProcessingRateSample]):
+    def __init__(self, rates: Collection[ProcessingRateSample]):
         """Constructor.
 
         Args:
@@ -188,25 +185,20 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
 
     @property
     def event_patterns(self) -> set[str]:
-        return {_CPU_USAGE_EVENT_NAME, f"{_PROCESSING_RATE_EVENT_NAME}.*"}
+        return {_CPU_USAGE_EVENT_NAME, f"{_RATE_EVENT_NAME}.*"}
 
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:
-        all_events: Iterator[trace_model.Event] = model.all_events()
-        cpu_usage_events: Iterable[
-            trace_model.CounterEvent
-        ] = trace_utils.filter_events(
-            all_events,
-            name=_CPU_USAGE_EVENT_NAME,
-            type=trace_model.CounterEvent,
-        )
-
         cpu_starts: list[float] = []
         cpu_percentages: list[float] = []
 
         # Parse the start time and percentage for each `Event`.
-        for event in cpu_usage_events:
+        for event in trace_utils.filter_events(
+            model.all_events(),
+            name=_CPU_USAGE_EVENT_NAME,
+            type=trace_model.CounterEvent,
+        ):
             cpu_starts.append(event.start.to_epoch_delta().to_nanoseconds())
             cpu_percentages.append(
                 event.args.get("average_cpu_percentage") or 0
@@ -408,12 +400,12 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
                 model.all_events(),
                 type=trace_model.CounterEvent,
             )
-            if e.name and e.name.startswith(_PROCESSING_RATE_EVENT_NAME)
+            if e.name and e.name.startswith(_RATE_EVENT_NAME)
         )
 
         rates_by_cpu: dict[int, list[ProcessingRateSample]] = {}
         for event in power_events:
-            # For "Processing Rate" events, the CPU index is encoded in `event.id`.
+            # For "Rate" events, the CPU index is encoded in `event.id`.
             # When the CPU index is 0, the `event.id` field is omitted from the trace.
             cpu_idx = event.id if event.id is not None else 0
             rate = event.args.get("CPU", _DEFAULT_PROCESSING_RATE)
@@ -605,7 +597,7 @@ class DurationsBreakdown:
                 cpu,
                 sorted(
                     trace_utils.filter_records(
-                        records, trace_model.ContextSwitch
+                        iter(records), trace_model.ContextSwitch
                     ),
                     key=lambda record: record.start,
                 ),

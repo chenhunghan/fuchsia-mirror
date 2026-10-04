@@ -115,7 +115,7 @@ inspect::Inspector Dwc3Metrics::RecordMetrics(fdf::MmioBuffer* mmio, Dwc3* dwc3)
   if (dwc3) {
     auto endpoints_node = root.CreateChild("endpoints");
     auto record_endpoint = [](const Dwc3::Endpoint& ep, inspect::Node& ep_node) {
-      ep_node.RecordUint("type", static_cast<uint64_t>(ep.type));
+      ep_node.RecordUint("type", fidl::ToUnderlying(ep.type));
       ep_node.RecordUint("interval", ep.interval);
       ep_node.RecordUint("max_packet_size", ep.max_packet_size);
       ep_node.RecordBool("enabled", ep.enabled);

@@ -64,6 +64,7 @@ pub async fn run<'a>(coordinator: &Coordinator, args: Args<'a>) -> Result<()> {
         MappedImage::create(Image::create(coordinator.clone(), ImageId(1), &params).await?)?;
     let bytes_to_fill = get_bytes_for_rgb_color(color, pixel_format)?;
     image.fill(&bytes_to_fill).context("failed to draw fill color")?;
+    image.cache_clean()?;
 
     // Ensure that vsync events are enabled before we issue the first call to CommitConfig.
     let mut vsync = coordinator.add_vsync_listener(Some(display.id()))?;

@@ -396,7 +396,7 @@ zx::result<> vmcs_init(AutoVmcs& vmcs, uint16_t vpid, uintptr_t entry, paddr_t m
   vmcs.Write(VmcsFieldXX::GUEST_CR4, cr4);
 
   // Mask access to CR4.
-  vmcs.Write(VmcsFieldXX::CR4_GUEST_HOST_MASK, X86_CR4_VMXE);
+  vmcs.Write(VmcsFieldXX::CR4_GUEST_HOST_MASK, X86_CR4_LA57 | X86_CR4_VMXE);
   vmcs.Write(VmcsFieldXX::CR4_READ_SHADOW, 0);
 
   vmcs.Write(VmcsField64::GUEST_IA32_PAT, read_msr(X86_MSR_IA32_PAT));

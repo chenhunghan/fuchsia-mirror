@@ -65,7 +65,7 @@ open protocol WifiEventCallback {
     flexible OnStart();
     flexible OnStop();
     flexible OnSubsystemRestart(resource table {
-        1: status zx.Status;
+        1: status zx.Result;
     });
 };
 
@@ -342,7 +342,7 @@ open protocol SupplicantStaNetwork {
 type Nl80211Message = flexible union {
     1: done struct {};
     2: error struct {
-        error_code zx.Status;
+        error_code zx.Result;
     };
     3: ack struct {};
     4: message struct {

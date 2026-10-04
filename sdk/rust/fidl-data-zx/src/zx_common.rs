@@ -9,6 +9,8 @@ use zerocopy::{Immutable, IntoBytes, TryFromBytes};
 
 pub type Status = i32;
 
+pub type Result = i32;
+
 pub type Time = i64;
 
 pub type InstantMono = i64;

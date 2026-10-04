@@ -17,15 +17,6 @@
                 "BinderTest/CallPermission.DoCall/0",
                 "BinderTest/CallPermission.DoCall/1",
 
-                // TODO(https://fxbug.dev/398654361)
-                "BinderTest/ManagerProviderClientTest/0.SameOperationsAsSELinuxTestSuiteBinderTestSubTestOne",
-
-                // TODO: https://fxbug.dev/558674709 - Evaluate binder permissions against cached
-                // target SID.
-                "BinderTest.TargetUsesCachedSid",
-                "BinderTest.TargetUsesCachedSidTransferBinder",
-                "BinderTest.TargetUsesCachedSidTransferFile",
-
                 // TODO(https://fxbug.dev/521343708) - Support SELinux context= and rootcontext=
                 // mount options on cgroupfs v2.
                 "CgroupFs/CgroupFsTest.SecondMountWithDifferentOptionsChangesLabels/Context",
@@ -77,6 +68,11 @@
                 // TODO: Support reading pre-policy procattrs in Starnix.
                 "ProcAttrTest.PrePolicyAttrs",
 
+                // TODO: https://fxbug.dev/568759264 - Cache tracer credentials at ptrace
+                // attachment time for capability checks on exec.
+                "PtraceTest.PtraceExecVanillaCapCheckUsesCachedCreds",
+                "PtraceTest.PtraceExecSelinuxCapCheckUsesCachedCreds",
+
                 // TODO: https://fxbug.dev/361552580 - Fix SELinuxFS API handling of unknown policy class Ids.
                 "SeLinuxFsCreate.InvalidComputeCreateClassId",
                 "SeLinuxFsAccess.UnknownClassIdIsAccepted",
@@ -84,6 +80,23 @@
                 // TODO: https://fxbug.dev/361552580 - Fix SELinuxFS API validation of fields.
                 "SeLinuxFsAccess.ClassIdMayHaveTrailingNonNumericData",
                 "SeLinuxFsAccess.FourthArgumentIsNotValidated",
+
+                // TODO: https://fxbug.dev/566091911 - Label new sysfs nodes via
+                // `kernfs_init_security` when their parent has a `security.selinux` xattr.
+                // TODO: https://fxbug.dev/567514429 - The loop driver creates the `loop` sysfs
+                // attribute group at device creation rather than on `LOOP_SET_FD`.
+                // TODO: https://fxbug.dev/567481478 - `LOOP_CTL_REMOVE` fails after `LOOP_CLR_FD`
+                // on Starnix, failing the test teardown.
+                "SysFs/SysFsTest.SubdirectoryLabels/InheritsParentXattrLabel",
+                "SysFs/SysFsTest.SubdirectoryLabels/AppliesTypeTransitionWhenParentHasXattr",
+                "SysFs/SysFsTest.SubdirectoryLabels/UsesFscreateLabelWhenParentHasXattr",
+
+                // TODO: https://fxbug.dev/567514429 - The loop driver creates the `loop` sysfs
+                // attribute group at device creation rather than on `LOOP_SET_FD`.
+                // TODO: https://fxbug.dev/567481478 - `LOOP_CTL_REMOVE` fails after `LOOP_CLR_FD`
+                // on Starnix, failing the test teardown.
+                "SysFs/SysFsTest.SubdirectoryLabels/UsesDefaultLabelWhenParentHasNoXattr",
+                "SysFs/SysFsTest.SubdirectoryLabels/IgnoresFscreateLabelWhenParentHasNoXattr",
 
                 // TODO: https://fxbug.dev/455799917 - Fix test setup for Starnix to match Linux.
                 "UnlabeledFsTest.CreateFileInUnlabeledFs",

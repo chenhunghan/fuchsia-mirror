@@ -9,18 +9,28 @@ import json
 import sys
 from collections.abc import Sequence
 from enum import Enum
-from pathlib import Path
-from typing import AbstractSet
+from typing import IO, AbstractSet, TypedDict
 
 SizeCheckMode = Enum("SizeCheckMode", ["EQUAL", "BAZEL_SMALLER"])
 
 
+class Blob(TypedDict):
+    """A single entry in a package manifest's "blobs" list."""
+
+    source_path: str
+    path: str
+    merkle: str
+    size: int
+
+
 class Package:
-    def __init__(self, manifest: Path, ignored_blobs: Sequence[str] = None):
+    def __init__(
+        self, manifest: IO[str], ignored_blobs: Sequence[str] | None = None
+    ) -> None:
         pkg = json.load(manifest)
         self.repository: str = pkg.get("repository", "")
-        self.blobs: dict[str, str] = {}
-        self.driver_blobs: dict[str, str] = {}
+        self.blobs: dict[str, Blob] = {}
+        self.driver_blobs: dict[str, Blob] = {}
 
         ignored_blobs = ignored_blobs or []
 
@@ -41,21 +51,21 @@ class Package:
     def driver_paths(self) -> AbstractSet[str]:
         return set(self.driver_blobs.keys())
 
-    def merkle_for_blob(self, path) -> str:
+    def merkle_for_blob(self, path: str) -> str:
         if path in self.blobs:
-            return self.blobs[path]["merkle"]
+            return str(self.blobs[path]["merkle"])
         elif path in self.driver_blobs:
-            return self.driver_blobs[path]["merkle"]
+            return str(self.driver_blobs[path]["merkle"])
         else:
-            return {}
+            raise KeyError(path)
 
-    def size_for_blob(self, path) -> int:
+    def size_for_blob(self, path: str) -> int:
         if path in self.blobs:
-            return self.blobs[path]["size"]
+            return int(self.blobs[path]["size"])
         elif path in self.driver_blobs:
-            return self.driver_blobs[path]["size"]
+            return int(self.driver_blobs[path]["size"])
         else:
-            return 0
+            raise KeyError(path)
 
 
 def calculate_diff(
@@ -79,7 +89,7 @@ def calculate_diff(
     if gn_package.meta_merkle == bazel_package.meta_merkle:
         return []
 
-    findings: Sequence[str] = []
+    findings: list[str] = []
     if gn_package.repository != bazel_package.repository:
         findings.append(
             f"Repositories do not match '{gn_package.repository}' != '{bazel_package.repository}'"
@@ -88,9 +98,9 @@ def calculate_diff(
     # Check to make sure that the driver blobs are the same and have the same size.
     bazel_drivers: AbstractSet[str] = bazel_package.driver_paths()
     gn_drivers: AbstractSet[str] = gn_package.driver_paths()
-    common_drivers: AbstractSet[str] = gn_drivers.intersection(bazel_drivers)
+    common_drivers: AbstractSet[str] = gn_drivers & bazel_drivers
 
-    def compare_driver_size(path):
+    def compare_driver_size(path: str) -> None:
         gn_size: int = gn_package.size_for_blob(path)
         bazel_size: int = bazel_package.size_for_blob(path)
         if size_check_mode == SizeCheckMode.EQUAL:
@@ -111,20 +121,20 @@ def calculate_diff(
     for driver in common_drivers:
         compare_driver_size(driver)
 
-    for driver in gn_drivers.difference(common_drivers):
+    for driver in gn_drivers - common_drivers:
         findings.append(f"Driver at '{driver}' only exists in gn package")
 
-    for driver in bazel_drivers.difference(common_drivers):
+    for driver in bazel_drivers - common_drivers:
         findings.append(f"Driver at '{driver}' only exists in bazel package")
 
     # find all the blob diffs - this does not include the drivers which are checked above
     bazel_blobs: AbstractSet[str] = bazel_package.blob_paths()
     gn_blobs: AbstractSet[str] = gn_package.blob_paths()
-    common_blobs: AbstractSet[str] = gn_blobs.intersection(bazel_blobs)
+    common_blobs: AbstractSet[str] = gn_blobs & bazel_blobs
 
-    def compare_blob_merkles(path):
-        gn_merkle: int = gn_package.merkle_for_blob(path)
-        bazel_merkle: int = bazel_package.merkle_for_blob(path)
+    def compare_blob_merkles(path: str) -> None:
+        gn_merkle: str = gn_package.merkle_for_blob(path)
+        bazel_merkle: str = bazel_package.merkle_for_blob(path)
         if gn_merkle != bazel_merkle:
             findings.append(
                 f"Blobs at '{path}' have different merkle roots '{gn_merkle}' != '{bazel_merkle}'"
@@ -133,16 +143,16 @@ def calculate_diff(
     for blob in common_blobs:
         compare_blob_merkles(blob)
 
-    for blob in gn_blobs.difference(common_blobs):
+    for blob in gn_blobs - common_blobs:
         findings.append(f"Blob at '{blob}' only exists in gn package")
 
-    for blob in bazel_blobs.difference(common_blobs):
+    for blob in bazel_blobs - common_blobs:
         findings.append(f"Blob at '{blob}' only exists in bazel package")
 
     return findings
 
 
-def main(argv: Sequence[str]):
+def main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Compares drivers")
     parser.add_argument(
         "--gn-package-manifest", type=argparse.FileType("r"), required=True

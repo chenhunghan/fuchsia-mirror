@@ -4,14 +4,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::channel_dispatcher::MessageWaiter;
 use super::handle::KernelHandle;
 use super::process_dispatcher::ProcessDispatcher;
 use super::thread_dispatcher_ffi::{
     cpp_sys_thread_legacy_yield, cpp_sys_thread_raise_exception, cpp_thread_dispatcher_create,
-    cpp_thread_dispatcher_exit_current, cpp_thread_dispatcher_get_exception_report,
-    cpp_thread_dispatcher_get_info_for_userspace, cpp_thread_dispatcher_get_runtime_stats,
-    cpp_thread_dispatcher_get_stats_for_userspace, cpp_thread_dispatcher_initialize,
-    cpp_thread_dispatcher_is_current, cpp_thread_dispatcher_kill,
+    cpp_thread_dispatcher_exit_current, cpp_thread_dispatcher_get_current_message_waiter,
+    cpp_thread_dispatcher_get_exception_report, cpp_thread_dispatcher_get_info_for_userspace,
+    cpp_thread_dispatcher_get_runtime_stats, cpp_thread_dispatcher_get_stats_for_userspace,
+    cpp_thread_dispatcher_initialize, cpp_thread_dispatcher_is_current, cpp_thread_dispatcher_kill,
     cpp_thread_dispatcher_kill_current, cpp_thread_dispatcher_read_state,
     cpp_thread_dispatcher_restricted_kick, cpp_thread_dispatcher_resume,
     cpp_thread_dispatcher_set_base_profile, cpp_thread_dispatcher_set_soft_affinity,
@@ -34,23 +35,41 @@ crate::object::dispatcher::impl_dispatcher_facade!(
 
 zr::static_assert!(core::mem::size_of::<ThreadDispatcher>() == 0);
 
-impl ThreadDispatcher {
-    /// Default rights assigned to a newly created ThreadDispatcher handle.
-    pub const DEFAULT_RIGHTS: zx_rights_t = zx_types::ZX_RIGHT_TRANSFER
-        | zx_types::ZX_RIGHT_DUPLICATE
-        | zx_types::ZX_RIGHT_WAIT
-        | zx_types::ZX_RIGHT_INSPECT
-        | zx_types::ZX_RIGHT_READ
-        | zx_types::ZX_RIGHT_WRITE
-        | zx_types::ZX_RIGHT_GET_PROPERTY
-        | zx_types::ZX_RIGHT_SET_PROPERTY
-        | zx_types::ZX_RIGHT_DESTROY
-        | zx_types::ZX_RIGHT_SIGNAL
-        | zx_types::ZX_RIGHT_MANAGE_THREAD;
+/// A wrapper around a raw pointer to the current thread's [`MessageWaiter`].
+///
+/// This type explicitly does not implement [`Send`] or [`Sync`], guaranteeing that it cannot be
+/// shared with or sent to other threads. Because the [`MessageWaiter`] is embedded in the
+/// currently executing [`ThreadDispatcher`], it cannot be destroyed while this thread is
+/// executing, making it safe to dereference the raw pointer into a [`MessageWaiter`] reference.
+pub struct CurrentMessageWaiter {
+    ptr: *const MessageWaiter,
+}
 
+impl core::ops::Deref for CurrentMessageWaiter {
+    type Target = MessageWaiter;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `CurrentMessageWaiter` does not implement `Send` or `Sync`, so it cannot be
+        // shared with other threads. `self.ptr` points to the `MessageWaiter` embedded in the
+        // current `ThreadDispatcher`, which cannot be destroyed while this thread is executing.
+        unsafe { &*self.ptr }
+    }
+}
+
+impl ThreadDispatcher {
     /// Returns default rights for a thread handle.
     pub const fn default_rights() -> zx_rights_t {
-        Self::DEFAULT_RIGHTS
+        zx_types::ZX_DEFAULT_THREAD_RIGHTS
+    }
+
+    /// Returns a wrapper that dereferences to the current thread's [`MessageWaiter`].
+    #[inline]
+    pub fn get_current_message_waiter() -> CurrentMessageWaiter {
+        // SAFETY: Calling `cpp_thread_dispatcher_get_current_message_waiter` is safe when
+        // executing in a valid user thread context.
+        let ptr = unsafe { cpp_thread_dispatcher_get_current_message_waiter() };
+        CurrentMessageWaiter { ptr }
     }
 
     /// Creates a new child `ThreadDispatcher` under the given parent process.

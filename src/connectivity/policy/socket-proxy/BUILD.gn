@@ -14,7 +14,6 @@ rustc_library("lib") {
   deps = [
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/fidl/fuchsia.net.policy.properties:fuchsia.net.policy.properties_rust",
-    "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
     "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
     "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_rust",
@@ -27,22 +26,16 @@ rustc_library("lib") {
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
-    "//third_party/rust_crates:thiserror",
   ]
 
   test_deps = [
-    "testing",
-    "//src/connectivity/lib/net-declare",
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/lib/fuchsia",
-    "//src/lib/fuchsia-component-test",
-    "//third_party/rust_crates:pretty_assertions",
-    "//third_party/rust_crates:test-case",
   ]
 
   sources = [
     "src/lib.rs",
     "src/mark_watcher.rs",
-    "src/registry.rs",
     "src/socket_provider.rs",
   ]
 

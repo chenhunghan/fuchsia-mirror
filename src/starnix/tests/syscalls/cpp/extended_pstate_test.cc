@@ -449,6 +449,78 @@ TEST(ExtendedPstate, Syscall) {
   EXPECT_EQ(GetTestRegisters(), kTestRegisters);
 }
 
+// Verify that FP/SIMD registers and floating-point control registers are preserved in the child
+// process across fork/clone.
+TEST(ExtendedPstate, ForkPreservesAllRegisters) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    RegistersValue test_registers;
+#ifdef __x86_64__
+    for (size_t i = 0; i < 16; ++i) {
+      test_registers.xmm[i] = (static_cast<__uint128_t>(0x0102030405060708ULL + i) << 64u) |
+                              (0x0901020304050607ULL + i);
+    }
+#elifdef __arm__
+    for (size_t i = 0; i < 32; ++i) {
+      test_registers.d[i] = 0x0102030405060708ULL + i;
+    }
+    constexpr uint32_t kTestFpscr = 1u << 24u;  // FZ (Flush-to-zero) bit
+#elifdef __aarch64__
+    for (size_t i = 0; i < 32; ++i) {
+      test_registers.q[i] = (static_cast<__uint128_t>(0x0102030405060708ULL + i) << 64u) |
+                            (0x090a0b0c0d0e0f10ULL + i);
+    }
+    constexpr uint64_t kTestFpcr = 1ull << 24u;  // FZ (Flush-to-zero) bit
+#elifdef __riscv
+    for (size_t i = 0; i < 32; ++i) {
+      test_registers.f[i] = 0x0102030405060708ULL + i;
+      test_registers.v[i] = (static_cast<__uint128_t>(0x0102030405060708ULL + i) << 64u) |
+                            (0x0901020304050607ULL + i);
+    }
+#endif
+
+    SetTestRegisters(&test_registers);
+#ifdef __arm__
+    // Set the AArch32 Floating-Point Status and Control Register (FPSCR).
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(kTestFpscr));
+#elifdef __aarch64__
+    // Set the AArch64 Floating-Point Control Register (FPCR).
+    __asm__ volatile("msr fpcr, %0" : : "r"(kTestFpcr));
+#endif
+
+    // Invoke the raw clone syscall directly rather than fork() or ForkHelper, and capture
+    // registers in the child before running any GTest assertions. Because most FP/SIMD registers
+    // are caller-saved under standard C ABIs, libc's fork() wrapper (e.g. post-fork lock and
+    // atfork bookkeeping) and C++ helpers may clobber them before the child can inspect them.
+    pid_t pid = static_cast<pid_t>(syscall(SYS_clone, SIGCHLD, 0, nullptr, nullptr, 0));
+    if (pid == 0) {
+      RegistersValue child_registers = GetTestRegisters();
+#ifdef __arm__
+      // Read back the AArch32 Floating-Point Status and Control Register (FPSCR).
+      uint32_t fpscr = 0;
+      __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr));
+#elifdef __aarch64__
+      // Read back the AArch64 Floating-Point Control Register (FPCR).
+      uint64_t fpcr = 0;
+      __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+#endif
+      EXPECT_EQ(child_registers, test_registers);
+#ifdef __arm__
+      EXPECT_EQ(fpscr, kTestFpscr);
+#elifdef __aarch64__
+      EXPECT_EQ(fpcr, kTestFpcr);
+#endif
+      _exit(testing::Test::HasFailure() ? 1 : 0);
+    }
+    ASSERT_GE(pid, 0);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
 struct SignalHandlerData {
   void* sigsegv_target;
   bool received_sigsegv = false;

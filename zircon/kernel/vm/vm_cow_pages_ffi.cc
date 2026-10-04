@@ -22,6 +22,13 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_replace_page_with_loaned(VmCowPag
   return cow->ReplacePageWithLoaned(before_page, offset);
 }
 
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_replace_page(VmCowPages* cow, vm_page_t* before_page,
+                                                            uint64_t offset, bool with_loaned,
+                                                            vm_page_t** after_page,
+                                                            AnonymousPageRequest* page_request) {
+  return cow->ReplacePage(before_page, offset, with_loaned, after_page, page_request);
+}
+
 FFI_ALWAYS_INLINE void* cpp_vm_cow_pages_get_ref_counted(const VmCowPages* cow) {
   return const_cast<fbl::RefCountedUpgradeable<VmCowPages>*>(
       static_cast<const fbl::RefCountedUpgradeable<VmCowPages>*>(cow));
@@ -64,6 +71,10 @@ FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_debug_is_empty(const VmCowPages* cow, ui
 
 FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_debug_is_high_memory_priority(const VmCowPages* cow) {
   return cow->DebugIsHighMemoryPriority();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_lock_is_held(const VmCowPages* cow) {
+  return cow->lock_ref().lock().IsHeld();
 }
 
 FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_reclaim_page(
@@ -113,6 +124,13 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_zero_pages_locked(
   auto [status, zeroed_bytes] = cow->ZeroPagesLocked(range, dirty_track, *deferred, page_request);
   *out_zeroed_bytes = zeroed_bytes;
   return status;
+}
+
+FFI_ALWAYS_INLINE zx_status_t
+cpp_vm_cow_pages_supply_pages_locked(VmCowPages* cow, VmCowRange range, VmPageSpliceList* pages,
+                                     SupplyOptions options, VmCowPages::DeferredOps* deferred,
+                                     MultiPageRequest* page_request) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return cow->SupplyPagesLocked(range, pages, options, *deferred, page_request);
 }
 
 FFI_ALWAYS_INLINE uint32_t cpp_vm_cow_pages_debug_get_populated_slots_count(const VmCowPages* cow) {
@@ -168,6 +186,11 @@ FFI_ALWAYS_INLINE void cpp_priority_changer_change_high_priority_count_locked(Pr
 FFI_ALWAYS_INLINE void* cpp_priority_changer_lock(const PriorityChanger* pc)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   return pc->lock();
+}
+
+FFI_ALWAYS_INLINE void cpp_vm_cow_pages_debug_get_discardable_page_counts(
+    const VmCowPages* cow, VmCowPages::DiscardablePageCounts* out_counts) {
+  *out_counts = cow->DebugGetDiscardablePageCounts();
 }
 
 }  // extern "C"

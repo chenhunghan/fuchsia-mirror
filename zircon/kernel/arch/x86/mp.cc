@@ -91,7 +91,7 @@ X86IdleStates fake_idle_states = X86IdleStates(&fake_supported_idle_states);
 
 // Pre-initialize the per cpu structure for the boot cpu. Referenced by early boot code prior to
 // being able to initialize via code.
-struct x86_percpu bp_percpu = {
+constinit struct x86_percpu bp_percpu = {
     .direct = &bp_percpu,
     .current_thread = {},
 

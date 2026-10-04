@@ -32,6 +32,7 @@
 namespace usb_virtual_bus {
 namespace {
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 namespace fhidbus = fuchsia_hardware_hidbus;
 
 using usb_virtual::BusLauncher;
@@ -105,9 +106,10 @@ class UsbOneEndpointTest : public UsbHidTest {
  protected:
   fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor GetConfigDescriptor() override {
     return fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor{
-        .interface_class = USB_CLASS_HID,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kHid),
         .interface_subclass = 0,
-        .interface_protocol = USB_PROTOCOL_TEST_HID_ONE_ENDPOINT,
+        .interface_protocol =
+            fidl::ToUnderlying(fdescriptor::TestVendorProtocol::kTestHidOneEndpoint),
     };
   }
 };
@@ -144,9 +146,10 @@ class UsbTwoEndpointTest : public UsbHidTest {
  protected:
   fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor GetConfigDescriptor() override {
     return fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor{
-        .interface_class = USB_CLASS_HID,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kHid),
         .interface_subclass = 0,
-        .interface_protocol = USB_PROTOCOL_TEST_HID_TWO_ENDPOINT,
+        .interface_protocol =
+            fidl::ToUnderlying(fdescriptor::TestVendorProtocol::kTestHidTwoEndpoint),
     };
   }
 };

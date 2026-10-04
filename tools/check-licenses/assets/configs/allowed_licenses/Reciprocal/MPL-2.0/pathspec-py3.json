@@ -1,0 +1,13 @@
+{
+    "allowed_licenses": {
+        "MPL-2.0": [
+            {
+                "bug": "b/568442238",
+                "description": "Host-only Python library required by mypy at build time; not shipped.",
+                "paths": [
+                    "prebuilt/third_party/pathspec-py3"
+                ]
+            }
+        ]
+    }
+}

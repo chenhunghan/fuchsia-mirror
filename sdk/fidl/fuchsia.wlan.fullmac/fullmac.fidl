@@ -29,7 +29,7 @@ type WlanAuthType = flexible enum : uint8 {
 const WLAN_MAX_KEYLIST_SIZE uint32 = 4;
 
 type WlanFullmacSetKeysResp = struct {
-    statuslist vector<zx.Status>:WLAN_MAX_KEYLIST_SIZE;
+    statuslist vector<zx.Result>:WLAN_MAX_KEYLIST_SIZE;
 };
 
 /// Contains the information of SAE authentication frames. Shared between transmit and receive
@@ -101,12 +101,12 @@ type EapolTxResult = flexible enum : uint8 {
     TRANSMISSION_FAILURE = 1;
 };
 
-type WlanFullmacSignalReportIndication = struct {
-    rssi_dbm int8;
-    snr_db int8;
+type WlanFullmacSignalReportIndication = table {
+    1: rssi_dbm int8;
+    2: snr_db int8;
     /// Tx rate in units of 500 kbit/s, which are the units used for
     /// Supported Rates in IEEE Std 802.11-2024 9.4.2.3
-    tx_rate_500kbps uint32;
+    3: tx_rate_500kbps uint32;
 };
 
 /// Describes parameters and capabilities for a single WlanBand.
@@ -288,7 +288,7 @@ closed protocol WlanFullmacImplIfc {
         ///   - ZX_ERR_INVALID_ARGS: no association exists with specified peer
         ///   - ZX_ERR_SHOULD_WAIT: disassociate request could not be serviced because firmware or
         ///     driver was busy
-        1: status zx.Status;
+        1: status zx.Result;
     }) -> ();
     /// Report that disassociation with the specified peer occurred (IEEE 802.11-2020 6.3.9.3).
     strict DisassocInd(table {
@@ -359,7 +359,7 @@ closed protocol WlanFullmacImplIfc {
         frame SaeFrame;
     }) -> ();
     strict OnWmmStatusResp(struct {
-        status zx.Status;
+        status zx.Result;
         wmm_params fuchsia.wlan.driver.WlanWmmParameters;
     }) -> ();
 };

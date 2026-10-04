@@ -7,6 +7,7 @@
 all_libs = [
   "boot-shim",
   "linux-boot-config",
+  "linux-initramfs",
   "memalloc",
 ]
 

@@ -59,7 +59,7 @@ fuchsia_test_package("http-client-integration-tests") {
 
     # The component under test.
     "../:component",
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
   ]
 }
 

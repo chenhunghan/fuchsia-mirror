@@ -41,6 +41,7 @@ rustc_library_with_features("netstack3-device") {
     "//third_party/rust_crates:derivative",
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:ref-cast",
+    "//third_party/rust_crates:static_assertions",
   ]
 
   _testutils_deps =

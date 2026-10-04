@@ -68,7 +68,6 @@ def main() -> None:
     # Imitate the configuration in //src/developer/ffx/build/ffx_action.gni.
     base_config = [
         "ffx.analytics.disabled=true",
-        "daemon.autostart=false",
         "log.enabled=false",
     ]
 

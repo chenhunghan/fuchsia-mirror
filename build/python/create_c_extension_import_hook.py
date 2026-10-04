@@ -10,7 +10,7 @@ import os
 import sys
 
 
-def main():
+def main() -> int:
     """Creates library wrapper"""
 
     parser = argparse.ArgumentParser(

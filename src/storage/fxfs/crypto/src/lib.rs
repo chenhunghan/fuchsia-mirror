@@ -21,7 +21,10 @@ use zx_status as zx;
 mod cipher;
 pub mod ff1;
 
-pub use cipher::fscrypt_ino_lblk32::FscryptSoftwareInoLblk32FileCipher;
+pub use cipher::fscrypt_ino_lblk32::{
+    FscryptInoLblk32FileCipher, FscryptSoftwareInoLblk32FileCipher,
+};
+pub use cipher::fscrypt_ino_lblk64::{FscryptInoLblk64DirCipher, FscryptInoLblk64FileCipher};
 pub use cipher::fxfs::FxfsCipher;
 pub use cipher::{
     Cipher, CipherHolder, CipherSet, FindKeyResult, KeyType, MutPtrByteSlice, PtrByteSlice,
@@ -38,16 +41,33 @@ pub const FXFS_WRAPPED_KEY_SIZE: usize = FXFS_KEY_SIZE + 16;
 /// Essentially just a vector by another name to indicate that it holds unwrapped key material.
 /// The length of an unwrapped key depends on the type of key that is wrapped.
 #[derive(Debug)]
-pub struct UnwrappedKey(Vec<u8>);
+pub struct UnwrappedKey {
+    key: Vec<u8>,
+    /// Optional inline encryption key slot registered with the block device.
+    slot: Option<u8>,
+}
 impl UnwrappedKey {
     pub fn new(key: Vec<u8>) -> Self {
-        UnwrappedKey(key)
+        Self { key, slot: None }
+    }
+
+    pub fn new_with_slot(key: Vec<u8>, slot: Option<u8>) -> Self {
+        Self { key, slot }
+    }
+
+    pub fn slot(&self) -> Option<u8> {
+        self.slot
     }
 }
 impl std::ops::Deref for UnwrappedKey {
     type Target = Vec<u8>;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.key
+    }
+}
+impl std::ops::DerefMut for UnwrappedKey {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.key
     }
 }
 
@@ -160,6 +180,13 @@ pub enum EncryptionKey {
     },
     /// Fxfs key that domain-separates XTS tweaks using `(attribute_id << 64) | sector_offset`.
     Fxfs(FxfsKey),
+    FscryptInoLblk64File {
+        key_identifier: [u8; 16],
+    },
+    FscryptInoLblk64Dir {
+        key_identifier: [u8; 16],
+        nonce: [u8; 16],
+    },
 }
 
 impl EncryptionKey {
@@ -168,20 +195,27 @@ impl EncryptionKey {
             EncryptionKey::LegacyFxfs(_) => unreachable!(),
             EncryptionKey::Fxfs(key) => Some(key.wrapping_key_id),
             EncryptionKey::FscryptInoLblk32File { key_identifier }
-            | EncryptionKey::FscryptInoLblk32Dir { key_identifier, .. } => Some(*key_identifier),
+            | EncryptionKey::FscryptInoLblk32Dir { key_identifier, .. }
+            | EncryptionKey::FscryptInoLblk64File { key_identifier }
+            | EncryptionKey::FscryptInoLblk64Dir { key_identifier, .. } => Some(*key_identifier),
         }
     }
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for EncryptionKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=2)? {
+        Ok(match u.int_in_range(0..=4)? {
             0 => EncryptionKey::FscryptInoLblk32File { key_identifier: u.arbitrary()? },
             1 => EncryptionKey::FscryptInoLblk32Dir {
                 key_identifier: u.arbitrary()?,
                 nonce: u.arbitrary()?,
             },
             2 => EncryptionKey::Fxfs(u.arbitrary()?),
+            3 => EncryptionKey::FscryptInoLblk64File { key_identifier: u.arbitrary()? },
+            4 => EncryptionKey::FscryptInoLblk64Dir {
+                key_identifier: u.arbitrary()?,
+                nonce: u.arbitrary()?,
+            },
             _ => unreachable!(),
         })
     }
@@ -201,6 +235,15 @@ impl From<EncryptionKey> for WrappedKey {
                     nonce,
                 })
             }
+            EncryptionKey::FscryptInoLblk64File { key_identifier } => {
+                WrappedKey::FscryptInoLblk64File(FscryptKeyIdentifier { key_identifier })
+            }
+            EncryptionKey::FscryptInoLblk64Dir { key_identifier, nonce } => {
+                WrappedKey::FscryptInoLblk64Dir(FscryptKeyIdentifierAndNonce {
+                    key_identifier,
+                    nonce,
+                })
+            }
         }
     }
 }
@@ -212,6 +255,8 @@ impl From<&EncryptionKey> for KeyType {
             EncryptionKey::Fxfs(_) => KeyType::Fxfs,
             EncryptionKey::FscryptInoLblk32File { .. } => KeyType::FscryptInoLblk32File,
             EncryptionKey::FscryptInoLblk32Dir { .. } => KeyType::FscryptInoLblk32Dir,
+            EncryptionKey::FscryptInoLblk64File { .. } => KeyType::FscryptInoLblk64File,
+            EncryptionKey::FscryptInoLblk64Dir { .. } => KeyType::FscryptInoLblk64Dir,
         }
     }
 }
@@ -231,6 +276,13 @@ impl TryFrom<WrappedKey> for EncryptionKey {
                 key_identifier,
                 nonce,
             }) => EncryptionKey::FscryptInoLblk32Dir { key_identifier, nonce },
+            WrappedKey::FscryptInoLblk64File(FscryptKeyIdentifier { key_identifier }) => {
+                EncryptionKey::FscryptInoLblk64File { key_identifier }
+            }
+            WrappedKey::FscryptInoLblk64Dir(FscryptKeyIdentifierAndNonce {
+                key_identifier,
+                nonce,
+            }) => EncryptionKey::FscryptInoLblk64Dir { key_identifier, nonce },
             _ => return Err(zx::Status::NOT_SUPPORTED),
         })
     }
@@ -488,12 +540,13 @@ pub trait Crypt: Send + Sync {
     /// `owner` is intended to be used such that when the key is wrapped, it appears to be different
     /// to that of the same key wrapped by a different owner.  In this way, keys can be shared
     /// amongst different filesystem objects (e.g. for clones), but it is not possible to tell just
-    /// by looking at the wrapped keys.
+    /// by looking at the wrapped keys. `flags` specifies the fscrypt policy flags for the object.
     async fn create_key_with_id(
         &self,
         owner: u64,
         wrapping_key_id: WrappingKeyId,
         object_type: ObjectType,
+        flags: fidl_fuchsia_io::FscryptPolicyFlags,
     ) -> Result<(EncryptionKey, UnwrappedKey), zx::Status>;
 
     /// Unwraps a single key, returning a raw unwrapped key.

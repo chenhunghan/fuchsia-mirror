@@ -199,3 +199,32 @@ async fn packageless_update_fails_with_overflowing_range() {
     );
     assert_matches!(attempt.try_next().await, Ok(None));
 }
+
+#[fuchsia::test]
+async fn packageless_update_retries_manifest_fetch_on_transient_error() {
+    let zbi_content = b"zbi contents";
+    let zbi_hash = fuchsia_merkle::root_from_slice(zbi_content);
+
+    let env = TestEnv::builder()
+        .ota_manifest(OtaManifest {
+            images: vec![manifest::Image {
+                slot: manifest::Slot::AB,
+                image_type: manifest::ImageType::Asset(AssetType::Zbi),
+                blob: manifest::Blob {
+                    uncompressed_size: zbi_content.len() as u64,
+                    fuchsia_merkle_root: zbi_hash,
+                },
+            }],
+            ..make_manifest([])
+        })
+        .blob(zbi_hash, zbi_content.to_vec())
+        .build()
+        .await;
+
+    env.http_loader_service().push_response(fhttp::Response {
+        error: Some(fhttp::Error::Internal),
+        ..Default::default()
+    });
+
+    env.run_packageless_update().await.unwrap();
+}

@@ -40,5 +40,35 @@ struct std::formatter<::test_zxtypes::StatusEnumAlias> {
     return std::format_to(ctx.out(), "test_zxtypes::StatusEnumAlias::{}", output);
   }
 };
+template <>
+struct std::formatter<::test_zxtypes::ResultEnum> {
+  constexpr auto parse(auto& ctx) { return ctx.begin(); }
+  auto format(const ::test_zxtypes::ResultEnum& value, std::format_context& ctx) const {
+    std::string_view output;
+    switch (value) {
+      case ::test_zxtypes::ResultEnum::kOk:
+        output = "kOk";
+        break;
+      default:
+        output = "UNKNOWN";
+    }
+    return std::format_to(ctx.out(), "test_zxtypes::ResultEnum::{}", output);
+  }
+};
+template <>
+struct std::formatter<::test_zxtypes::ResultEnumAlias> {
+  constexpr auto parse(auto& ctx) { return ctx.begin(); }
+  auto format(const ::test_zxtypes::ResultEnumAlias& value, std::format_context& ctx) const {
+    std::string_view output;
+    switch (value) {
+      case ::test_zxtypes::ResultEnumAlias::kOk:
+        output = "kOk";
+        break;
+      default:
+        output = "UNKNOWN";
+    }
+    return std::format_to(ctx.out(), "test_zxtypes::ResultEnumAlias::{}", output);
+  }
+};
 
 #endif

@@ -363,6 +363,10 @@ Linter::Linter()
           DefineCheck("invalid-copyright-for-platform-source-library",
                       "FIDL files defined in the Platform Source Tree (i.e., defined in "
                       "fuchsia.googlesource.com) must begin with the standard copyright notice")),
+      kZxResultInErrorCheck(
+          DefineCheck("zx-result-error", "Use zx.Status for two-way errors instead of zx.Result")),
+      kZxStatusNotInErrorCheck(
+          DefineCheck("zx-status-non-error", "Consider using zx.Result if the status can be OK")),
       kCopyrightLines({
           // First line may also contain " All rights reserved."
           "// Copyright ${YYYY} The Fuchsia Authors.",
@@ -745,6 +749,40 @@ Linter::Linter()
         }
       });
   // clang-format on
+
+  // Detect zx.Status in field position and zx.Result in error position
+  callbacks_.OnEnterMethodError([&linter = *this] { linter.in_method_error_ = true; });
+  callbacks_.OnExitMethodError([&linter = *this] { linter.in_method_error_ = false; });
+  callbacks_.OnTypeConstructor(
+      [&linter = *this]
+      //
+      (const RawTypeConstructor& element) {
+        if (element.layout_ref->kind != RawLayoutReference::Kind::kNamed)
+          return;
+        const auto as_named = static_cast<RawNamedLayoutReference*>(element.layout_ref.get());
+
+        linter.CheckZxTypes(*as_named->identifier);
+      });
+  callbacks_.OnIdentifierLayoutParameter(
+      [&linter = *this]
+      //
+      (const RawIdentifierLayoutParameter& element) { linter.CheckZxTypes(*element.identifier); });
+}
+
+void Linter::CheckZxTypes(RawCompoundIdentifier& identifier) {
+  if (identifier.components.size() != 2)
+    return;
+
+  auto library = to_string_view(identifier.components[0]);
+  if (library != "zx")
+    return;
+
+  auto type = to_string_view(identifier.components[1]);
+  if (type == "Result" && in_method_error_) {
+    AddFinding(identifier, kZxResultInErrorCheck);
+  } else if (type == "Status" && !in_method_error_) {
+    AddFinding(identifier, kZxStatusNotInErrorCheck);
+  }
 }
 
 }  // namespace fidlc

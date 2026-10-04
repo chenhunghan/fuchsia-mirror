@@ -58,12 +58,12 @@ impl Resolver {
                     }
                     fpkg::PackageResolverRequest::GetHash { package_url, responder } => {
                         error!(
-                            "unsupported fuchsia.pkg/PackageResolver.GetHash called with {:?}",
+                            "unsupported fuchsia.pkg/PackageResolver-base.GetHash called with {:?}",
                             package_url
                         );
                         responder
                             .send(Err(zx::Status::NOT_SUPPORTED.into_raw()))
-                            .context("sending fuchsia.pkg/PackageResolver.GetHash response")
+                            .context("sending fuchsia.pkg/PackageResolver-base.GetHash response")
                     }
                 }
             })
@@ -84,7 +84,7 @@ impl Resolver {
                 responder.send(Err(fidl_error))
             }
         }
-        .context("sending fuchsia.pkg/PackageResolver.Resolve response")
+        .context("sending fuchsia.pkg/PackageResolver-base.Resolve response")
     }
 
     async fn handle_resolve_with_context_request(
@@ -106,7 +106,7 @@ impl Resolver {
                 responder.send(Err(fidl_error))
             }
         }
-        .context("sending fuchsia.pkg/PackageResolver.ResolveWithContext response")
+        .context("sending fuchsia.pkg/PackageResolver-base.ResolveWithContext response")
     }
 
     async fn resolve_with_context_unparsed_and_serve(

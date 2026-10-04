@@ -71,11 +71,13 @@ namespace {
 
 // These match the regions exported when the bus device was added.
 enum MmioRegion {
-  kCbus,
-  kDosbus,
-  kHiubus,
-  kAobus,
-  kDmc,
+  kCbusReset = 0,
+  kCbusDemux = 1,
+  kCbusParser = 2,
+  kDosbus = 3,
+  kHiubus = 4,
+  kAobus = 5,
+  kDmc = 6,
 };
 
 enum Interrupt {
@@ -1050,11 +1052,31 @@ zx_status_t AmlogicVideo::InitRegisters(zx_device_t* parent) {
     LOG(INFO, "amlogic-video: Unable to get secure monitor handle, assuming no protected memory");
   }
 
-  zx::result cbus_mmio = pdev.MapMmio(kCbus);
-  if (cbus_mmio.is_error()) {
-    DECODE_ERROR("Failed to map cbus mmio: %s", cbus_mmio.status_string());
-    return cbus_mmio.status_value();
+  if (!IsDeviceAtLeast(device_type_, DeviceType::kG12A)) {
+    DECODE_ERROR("Unsupported device type: GXM is no longer supported by this driver");
+    return ZX_ERR_NOT_SUPPORTED;
   }
+
+  zx::result cbus_reset_mmio = pdev.MapMmio(kCbusReset);
+  if (cbus_reset_mmio.is_error()) {
+    DECODE_ERROR("Failed to map cbus reset mmio: %s", cbus_reset_mmio.status_string());
+    return cbus_reset_mmio.status_value();
+  }
+  cbus_reset_.emplace(std::move(cbus_reset_mmio.value()));
+
+  zx::result cbus_demux_mmio = pdev.MapMmio(kCbusDemux);
+  if (cbus_demux_mmio.is_error()) {
+    DECODE_ERROR("Failed to map cbus demux mmio: %s", cbus_demux_mmio.status_string());
+    return cbus_demux_mmio.status_value();
+  }
+  cbus_demux_.emplace(std::move(cbus_demux_mmio.value()));
+
+  zx::result cbus_parser_mmio = pdev.MapMmio(kCbusParser);
+  if (cbus_parser_mmio.is_error()) {
+    DECODE_ERROR("Failed to map cbus parser mmio: %s", cbus_parser_mmio.status_string());
+    return cbus_parser_mmio.status_value();
+  }
+  cbus_parser_.emplace(std::move(cbus_parser_mmio.value()));
 
   zx::result dosbus_mmio = pdev.MapMmio(kDosbus);
   if (dosbus_mmio.is_error()) {
@@ -1112,19 +1134,9 @@ zx_status_t AmlogicVideo::InitRegisters(zx_device_t* parent) {
   }
   bti_ = std::move(bti.value());
 
-  int64_t reset_register_offset = 0x1100 * 4;
-  int64_t parser_register_offset = 0;
-  int64_t demux_register_offset = 0;
-  if (IsDeviceAtLeast(device_type_, DeviceType::kG12A)) {
-    // Some portions of the cbus moved in newer versions (TXL and later).
-    reset_register_offset = 0x0400 * 4;
-    parser_register_offset = (0x3800 - 0x2900) * 4;
-    demux_register_offset = (0x1800 - 0x1600) * 4;
-  }
-  reset_.emplace(*cbus_mmio, reset_register_offset);
-  parser_regs_.emplace(*cbus_mmio, parser_register_offset);
-  demux_.emplace(*cbus_mmio, demux_register_offset);
-  cbus_.emplace(*std::move(cbus_mmio));
+  reset_.emplace(*cbus_reset_, 0);
+  parser_regs_.emplace(*cbus_parser_, 0);
+  demux_.emplace(*cbus_demux_, 0);
   registers_ = std::unique_ptr<MmioRegisters>(new MmioRegisters{
       &*dosbus_, &*aobus_, &*dmc_, &*hiubus_, &*reset_, &*parser_regs_, &*demux_});
 

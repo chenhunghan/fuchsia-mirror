@@ -403,8 +403,20 @@ impl UncheckedSignalInfo {
     ) -> Result<Self, Errno> {
         let siginfo_mem = current_task.read_memory_to_array::<SI_MAX_SIZE_AS_USIZE>(siginfo_ref)?;
         let header = SignalInfoHeader::read_from_bytes(&siginfo_mem[..SI_HEADER_SIZE]).unwrap();
+        let sifields_offset = if current_task.is_arch32() {
+            std::mem::offset_of!(
+                uapi::arch32::siginfo_t,
+                __bindgen_anon_1.__bindgen_anon_1._sifields
+            )
+        } else {
+            std::mem::offset_of!(uapi::siginfo_t, __bindgen_anon_1.__bindgen_anon_1._sifields)
+        };
         let mut data = [0u8; SI_DETAIL_SIZE];
-        data.copy_from_slice(&siginfo_mem[SI_HEADER_SIZE..]);
+        let payload = &siginfo_mem[sifields_offset..];
+        data[..payload.len()].copy_from_slice(payload);
+        if current_task.is_arch32() && header.code < 0 {
+            data[std::mem::size_of::<uapi::arch32::__sifields__bindgen_ty_3>()..].fill(0);
+        }
         Ok(Self { header, data, sender: Some(current_task.weak_task()) })
     }
 
@@ -602,7 +614,12 @@ macro_rules! signal_info_as_siginfo_bytes {
                 };
                 let mut array: [u8; SI_MAX_SIZE as usize] = [0; SI_MAX_SIZE as usize];
                 let _ = header.write_to(&mut array[..SI_HEADER_SIZE]);
-                array[SI_HEADER_SIZE..SI_MAX_SIZE as usize].copy_from_slice(&data);
+                let sifields_offset = std::mem::offset_of!(
+                    uapi_path::siginfo_t,
+                    __bindgen_anon_1.__bindgen_anon_1._sifields
+                );
+                let sifields_len = SI_MAX_SIZE as usize - sifields_offset;
+                array[sifields_offset..SI_MAX_SIZE as usize].copy_from_slice(&data[..sifields_len]);
                 array
             }
         }
@@ -861,11 +878,7 @@ pub struct SignalEventValue(pub u64);
 
 impl From<sigval_t> for SignalEventValue {
     fn from(value: sigval_t) -> Self {
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        SignalEventValue(zerocopy::transmute!(unsafe { value._bindgen_opaque_blob }))
+        SignalEventValue(zerocopy::transmute!(value))
     }
 }
 
@@ -919,6 +932,17 @@ mod test {
     use crate::task::PidEntry;
     use starnix_uapi::CLD_EXITED;
     use starnix_uapi::signals::{SIGCHLD, SIGPWR};
+
+    #[test]
+    fn test_signal_event_value_conversion() {
+        for value in
+            [0, u64::MAX, 0x0123_4567_89ab_cdef].into_iter().chain((0..64).map(|bit| 1u64 << bit))
+        {
+            let native: sigval_t = SignalEventValue(value).into();
+            assert_eq!(native.as_bytes(), value.to_ne_bytes());
+            assert_eq!(SignalEventValue::from(native), SignalEventValue(value));
+        }
+    }
 
     #[::fuchsia::test]
     fn test_signal() {

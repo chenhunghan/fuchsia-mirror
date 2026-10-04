@@ -28,6 +28,13 @@ where
     deserializer.deserialize_any(OneOrMany(PhantomData::<Selector>))
 }
 
+pub fn one_or_many_strings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(OneOrMany(PhantomData::<String>))
+}
+
 pub(crate) struct OneOrMany<T>(pub PhantomData<T>);
 
 trait ParseString {

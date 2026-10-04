@@ -50,12 +50,15 @@ pub unsafe trait PtrTraits {
 unsafe impl<T> PtrTraits for *mut T {
     type Target = T;
     const IS_MANAGED: bool = false;
+    #[inline]
     fn into_raw(self) -> *mut T {
         self
     }
+    #[inline]
     unsafe fn from_raw(raw: *mut T) -> Self {
         raw
     }
+    #[inline]
     fn get_ref(&self) -> &T {
         // SAFETY: The caller must ensure that `self` (which is `&(*mut T)`) points to a valid T.
         unsafe { &**self }
@@ -67,15 +70,18 @@ unsafe impl<T> PtrTraits for *mut T {
 unsafe impl<T> PtrTraits for NonNull<T> {
     type Target = T;
     const IS_MANAGED: bool = false;
+    #[inline]
     fn into_raw(self) -> *mut T {
         self.as_ptr()
     }
+    #[inline]
     unsafe fn from_raw(raw: *mut T) -> Self {
         // SAFETY: The caller of `from_raw` must ensure that `raw` was returned
         // by a previous call to `into_raw` on an instance of `Self`. Since `into_raw`
         // for `NonNull` always returns a non-null pointer, `raw` is guaranteed to be non-null.
         unsafe { NonNull::new_unchecked(raw) }
     }
+    #[inline]
     fn get_ref(&self) -> &T {
         // SAFETY: The caller must ensure that `self` points to a valid T.
         unsafe { self.as_ref() }
@@ -87,15 +93,18 @@ unsafe impl<T> PtrTraits for NonNull<T> {
 unsafe impl<T: Recyclable> PtrTraits for UniquePtr<T> {
     type Target = T;
     const IS_MANAGED: bool = true;
+    #[inline]
     fn into_raw(self) -> *mut T {
         UniquePtr::into_raw(self)
     }
+    #[inline]
     unsafe fn from_raw(raw: *mut T) -> Self {
         // SAFETY: The caller of `from_raw` must ensure that `raw` was returned
         // by a previous call to `into_raw` on an instance of `Self`, and that it
         // has not been used to create another instance of `Self`.
         unsafe { UniquePtr::from_raw(raw) }
     }
+    #[inline]
     fn get_ref(&self) -> &T {
         self.deref()
     }
@@ -106,15 +115,18 @@ unsafe impl<T: Recyclable> PtrTraits for UniquePtr<T> {
 unsafe impl<T: HasRefCount + Recyclable> PtrTraits for RefPtr<T> {
     type Target = T;
     const IS_MANAGED: bool = true;
+    #[inline]
     fn into_raw(self) -> *mut T {
         RefPtr::into_raw(self) as *mut T
     }
+    #[inline]
     unsafe fn from_raw(raw: *mut T) -> Self {
         // SAFETY: The caller of `from_raw` must ensure that `raw` was returned
         // by a previous call to `into_raw` on an instance of `Self`, and that it
         // has not been used to create another instance of `Self`.
         unsafe { RefPtr::from_raw(raw) }
     }
+    #[inline]
     fn get_ref(&self) -> &T {
         self.deref()
     }

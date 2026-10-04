@@ -17,7 +17,7 @@ use thiserror::Error;
 use vfs::execution_scope::ExecutionScope;
 use vfs::file::StreamIoConnection;
 use vfs::{ObjectRequest, ObjectRequestRef, ProtocolsExt};
-use zx::{self as zx, Status};
+use zx::Status;
 
 pub mod mock;
 pub use mock::Mock;

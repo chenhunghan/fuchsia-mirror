@@ -24,6 +24,8 @@ rustc_binary("batteryutil") {
     "//third_party/rust_crates:futures",
   ]
 
+  test_deps = [ "//src/lib/fuchsia-async" ]
+
   sources = [
     "src/battery.rs",
     "src/charger.rs",

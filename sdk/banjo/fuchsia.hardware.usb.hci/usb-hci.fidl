@@ -38,7 +38,7 @@ closed protocol UsbHci {
         ss_com_desc fuchsia.hardware.usb.descriptor.UsbSsEpCompDescriptor;
         enable bool;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Returns the current frame (in milliseconds), used for isochronous transfers.
     strict GetCurrentFrame() -> (struct {
@@ -51,7 +51,7 @@ closed protocol UsbHci {
         desc fuchsia.hardware.usb.descriptor.UsbHubDescriptor;
         multi_tt bool;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Called by the USB hub driver when a new device is attached.
     strict HubDeviceAdded(struct {
@@ -59,35 +59,35 @@ closed protocol UsbHci {
         port uint32;
         speed fuchsia.hardware.usb.descriptor.UsbSpeed;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Called by the USB hub driver when a device has been removed.
     strict HubDeviceRemoved(struct {
         device_id uint32;
         port uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Called by the USB hub driver when a device has been reset.
     strict HubDeviceReset(struct {
         device_id uint32;
         port uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Resets an endpoint on the specified device.
     strict ResetEndpoint(struct {
         device_id uint32;
         ep_address uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Resets the specified device.
     strict ResetDevice(struct {
         hub_address uint32;
         device_id uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Returns the maximum size of a packet that can be queued on the specified endpoint.
     strict GetMaxTransferSize(struct {
@@ -101,7 +101,7 @@ closed protocol UsbHci {
         device_id uint32;
         ep_address uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Returns the size needed for a |usb_request_t|, including private storage needed by the
     /// HCI driver.

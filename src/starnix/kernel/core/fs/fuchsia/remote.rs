@@ -299,9 +299,8 @@ impl FileSystemOps for RemoteFs {
 }
 
 /// Factory is a helper that creates the appropriate node type when creating a node.  See
-/// LookupFactory below for a helper that is specialised for the lookup case.  All the functions
-/// will create nodes that are initially dirty which is intentional because not all attributes are
-/// fetched when creating nodes.
+/// LookupFactory below for a helper that is specialised for the lookup case.  Nodes are created
+/// clean if attributes are returned in `OnRepresentation`, or dirty otherwise.
 struct Factory<'a> {
     node_info: &'a mut FsNodeInfo,
     assume_special: bool,
@@ -311,6 +310,7 @@ impl<'a> sync_io_client::Factory for Factory<'a> {
     type Result = (Box<dyn FsNodeOps>, u64);
 
     fn create_node(self, io: RemoteIo, info: fio::NodeInfo) -> Self::Result {
+        let dirty = info.attributes.is_none();
         let attrs = get_attributes(&info.attributes);
         let id = attrs.immutable_attributes.id.unwrap_or(fio::INO_UNKNOWN);
         update_info_from_fidl(
@@ -318,10 +318,11 @@ impl<'a> sync_io_client::Factory for Factory<'a> {
             &attrs.mutable_attributes,
             &attrs.immutable_attributes,
         );
-        (Box::new(RemoteNode::new(io, true)), id)
+        (Box::new(RemoteNode::new(io, dirty)), id)
     }
 
     fn create_directory(self, io: RemoteIo, info: fio::DirectoryInfo) -> Self::Result {
+        let dirty = info.attributes.is_none();
         let attrs = get_attributes(&info.attributes);
         let id = attrs.immutable_attributes.id.unwrap_or(fio::INO_UNKNOWN);
         update_info_from_fidl(
@@ -329,17 +330,18 @@ impl<'a> sync_io_client::Factory for Factory<'a> {
             &attrs.mutable_attributes,
             &attrs.immutable_attributes,
         );
-        (Box::new(RemoteNode::new(io, true)), id)
+        (Box::new(RemoteNode::new(io, dirty)), id)
     }
 
     fn create_file(self, io: RemoteIo, info: fio::FileInfo) -> Self::Result {
+        let dirty = info.attributes.is_none();
         let is_special_node = self.assume_special || is_special(&info);
         let attrs = get_attributes(&info.attributes);
         let id = attrs.immutable_attributes.id.unwrap_or(fio::INO_UNKNOWN);
         let ops: Box<dyn FsNodeOps> = if is_special_node {
-            Box::new(RemoteSpecialNode { node: BaseNode::new(io, true) })
+            Box::new(RemoteSpecialNode { node: BaseNode::new(io, dirty) })
         } else {
-            Box::new(RemoteNode::new(io, true))
+            Box::new(RemoteNode::new(io, dirty))
         };
         update_info_from_fidl(
             self.node_info,
@@ -350,6 +352,7 @@ impl<'a> sync_io_client::Factory for Factory<'a> {
     }
 
     fn create_symlink(self, io: RemoteIo, info: fio::SymlinkInfo) -> Self::Result {
+        let dirty = info.attributes.is_none();
         let attrs = get_attributes(&info.attributes);
         let id = attrs.immutable_attributes.id.unwrap_or(fio::INO_UNKNOWN);
         let target = info.target.unwrap_or_default();
@@ -358,7 +361,7 @@ impl<'a> sync_io_client::Factory for Factory<'a> {
             &attrs.mutable_attributes,
             &attrs.immutable_attributes,
         );
-        (Box::new(RemoteSymlink::new(BaseNode::new(io, true), target)), id)
+        (Box::new(RemoteSymlink::new(BaseNode::new(io, dirty), target)), id)
     }
 }
 
@@ -518,7 +521,9 @@ impl RemoteFs {
                     | fio::Flags::FLAG_SEND_REPRESENTATION,
                 &fio::Options {
                     attributes: Some(
-                        fio::NodeAttributesQuery::ID | fio::NodeAttributesQuery::WRAPPING_KEY_ID,
+                        NODE_INFO_ATTRIBUTES
+                            | fio::NodeAttributesQuery::ID
+                            | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
                     ),
                     ..Default::default()
                 },
@@ -643,7 +648,14 @@ impl BaseNode {
                 gid: has.gid.then_some(info.gid),
                 rdev: has.rdev.then_some(info.rdev.bits()),
                 casefold: has.casefold.then_some(info.casefold),
-                wrapping_key_id: if has.wrapping_key_id { info.wrapping_key_id } else { None },
+                encryption_policy: if has.encryption_policy {
+                    info.encryption_policy.map(|p| fio::FscryptPolicy {
+                        key_identifier: p.key_identifier,
+                        flags: fio::FscryptPolicyFlags::from_bits_retain(p.flags.bits()),
+                    })
+                } else {
+                    None
+                },
                 ..Default::default()
             });
             res.map_err(|status| from_status_like_fdio!(status))
@@ -866,9 +878,6 @@ pub(super) fn update_info_from_attrs(info: &mut FsNodeInfo, attrs: &zxio_node_at
     if attrs.has.casefold {
         info.casefold = attrs.casefold;
     }
-    if attrs.has.wrapping_key_id {
-        info.wrapping_key_id = Some(attrs.wrapping_key_id);
-    }
 }
 
 /// Same as `update_info_from_attr` but uses FIDL.
@@ -904,8 +913,11 @@ fn update_info_from_fidl(
     if let Some(casefold) = mutable.casefold {
         info.casefold = casefold;
     }
-    if let Some(wrapping_key_id) = mutable.wrapping_key_id {
-        info.wrapping_key_id = Some(wrapping_key_id);
+    if let Some(policy) = mutable.encryption_policy {
+        info.encryption_policy = Some(crate::vfs::FscryptNodePolicy {
+            key_identifier: policy.key_identifier,
+            flags: crate::vfs::FscryptPolicyFlags::from_bits_retain(policy.flags.bits()),
+        });
     }
 }
 
@@ -1038,17 +1050,18 @@ impl FsNodeOps for RemoteNode {
         flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
         {
-            // It is safe to read the cached node info here because the `wrapping_key_id` is
+            // It is safe to read the cached node info here because the `encryption_policy` is
             // fetched when the node is first opened, and updated when set. We don't expect this to
             // change out from under Starnix.
             let node_info = node.info();
             if node_info.mode.is_dir() {
-                if let Some(wrapping_key_id) = node_info.wrapping_key_id {
+                if let Some(policy) = node_info.encryption_policy {
                     if flags.can_write() {
                         // Locked encrypted directories cannot be opened with write access.
                         let crypt_service =
                             node.fs().crypt_service().ok_or_else(|| errno!(ENOKEY))?;
-                        if !crypt_service.contains_key(EncryptionKeyId::from(wrapping_key_id)) {
+                        if !crypt_service.contains_key(EncryptionKeyId::from(policy.key_identifier))
+                        {
                             return error!(ENOKEY);
                         }
                     }
@@ -1116,7 +1129,9 @@ impl FsNodeOps for RemoteNode {
                         rdev: Some(dev.bits()),
                         ..Default::default()
                     }),
-                    fio::NodeAttributesQuery::ID | fio::NodeAttributesQuery::WRAPPING_KEY_ID,
+                    NODE_INFO_ATTRIBUTES
+                        | fio::NodeAttributesQuery::ID
+                        | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
                     Factory { node_info: &mut node_info, assume_special: !mode.is_reg() },
                 )
                 .map_err(|status| from_status_like_fdio!(status, name))
@@ -1158,7 +1173,9 @@ impl FsNodeOps for RemoteNode {
                         gid: Some(owner.gid),
                         ..Default::default()
                     }),
-                    fio::NodeAttributesQuery::ID | fio::NodeAttributesQuery::WRAPPING_KEY_ID,
+                    NODE_INFO_ATTRIBUTES
+                        | fio::NodeAttributesQuery::ID
+                        | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
                     Factory { node_info: &mut node_info, assume_special: false },
                 )
                 .map_err(|status| from_status_like_fdio!(status, name))
@@ -1187,7 +1204,7 @@ impl FsNodeOps for RemoteNode {
             | fio::NodeAttributesQuery::UID
             | fio::NodeAttributesQuery::GID
             | fio::NodeAttributesQuery::RDEV
-            | fio::NodeAttributesQuery::WRAPPING_KEY_ID
+            | fio::NodeAttributesQuery::ENCRYPTION_POLICY
             | fio::NodeAttributesQuery::VERITY_ENABLED
             | fio::NodeAttributesQuery::CASEFOLD;
 
@@ -1220,7 +1237,7 @@ impl FsNodeOps for RemoteNode {
             | fio::NodeAttributesQuery::UID
             | fio::NodeAttributesQuery::GID
             | fio::NodeAttributesQuery::RDEV
-            | fio::NodeAttributesQuery::WRAPPING_KEY_ID
+            | fio::NodeAttributesQuery::ENCRYPTION_POLICY
             | fio::NodeAttributesQuery::VERITY_ENABLED
             | fio::NodeAttributesQuery::CASEFOLD;
 
@@ -1418,7 +1435,9 @@ impl FsNodeOps for RemoteNode {
                         gid: Some(owner.gid),
                         ..Default::default()
                     }),
-                    fio::NodeAttributesQuery::ID,
+                    NODE_INFO_ATTRIBUTES
+                        | fio::NodeAttributesQuery::ID
+                        | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
                     Factory { node_info: &mut node_info, assume_special: false },
                 )
                 .map_err(|status| from_status_like_fdio!(status))
@@ -2373,7 +2392,7 @@ mod test {
     use flyweights::FlyByteStr;
     use fuchsia_async as fasync;
     use fuchsia_runtime::UtcDuration;
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
     use fxfs_testing::{TestFixture, TestFixtureOptions};
     use starnix_sync::{FsNodeInfoLevel, Mutex};
     use starnix_uapi::auth::Credentials;
@@ -3977,21 +3996,14 @@ mod test {
             )
             .expect("failed to mount test remote FS");
 
-            // 1. Initial fetch.
+            // 1. Initial fetch. Should use cached information from OnRepresentation.
             {
                 let _info =
                     fs.root().node.fetch_and_refresh_info(current_task).expect("fetch failed");
             }
-            assert_eq!(get_attrs_count.load(Ordering::SeqCst), 1);
+            assert_eq!(get_attrs_count.load(Ordering::SeqCst), 0);
 
-            // 2. Second time should use cached information.
-            {
-                let _info =
-                    fs.root().node.fetch_and_refresh_info(current_task).expect("fetch failed");
-            }
-            assert_eq!(get_attrs_count.load(Ordering::SeqCst), 1);
-
-            // 3. Update attributes. This should dirty the node.
+            // 2. Update attributes. This should dirty the node.
             fs.root()
                 .node
                 .update_attributes(current_task, |attrs| {
@@ -4000,12 +4012,19 @@ mod test {
                 })
                 .expect("update_attributes failed");
 
-            // 4. Fetch again. Should trigger a request.
+            // 3. Fetch again. Should trigger a request.
             {
                 let _info =
                     fs.root().node.fetch_and_refresh_info(current_task).expect("fetch failed");
             }
-            assert_eq!(get_attrs_count.load(Ordering::SeqCst), 2);
+            assert_eq!(get_attrs_count.load(Ordering::SeqCst), 1);
+
+            // 4. Subsequent fetch should use cached information.
+            {
+                let _info =
+                    fs.root().node.fetch_and_refresh_info(current_task).expect("fetch failed");
+            }
+            assert_eq!(get_attrs_count.load(Ordering::SeqCst), 1);
         })
         .await;
 
@@ -4028,6 +4047,7 @@ mod test {
         get_attrs_count: AtomicU32,
         file_size: AtomicUsize,
         write_offsets: Mutex<Vec<u64>>,
+        open_paths: Mutex<Vec<String>>,
         data: Mutex<Vec<u8>>,
         get_attrs_hook: Mutex<Option<futures::future::BoxFuture<'static, ()>>>,
         write_hook: Mutex<Option<futures::future::BoxFuture<'static, ()>>>,
@@ -4142,46 +4162,101 @@ mod test {
             }
         }
 
-        async fn handle_directory_requests(
+        fn handle_directory_requests(
             self: Arc<Self>,
             mut stream: fio::DirectoryRequestStream,
             control_handle: fio::DirectoryControlHandle,
-        ) {
-            let info = fio::DirectoryInfo {
-                attributes: Some(fio::NodeAttributes2 {
-                    mutable_attributes: fio::MutableNodeAttributes { ..Default::default() },
-                    immutable_attributes: fio::ImmutableNodeAttributes {
-                        id: Some(1),
-                        link_count: Some(1),
-                        ..Default::default()
-                    },
-                }),
-                ..Default::default()
-            };
-            let _ = control_handle.send_on_representation(fio::Representation::Directory(info));
-            let mut file_tasks = Vec::new();
-            while let Some(Ok(request)) = stream.next().await {
-                match request {
-                    fio::DirectoryRequest::Open { path, object, .. } => {
-                        if path == "file" {
-                            let self_clone = Arc::clone(&self);
-                            file_tasks.push(fasync::Task::spawn(async move {
-                                let (stream, control_handle) =
-                                    ServerEnd::<fio::FileMarker>::new(object)
-                                        .into_stream_and_control_handle();
-                                self_clone.handle_file_requests(stream, control_handle).await;
-                            }));
+        ) -> futures::future::BoxFuture<'static, ()> {
+            async move {
+                let info = fio::DirectoryInfo {
+                    attributes: Some(fio::NodeAttributes2 {
+                        mutable_attributes: fio::MutableNodeAttributes { ..Default::default() },
+                        immutable_attributes: fio::ImmutableNodeAttributes {
+                            id: Some(1),
+                            link_count: Some(1),
+                            protocols: Some(fio::NodeProtocolKinds::DIRECTORY),
+                            ..Default::default()
+                        },
+                    }),
+                    ..Default::default()
+                };
+                let _ = control_handle.send_on_representation(fio::Representation::Directory(info));
+                let mut sub_tasks = Vec::new();
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        fio::DirectoryRequest::Open { path, flags, object, .. } => {
+                            self.open_paths.lock().push(path.clone());
+                            if flags.contains(fio::Flags::FLAG_MUST_CREATE) {
+                                let self_clone = Arc::clone(&self);
+                                if flags.contains(fio::Flags::PROTOCOL_DIRECTORY) {
+                                    sub_tasks.push(fasync::Task::spawn(async move {
+                                        let (stream, control_handle) =
+                                            ServerEnd::<fio::DirectoryMarker>::new(object)
+                                                .into_stream_and_control_handle();
+                                        self_clone
+                                            .handle_directory_requests(stream, control_handle)
+                                            .await;
+                                    }));
+                                } else {
+                                    sub_tasks.push(fasync::Task::spawn(async move {
+                                        let (stream, control_handle) =
+                                            ServerEnd::<fio::FileMarker>::new(object)
+                                                .into_stream_and_control_handle();
+                                        self_clone
+                                            .handle_file_requests(stream, control_handle)
+                                            .await;
+                                    }));
+                                }
+                            } else if path == "file"
+                                || flags.contains(fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY)
+                            {
+                                let self_clone = Arc::clone(&self);
+                                sub_tasks.push(fasync::Task::spawn(async move {
+                                    let (stream, control_handle) =
+                                        ServerEnd::<fio::FileMarker>::new(object)
+                                            .into_stream_and_control_handle();
+                                    self_clone.handle_file_requests(stream, control_handle).await;
+                                }));
+                            } else if path == "dir" || path == "dir2" || path == "sub" {
+                                let self_clone = Arc::clone(&self);
+                                sub_tasks.push(fasync::Task::spawn(async move {
+                                    let (stream, control_handle) =
+                                        ServerEnd::<fio::DirectoryMarker>::new(object)
+                                            .into_stream_and_control_handle();
+                                    self_clone
+                                        .handle_directory_requests(stream, control_handle)
+                                        .await;
+                                }));
+                            } else {
+                                let _ = ServerEnd::<fio::NodeMarker>::new(object)
+                                    .close_with_epitaph(zx::Status::NOT_FOUND);
+                            }
                         }
+                        fio::DirectoryRequest::GetAttributes { responder, .. } => {
+                            self.get_attrs_count.fetch_add(1, Ordering::SeqCst);
+                            responder
+                                .send(Ok((
+                                    &fio::MutableNodeAttributes { ..Default::default() },
+                                    &fio::ImmutableNodeAttributes {
+                                        id: Some(1),
+                                        link_count: Some(1),
+                                        protocols: Some(fio::NodeProtocolKinds::DIRECTORY),
+                                        ..Default::default()
+                                    },
+                                )))
+                                .unwrap();
+                        }
+                        fio::DirectoryRequest::Close { responder } => {
+                            responder.send(Ok(())).unwrap();
+                        }
+                        _ => {}
                     }
-                    fio::DirectoryRequest::Close { responder } => {
-                        responder.send(Ok(())).unwrap();
-                    }
-                    _ => {}
+                }
+                for task in sub_tasks {
+                    let _ = task.await;
                 }
             }
-            for task in file_tasks {
-                let _ = task.await;
-            }
+            .boxed()
         }
 
         async fn run(self: Arc<Self>, mut stream: fio::DirectoryRequestStream) {
@@ -4212,6 +4287,148 @@ mod test {
                 let _ = sub_task.await;
             }
         }
+    }
+
+    #[::fuchsia::test]
+    async fn test_mknod_and_mkdir_do_not_trigger_get_attributes() {
+        let (client, stream) = create_request_stream::<fio::DirectoryMarker>();
+        let state = Arc::new(MockRemoteFs::default());
+
+        let server_task = fasync::Task::spawn(Arc::clone(&state).run(stream));
+
+        spawn_kernel_and_run(async move |current_task| {
+            let fs = RemoteFs::new_fs(
+                &current_task.kernel(),
+                client.into_channel(),
+                FileSystemOptions { source: FlyByteStr::new(b"."), ..Default::default() },
+                fio::PERM_READABLE | fio::PERM_WRITABLE,
+            )
+            .expect("failed to mount test remote FS");
+
+            let ns = Namespace::new(fs);
+            let root = ns.root();
+
+            // 1. Fetching attributes on the freshly mounted root directory should not trigger GetAttributes.
+            {
+                let _info =
+                    root.entry.node.fetch_and_refresh_info(current_task).expect("fetch root info");
+            }
+            assert_eq!(state.get_attrs_count.load(Ordering::SeqCst), 0);
+
+            // 2. Creating a regular file (mknod) and fetching its attributes should not trigger GetAttributes.
+            let file_node = root
+                .create_node(current_task, "new_file".into(), mode!(IFREG, 0o644), DeviceId::NONE)
+                .expect("create_node file failed");
+            {
+                let _info = file_node
+                    .entry
+                    .node
+                    .fetch_and_refresh_info(current_task)
+                    .expect("fetch file info");
+            }
+            assert_eq!(state.get_attrs_count.load(Ordering::SeqCst), 0);
+
+            // 3. Creating a directory (mkdir) and fetching its attributes should not trigger GetAttributes.
+            let dir_node = root
+                .create_node(current_task, "new_dir".into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                .expect("create_node dir failed");
+            {
+                let _info = dir_node
+                    .entry
+                    .node
+                    .fetch_and_refresh_info(current_task)
+                    .expect("fetch dir info");
+            }
+            assert_eq!(state.get_attrs_count.load(Ordering::SeqCst), 0);
+
+            // 4. Creating an unnamed temporary file (create_tmpfile) and fetching its attributes should not trigger GetAttributes.
+            let tmp_node = root
+                .create_tmpfile(current_task, mode!(IFREG, 0o644), OpenFlags::RDWR)
+                .expect("create_tmpfile failed");
+            {
+                let _info = tmp_node
+                    .entry
+                    .node
+                    .fetch_and_refresh_info(current_task)
+                    .expect("fetch tmpfile info");
+            }
+            assert_eq!(state.get_attrs_count.load(Ordering::SeqCst), 0);
+        })
+        .await;
+
+        server_task.await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_lookup_open_counts() {
+        let (client, stream) = create_request_stream::<fio::DirectoryMarker>();
+        let state = Arc::new(MockRemoteFs::default());
+
+        let server_task = fasync::Task::spawn(Arc::clone(&state).run(stream));
+
+        spawn_kernel_and_run(async move |current_task| {
+            let fs = RemoteFs::new_fs(
+                &current_task.kernel(),
+                client.into_channel(),
+                FileSystemOptions { source: FlyByteStr::new(b"."), ..Default::default() },
+                fio::PERM_READABLE | fio::PERM_WRITABLE,
+            )
+            .expect("failed to mount test remote FS");
+
+            let ns = Namespace::new(fs);
+            let root = ns.root();
+
+            // 1. Non-existent component_lookup sends only 1 Open request (not 2).
+            let mut context = LookupContext::default();
+            assert_eq!(
+                root.lookup_child(current_task, &mut context, "nonexistent".into())
+                    .expect_err("lookup should fail with ENOENT"),
+                errno!(ENOENT)
+            );
+            assert_eq!(*state.open_paths.lock(), vec!["nonexistent"]);
+            state.open_paths.lock().clear();
+
+            // 2. Multi-component get_children_pipelined sends 1 pipelined Open per component.
+            let results = root.entry.get_children_pipelined(
+                current_task,
+                &root.mount,
+                &["dir".into(), "sub".into(), "file".into()],
+            );
+            assert_eq!(results.len(), 3);
+            for res in &results {
+                assert!(res.is_ok(), "expected Ok, got {res:?}");
+            }
+            assert_eq!(*state.open_paths.lock(), vec!["dir", "sub", "file"]);
+            state.open_paths.lock().clear();
+
+            // 3. Pipelined lookup encountering ENOENT does not send duplicate Open requests.
+            let results = root.entry.get_children_pipelined(
+                current_task,
+                &root.mount,
+                &["dir2".into(), "missing".into()],
+            );
+            assert_eq!(results.len(), 2);
+            assert!(results[0].is_ok());
+            assert_eq!(results[1].as_ref().expect_err("expected ENOENT"), &errno!(ENOENT));
+            assert_eq!(*state.open_paths.lock(), vec!["dir2", "missing"]);
+            state.open_paths.lock().clear();
+
+            // 4. Re-querying a previously resolved path is served from the cache and sends no Open
+            // requests.
+            let results = root.entry.get_children_pipelined(
+                current_task,
+                &root.mount,
+                &["dir".into(), "sub".into(), "file".into()],
+            );
+            assert_eq!(results.len(), 3);
+            for res in &results {
+                assert!(res.is_ok(), "expected Ok, got {res:?}");
+            }
+            assert_eq!(*state.open_paths.lock(), Vec::<String>::new());
+        })
+        .await;
+
+        server_task.await;
     }
 
     #[::fuchsia::test]

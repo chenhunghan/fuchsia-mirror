@@ -7,29 +7,34 @@ import argparse
 import json
 import os
 import sys
+from typing import Iterable
 
 FUCHSIA_MODULE = "go.fuchsia.dev/fuchsia"
 
 
 class Source(object):
-    def __init__(self, name, path, file):
+    def __init__(self, name: str, path: str, file: str) -> None:
         self.name = name
         self.path = path
         self.file = file
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "%s[%s]" % (self.name, self.path)
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((self.name, self.path))
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Source):
+            return NotImplemented
         return self.name == other.name and self.path == other.path
 
 
-def get_sources(dep_files, extra_sources=None):
+def get_sources(
+    dep_files: list[str], extra_sources: Iterable[Source] | None = None
+) -> dict[str, str]:
     # Aggregate source data from dependencies.
-    sources = set()
+    sources: set[Source] = set()
     if extra_sources:
         sources.update(extra_sources)
     for dep in dep_files:
@@ -38,7 +43,7 @@ def get_sources(dep_files, extra_sources=None):
                 sources.add(Source(name, path, dep))
 
     # Verify duplicates.
-    sources_by_name = {}
+    sources_by_name: dict[str, list[Source]] = {}
     for src in sources:
         sources_by_name.setdefault(src.name, []).append(src)
     for name, srcs in sources_by_name.items():
@@ -52,7 +57,7 @@ def get_sources(dep_files, extra_sources=None):
     return {s.name: s.path for s in sources}
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     name_group = parser.add_mutually_exclusive_group(required=True)
     name_group.add_argument("--name", help="Name of the current library")
@@ -184,6 +189,8 @@ def main():
             indent=2,
             sort_keys=True,
         )
+
+    return 0
 
 
 if __name__ == "__main__":

@@ -24,6 +24,15 @@ unsafe extern "C" {
         set_mask: u32,
         strobe_mask: u32,
     );
+    pub(crate) fn cpp_dispatcher_raise_signals_locked(
+        dispatcher: *const Dispatcher,
+        signals: zx_types::zx_signals_t,
+    ) -> zx_types::zx_signals_t;
+    pub(crate) fn cpp_dispatcher_notify_observers_locked(
+        dispatcher: *const Dispatcher,
+        signals: zx_types::zx_signals_t,
+        queue_to_own: *mut core::ffi::c_void,
+    );
     pub(crate) fn cpp_dispatcher_signals_state_locked(
         dispatcher: *const Dispatcher,
     ) -> zx_types::zx_signals_t;
@@ -58,4 +67,9 @@ unsafe extern "C" {
         len: usize,
     ) -> zx_types::zx_status_t;
     pub(crate) fn cpp_dispatcher_current_handle_count(dispatcher: *const Dispatcher) -> u32;
+    pub(crate) fn cpp_dispatcher_is_waitable(dispatcher: *const Dispatcher) -> bool;
+    pub(crate) fn cpp_dispatcher_cancel(
+        dispatcher: *const Dispatcher,
+        handle: *const core::ffi::c_void,
+    );
 }

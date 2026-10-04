@@ -85,10 +85,14 @@ When editing any Fuchsia documentation file, enforce the following standards:
   mailto:user@example.com`). Mention email addresses and usernames as plain text
   or inline monospace code (e.g., `user@example.com` or `username`).
 
-### 4. Sentence Case Headers & Custom Anchors
+### 4. Sentence Case Headers, No Backticks & Custom Anchors
 
 - All titles and section headers (`#`, `##`, `###`) MUST use **sentence case**
   (e.g. `## Document locations`, not `## Document Locations`).
+- Do NOT use **backticks** (`` ` ``) to format code in page and section titles
+  (`#`, `##`, `###`, and so on). Write code terms as plain text:
+    - Good: `# BUILD.bazel files style guide`
+    - Bad: ``# `BUILD.bazel` files style guide``
 - Use `{:#anchor-name}` for custom section anchors (e.g. `## Section title
   {:#section-title}`).
 - Custom section header (`##`, `###`) anchors MUST use **dashes (`-`)** instead
@@ -223,6 +227,7 @@ When editing any Fuchsia documentation file, enforce the following standards:
 2.  **Inspect Target Document**: Scan target Markdown file for violations:
     - Lines exceeding 80 characters (excluding top-level YAML frontmatter).
     - Header titles using Title Case instead of sentence case.
+    - Page or section titles (`#`, `##`, `###`, ...) containing backticks.
     - Main title (`# ...`) containing custom anchor, or section headers using
       underscore-based anchors.
 
@@ -254,6 +259,8 @@ When editing any Fuchsia documentation file, enforce the following standards:
       sentences.
     - Update headers to sentence case, remove custom anchor from `#` main title,
       and use dash-based anchors for subheadings (e.g., `{:#anchor-name}`).
+    - Remove backticks from page and section titles, keeping the code terms as
+      plain text.
     - Add a top-level outline navigation list after the intro (listing major
       sections without redundant sub-section nesting), and sub-section lists
       under major section headings.

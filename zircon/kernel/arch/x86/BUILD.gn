@@ -19,6 +19,9 @@ compiler_config("abi") {
     ":thread-pointer-abi",
     ":stack-pointer-abi",
   ]
+  if (!is_gcc) {
+    compiler_configs += [ ":safe-stack-abi" ]
+  }
 
   # These are not part of the ABI contract per se, but they're part of the
   # "expected resilience of generated code" contract that should be uniform
@@ -122,6 +125,33 @@ compiler_config("stack-pointer-abi") {
     ]
   } else {
     rustflags = [ "-Cno-redzone" ]
+  }
+}
+
+# TODO(https://fxbug.dev/538720963): Explicitly enable this for rust until
+# the upstream change enabling by default gets rolled in. After that, we can
+# remove this.
+compiler_config("safe-stack-abi") {
+  # Do not enable this for KASan builds since safestack and ASan are
+  # "incompatible". Specifically, clang will implicitly disable safestack if
+  # ASan is used, so until we get the rust driver matching clang's, then we can
+  # explicitly match that logic here.
+  if (toolchain_environment == "kernel" &&
+      toolchain_variant.tags + [ "asan" ] - [ "asan" ] ==
+      toolchain_variant.tags) {
+    rustflags = [ "-Zexternal-clangrt" ]
+    rust_target_edits = [
+      {
+        key = "supported-sanitizers"
+        action = "append"
+        value = "safestack"
+      },
+      {
+        key = "default-sanitizers"
+        action = "set"
+        value = [ "safestack" ]
+      },
+    ]
   }
 }
 
@@ -305,6 +335,16 @@ source_set("syscall") {
   ]
 }
 
+kernel_bindgen_crate("arch-x86-vm-bindings") {
+  headers = [ "include/arch/vm.h" ]
+  cpp = true
+  non_rust_deps = [ ":headers" ]
+  raw_lines = [ "#![no_std]" ]
+  var_allowlist = [ "kX86CanonicalAddressMask" ]
+  expect_lints = [ "non_upper_case_globals" ]
+  notice_year = 2026
+}
+
 kernel_bindgen_crate("arch-x86-aspace-bindings") {
   headers = [
     "include/arch/kernel_aspace.h",
@@ -343,10 +383,12 @@ kernel_rust_mod("arch-x86-rs") {
     "src/registers.rs",
     "src/suspend.rs",
     "src/system_topology.rs",
+    "src/vm.rs",
     "src/x86.rs",
   ]
   deps = [
     ":arch-x86-aspace-bindings",
+    ":arch-x86-vm-bindings",
     "//sdk/rust/zbi",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",

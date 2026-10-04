@@ -496,7 +496,7 @@ impl<T, L: RawLock + IsRawMutex, const SLAB_SIZE: usize, const TRACK_OBJECT_COUN
     ///
     /// Note: Slabs are not pre-allocated during const-construction.
     pub const fn const_new(max_slabs: usize, lock: RawMutex) -> Self {
-        let _ = Self::_ASSERT;
+        const { Self::_ASSERT };
         Self {
             mu: KMutex::new(lock),
             free_list: KCell::new(SinglyLinkedList::new()),
@@ -570,12 +570,12 @@ impl<T, L: RawLock + IsRawMutex, const SLAB_SIZE: usize, const TRACK_OBJECT_COUN
         }
 
         // 2. Try active slab
-        if let Some(active_slab) = fields.slab_list.front_mut() {
-            if let Some(mem) = active_slab.allocate(Self::ALLOC_SIZE, SLAB_SIZE) {
-                let ptr = mem.cast::<T>();
-                fields.record_allocation();
-                return Ok(ptr);
-            }
+        if let Some(active_slab) = fields.slab_list.front_mut()
+            && let Some(mem) = active_slab.allocate(Self::ALLOC_SIZE, SLAB_SIZE)
+        {
+            let ptr = mem.cast::<T>();
+            fields.record_allocation();
+            return Ok(ptr);
         }
 
         // 3. Try allocate new slab

@@ -34,8 +34,8 @@ use netemul::{RealmTcpListener as _, RealmUdpSocket as _};
 use netstack_testing_common::constants::ipv6 as ipv6_consts;
 use netstack_testing_common::ndp::send_ra_with_router_lifetime;
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Manager, ManagerConfig, Netstack3, NetstackExt, SocketProxyType,
-    TestSandboxExt as _, constants,
+    KnownServiceProvider, Manager, ManagerConfig, Netstack3, SocketProxyType, TestSandboxExt as _,
+    constants,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, Result, pause_fake_clock, wait_for_component_stopped,
@@ -283,7 +283,6 @@ async fn discovered_ndp_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
         &name.clone(),
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
         },
@@ -348,7 +347,6 @@ async fn discovered_dhcpv4_dns<M: Manager>(name: &str, check_type: DnsCheckType)
         &name.clone(),
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
         },
@@ -483,7 +481,6 @@ async fn discovered_dhcpv6_dns<M: Manager>(name: &str, check_type: DnsCheckType)
         &name.clone(),
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
         },
@@ -650,24 +647,18 @@ async fn discovered_starnix_networks_dns<M: Manager>(name: &str, check_type: Dns
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::EnableSocketProxy,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::Real,
                 },
+                KnownServiceProvider::DhcpClient,
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::SocketProxy,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+            ],
         )
         .expect("create netstack realm");
 
     let network_registry = realm
-        .connect_to_protocol::<fnp_socketproxy::StarnixNetworksMarker>()
+        .connect_to_protocol::<fnp_socketproxy::NetworkRegistryMarker>()
         .expect("while connecting to network registry");
 
     // Add a network and observe the DNS servers in the DNS update.
@@ -766,28 +757,22 @@ async fn discovered_starnix_fuchsia_networks_dns<M: Manager>(name: &str, check_t
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::EnableSocketProxy,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::Real,
                 },
+                KnownServiceProvider::DhcpClient,
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::SocketProxy,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+            ],
         )
         .expect("create netstack realm");
-    let starnix_networks = realm
-        .connect_to_protocol::<fnp_socketproxy::StarnixNetworksMarker>()
-        .expect("while connecting to StarnixNetworks");
+    let network_registry = realm
+        .connect_to_protocol::<fnp_socketproxy::NetworkRegistryMarker>()
+        .expect("while connecting to NetworkRegistry");
 
-    // Add a Starnix network to the Starnix NetworkRegistry. Since there is no
-    // default network in the Fuchsia NetworkRegistry, the network will be
-    // observed via the watcher without setting it as the default.
+    // Add a Starnix network to the NetworkRegistry. Since there is no
+    // default network, the network will be observed via the watcher without
+    // setting it as the default.
     let mut starnix_network = fnp_socketproxy::Network {
         network_id: Some(STARNIX_NETWORK_ID),
         info: Some(starnix_network_info(123, 456)),
@@ -798,7 +783,7 @@ async fn discovered_starnix_fuchsia_networks_dns<M: Manager>(name: &str, check_t
         }),
         ..Default::default()
     };
-    assert_matches::assert_matches!(starnix_networks.add(&starnix_network).await, Ok(Ok(())));
+    assert_matches::assert_matches!(network_registry.add(&starnix_network).await, Ok(Ok(())));
     let expect1 = HashSet::from([fnet::SocketAddress::Ipv4(fnet::Ipv4SocketAddress {
         address: fidl_ip_v4!("192.0.2.1"),
         port: DEFAULT_DNS_PORT,
@@ -809,7 +794,7 @@ async fn discovered_starnix_fuchsia_networks_dns<M: Manager>(name: &str, check_t
     check_type.clone().evaluate_check::<M, _>(&realm, &mut wait_for_netmgr, &expect1).await;
 
     // Add a device to devfs for netcfg to manage and install into the Netstack.
-    // The network will not yet be added to FuchsiaNetworks or set it as default.
+    // The network will not yet be added to the NetworkRegistry or set it as default.
     // It will not be a default network candidate until it has a default route.
     let network = sandbox.create_network(name).await.expect("create network");
     let _endpoint =
@@ -826,7 +811,7 @@ async fn discovered_starnix_fuchsia_networks_dns<M: Manager>(name: &str, check_t
         v6: Some(vec![]),
         ..Default::default()
     });
-    assert_matches::assert_matches!(starnix_networks.update(&starnix_network).await, Ok(Ok(())));
+    assert_matches::assert_matches!(network_registry.update(&starnix_network).await, Ok(Ok(())));
     let starnix_updated_dns = fnet::SocketAddress::Ipv4(fnet::Ipv4SocketAddress {
         address: fidl_ip_v4!("192.0.2.2"),
         port: DEFAULT_DNS_PORT,

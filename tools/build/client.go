@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // BuildAPIClient is a convenience interface for accessing the build API module
@@ -97,27 +96,52 @@ func (c BuildAPIClient) ExportDebugSymbols(ctx context.Context, outputDir string
 	return nil
 }
 
-// AffectedTests returns the list of affected test targets by calling the
-// build/api/client affected_tests command with the given files list.
-func (c BuildAPIClient) AffectedTests(ctx context.Context, filesListPath string) ([]string, error) {
-	args := []string{
-		"--build-dir",
-		c.buildDir,
+// AffectedTestsResult contains the result of calling the affected_tests tool.
+type AffectedTestsResult struct {
+	// Targets is the list of affected test target labels (e.g. "//src/foo:bar_test").
+	Targets []string
+	// BuildNotAffected is true if the changed files affected no targets in the
+	// build graph.
+	BuildNotAffected bool
+}
+
+// affectedTestsOutput mirrors the JSON emitted by
+// `build/api/client affected_tests --format=json`.
+type affectedTestsOutput struct {
+	TestTargets []struct {
+		Label string `json:"label"`
+		Env   string `json:"env"`
+	} `json:"test_targets"`
+	BuildNotAffected bool `json:"build_not_affected"`
+}
+
+// AffectedTests runs the build/api/client affected_tests command with the given
+// files list and returns the affected test targets and whether the build graph
+// was affected.
+func (c BuildAPIClient) AffectedTests(ctx context.Context, filesListPath string) (*AffectedTestsResult, error) {
+	cmd := exec.CommandContext(ctx, c.toolPath,
+		"--build-dir", c.buildDir,
 		"affected_tests",
-		fmt.Sprintf("--files-list=%s", filesListPath),
-	}
-	cmd := exec.CommandContext(ctx, c.toolPath, args...)
+		"--files-list="+filesListPath,
+		"--format=json",
+	)
 	cmd.Stderr = os.Stderr
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("affected_tests failed: %w", err)
 	}
-	var tests []string
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			tests = append(tests, line)
-		}
+
+	var out affectedTestsOutput
+	if err := json.Unmarshal(output, &out); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal affected_tests output: %w", err)
 	}
-	return tests, nil
+
+	targets := make([]string, 0, len(out.TestTargets))
+	for _, t := range out.TestTargets {
+		targets = append(targets, t.Label)
+	}
+	return &AffectedTestsResult{
+		Targets:          targets,
+		BuildNotAffected: out.BuildNotAffected,
+	}, nil
 }

@@ -58,7 +58,6 @@ sysmem
 ?usb-cdc-acm
 ?usb-cdc-ecm
 ?usb-composite
-?usb-harriet
 ?usb-hid
 ?usb-hub
 ?usb-mass-storage

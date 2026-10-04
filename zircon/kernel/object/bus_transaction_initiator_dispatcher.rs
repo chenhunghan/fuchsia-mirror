@@ -10,9 +10,7 @@ use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_BTI, ZX_RIGHT_DUPLICATE, ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT,
-    ZX_RIGHT_MAP, ZX_RIGHT_READ, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_TRANSFER, ZX_RIGHT_WRITE,
-    zx_info_bti_t, zx_rights_t,
+    ZX_DEFAULT_BTI_RIGHTS, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_BTI, zx_info_bti_t, zx_rights_t,
 };
 
 use super::bti::Bti;
@@ -24,17 +22,6 @@ use crate::vm::pinned_vm_object::PinnedVmObject;
 use crate::vm::vm_object::VmObject;
 
 use object_constants_rs as object_constants;
-
-/// Default rights assigned to a BusTransactionInitiatorDispatcher handle:
-/// ((ZX_RIGHTS_BASIC & (~ZX_RIGHT_WAIT)) | ZX_RIGHTS_IO | ZX_RIGHTS_PROPERTY | ZX_RIGHT_MAP)
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_GET_PROPERTY
-    | ZX_RIGHT_SET_PROPERTY
-    | ZX_RIGHT_MAP;
 
 zr::static_assert_size_and_align!(
     BusTransactionInitiatorDispatcherState,
@@ -120,7 +107,7 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 impl BusTransactionInitiatorDispatcher {
     /// Returns default rights for a BusTransactionInitiatorDispatcher handle.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_BTI_RIGHTS
     }
 
     /// Creates a new BusTransactionInitiatorDispatcher and returns its kernel handle and rights.
@@ -132,7 +119,7 @@ impl BusTransactionInitiatorDispatcher {
                 cpp_bus_transaction_initiator_dispatcher_create(iommu as *const Iommu, bti_id, out)
             })
         }?;
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_BTI_RIGHTS))
     }
 
     /// Pins the given VMO range and returns a `PinnedMemoryTokenDispatcher` representing the

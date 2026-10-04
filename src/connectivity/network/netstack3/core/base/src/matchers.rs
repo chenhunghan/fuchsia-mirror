@@ -225,6 +225,36 @@ impl Matcher<Marks> for MarkMatchers {
     }
 }
 
+impl InspectableValue for MarkMatcher {
+    fn record<I: Inspector>(&self, name: &str, inspector: &mut I) {
+        match self {
+            MarkMatcher::Unmarked => inspector.record_str(name, "Unmarked"),
+            MarkMatcher::Marked { start, end, mask, invert } => {
+                inspector.record_child(name, |inspector| {
+                    inspector.record_uint("Mask", *mask);
+                    inspector.record_child("Range", |inspector| {
+                        inspector.record_uint("StartInclusive", *start);
+                        inspector.record_uint("EndInclusive", *end);
+                    });
+                    inspector.record_bool("Invert", *invert);
+                })
+            }
+        }
+    }
+}
+
+impl InspectableValue for MarkMatchers {
+    fn record<I: Inspector>(&self, name: &str, inspector: &mut I) {
+        inspector.record_child(name, |inspector| {
+            for (domain, matcher) in self.iter() {
+                if let Some(matcher) = matcher {
+                    matcher.record(domain.name(), inspector);
+                }
+            }
+        });
+    }
+}
+
 /// A matcher for a socket's cookie.
 pub struct SocketCookieMatcher {
     /// The cookie to check against.

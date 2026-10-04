@@ -225,7 +225,7 @@ func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
 		return nil, fmt.Errorf("%s is not a known Bazel rule to convert to GN", bazelRule)
 	}
 
-	if gnTemplateName == "__NO_GN_EQUIVALENT__" {
+	if gnTemplateName == noGNEquivalent {
 		return nil, nil
 	}
 

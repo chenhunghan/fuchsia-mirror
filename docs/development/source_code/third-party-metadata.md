@@ -75,7 +75,7 @@ Short Name: openssh
 
 ### `URL` {:#url}
 
-*(REQUIRED)* The URL where the package lives i.e. a clonable url for git
+**(Required)** The URL where the package lives i.e. a clonable url for git
 repositories, a package manager url for packages from package managers, or
 [a URL type listed here as per AutoVM's metadata proto](https://source.corp.google.com/piper///depot/google3/third_party/metadata.proto;l=165;rcl=670837485).
 If there is no upstream, use 'This is the canonical public repository'. For
@@ -93,11 +93,7 @@ URL: https://chromium.googlesource.com/chromium/src/
 
 ### `Revision` {:#revision}
 
-*(REQUIRED for dependencies which have a git repository as an upstream,
-OPTIONAL if the upstream is not a git repository and Version or Date is
-supplied)*. Revision is typically a git hash. If the dependency is managed by
-an autoroller or a script, you must ensure the uprev process also updates the
-`README.fuchsia` file with the correct Revision.
+**(Required)** Revision is typically a commit hash.
 
 ```
 Revision: 8950d99ba1ba67280fbd1e5445214d2cebe966bb
@@ -181,13 +177,16 @@ to the lower of the public versions.
 
 ### `Version` {:#version}
 
-*(REQUIRED if using CPEPrefix for vuln scanning)* This is often a git tag. If
-not git, it should be a searchable version number for the package (if the
-package does not version or is versioned by date or revision this field should
-be "N/A" and the revision, or date should be enumerated in the appropriate
-field). If the dependency is managed by an autoroller or a script, you must
-ensure the uprev process also updates the `README.fuchsia` file with the
-correct Version.
+Note: Optional, but required if URL and Revision are not provided, or if using
+CPEPrefix for vulnerability scanning.
+
+This is often a git tag. If not git, it should be a searchable version number
+for the package (if the package does not version or is versioned by date or
+revision this field should be "N/A" and the
+revision, or date should be enumerated in the appropriate field). If this field
+is set, Fuchsia's third-party freshness dashboard
+compares the pinned `Revision` against the latest upstream *release*, rather
+than the latest upstream commit, when measuring freshness.
 
 ```
 Version: 7.6

@@ -36,12 +36,11 @@ zx::result<fuchsia_hardware_platform_device::wire::Mmio> FakePDev::GetMmioById(
 
 void FakePDev::GetMmioById(GetMmioByIdRequestView request, GetMmioByIdCompleter::Sync& completer) {
   fidl::Arena arena;
-  zx::result mmio = GetMmioById(request->index, arena);
-  if (mmio.is_error()) {
+  if (zx::result mmio = GetMmioById(request->index, arena); mmio.is_ok()) {
+    completer.ReplySuccess(mmio.value());
+  } else {
     completer.ReplyError(mmio.status_value());
-    return;
   }
-  completer.ReplySuccess(std::move(mmio.value()));
 }
 
 void FakePDev::GetMmioByName(GetMmioByNameRequestView request,
@@ -52,12 +51,11 @@ void FakePDev::GetMmioByName(GetMmioByNameRequestView request,
     return;
   }
   fidl::Arena arena;
-  zx::result mmio = GetMmioById(index->second, arena);
-  if (mmio.is_error()) {
+  if (zx::result mmio = GetMmioById(index->second, arena); mmio.is_ok()) {
+    completer.ReplySuccess(mmio.value());
+  } else {
     completer.ReplyError(mmio.status_value());
-    return;
   }
-  completer.ReplySuccess(std::move(mmio.value()));
 }
 
 zx::result<zx::interrupt> FakePDev::GetInterruptById(uint32_t index) {
@@ -94,12 +92,11 @@ zx::result<zx::bti> FakePDev::GetBtiById(uint32_t index) {
 
 void FakePDev::GetInterruptById(GetInterruptByIdRequestView request,
                                 GetInterruptByIdCompleter::Sync& completer) {
-  zx::result irq = GetInterruptById(request->index);
-  if (irq.is_error()) {
+  if (zx::result irq = GetInterruptById(request->index); irq.is_ok()) {
+    completer.ReplySuccess(std::move(irq.value()));
+  } else {
     completer.ReplyError(irq.status_value());
-    return;
   }
-  completer.ReplySuccess(std::move(irq.value()));
 }
 
 void FakePDev::GetInterruptByName(GetInterruptByNameRequestView request,
@@ -109,21 +106,19 @@ void FakePDev::GetInterruptByName(GetInterruptByNameRequestView request,
     completer.ReplyError(ZX_ERR_NOT_FOUND);
     return;
   }
-  zx::result irq = GetInterruptById(index->second);
-  if (irq.is_error()) {
+  if (zx::result irq = GetInterruptById(index->second); irq.is_ok()) {
+    completer.ReplySuccess(std::move(irq.value()));
+  } else {
     completer.ReplyError(irq.status_value());
-    return;
   }
-  completer.ReplySuccess(std::move(irq.value()));
 }
 
 void FakePDev::GetBtiById(GetBtiByIdRequestView request, GetBtiByIdCompleter::Sync& completer) {
-  zx::result bti = GetBtiById(request->index);
-  if (bti.is_error()) {
+  if (zx::result bti = GetBtiById(request->index); bti.is_ok()) {
+    completer.ReplySuccess(std::move(bti.value()));
+  } else {
     completer.ReplyError(bti.status_value());
-    return;
   }
-  completer.ReplySuccess(std::move(bti.value()));
 }
 
 void FakePDev::GetBtiByName(GetBtiByNameRequestView request,
@@ -133,12 +128,11 @@ void FakePDev::GetBtiByName(GetBtiByNameRequestView request,
     completer.ReplyError(ZX_ERR_NOT_FOUND);
     return;
   }
-  zx::result bti = GetBtiById(index->second);
-  if (bti.is_error()) {
+  if (zx::result bti = GetBtiById(index->second); bti.is_ok()) {
+    completer.ReplySuccess(std::move(bti.value()));
+  } else {
     completer.ReplyError(bti.status_value());
-    return;
   }
-  completer.ReplySuccess(std::move(bti.value()));
 }
 
 void FakePDev::GetSmcById(GetSmcByIdRequestView request, GetSmcByIdCompleter::Sync& completer) {
@@ -231,7 +225,7 @@ zx::result<fdf::MmioBuffer> fdf::internal::PDevMakeMmioBufferWeak(fdf::PDev::Mmi
                               cache_policy);
   }
 
-  auto* mmio_buffer = reinterpret_cast<MmioBuffer*>(pdev_mmio.offset);
+  auto* mmio_buffer = reinterpret_cast<MmioBuffer*>(static_cast<uintptr_t>(pdev_mmio.offset));
   return zx::ok(std::move(*mmio_buffer));
 }
 

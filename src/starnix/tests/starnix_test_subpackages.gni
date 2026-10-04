@@ -15,6 +15,7 @@ starnix_test_subpackages = [
   "//src/starnix/kernel:starnix_kernel_package",
   "//src/starnix/runner:starnix_package",
   "//src/starnix/tests:netstack_package",
+  "//src/storage/erofs/component:erofs",
   "//src/storage/fxfs/test-fxfs:test-fxfs-package",
   "//src/sys/time/timekeeper:timekeeper-with-config-for-starnix-tests",
   "//src/sys/time/testing/utc-handle-vendor:pkg",

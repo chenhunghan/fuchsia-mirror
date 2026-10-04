@@ -5,6 +5,10 @@
 package artifactory
 
 import (
+	"bytes"
+	"debug/elf"
+	"encoding/binary"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,8 +16,97 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
+	"go.fuchsia.dev/fuchsia/tools/debug/elflib"
 	"go.fuchsia.dev/fuchsia/tools/lib/jsonutil"
 )
+
+// writeTestELFWithBuildID writes a minimal 64-bit little-endian ELF file at
+// path containing a single PT_NOTE program header with a GNU build ID note
+// (.note.gnu.build-id) matching buildIDHex.
+//
+// This is needed because debugSymbolUploads verifies that each ELF file on disk
+// contains a build ID note matching its debug_symbols.json entry via
+// elflib.BinaryFileRef.Verify(), which parses the ELF header and PT_NOTE
+// segments.
+func writeTestELFWithBuildID(t *testing.T, path, buildIDHex string) {
+	t.Helper()
+	buildID, err := hex.DecodeString(buildIDHex)
+	if err != nil {
+		t.Fatalf("hex.DecodeString(%q) failed: %v", buildIDHex, err)
+	}
+
+	// Construct the ELF note payload: a 12-byte note header (namesz, descsz,
+	// type=NT_GNU_BUILD_ID), followed by the "GNU\x00" owner name and raw build
+	// ID bytes, padded to 4-byte alignment.
+	var noteBuf bytes.Buffer
+	const gnuNoteName = "GNU\x00"
+	noteHdr := struct {
+		Namesz uint32
+		Descsz uint32
+		Type   uint32
+	}{
+		Namesz: uint32(len(gnuNoteName)),
+		Descsz: uint32(len(buildID)),
+		Type:   elflib.NT_GNU_BUILD_ID,
+	}
+	if err := binary.Write(&noteBuf, binary.LittleEndian, &noteHdr); err != nil {
+		t.Fatalf("binary.Write(noteHdr) failed: %v", err)
+	}
+	if _, err := noteBuf.WriteString(gnuNoteName); err != nil {
+		t.Fatalf("noteBuf.WriteString(%q) failed: %v", gnuNoteName, err)
+	}
+	if _, err := noteBuf.Write(buildID); err != nil {
+		t.Fatalf("noteBuf.Write(buildID) failed: %v", err)
+	}
+	for noteBuf.Len()%4 != 0 {
+		if err := noteBuf.WriteByte(0); err != nil {
+			t.Fatalf("noteBuf.WriteByte(0) failed: %v", err)
+		}
+	}
+	noteBytes := noteBuf.Bytes()
+
+	// Construct a minimal 64-bit ELF header followed immediately by a single
+	// PT_NOTE program header pointing to the note payload above.
+	hdr := elf.Header64{
+		Type:      uint16(elf.ET_EXEC),
+		Machine:   uint16(elf.EM_X86_64),
+		Version:   uint32(elf.EV_CURRENT),
+		Phoff:     uint64(binary.Size(elf.Header64{})),
+		Ehsize:    uint16(binary.Size(elf.Header64{})),
+		Phentsize: uint16(binary.Size(elf.Prog64{})),
+		Phnum:     1,
+	}
+	copy(hdr.Ident[:], elf.ELFMAG)
+	hdr.Ident[elf.EI_CLASS] = byte(elf.ELFCLASS64)
+	hdr.Ident[elf.EI_DATA] = byte(elf.ELFDATA2LSB)
+	hdr.Ident[elf.EI_VERSION] = byte(elf.EV_CURRENT)
+
+	prog := elf.Prog64{
+		Type:   uint32(elf.PT_NOTE),
+		Off:    uint64(binary.Size(elf.Header64{}) + binary.Size(elf.Prog64{})),
+		Filesz: uint64(len(noteBytes)),
+		Memsz:  uint64(len(noteBytes)),
+		Align:  4,
+	}
+
+	var elfBuf bytes.Buffer
+	if err := binary.Write(&elfBuf, binary.LittleEndian, &hdr); err != nil {
+		t.Fatalf("binary.Write(hdr) failed: %v", err)
+	}
+	if err := binary.Write(&elfBuf, binary.LittleEndian, &prog); err != nil {
+		t.Fatalf("binary.Write(prog) failed: %v", err)
+	}
+	if _, err := elfBuf.Write(noteBytes); err != nil {
+		t.Fatalf("elfBuf.Write(noteBytes) failed: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("os.MkdirAll(%q) failed: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, elfBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", path, err)
+	}
+}
 
 func TestDebugSymbolUploads(t *testing.T) {
 	checkout := t.TempDir()
@@ -60,12 +153,21 @@ func TestDebugSymbolUploads(t *testing.T) {
 		},
 		{
 			Debug:    filepath.Join(".build-id", "th", "ird.debug"),
+			Stripped: filepath.Join(".build-id", "th", "ird"),
 			DestPath: filepath.Join(".build-id", "th", "ird"),
 			BuildID:  "b0000005",
 			OS:       "linux",
 			CPU:      "x64",
 			Label:    "//third",
 		},
+	}
+
+	// Write valid debug symbols to be verified before upload.
+	for _, entry := range debugSymbols {
+		writeTestELFWithBuildID(t, filepath.Join(outputDir, entry.Debug), entry.BuildID)
+		if entry.Stripped != "" {
+			writeTestELFWithBuildID(t, filepath.Join(outputDir, entry.Stripped), entry.BuildID)
+		}
 	}
 	if err := jsonutil.WriteToFile(filepath.Join(outputDir, "debug_symbols.json"), debugSymbols); err != nil {
 		t.Fatal(err)
@@ -130,6 +232,8 @@ func TestDebugSymbolUploads(t *testing.T) {
 		filepath.Join(outputDir, ".build-id", "th", "ird.debug"): {
 			"DEBUG_NAMESPACE/b0000005.debug",
 			"BUILDID_NAMESPACE/b0000005/debuginfo",
+		},
+		filepath.Join(outputDir, ".build-id", "th", "ird"): {
 			"BUILDID_NAMESPACE/b0000005/executable",
 		},
 	}
@@ -161,5 +265,65 @@ func TestDebugSymbolUploads(t *testing.T) {
 	opts := cmpopts.SortSlices(func(a, b Upload) bool { return a.Destination < b.Destination })
 	if diff := cmp.Diff(expectedUploads, actualUploads, opts); diff != "" {
 		t.Fatalf("unexpected debug binary uploads (-want +got):\n%s", diff)
+	}
+}
+
+func TestDebugSymbolUploadsBuildIDVerification(t *testing.T) {
+	tests := []struct {
+		name              string
+		debugFileBuildID  string
+		strippedBuildID   string
+		withStrippedEntry bool
+	}{
+		{
+			name: "missing_debug_binary",
+		},
+		{
+			name:             "mismatched_debug_binary_build_id",
+			debugFileBuildID: "deadbeef",
+		},
+		{
+			name:              "missing_stripped_binary",
+			debugFileBuildID:  "b0000001",
+			withStrippedEntry: true,
+		},
+		{
+			name:              "mismatched_stripped_binary_build_id",
+			debugFileBuildID:  "b0000001",
+			withStrippedEntry: true,
+			strippedBuildID:   "deadbeef",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			entry := ExportedDebugSymbol{
+				Debug:   filepath.Join(".build-id", "b0", "000001.debug"),
+				BuildID: "b0000001",
+				OS:      "linux",
+				CPU:     "x64",
+				Label:   "//test",
+			}
+			if tc.withStrippedEntry {
+				entry.Stripped = filepath.Join(".build-id", "b0", "000001")
+			}
+			if tc.debugFileBuildID != "" {
+				writeTestELFWithBuildID(t, filepath.Join(outputDir, entry.Debug), tc.debugFileBuildID)
+			}
+			if tc.strippedBuildID != "" {
+				writeTestELFWithBuildID(t, filepath.Join(outputDir, entry.Stripped), tc.strippedBuildID)
+			}
+			manifestPath := filepath.Join(outputDir, "debug_symbols.json")
+			if err := jsonutil.WriteToFile(manifestPath, []ExportedDebugSymbol{entry}); err != nil {
+				t.Fatalf("jsonutil.WriteToFile(%q) failed: %v", manifestPath, err)
+			}
+
+			uploads, err := debugSymbolUploads(outputDir, "TOP_NAMESPACE", "DEBUG_NAMESPACE", "BUILDID_NAMESPACE")
+			if err == nil {
+				t.Errorf("debugSymbolUploads(%q, ...) (entry=%+v, debugFileBuildID=%q, strippedBuildID=%q) = %+v, nil; want non-nil error",
+					outputDir, entry, tc.debugFileBuildID, tc.strippedBuildID, uploads)
+			}
+		})
 	}
 }

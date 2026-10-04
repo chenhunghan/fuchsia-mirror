@@ -5,14 +5,14 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    Dispatcher, HandleValue, ResourceDispatcher, StrictValidation, ZX_RSRC_FLAGS_MASK,
-    is_valid_kind, validate_ranged_resource_dispatcher,
+    Dispatcher, HandleValue, ResourceDispatcher, StrictValidation, is_valid_kind,
+    validate_ranged_resource_dispatcher,
 };
 use crate::user_copy::UserInPtr;
 use core::mem::MaybeUninit;
 use syscalls_macro::syscall;
 use zx_status::Status;
-use zx_types::{ZX_MAX_NAME_LEN, ZX_RIGHT_WRITE, ZX_RSRC_FLAG_EXCLUSIVE};
+use zx_types::{ZX_MAX_NAME_LEN, ZX_RIGHT_WRITE, ZX_RSRC_FLAG_EXCLUSIVE, ZX_RSRC_FLAGS_MASK};
 
 const ZX_RSRC_KIND_MASK: u32 = 0x0000_FFFF;
 

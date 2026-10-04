@@ -60,13 +60,13 @@ use starnix_uapi::{
     F_GETOWN, F_GETOWN_EX, F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW, F_SETFD, F_SETFL, F_SETLEASE,
     F_SETLK, F_SETLK64, F_SETLKW, F_SETLKW64, F_SETOWN, F_SETOWN_EX, F_SETSIG, FIOCLEX, FIONCLEX,
     MFD_ALLOW_SEALING, MFD_CLOEXEC, MFD_EXEC, MFD_HUGE_MASK, MFD_HUGE_SHIFT, MFD_HUGETLB,
-    MFD_NOEXEC_SEAL, NAME_MAX, O_CLOEXEC, O_CREAT, O_NOFOLLOW, O_PATH, O_TMPFILE, PIDFD_NONBLOCK,
-    POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI, POLLRDBAND, POLLRDNORM, POLLWRBAND, POLLWRNORM,
-    POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE, POSIX_FADV_NORMAL, POSIX_FADV_RANDOM,
-    POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED, RWF_SUPPORTED, TFD_CLOEXEC, TFD_NONBLOCK,
-    TFD_TIMER_ABSTIME, TFD_TIMER_CANCEL_ON_SET, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE,
-    XATTR_SIZE_MAX, aio_context_t, errno, error, io_event, iocb, off_t, pid_t, pollfd,
-    pselect6_sigmask, sigset_t, statx, timespec, uapi, uid_t,
+    MFD_NOEXEC_SEAL, NAME_MAX, O_CLOEXEC, O_CREAT, O_NOFOLLOW, O_NOTIFICATION_PIPE, O_PATH,
+    O_TMPFILE, PIDFD_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI, POLLRDBAND, POLLRDNORM,
+    POLLWRBAND, POLLWRNORM, POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE, POSIX_FADV_NORMAL,
+    POSIX_FADV_RANDOM, POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED, RWF_SUPPORTED, TFD_CLOEXEC,
+    TFD_NONBLOCK, TFD_TIMER_ABSTIME, TFD_TIMER_CANCEL_ON_SET, XATTR_CREATE, XATTR_NAME_MAX,
+    XATTR_REPLACE, XATTR_SIZE_MAX, aio_context_t, errno, error, io_event, iocb, off_t, pid_t,
+    pollfd, pselect6_sigmask, sigset_t, statx, timespec, uapi, uid_t,
 };
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
@@ -1541,8 +1541,14 @@ pub fn sys_pipe2(
     flags: u32,
 ) -> Result<(), Errno> {
     let supported_file_flags = OpenFlags::NONBLOCK | OpenFlags::DIRECT;
-    if flags & !(O_CLOEXEC | supported_file_flags.bits()) != 0 {
+    // Unknown flags take precedence over `O_NOTIFICATION_PIPE` and fail with EINVAL.
+    if flags & !(O_CLOEXEC | O_NOTIFICATION_PIPE | supported_file_flags.bits()) != 0 {
         return error!(EINVAL);
+    }
+    if flags & O_NOTIFICATION_PIPE != 0 {
+        // Since Starnix doesn't support notifications (CONFIG_WATCH_QUEUE) and
+        // O_NOTIFICATION_PIPE was passed in flags, return ENOPKG (see pipe(2)).
+        return error!(ENOPKG);
     }
     let (read, write) = new_pipe(current_task)?;
 
@@ -2779,18 +2785,44 @@ pub fn sys_utimensat(
         return Ok(());
     };
 
-    // Non-standard feature: if user_path is null, the timestamps are updated on the file referred
-    // to by dir_fd.
-    // See https://man7.org/linux/man-pages/man2/utimensat.2.html
+    // From `utimensat(2)`:
+    //
+    //   On Linux, futimens() is a library function implemented on top of
+    //   the utimensat() system call.  To support this, the Linux
+    //   utimensat() system call implements a nonstandard feature: if
+    //   pathname is NULL, then the call modifies the timestamps of the
+    //   file referred to by the file descriptor dirfd (which may refer to
+    //   any type of file).
+    //
+    //   EFAULT times pointed to an invalid address; or, dirfd was
+    //          AT_FDCWD, and pathname is NULL or an invalid address.
+    //
+    //   EINVAL Invalid value in flags.
+    //
+    //   EINVAL pathname is NULL, dirfd is not AT_FDCWD, and flags
+    //          contains AT_SYMLINK_NOFOLLOW.
+    //
+    // From `open(2)` (`O_PATH`):
+    //
+    //   The file itself is not opened, and other file operations (e.g.,
+    //   read(2), write(2), fchmod(2), fchown(2), fgetxattr(2), ioctl(2),
+    //   mmap(2)) fail with the error EBADF.
+    //
+    // Because a `NULL` pathname operates directly on the open file referred to by
+    // `dir_fd` rather than performing path resolution relative to `dir_fd`,
+    // look up `dir_fd` via `current_task.files().get` (which rejects `O_PATH` file descriptors
+    // with `EBADF`) instead of `CurrentTask::resolve_dir_fd` (which calls
+    // `get_allowing_opath`).
     let name = if user_path.addr().is_null() {
         if dir_fd == FdNumber::AT_FDCWD {
             return error!(EFAULT);
         }
-        let (node, _) =
-            current_task.resolve_dir_fd(dir_fd, Default::default(), ResolveFlags::empty())?;
-        node
+        if flags != 0 {
+            return error!(EINVAL);
+        }
+        current_task.files().get(dir_fd)?.name.to_passive()
     } else {
-        let lookup_flags = LookupFlags::from_bits(flags, AT_SYMLINK_NOFOLLOW)?;
+        let lookup_flags = LookupFlags::from_bits(flags, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)?;
         lookup_at(current_task, dir_fd, user_path, lookup_flags)?
     };
     name.entry.node.update_atime_mtime(current_task, &name.mount, atime, mtime)?;

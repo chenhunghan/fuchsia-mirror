@@ -6,63 +6,15 @@
 
 #include <lib/syscalls/forward.h>
 #include <zircon/syscalls/hypervisor.h>
+#include <zircon/syscalls/port.h>
 
 #include <fbl/ref_ptr.h>
 #include <object/guest_dispatcher.h>
 #include <object/handle.h>
-#include <object/port_dispatcher.h>
 #include <object/process_dispatcher.h>
-#include <object/resource.h>
 #include <object/vcpu_dispatcher.h>
-#include <object/vm_address_region_dispatcher.h>
-#include <object/vm_object_dispatcher.h>
 
-zx_status_t sys_guest_create(zx_handle_t resource, uint32_t options, zx_handle_t* guest_handle,
-                             zx_handle_t* vmar_handle) {
-  zx_status_t status =
-      validate_ranged_resource(resource, ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_HYPERVISOR_BASE, 1);
-  if (status != ZX_OK) {
-    return status;
-  }
-
-  KernelHandle<GuestDispatcher> new_guest_handle;
-  KernelHandle<VmAddressRegionDispatcher> new_vmar_handle;
-  zx_rights_t guest_rights, vmar_rights;
-  status = GuestDispatcher::Create(options, &new_guest_handle, &guest_rights, &new_vmar_handle,
-                                   &vmar_rights);
-  if (status != ZX_OK) {
-    return status;
-  }
-  auto up = ProcessDispatcher::GetCurrent();
-  status = up->MakeAndAddHandle(ktl::move(new_guest_handle), guest_rights, guest_handle);
-  if (status != ZX_OK) {
-    return status;
-  }
-  return up->MakeAndAddHandle(ktl::move(new_vmar_handle), vmar_rights, vmar_handle);
-}
-
-zx_status_t sys_guest_set_trap(zx_handle_t handle, uint32_t kind, zx_vaddr_t addr, size_t size,
-                               zx_handle_t port_handle, uint64_t key) {
-  auto up = ProcessDispatcher::GetCurrent();
-
-  fbl::RefPtr<GuestDispatcher> guest;
-  zx_status_t status =
-      up->handle_table().GetDispatcherWithRights(*up, handle, ZX_RIGHT_WRITE, &guest);
-  if (status != ZX_OK) {
-    return status;
-  }
-
-  fbl::RefPtr<PortDispatcher> port;
-  if (port_handle != ZX_HANDLE_INVALID) {
-    status = up->handle_table().GetDispatcherWithRights(*up, port_handle, ZX_RIGHT_WRITE, &port);
-    if (status != ZX_OK) {
-      return status;
-    }
-  }
-
-  return guest->SetTrap(kind, addr, size, ktl::move(port), key);
-}
-
+// zx_status_t zx_vcpu_create
 zx_status_t sys_vcpu_create(zx_handle_t guest_handle, uint32_t options, zx_vaddr_t entry,
                             zx_handle_t* out) {
   if (options != 0u) {

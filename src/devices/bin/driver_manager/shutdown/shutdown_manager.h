@@ -16,6 +16,7 @@
 #include <lib/zx/vmo.h>
 
 #include <list>
+#include <utility>
 #include <vector>
 
 #include "src/devices/bin/driver_manager/shutdown/node_remover.h"
@@ -86,6 +87,12 @@ class ShutdownManager : public fidl::WireServer<fuchsia_process_lifecycle::Lifec
   void OnBootShutdownComplete();
 
  private:
+  // Virtual for testing.
+  virtual fuchsia_system_state::SystemPowerState GetSystemPowerState();
+  virtual zx_status_t SystemPowerctl(uint32_t cmd);
+  virtual zx_status_t MexecBoot();
+  virtual void Exit(int status);
+
   // Signal state for when devfs and fshost are shutdown.
   class Lifecycle : public fidl::WireServer<fuchsia_process_lifecycle::Lifecycle> {
    public:
@@ -138,7 +145,9 @@ class ShutdownManager : public fidl::WireServer<fuchsia_process_lifecycle::Lifec
 
   // Execute the shutdown strategy set in shutdown_system_state_.
   // This should be done after all attempts at shutting down drivers has been made.
-  void SystemExecute();
+  //
+  // `node_removal_timed_out` is only used during a mexec reboot.
+  void ExecuteShutdownStrategy(bool node_removal_timed_out);
 
   // Called when one of our connections is dropped.
   void OnUnbound(const char* connection, fidl::UnbindInfo info);

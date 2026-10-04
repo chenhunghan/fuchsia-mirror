@@ -4,8 +4,9 @@ description: >
   Guide for using the `fx gh` command-line interface to interact with Fuchsia
   Gerrit changes (CLs). Use when reading open changes, posting inline
   comments, replying to reviewer threads, managing draft comments, checking CI
-  status with `pr checks`, or updating CQ labels from the terminal. Do NOT use
-  for performing automated code reviews (use /review instead).
+  status with `pr checks`, triggering presubmit, updating CQ labels, or
+  landing/merging CLs and patch stacks from the terminal. Do NOT use for
+  performing automated code reviews (use /review instead).
 ---
 
 # Fuchsia Gerrit CLI (fx gh)
@@ -138,10 +139,22 @@ key mappings and differences you need to know:
     post them).
   - **Trigger Agent (Dry Run)**: `fx gh pr review <id> --agent <agent_id>
     --dry-run` (This prints suggestions to terminal without posting drafts).
-- **Triggering CQ (Commit Queue)**: To set Gerrit labels like `Commit-Queue+1`
-  or `Commit-Queue+2`, you must use the `edit` subcommand with the `--add-label`
-  flag.
+- **Triggering CQ (Commit Queue) and Landing Changes**: To set Gerrit labels
+  like `Commit-Queue+1`, `Commit-Queue+2`, or `Fuchsia-Auto-Submit+1`, use the
+  `edit` subcommand with the `--add-label` flag.
   - **Example**: `fx gh pr edit <id> --add-label Commit-Queue+1`
+  - **Patch Stacks (`Commit-Queue+1`)**: For a stack of dependent CLs, **only
+    trigger `Commit-Queue+1` on the first and last CLs in the stack**, rather
+    than on every intermediate CL. Because each commit in a stack includes its
+    parent commits in its Git tree, testing the first and last patches validates
+    the stack without putting excessive load on CQ or exhausting per-user LUCI
+    CV run quota.
+  - **Landing Changes (Never Force-Submit)**: **NEVER** call the Gerrit
+    `/submit` REST endpoint (`POST /a/changes/<id>/submit`) directly to merge
+    changes; always land via `Commit-Queue+2` or `Fuchsia-Auto-Submit+1`.
+    Calling `/submit` directly bypasses CQ and force-submits the CL under the
+    user's account. In the rare event that a force submit is necessary, it
+    **always** requires explicit user approval first.
 
 #### `pr checks`
 - **Viewing Check Status**: To see the status of CI checks and failing bots for

@@ -235,6 +235,18 @@ TEST_F(RedactorTest, DoesNotRedactBuildId) {
             "456 build_id: '5f2c0ede0fa479b9b997c4fce6d4cf24' 789");
 }
 
+TEST_F(RedactorTest, DoesNotRedactFloatingPointNumbers) {
+  EXPECT_EQ(Redact("2.1234567890123456"), "2.1234567890123456");
+  EXPECT_EQ(Redact("-0.4679999947547912"), "-0.4679999947547912");
+  EXPECT_EQ(Redact("max=2.611999988555908 min=2.2263672351837161"),
+            "max=2.611999988555908 min=2.2263672351837161");
+  EXPECT_EQ(Redact("2.1234567890abcdef"), "2.<REDACTED-HEX: 1>");
+  EXPECT_EQ(Redact(".1234567890123456"), ".<REDACTED-HEX: 2>");
+  EXPECT_EQ(Redact("foo.1234567890123456"), "foo.<REDACTED-HEX: 2>");
+  EXPECT_EQ(Redact("foo1.1234567890123456"), "foo1.<REDACTED-HEX: 2>");
+  EXPECT_EQ(Redact("1234567890123456"), "<REDACTED-HEX: 2>");
+}
+
 TEST_F(RedactorTest, RedactsIpv4InFidl) {
   EXPECT_EQ(Redact("ipv4 fidl debug: Ipv4Address { addr: [1, 255, FF, FF] }"),
             "ipv4 fidl debug: Ipv4Address { <REDACTED-IPV4: 1> }");

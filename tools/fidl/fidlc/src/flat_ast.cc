@@ -263,6 +263,7 @@ bool Builtin::IsInternal() const {
     case Identity::kServerEnd:
     case Identity::kByte:
     case Identity::kOptional:
+    case Identity::kNonZero:
     case Identity::kMax:
     case Identity::kNext:
     case Identity::kHead:
@@ -383,6 +384,7 @@ std::unique_ptr<Library> Library::CreateRootLibrary() {
   insert("byte", Builtin::Identity::kByte);
   insert("FrameworkErr", Builtin::Identity::kFrameworkErr);
   insert("optional", Builtin::Identity::kOptional);
+  insert("nonzero", Builtin::Identity::kNonZero);
   insert("MAX", Builtin::Identity::kMax);
   insert("NEXT", Builtin::Identity::kNext);
   insert("HEAD", Builtin::Identity::kHead);

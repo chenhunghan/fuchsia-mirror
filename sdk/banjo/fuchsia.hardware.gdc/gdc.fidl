@@ -34,7 +34,7 @@ closed protocol Gdc {
         res_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelResChangeCallback;
         task_remove_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelRemoveTaskCallback;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         task_index uint32;
     });
 
@@ -55,7 +55,7 @@ closed protocol Gdc {
         input_buffer_index uint32;
         capture_timestamp uint64;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Releases the frame |buffer_index| from the |output_buffer_collection| to be
@@ -72,6 +72,6 @@ closed protocol Gdc {
         task_index uint32;
         new_output_image_format_index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };

@@ -18,8 +18,11 @@ use packet_formats::ip::{DscpAndEcn, IpExt, IpProto, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet, Ipv4PacketRaw};
 use packet_formats::ipv6::{IPV6_FIXED_HDR_LEN, Ipv6Header, Ipv6Packet, Ipv6PacketRaw};
 use packet_formats::tcp::{MAX_OPTIONS_LEN, TcpParseArgs, TcpSegment, TcpSegmentRaw};
+use static_assertions::const_assert;
 
-use netstack3_base::{ChecksumRxOffloading, GsoInfo, Ipv4IdMode, NetworkParsingContext};
+use netstack3_base::{
+    ChecksumRxOffloading, GsoInfo, Ipv4IdMode, MAX_GSO_PAYLOAD_LEN, NetworkParsingContext,
+};
 
 /// The maximum length of a coalesced frame.
 ///
@@ -31,7 +34,14 @@ use netstack3_base::{ChecksumRxOffloading, GsoInfo, Ipv4IdMode, NetworkParsingCo
 /// bits). This is a conservative bound: the frame length also includes the
 /// link-layer and IP headers, so each of those lengths is strictly smaller than
 /// the frame length.
+///
+/// Must not exceed [`MAX_GSO_PAYLOAD_LEN`], so that every coalesced frame can
+/// be segmented by GSO on egress. Because the frame length includes headers,
+/// the coalesced transport payload is strictly smaller than the frame.
 const MAX_GRO_FRAME_LEN: u16 = u16::MAX;
+// Compared as `usize` because clippy rejects `<=` against `u16::MAX` as always
+// true.
+const_assert!(MAX_GRO_FRAME_LEN as usize <= MAX_GSO_PAYLOAD_LEN as usize);
 
 /// Returns the number of bytes that can still be coalesced into a frame whose
 /// current length is `frame_len`.

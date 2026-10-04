@@ -12,7 +12,9 @@ import os
 import shutil
 import sys
 import zipapp
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 
 def main() -> int:
@@ -122,6 +124,11 @@ def main() -> int:
             f"""
 import sys
 import inspect
+import warnings
+
+# TODO(https://fxbug.dev/401351334): Remove once //third_party/mako SyntaxWarning fixes roll.
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r".*[/\\\\]mako[/\\\\].*")
+
 from {main_module} import *
 
 if inspect.iscoroutinefunction({args.main_callable}):
@@ -214,7 +221,7 @@ def _copy_files(
 
 def copy_library_sources(
     dest_dir: str,
-    lib_infos: list[dict[str, object]],
+    lib_infos: Sequence[Mapping[str, object]],
     src_map: dict[str, str],
 ) -> None:
     """Copies the sources of all library dependencies of a binary target
@@ -230,7 +237,7 @@ def copy_library_sources(
         os.makedirs(dest_lib_root, exist_ok=True)
 
         _copy_files(
-            lib_info["sources"],
+            cast(list[str], lib_info["sources"]),
             str(lib_info["source_root"]),
             dest_lib_root,
             src_map,
@@ -240,13 +247,13 @@ def copy_library_sources(
             # Data sources are copied from their original location to the
             # "data_package_name" directory relative to the library_root.
             dest_data_root = os.path.join(
-                dest_lib_root, lib_info["data_package_name"]
+                dest_lib_root, str(lib_info["data_package_name"])
             )
             os.makedirs(dest_data_root, exist_ok=True)
             # Create __init__.py to make the data package importable.
             data_init_path = os.path.join(dest_data_root, "__init__.py")
             Path(data_init_path).touch()
-            for data_src in lib_info["data_sources"]:
+            for data_src in cast(list[str], lib_info["data_sources"]):
                 src = data_src
                 dest = os.path.join(dest_data_root, os.path.basename(data_src))
                 src_map[dest] = src
@@ -254,7 +261,7 @@ def copy_library_sources(
 
         if lib_info.get("stubs_root") and lib_info.get("stubs"):
             _copy_files(
-                lib_info["stubs"],
+                cast(list[str], lib_info["stubs"]),
                 str(lib_info["stubs_root"]),
                 dest_lib_root,
                 src_map,
@@ -264,7 +271,7 @@ def copy_library_sources(
 
 def copy_library_sources_for_mypy(
     dest_dir: str,
-    lib_infos: list[dict[str, object]],
+    lib_infos: Sequence[Mapping[str, object]],
     src_map: dict[str, str],
 ) -> None:
     """Copies library components needed for mypy type checking.
@@ -284,7 +291,7 @@ def copy_library_sources_for_mypy(
 
         if lib_info.get("mypy_enable", True):
             _copy_files(
-                lib_info["sources"],
+                cast(list[str], lib_info["sources"]),
                 str(lib_info["source_root"]),
                 dest_lib_root,
                 src_map,
@@ -292,7 +299,7 @@ def copy_library_sources_for_mypy(
 
         if lib_info.get("stubs_root") and lib_info.get("stubs"):
             _copy_files(
-                lib_info["stubs"],
+                cast(list[str], lib_info["stubs"]),
                 str(lib_info["stubs_root"]),
                 dest_lib_root,
                 src_map,

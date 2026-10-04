@@ -5,7 +5,7 @@
 """Macros for defining `host_test()` targets for Go binaries."""
 
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load(":host_test.bzl", "host_test")
 load(":host_test_data.bzl", "host_test_data_files")
 
@@ -81,7 +81,7 @@ def legacy_host_go_test(
         binary = wrapper_script,
         test_args = test_args,
         data = test_data,
-        target_compatible_with = HOST_CONSTRAINTS,
+        target_compatible_with = HOST_OS_CONSTRAINTS,
         visibility = visibility,
     )
 

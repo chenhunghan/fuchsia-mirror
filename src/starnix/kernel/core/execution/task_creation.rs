@@ -142,7 +142,7 @@ pub fn create_init_child_process(
 ) -> Result<TaskBuilder, Errno> {
     let init_task = kernel.get_init_task()?;
 
-    let fs = init_task.running_state()?.fs().fork();
+    let fs = init_task.fs()?.fork();
 
     let security_state = if let Some(seclabel) = seclabel {
         security::task_for_context(&init_task, seclabel.as_bytes().into())?
@@ -181,7 +181,7 @@ pub fn create_init_child_process(
         let mut new_process_writer = task.thread_group().write();
         new_process_writer.parent =
             Some(ThreadGroupParent::new(Arc::downgrade(&init_task.thread_group())));
-        init_writer.children.insert(task.tid.id, Arc::downgrade(task.thread_group()));
+        init_writer.children.insert(task.pid.clone());
     }
     // A child process created via fork(2) inherits its parent's
     // resource limits.  Resource limits are preserved across execve(2).
@@ -375,7 +375,7 @@ pub fn create_kernel_thread(
     {
         let running_state = system_task.running_state()?;
         mm = running_state.mm.upgrade();
-        fs = running_state.fs();
+        fs = running_state.fs()?;
         abstract_socket_namespace = running_state.abstract_socket_namespace.clone();
         abstract_vsock_namespace = running_state.abstract_vsock_namespace.clone();
     }

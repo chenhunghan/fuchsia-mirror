@@ -29,9 +29,12 @@
 #include <zircon/syscalls.h>
 
 #include <fake-dma-buffer/fake-dma-buffer.h>
+#include <usb/descriptors.h>
 
 #include "src/devices/usb/drivers/xhci/tests/test-env.h"
 #include "src/devices/usb/drivers/xhci/xhci-event-ring.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_xhci {
 
@@ -570,16 +573,17 @@ TEST_F(EnumerationTests, AddressDeviceCommandShouldOnlineDeviceUponCompletion) {
   ASSERT_EQ(get_max_packet_size_request.request()->header.device_id, 0UL);
   ASSERT_EQ(get_max_packet_size_request.request()->header.ep_address, 0UL);
   ASSERT_EQ(get_max_packet_size_request.request()->header.length, 8UL);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.bm_request_type,
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.w_value, USB_DT_DEVICE << 8);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.bm_request_type, kStandardDeviceIn);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.w_value,
+            usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice));
   ASSERT_EQ(get_max_packet_size_request.request()->setup.w_index, 0UL);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.b_request, USB_REQ_GET_DESCRIPTOR);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.b_request,
+            fdescriptor::StandardRequest::kGetDescriptor);
   ASSERT_EQ(get_max_packet_size_request.request()->setup.w_length, 8UL);
   ASSERT_TRUE(get_max_packet_size_request.request()->direct);
   usb_device_descriptor_t* descriptor;
   ASSERT_OK(get_max_packet_size_request.Mmap(reinterpret_cast<void**>(&descriptor)));
-  descriptor->b_descriptor_type = USB_DT_DEVICE;
+  descriptor->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
   descriptor->b_max_packet_size0 = 42;
   get_max_packet_size_request.Complete(ZX_OK, 8);
   driver_test().driver()->RunUntilIdle(0);
@@ -590,15 +594,17 @@ TEST_F(EnumerationTests, AddressDeviceCommandShouldOnlineDeviceUponCompletion) {
   ASSERT_EQ(get_descriptor_request.request()->header.device_id, 0UL);
   ASSERT_EQ(get_descriptor_request.request()->header.ep_address, 0UL);
   ASSERT_EQ(get_descriptor_request.request()->header.length, sizeof(usb_device_descriptor_t));
-  ASSERT_EQ(get_descriptor_request.request()->setup.bm_request_type,
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE);
-  ASSERT_EQ(get_descriptor_request.request()->setup.w_value, USB_DT_DEVICE << 8);
+  ASSERT_EQ(get_descriptor_request.request()->setup.bm_request_type, kStandardDeviceIn);
+  ASSERT_EQ(get_descriptor_request.request()->setup.w_value,
+            usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice));
   ASSERT_EQ(get_descriptor_request.request()->setup.w_index, 0UL);
-  ASSERT_EQ(get_descriptor_request.request()->setup.b_request, USB_REQ_GET_DESCRIPTOR);
+  ASSERT_EQ(get_descriptor_request.request()->setup.b_request,
+            fdescriptor::StandardRequest::kGetDescriptor);
   ASSERT_EQ(get_descriptor_request.request()->setup.w_length, sizeof(usb_device_descriptor_t));
   ASSERT_TRUE(get_descriptor_request.request()->direct);
   ASSERT_OK(get_descriptor_request.Mmap(reinterpret_cast<void**>(&descriptor)));
-  descriptor->b_descriptor_type = USB_DT_DEVICE;
+  descriptor->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
+  descriptor->b_device_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor);
   get_descriptor_request.Complete(ZX_OK, sizeof(usb_device_descriptor_t));
   driver_test().driver()->RunUntilIdle(0);
 
@@ -709,16 +715,17 @@ TEST_F(EnumerationTests, AddressDeviceCommandShouldOnlineDeviceAfterSuccessfulRe
   ASSERT_EQ(get_max_packet_size_request.request()->header.device_id, 1UL);
   ASSERT_EQ(get_max_packet_size_request.request()->header.ep_address, 0UL);
   ASSERT_EQ(get_max_packet_size_request.request()->header.length, 8UL);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.bm_request_type,
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.w_value, USB_DT_DEVICE << 8);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.bm_request_type, kStandardDeviceIn);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.w_value,
+            usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice));
   ASSERT_EQ(get_max_packet_size_request.request()->setup.w_index, 0UL);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.b_request, USB_REQ_GET_DESCRIPTOR);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.b_request,
+            fdescriptor::StandardRequest::kGetDescriptor);
   ASSERT_EQ(get_max_packet_size_request.request()->setup.w_length, 8UL);
   ASSERT_TRUE(get_max_packet_size_request.request()->direct);
   usb_device_descriptor_t* descriptor;
   ASSERT_OK(get_max_packet_size_request.Mmap(reinterpret_cast<void**>(&descriptor)));
-  descriptor->b_descriptor_type = USB_DT_DEVICE;
+  descriptor->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
   descriptor->b_max_packet_size0 = 42;
   get_max_packet_size_request.Complete(ZX_OK, 8);
   driver_test().driver()->RunUntilIdle(0);
@@ -757,15 +764,16 @@ TEST_F(EnumerationTests, AddressDeviceCommandShouldOnlineDeviceAfterSuccessfulRe
   ASSERT_EQ(get_max_packet_size_request.request()->header.device_id, 1UL);
   ASSERT_EQ(get_max_packet_size_request.request()->header.ep_address, 0UL);
   ASSERT_EQ(get_max_packet_size_request.request()->header.length, 8UL);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.bm_request_type,
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.w_value, USB_DT_DEVICE << 8);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.bm_request_type, kStandardDeviceIn);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.w_value,
+            usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice));
   ASSERT_EQ(get_max_packet_size_request.request()->setup.w_index, 0UL);
-  ASSERT_EQ(get_max_packet_size_request.request()->setup.b_request, USB_REQ_GET_DESCRIPTOR);
+  ASSERT_EQ(get_max_packet_size_request.request()->setup.b_request,
+            fdescriptor::StandardRequest::kGetDescriptor);
   ASSERT_EQ(get_max_packet_size_request.request()->setup.w_length, 8UL);
   ASSERT_TRUE(get_max_packet_size_request.request()->direct);
   ASSERT_OK(get_max_packet_size_request.Mmap(reinterpret_cast<void**>(&descriptor)));
-  descriptor->b_descriptor_type = USB_DT_DEVICE;
+  descriptor->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
   descriptor->b_max_packet_size0 = 32;
   get_max_packet_size_request.Complete(ZX_OK, 8);
   driver_test().driver()->RunUntilIdle(0);
@@ -787,15 +795,17 @@ TEST_F(EnumerationTests, AddressDeviceCommandShouldOnlineDeviceAfterSuccessfulRe
   ASSERT_EQ(get_descriptor_request.request()->header.device_id, 1UL);
   ASSERT_EQ(get_descriptor_request.request()->header.ep_address, 0UL);
   ASSERT_EQ(get_descriptor_request.request()->header.length, sizeof(usb_device_descriptor_t));
-  ASSERT_EQ(get_descriptor_request.request()->setup.bm_request_type,
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE);
-  ASSERT_EQ(get_descriptor_request.request()->setup.w_value, USB_DT_DEVICE << 8);
+  ASSERT_EQ(get_descriptor_request.request()->setup.bm_request_type, kStandardDeviceIn);
+  ASSERT_EQ(get_descriptor_request.request()->setup.w_value,
+            usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice));
   ASSERT_EQ(get_descriptor_request.request()->setup.w_index, 0UL);
-  ASSERT_EQ(get_descriptor_request.request()->setup.b_request, USB_REQ_GET_DESCRIPTOR);
+  ASSERT_EQ(get_descriptor_request.request()->setup.b_request,
+            fdescriptor::StandardRequest::kGetDescriptor);
   ASSERT_EQ(get_descriptor_request.request()->setup.w_length, sizeof(usb_device_descriptor_t));
   ASSERT_TRUE(get_descriptor_request.request()->direct);
   ASSERT_OK(get_descriptor_request.Mmap(reinterpret_cast<void**>(&descriptor)));
-  descriptor->b_descriptor_type = USB_DT_DEVICE;
+  descriptor->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
+  descriptor->b_device_class = fidl::ToUnderlying(fdescriptor::UsbClass::kUndefined);
   get_descriptor_request.Complete(ZX_OK, sizeof(usb_device_descriptor_t));
   driver_test().driver()->RunUntilIdle(0);
 

@@ -271,51 +271,6 @@ impl TraceableError for FfxTargetError {
     }
 }
 
-#[cfg(cw)]
-mod cw {
-    #[cfg(not(target_os = "fuchsia"))]
-    impl IntoExitCode for OpenTargetError {
-        fn exit_code(&self) -> i32 {
-            match self {
-                OpenTargetError::TargetNotFound => 26,
-                OpenTargetError::QueryAmbiguous => 27,
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "fuchsia"))]
-    impl IntoExitCode for TunnelError {
-        fn exit_code(&self) -> i32 {
-            match self {
-                TunnelError::CouldNotListen => 31,
-                TunnelError::TargetConnectFailed => 32,
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "fuchsia"))]
-    impl IntoExitCode for TargetConnectionError {
-        fn exit_code(&self) -> i32 {
-            match self {
-                TargetConnectionError::PermissionDenied => 41,
-                TargetConnectionError::ConnectionRefused => 42,
-                TargetConnectionError::UnknownNameOrService => 43,
-                TargetConnectionError::Timeout => 44,
-                TargetConnectionError::KeyVerificationFailure => 45,
-                TargetConnectionError::NoRouteToHost => 46,
-                TargetConnectionError::NetworkUnreachable => 47,
-                TargetConnectionError::InvalidArgument => 48,
-                TargetConnectionError::UnknownError => 49,
-                TargetConnectionError::FidlCommunicationError => 50,
-                TargetConnectionError::RcsConnectionError => 51,
-                TargetConnectionError::FailedToKnockService => 52,
-                TargetConnectionError::TargetIncompatible => 53,
-                TargetConnectionError::ConnectionClosedByRemoteHost => 54,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

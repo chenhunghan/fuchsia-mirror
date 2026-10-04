@@ -260,6 +260,7 @@ struct Builtin : public Decl {
     kFrameworkErr,
     // Constraints
     kOptional,
+    kNonZero,
     kMax,
     // Version constants
     kNext,
@@ -337,9 +338,11 @@ struct LayoutInvocation {
   const Constant* rights_raw = nullptr;
   const Constant* protocol_decl_raw = nullptr;
 
-  // Nullability is represented differently because there's only one degree of
-  // freedom: if it was specified, this value is equal to kNullable
+  // Nullability and zeroability are represented differently because there's
+  // only one degree of freedom: if it was specified, this value is equal to
+  // kNullable/kNotZeroable.
   Nullability nullability = Nullability::kNonnullable;
+  Zeroability zeroability = Zeroability::kZeroable;
 
   // Utf8 is similarly just a boolean.
   bool utf8 = false;

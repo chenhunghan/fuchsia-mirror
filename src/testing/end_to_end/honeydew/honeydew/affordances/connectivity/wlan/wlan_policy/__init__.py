@@ -186,6 +186,7 @@ class WlanPolicy(AsyncLazyReady):
         reboot_affordance: affordances_capable.RebootCapableDevice,
         fuchsia_device_close: affordances_capable.FuchsiaDeviceClose,
         location: location.Location,
+        suspend_resume_affordance: affordances_capable.SuspendResumeCapableDevice,
     ) -> None:
         """Create an Async WlanPolicy Fuchsia Controller affordance.
 
@@ -196,6 +197,8 @@ class WlanPolicy(AsyncLazyReady):
             reboot_affordance: Object that implements RebootCapableDevice.
             fuchsia_device_close: Object that implements FuchsiaDeviceClose.
             location: Object that implements Location.
+            suspend_resume_affordance: Object that implements
+                SuspendResumeCapableDevice.
         """
         AsyncLazyReady.__init__(self)
 
@@ -206,10 +209,17 @@ class WlanPolicy(AsyncLazyReady):
         self._fuchsia_device_close = fuchsia_device_close
         self._client_controller: ClientControllerState | None = None
         self._location = location
+        self._suspend_resume_affordance = suspend_resume_affordance
 
         self.verify_supported()
 
         self._reboot_affordance.register_for_on_device_boot(self.make_ready)
+        self._suspend_resume_affordance.register_on_device_suspend_fn(
+            self._close
+        )
+        self._suspend_resume_affordance.register_on_device_resume_fn(
+            self.make_ready
+        )
 
         self._fuchsia_device_close.register_for_on_device_close(self._close)
 

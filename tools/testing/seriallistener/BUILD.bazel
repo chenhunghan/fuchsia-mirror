@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_binary_host_tool(
+    name = "seriallistener",
+    srcs = [
+        "cmd/main.go",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//tools/botanist:constants",
+        "//tools/lib/color",
+        "//tools/lib/iomisc",
+        "//tools/lib/logger",
+        "//tools/lib/osmisc",
+        "//tools/testing/testrunner:constants",
+        "//tools/testing/testrunner:lib",
+    ],
+)

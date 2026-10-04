@@ -58,10 +58,10 @@ inline void Scheduler::UpdateTotalExpectedRuntime(SchedDuration delta_ns) {
     exported_clamped_total_utilization_ = power_level_control_.clamped_total_demand();
 
     auto latched_timestamp = KTrace::LatchedTimestamp();
-    KTRACE_CPU_COUNTER_TIMESTAMP("kernel:power", "Demand:Variable", latched_timestamp(), this_cpu(),
-                                 ("CPU", ffl::Round<uint64_t>(fair_demand * 1000)));
+    KTRACE_CPU_COUNTER_TIMESTAMP("kernel:sched-demand", "Demand:Variable", latched_timestamp(),
+                                 this_cpu(), ("CPU", ffl::Round<uint64_t>(fair_demand * 1000)));
     KTRACE_CPU_COUNTER_TIMESTAMP(
-        "kernel:power", "Demand:Total", latched_timestamp(), this_cpu(),
+        "kernel:sched-demand", "Demand:Total", latched_timestamp(), this_cpu(),
         ("CPU", ffl::Round<uint64_t>(power_level_control_.total_demand() * 1000)));
   }
 }
@@ -78,10 +78,10 @@ inline void Scheduler::UpdateTotalDeadlineUtilization(SchedUtilization delta) {
     exported_clamped_total_utilization_ = power_level_control_.clamped_total_demand();
 
     auto latched_timestamp = KTrace::LatchedTimestamp();
-    KTRACE_CPU_COUNTER_TIMESTAMP("kernel:power", "Demand:Constant", latched_timestamp(), this_cpu(),
-                                 ("CPU", ffl::Round<uint64_t>(utilization * 1000)));
+    KTRACE_CPU_COUNTER_TIMESTAMP("kernel:sched-demand", "Demand:Constant", latched_timestamp(),
+                                 this_cpu(), ("CPU", ffl::Round<uint64_t>(utilization * 1000)));
     KTRACE_CPU_COUNTER_TIMESTAMP(
-        "kernel:power", "Demand:Total", latched_timestamp(), this_cpu(),
+        "kernel:sched-demand", "Demand:Total", latched_timestamp(), this_cpu(),
         ("CPU", ffl::Round<uint64_t>(power_level_control_.total_demand() * 1000)));
 
     if (const ktl::optional<uint32_t> domain_id = power_level_control_.domain_id()) {

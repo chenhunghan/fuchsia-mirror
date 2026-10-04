@@ -22,12 +22,3 @@ def get_sdk_debug_path(binary: str) -> str:
         raise RuntimeError(f"Unable to extract ELF info from {binary}")
     build_id = elf_info.build_id
     return ".build-id/" + build_id[:2] + "/" + build_id[2:] + ".debug"
-
-
-# For testing.
-def main() -> None:
-    print(get_sdk_debug_path(sys.argv[1]))
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -48,6 +48,7 @@ struct InternalObjects {
     internal_futures: JoinAll<Pin<Box<dyn Future<Output = Result<Infallible, Error>>>>>,
     phy_manager: Arc<Mutex<dyn PhyManagerApi + Send>>,
     iface_manager: Arc<Mutex<dyn IfaceManagerApi + Send>>,
+    power_manager: Arc<wlan_power_manager_testing::TestPowerManager>,
 }
 
 struct ExternalInterfaces {
@@ -102,6 +103,7 @@ fn test_setup(
     let (roam_service_request_sender, _roam_service_request_receiver) =
         mpsc::channel(ROAMING_CHANNEL_BUFFER_SIZE);
     let roam_manager = RoamManager::new(roam_service_request_sender);
+    let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
 
     // Construct the PhyManager and IfaceManager.
     let phy_manager = Arc::new(Mutex::new(PhyManager::new(
@@ -111,7 +113,7 @@ fn test_setup(
         inspect::Inspector::default().root().create_child("phy_manager"),
         telemetry_sender.clone(),
         recovery_sender,
-        Arc::new(wlan_power_manager_testing::TestPowerManager::new()),
+        power_manager.clone(),
     )));
     let (defect_sender, defect_receiver) = mpsc::channel(DEFECT_CHANNEL_SIZE);
     let (iface_manager, iface_manager_service) = create_iface_manager(
@@ -127,12 +129,18 @@ fn test_setup(
         defect_receiver,
         recovery_receiver,
         inspect::Inspector::default().root().create_child("iface_manager"),
+        power_manager.clone(),
     );
     let iface_manager_service = Box::pin(iface_manager_service);
 
     // Create the AccessPoint struct that will serve Access Point policy API.
     let ap_provider_lock = Arc::new(Mutex::new(()));
-    let ap = AccessPoint::new(iface_manager.clone(), ap_update_sender, ap_provider_lock);
+    let ap = AccessPoint::new(
+        iface_manager.clone(),
+        ap_update_sender,
+        ap_provider_lock,
+        power_manager.clone(),
+    );
 
     let serve_fut: Pin<Box<dyn Future<Output = Result<Infallible, Error>>>> = Box::pin(
         ap.serve_provider_requests(ap_provider_requests)
@@ -167,7 +175,8 @@ fn test_setup(
     let internal_futures =
         join_all(vec![serve_fut, iface_manager_service, serve_ap_policy_listeners]);
 
-    let internal_objects = InternalObjects { internal_futures, phy_manager, iface_manager };
+    let internal_objects =
+        InternalObjects { internal_futures, phy_manager, iface_manager, power_manager };
 
     let external_interfaces = ExternalInterfaces {
         monitor_service_proxy,
@@ -199,6 +208,7 @@ fn add_phy(exec: &mut TestExecutor, test_values: &mut TestValues) {
         legacy_client.clone(),
         test_values.internal_objects.phy_manager.clone(),
         test_values.internal_objects.iface_manager.clone(),
+        test_values.internal_objects.power_manager.clone(),
     );
     let add_phy_event = DeviceWatcherEvent::OnPhyAdded { phy_id: TEST_PHY_ID };
     let add_phy_fut = device_monitor::handle_event(&listener, add_phy_event);

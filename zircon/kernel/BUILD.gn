@@ -134,6 +134,7 @@ if (!is_efi_toolchain) {
   }
 
   kernel_unittests_boot_test("kernel-unittests-boot-test") {
+    timeout = 1800
   }
 
   # In strange failure modes, the bypass-debuglog version may get more useful

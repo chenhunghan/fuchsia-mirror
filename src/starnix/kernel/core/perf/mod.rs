@@ -365,11 +365,7 @@ impl FileOps for PerfEventFile {
                     TODO("https://fxbug.dev/398914921"),
                     "[perf_event_open] implement full sampling features"
                 );
-                if perf_event_file.attr.freq() == 0
-                // SAFETY: sample_period is a u64 field in a union with u64 sample_freq.
-                // This is always sound regardless of the union's tag.
-                    && unsafe { perf_event_file.attr.__bindgen_anon_1.sample_period != 0 }
-                {
+                if sampling_period(&perf_event_file.attr).is_some() {
                     ping_receiver(perf_event_file.ioctl_sender.clone(), IoctlOp::Enable);
                 }
                 return Ok(SUCCESS);
@@ -383,11 +379,7 @@ impl FileOps for PerfEventFile {
                     perf_event_file.total_time_running +=
                         curr_time - perf_event_file.most_recent_enabled_time;
                 }
-                if perf_event_file.attr.freq() == 0
-                // SAFETY: sample_period is a u64 field in a union with u64 sample_freq.
-                // This is always sound regardless of the union's tag.
-                    && unsafe { perf_event_file.attr.__bindgen_anon_1.sample_period != 0 }
-                {
+                if sampling_period(&perf_event_file.attr).is_some() {
                     ping_receiver(perf_event_file.ioctl_sender.clone(), IoctlOp::Disable);
                 }
                 return Ok(SUCCESS);
@@ -1033,6 +1025,24 @@ fn process_fxt_record(
     }
 }
 
+/// Returns the sampling period requested by `attr`, or `None` if this is not a
+/// sampling event. `attr` carries either a frequency (Hz) or a period in the
+/// same union, selected by the `freq` bit; the timebase counts nanoseconds.
+fn sampling_period(attr: &perf_event_attr) -> Option<zx::MonotonicDuration> {
+    // SAFETY: Reading a union field requires its bytes to be initialized and to
+    // be a valid value for the field's type. `attr` is filled in by `read_object`
+    // (or safe/Default construction), and this union's only fields, `sample_period`
+    // and `sample_freq`, are both 8-byte `u64`s, so all 8 bytes are initialized
+    // regardless of which field was written. Any 8 bytes are a valid `u64`, so
+    // this read is sound.
+    let value = unsafe { attr.__bindgen_anon_1.sample_period };
+    if value == 0 {
+        return None;
+    }
+    let nanos = if attr.freq() != 0 { (1_000_000_000 / value).max(1) } else { value };
+    Some(zx::MonotonicDuration::from_nanos(nanos as i64))
+}
+
 // Notifies other thread that we should start/stop sampling.
 // Once sampling is complete, that profiler session is no longer needed.
 // At that point, send back notification so that this is no longer blocking
@@ -1223,12 +1233,7 @@ pub fn sys_perf_event_open(
     let mut vmo_handle_copy =
         perf_event_file.perf_data_vmo.as_handle_ref().duplicate_handle(zx::Rights::SAME_RIGHTS);
 
-    // SAFETY: sample_period is a u64 field in a union with u64 sample_freq.
-    // This is always sound regardless of the union's tag.
-    let sample_period_in_ticks = unsafe { perf_event_file.attr.__bindgen_anon_1.sample_period };
-    // The sample period from the PERF_COUNT_SW_CPU_CLOCK is
-    // 1 nanosecond per tick. Convert this duration into zx::duration.
-    let zx_sample_period = zx::MonotonicDuration::from_nanos(sample_period_in_ticks as i64);
+    let sample_period = sampling_period(&perf_event_file.attr);
 
     // SeqLock does not get instantiated with metadata values until mmap() is called.
     let seq_lock =
@@ -1247,7 +1252,13 @@ pub fn sys_perf_event_open(
                 continue;
             }
 
-            let (session_proxy, client) = match set_up_profiler(zx_sample_period).await {
+            // Enable is only sent for sampling events, but guard anyway.
+            let Some(sample_period) = sample_period else {
+                let _ = profiling_complete_receiver.send(());
+                continue;
+            };
+
+            let (session_proxy, client) = match set_up_profiler(sample_period).await {
                 Ok(session) => session,
                 Err(e) => {
                     log_warn!("Failed to profile: {}", e);
@@ -1287,7 +1298,7 @@ pub fn sys_perf_event_open(
                         &vmo,
                         perf_event_file.sample_type,
                         perf_event_file.sample_id,
-                        sample_period_in_ticks,
+                        sample_period.into_nanos() as u64,
                         perf_event_file.attr.read_format,
                         perf_event_file.attr.sample_regs_user,
                         perf_event_file.attr.sample_stack_user as u64,

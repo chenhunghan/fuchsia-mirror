@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use fidl_fuchsia_driver_development as fdd;
 use fidl_fuchsia_driver_framework as fdf;
 use fidl_fuchsia_driver_test as fdt;
+
 use fuchsia_component_test::{RealmBuilder, RealmInstance};
 use fuchsia_driver_test::{DriverTestRealmBuilder, DriverTestRealmInstance};
 use zx_status;
@@ -16,13 +17,13 @@ const SAMPLE_DRIVER_URL: &str = "fuchsia-boot:///dtr#meta/sample_driver.cm";
 const PARENT_DRIVER_URL: &str = "fuchsia-boot:///dtr#meta/test-parent-sys.cm";
 const FAKE_DRIVER_URL: &str = "fuchsia-boot:///dtr#meta/driver-test-realm-fake-driver.cm";
 
-fn get_no_protocol_property_list() -> Option<[fdf::NodeProperty; 0]> {
+fn get_no_protocol_property_list() -> Option<[fdf::NodeProperty2; 0]> {
     None
 }
 
-fn get_test_parent_property_list() -> Option<[fdf::NodeProperty; 1]> {
-    Some([fdf::NodeProperty {
-        key: fdf::NodePropertyKey::StringValue("fuchsia.BIND_PROTOCOL".to_string()),
+fn get_test_parent_property_list() -> Option<[fdf::NodeProperty2; 1]> {
+    Some([fdf::NodeProperty2 {
+        key: "fuchsia.BIND_PROTOCOL".to_string(),
         value: fdf::NodePropertyValue::IntValue(bind_fuchsia_test::BIND_PROTOCOL_PARENT),
     }])
 }
@@ -421,8 +422,8 @@ async fn test_add_test_node() -> Result<()> {
     driver_dev
         .add_test_node(&fdd::TestNodeAddArgs {
             name: Some("test_sample".to_string()),
-            properties: Some(vec![fdf::NodeProperty {
-                key: fdf::NodePropertyKey::StringValue("fuchsia.BIND_PROTOCOL".to_string()),
+            properties: Some(vec![fdf::NodeProperty2 {
+                key: "fuchsia.BIND_PROTOCOL".to_string(),
                 value: fdf::NodePropertyValue::IntValue(bind_fuchsia_test::BIND_PROTOCOL_PARENT),
             }]),
             ..Default::default()

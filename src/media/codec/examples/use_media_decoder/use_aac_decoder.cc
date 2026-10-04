@@ -202,6 +202,7 @@ void use_aac_decoder(async::Loop* main_loop, fuchsia::mediacodec::CodecFactoryHa
   // create_params.input_details.oob_bytes.reset(std::move(asc_vector));
 
   fuchsia::media::FormatDetails full_input_details = fidl::Clone(create_params.input_details());
+  full_input_details.set_format_details_version_ordinal(1);
   *full_input_details.mutable_oob_bytes() = std::move(asc_vector);
 
   // We're using CodecPtr here rather than CodecSyncPtr partly to have this

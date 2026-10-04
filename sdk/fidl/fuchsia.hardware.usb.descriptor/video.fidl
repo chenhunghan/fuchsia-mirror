@@ -1,0 +1,115 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.usb.descriptor;
+
+/// USB Video subclass codes.
+type VideoSubclass = flexible enum : uint8 {
+    CONTROL = 1;
+    STREAMING = 2;
+    INTERFACE_COLLECTION = 3;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Video Class VC interface descriptor subtypes.
+type VideoVcDescriptorSubtype = flexible enum : uint8 {
+    HEADER = 0x01;
+    INPUT_TERMINAL = 0x02;
+    OUTPUT_TERMINAL = 0x03;
+    SELECTOR_UNIT = 0x04;
+    PROCESSING_UNIT = 0x05;
+    EXTENSION_UNIT = 0x06;
+    ENCODING_UNIT = 0x07;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Video Class VS interface descriptor subtypes.
+type VideoVsDescriptorSubtype = flexible enum : uint8 {
+    INPUT_HEADER = 0x01;
+    OUTPUT_HEADER = 0x02;
+    STILL_IMAGE_FRAME = 0x03;
+    FORMAT_UNCOMPRESSED = 0x04;
+    FRAME_UNCOMPRESSED = 0x05;
+    FORMAT_MJPEG = 0x06;
+    FRAME_MJPEG = 0x07;
+    FORMAT_MPEG2TS = 0x0a;
+    FORMAT_DV = 0x0c;
+    COLORFORMAT = 0x0d;
+    FORMAT_FRAME_BASED = 0x10;
+    FRAME_FRAME_BASED = 0x11;
+    FORMAT_STREAM_BASED = 0x12;
+    FORMAT_H264 = 0x13;
+    FRAME_H264 = 0x14;
+    FORMAT_H264_SIMULCAST = 0x15;
+    FORMAT_VP8 = 0x16;
+    FRAME_VP8 = 0x17;
+    FORMAT_VP8_SIMULCAST = 0x18;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Video Class endpoint descriptor subtypes.
+type VideoEpDescriptorSubtype = flexible enum : uint8 {
+    GENERAL = 0x01;
+    ENDPOINT = 0x02;
+    INTERRUPT = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Video Class setup request codes.
+type VideoRequest = flexible enum : uint8 {
+    SET_CUR = 0x01;
+    SET_CUR_ALL = 0x11;
+    GET_CUR = 0x81;
+    GET_MIN = 0x82;
+    GET_MAX = 0x83;
+    GET_RES = 0x84;
+    GET_LEN = 0x85;
+    GET_INFO = 0x86;
+    GET_DEF = 0x87;
+    GET_CUR_ALL = 0x91;
+    GET_MIN_ALL = 0x92;
+    GET_MAX_ALL = 0x93;
+    GET_RES_ALL = 0x94;
+    GET_DEF_ALL = 0x97;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Video Class streaming interface control selectors.
+type VideoVsControlSelector = flexible enum : uint8 {
+    PROBE_CONTROL = 0x01;
+    COMMIT_CONTROL = 0x02;
+    STILL_PROBE_CONTROL = 0x03;
+    STILL_COMMIT_CONTROL = 0x04;
+    STILL_IMAGE_TRIGGER_CONTROL = 0x05;
+    STREAM_ERROR_CODE_CONTROL = 0x06;
+    GENERATE_KEY_FRAME_CONTROL = 0x07;
+    UPDATE_FRAME_SEGMENT_CONTROL = 0x08;
+    SYNCH_DELAY_CONTROL = 0x09;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Video Class format GUID length.
+const VIDEO_GUID_LENGTH uint8 = 16;
+
+/// USB Video Class stream negotiation `bmHint` bits.
+const VIDEO_BM_HINT_FRAME_INTERVAL uint16 = 0x01;
+const VIDEO_BM_HINT_KEY_FRAME_RATE uint16 = 0x02;
+const VIDEO_BM_HINT_P_FRAME_RATE uint16 = 0x04;
+const VIDEO_BM_HINT_COMP_QUALITY uint16 = 0x08;
+const VIDEO_BM_HINT_COMP_WINDOW_SIZE uint16 = 0x10;
+
+/// USB Video Class payload header `bmHeaderInfo` bits.
+const VIDEO_VS_PAYLOAD_HEADER_FID uint8 = 0x01;
+const VIDEO_VS_PAYLOAD_HEADER_EOF uint8 = 0x02;
+const VIDEO_VS_PAYLOAD_HEADER_PTS uint8 = 0x04;
+const VIDEO_VS_PAYLOAD_HEADER_SCR uint8 = 0x08;
+const VIDEO_VS_PAYLOAD_HEADER_RES uint8 = 0x10;
+const VIDEO_VS_PAYLOAD_HEADER_STI uint8 = 0x20;
+const VIDEO_VS_PAYLOAD_HEADER_ERR uint8 = 0x40;
+const VIDEO_VS_PAYLOAD_HEADER_EOH uint8 = 0x80;

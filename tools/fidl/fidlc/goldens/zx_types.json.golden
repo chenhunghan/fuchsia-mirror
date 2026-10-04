@@ -103,6 +103,9 @@
         "zx/Off": {
           "kind": "alias"
         },
+        "zx/Result": {
+          "kind": "alias"
+        },
         "zx/Signals": {
           "kind": "alias"
         },
@@ -121,6 +124,92 @@
   "bits_declarations": [],
   "const_declarations": [],
   "enum_declarations": [
+    {
+      "name": "test.zxtypes/ResultEnum",
+      "naming_context": [
+        "ResultEnum"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 71,
+        "column": 6,
+        "length": 10
+      },
+      "deprecated": false,
+      "type": "int32",
+      "experimental_maybe_from_alias": {
+        "name": "zx/Result",
+        "args": [],
+        "nullable": false
+      },
+      "members": [
+        {
+          "name": "OK",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 72,
+            "column": 5,
+            "length": 2
+          },
+          "deprecated": false,
+          "value": {
+            "kind": "literal",
+            "value": "0",
+            "expression": "0",
+            "literal": {
+              "kind": "numeric",
+              "value": "0",
+              "expression": "0"
+            }
+          }
+        }
+      ],
+      "strict": false,
+      "maybe_unknown_value": 2147483647
+    },
+    {
+      "name": "test.zxtypes/ResultEnumAlias",
+      "naming_context": [
+        "ResultEnumAlias"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 75,
+        "column": 6,
+        "length": 15
+      },
+      "deprecated": false,
+      "type": "int32",
+      "experimental_maybe_from_alias": {
+        "name": "test.zxtypes/ResultAlias",
+        "args": [],
+        "nullable": false
+      },
+      "members": [
+        {
+          "name": "OK",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 76,
+            "column": 5,
+            "length": 2
+          },
+          "deprecated": false,
+          "value": {
+            "kind": "literal",
+            "value": "0",
+            "expression": "0",
+            "literal": {
+              "kind": "numeric",
+              "value": "0",
+              "expression": "0"
+            }
+          }
+        }
+      ],
+      "strict": false,
+      "maybe_unknown_value": 2147483647
+    },
     {
       "name": "test.zxtypes/StatusEnum",
       "naming_context": [
@@ -210,6 +299,164 @@
   ],
   "experimental_resource_declarations": [],
   "protocol_declarations": [
+    {
+      "name": "test.zxtypes/ResultProtocol",
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 115,
+        "column": 10,
+        "length": 14
+      },
+      "deprecated": false,
+      "openness": "open",
+      "composed_protocols": [],
+      "methods": [
+        {
+          "kind": "twoway",
+          "ordinal": 751677647873929722,
+          "name": "A",
+          "strict": false,
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 116,
+            "column": 5,
+            "length": 1
+          },
+          "deprecated": false,
+          "has_request": true,
+          "maybe_request_payload": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocolARequest",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "has_response": true,
+          "maybe_response_payload": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocol_A_Result",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "is_composed": false,
+          "has_error": true,
+          "maybe_response_success_type": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocol_A_Response",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "maybe_response_err_type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          }
+        },
+        {
+          "kind": "twoway",
+          "ordinal": 6463185773393452449,
+          "name": "B",
+          "strict": false,
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 122,
+            "column": 5,
+            "length": 1
+          },
+          "deprecated": false,
+          "has_request": true,
+          "maybe_request_payload": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocolBRequest",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "has_response": true,
+          "maybe_response_payload": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocol_B_Result",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "is_composed": false,
+          "has_error": true,
+          "maybe_response_success_type": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocol_B_Response",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "maybe_response_err_type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          }
+        }
+      ]
+    },
     {
       "name": "test.zxtypes/StatusProtocol",
       "location": {
@@ -372,6 +619,544 @@
   "service_declarations": [],
   "struct_declarations": [
     {
+      "name": "test.zxtypes/ResultProtocolARequest",
+      "naming_context": [
+        "ResultProtocol",
+        "A",
+        "Request"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 116,
+        "column": 7,
+        "length": 37
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "zx/Result",
+            "args": [],
+            "nullable": false
+          },
+          "name": "arg",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 117,
+            "column": 9,
+            "length": 3
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 0,
+            "padding": 0
+          }
+        }
+      ],
+      "resource": false,
+      "is_empty_success_struct": false,
+      "type_shape_v2": {
+        "inline_size": 4,
+        "alignment": 4,
+        "depth": 0,
+        "max_handles": 0,
+        "max_out_of_line": 0,
+        "has_padding": false,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultProtocolBRequest",
+      "naming_context": [
+        "ResultProtocol",
+        "B",
+        "Request"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 122,
+        "column": 7,
+        "length": 39
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "test.zxtypes/ResultAlias",
+            "args": [],
+            "nullable": false
+          },
+          "name": "arg",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 123,
+            "column": 9,
+            "length": 3
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 0,
+            "padding": 0
+          }
+        }
+      ],
+      "resource": false,
+      "is_empty_success_struct": false,
+      "type_shape_v2": {
+        "inline_size": 4,
+        "alignment": 4,
+        "depth": 0,
+        "max_handles": 0,
+        "max_out_of_line": 0,
+        "has_padding": false,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultProtocol_A_Response",
+      "naming_context": [
+        "ResultProtocol",
+        "A",
+        "Response",
+        "response"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 118,
+        "column": 12,
+        "length": 40
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "zx/Result",
+            "args": [],
+            "nullable": false
+          },
+          "name": "result",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 119,
+            "column": 9,
+            "length": 6
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 0,
+            "padding": 0
+          }
+        }
+      ],
+      "resource": false,
+      "is_empty_success_struct": false,
+      "type_shape_v2": {
+        "inline_size": 4,
+        "alignment": 4,
+        "depth": 0,
+        "max_handles": 0,
+        "max_out_of_line": 0,
+        "has_padding": false,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultProtocol_B_Response",
+      "naming_context": [
+        "ResultProtocol",
+        "B",
+        "Response",
+        "response"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 124,
+        "column": 12,
+        "length": 42
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "test.zxtypes/ResultAlias",
+            "args": [],
+            "nullable": false
+          },
+          "name": "result",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 125,
+            "column": 9,
+            "length": 6
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 0,
+            "padding": 0
+          }
+        }
+      ],
+      "resource": false,
+      "is_empty_success_struct": false,
+      "type_shape_v2": {
+        "inline_size": 4,
+        "alignment": 4,
+        "depth": 0,
+        "max_handles": 0,
+        "max_out_of_line": 0,
+        "has_padding": false,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultStruct",
+      "naming_context": [
+        "ResultStruct"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 79,
+        "column": 6,
+        "length": 12
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "zx/Result",
+            "args": [],
+            "nullable": false
+          },
+          "name": "result",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 80,
+            "column": 5,
+            "length": 6
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 0,
+            "padding": 0
+          }
+        },
+        {
+          "type": {
+            "kind_v2": "array",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "zx/Result",
+              "args": [],
+              "nullable": false
+            },
+            "element_count": 10,
+            "type_shape_v2": {
+              "inline_size": 40,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_array",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 81,
+            "column": 5,
+            "length": 12
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 4,
+            "padding": 4
+          }
+        },
+        {
+          "type": {
+            "kind_v2": "vector",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "zx/Result",
+              "args": [],
+              "nullable": false
+            },
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 4294967295,
+              "has_padding": true,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_vector",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 82,
+            "column": 5,
+            "length": 13
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 48,
+            "padding": 0
+          }
+        }
+      ],
+      "resource": false,
+      "is_empty_success_struct": false,
+      "type_shape_v2": {
+        "inline_size": 64,
+        "alignment": 8,
+        "depth": 1,
+        "max_handles": 0,
+        "max_out_of_line": 4294967295,
+        "has_padding": true,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultStructAlias",
+      "naming_context": [
+        "ResultStructAlias"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 85,
+        "column": 6,
+        "length": 17
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "test.zxtypes/ResultAlias",
+            "args": [],
+            "nullable": false
+          },
+          "name": "result",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 86,
+            "column": 5,
+            "length": 6
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 0,
+            "padding": 0
+          }
+        },
+        {
+          "type": {
+            "kind_v2": "array",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "test.zxtypes/ResultAlias",
+              "args": [],
+              "nullable": false
+            },
+            "element_count": 10,
+            "type_shape_v2": {
+              "inline_size": 40,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_array",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 87,
+            "column": 5,
+            "length": 12
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 4,
+            "padding": 4
+          }
+        },
+        {
+          "type": {
+            "kind_v2": "vector",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "test.zxtypes/ResultAlias",
+              "args": [],
+              "nullable": false
+            },
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 4294967295,
+              "has_padding": true,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_vector",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 88,
+            "column": 5,
+            "length": 13
+          },
+          "deprecated": false,
+          "field_shape_v2": {
+            "offset": 48,
+            "padding": 0
+          }
+        }
+      ],
+      "resource": false,
+      "is_empty_success_struct": false,
+      "type_shape_v2": {
+        "inline_size": 64,
+        "alignment": 8,
+        "depth": 1,
+        "max_handles": 0,
+        "max_out_of_line": 4294967295,
+        "has_padding": true,
+        "has_flexible_envelope": false
+      }
+    },
+    {
       "name": "test.zxtypes/StatusProtocolARequest",
       "naming_context": [
         "StatusProtocol",
@@ -526,7 +1311,7 @@
             "args": [],
             "nullable": false
           },
-          "name": "result",
+          "name": "status",
           "location": {
             "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
             "line": 59,
@@ -587,7 +1372,7 @@
             "args": [],
             "nullable": false
           },
-          "name": "result",
+          "name": "status",
           "location": {
             "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
             "line": 65,
@@ -913,6 +1698,284 @@
   "external_struct_declarations": [],
   "table_declarations": [
     {
+      "name": "test.zxtypes/ResultTable",
+      "naming_context": [
+        "ResultTable"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 91,
+        "column": 6,
+        "length": 11
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "ordinal": 1,
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "zx/Result",
+            "args": [],
+            "nullable": false
+          },
+          "name": "result",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 92,
+            "column": 8,
+            "length": 6
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 2,
+          "type": {
+            "kind_v2": "array",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "zx/Result",
+              "args": [],
+              "nullable": false
+            },
+            "element_count": 10,
+            "type_shape_v2": {
+              "inline_size": 40,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_array",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 93,
+            "column": 8,
+            "length": 12
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 3,
+          "type": {
+            "kind_v2": "vector",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "zx/Result",
+              "args": [],
+              "nullable": false
+            },
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 4294967295,
+              "has_padding": true,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_vector",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 94,
+            "column": 8,
+            "length": 13
+          },
+          "deprecated": false
+        }
+      ],
+      "strict": false,
+      "resource": false,
+      "type_shape_v2": {
+        "inline_size": 16,
+        "alignment": 8,
+        "depth": 3,
+        "max_handles": 0,
+        "max_out_of_line": 4294967295,
+        "has_padding": true,
+        "has_flexible_envelope": true
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultTableAlias",
+      "naming_context": [
+        "ResultTableAlias"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 97,
+        "column": 6,
+        "length": 16
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "ordinal": 1,
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "test.zxtypes/ResultAlias",
+            "args": [],
+            "nullable": false
+          },
+          "name": "result",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 98,
+            "column": 8,
+            "length": 6
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 2,
+          "type": {
+            "kind_v2": "array",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "test.zxtypes/ResultAlias",
+              "args": [],
+              "nullable": false
+            },
+            "element_count": 10,
+            "type_shape_v2": {
+              "inline_size": 40,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_array",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 99,
+            "column": 8,
+            "length": 12
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 3,
+          "type": {
+            "kind_v2": "vector",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "test.zxtypes/ResultAlias",
+              "args": [],
+              "nullable": false
+            },
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 4294967295,
+              "has_padding": true,
+              "has_flexible_envelope": false
+            }
+          },
+          "name": "result_vector",
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 100,
+            "column": 8,
+            "length": 13
+          },
+          "deprecated": false
+        }
+      ],
+      "strict": false,
+      "resource": false,
+      "type_shape_v2": {
+        "inline_size": 16,
+        "alignment": 8,
+        "depth": 3,
+        "max_handles": 0,
+        "max_out_of_line": 4294967295,
+        "has_padding": true,
+        "has_flexible_envelope": true
+      }
+    },
+    {
       "name": "test.zxtypes/StatusTable",
       "naming_context": [
         "StatusTable"
@@ -1192,6 +2255,500 @@
     }
   ],
   "union_declarations": [
+    {
+      "name": "test.zxtypes/ResultProtocol_A_Result",
+      "naming_context": [
+        "ResultProtocol",
+        "A",
+        "Response"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 118,
+        "column": 11,
+        "length": 42
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "ordinal": 1,
+          "name": "response",
+          "type": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocol_A_Response",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "generated",
+            "line": 9,
+            "column": 1,
+            "length": 8
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 2,
+          "name": "err",
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "zx/Result",
+            "args": [],
+            "nullable": false
+          },
+          "location": {
+            "filename": "generated",
+            "line": 10,
+            "column": 1,
+            "length": 3
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 3,
+          "name": "framework_err",
+          "type": {
+            "kind_v2": "internal",
+            "subtype": "framework_error",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "generated",
+            "line": 11,
+            "column": 1,
+            "length": 13
+          },
+          "deprecated": false
+        }
+      ],
+      "strict": true,
+      "resource": false,
+      "is_result": true,
+      "type_shape_v2": {
+        "inline_size": 16,
+        "alignment": 8,
+        "depth": 1,
+        "max_handles": 0,
+        "max_out_of_line": 0,
+        "has_padding": false,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultProtocol_B_Result",
+      "naming_context": [
+        "ResultProtocol",
+        "B",
+        "Response"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 124,
+        "column": 11,
+        "length": 44
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "ordinal": 1,
+          "name": "response",
+          "type": {
+            "kind_v2": "identifier",
+            "identifier": "test.zxtypes/ResultProtocol_B_Response",
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "generated",
+            "line": 13,
+            "column": 1,
+            "length": 8
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 2,
+          "name": "err",
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "test.zxtypes/ResultAlias",
+            "args": [],
+            "nullable": false
+          },
+          "location": {
+            "filename": "generated",
+            "line": 14,
+            "column": 1,
+            "length": 3
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 3,
+          "name": "framework_err",
+          "type": {
+            "kind_v2": "internal",
+            "subtype": "framework_error",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "generated",
+            "line": 15,
+            "column": 1,
+            "length": 13
+          },
+          "deprecated": false
+        }
+      ],
+      "strict": true,
+      "resource": false,
+      "is_result": true,
+      "type_shape_v2": {
+        "inline_size": 16,
+        "alignment": 8,
+        "depth": 1,
+        "max_handles": 0,
+        "max_out_of_line": 0,
+        "has_padding": false,
+        "has_flexible_envelope": false
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultUnion",
+      "naming_context": [
+        "ResultUnion"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 103,
+        "column": 6,
+        "length": 11
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "ordinal": 1,
+          "name": "result",
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "zx/Result",
+            "args": [],
+            "nullable": false
+          },
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 104,
+            "column": 8,
+            "length": 6
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 2,
+          "name": "result_array",
+          "type": {
+            "kind_v2": "array",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "zx/Result",
+              "args": [],
+              "nullable": false
+            },
+            "element_count": 10,
+            "type_shape_v2": {
+              "inline_size": 40,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 105,
+            "column": 8,
+            "length": 12
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 3,
+          "name": "result_vector",
+          "type": {
+            "kind_v2": "vector",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "zx/Result",
+              "args": [],
+              "nullable": false
+            },
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 4294967295,
+              "has_padding": true,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 106,
+            "column": 8,
+            "length": 13
+          },
+          "deprecated": false
+        }
+      ],
+      "strict": false,
+      "resource": false,
+      "is_result": false,
+      "type_shape_v2": {
+        "inline_size": 16,
+        "alignment": 8,
+        "depth": 2,
+        "max_handles": 0,
+        "max_out_of_line": 4294967295,
+        "has_padding": true,
+        "has_flexible_envelope": true
+      }
+    },
+    {
+      "name": "test.zxtypes/ResultUnionAlias",
+      "naming_context": [
+        "ResultUnionAlias"
+      ],
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 109,
+        "column": 6,
+        "length": 16
+      },
+      "deprecated": false,
+      "members": [
+        {
+          "ordinal": 1,
+          "name": "result",
+          "type": {
+            "kind_v2": "primitive",
+            "subtype": "int32",
+            "type_shape_v2": {
+              "inline_size": 4,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "experimental_maybe_from_alias": {
+            "name": "test.zxtypes/ResultAlias",
+            "args": [],
+            "nullable": false
+          },
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 110,
+            "column": 8,
+            "length": 6
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 2,
+          "name": "result_array",
+          "type": {
+            "kind_v2": "array",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "test.zxtypes/ResultAlias",
+              "args": [],
+              "nullable": false
+            },
+            "element_count": 10,
+            "type_shape_v2": {
+              "inline_size": 40,
+              "alignment": 4,
+              "depth": 0,
+              "max_handles": 0,
+              "max_out_of_line": 0,
+              "has_padding": false,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 111,
+            "column": 8,
+            "length": 12
+          },
+          "deprecated": false
+        },
+        {
+          "ordinal": 3,
+          "name": "result_vector",
+          "type": {
+            "kind_v2": "vector",
+            "element_type": {
+              "kind_v2": "primitive",
+              "subtype": "int32",
+              "type_shape_v2": {
+                "inline_size": 4,
+                "alignment": 4,
+                "depth": 0,
+                "max_handles": 0,
+                "max_out_of_line": 0,
+                "has_padding": false,
+                "has_flexible_envelope": false
+              }
+            },
+            "experimental_maybe_from_alias": {
+              "name": "test.zxtypes/ResultAlias",
+              "args": [],
+              "nullable": false
+            },
+            "nullable": false,
+            "type_shape_v2": {
+              "inline_size": 16,
+              "alignment": 8,
+              "depth": 1,
+              "max_handles": 0,
+              "max_out_of_line": 4294967295,
+              "has_padding": true,
+              "has_flexible_envelope": false
+            }
+          },
+          "location": {
+            "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+            "line": 112,
+            "column": 8,
+            "length": 13
+          },
+          "deprecated": false
+        }
+      ],
+      "strict": false,
+      "resource": false,
+      "is_result": false,
+      "type_shape_v2": {
+        "inline_size": 16,
+        "alignment": 8,
+        "depth": 2,
+        "max_handles": 0,
+        "max_out_of_line": 4294967295,
+        "has_padding": true,
+        "has_flexible_envelope": true
+      }
+    },
     {
       "name": "test.zxtypes/StatusProtocol_A_Result",
       "naming_context": [
@@ -1689,6 +3246,39 @@
   ],
   "alias_declarations": [
     {
+      "name": "test.zxtypes/ResultAlias",
+      "location": {
+        "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
+        "line": 69,
+        "column": 7,
+        "length": 11
+      },
+      "deprecated": false,
+      "partial_type_ctor": {
+        "name": "int32",
+        "args": [],
+        "nullable": false
+      },
+      "type": {
+        "kind_v2": "primitive",
+        "subtype": "int32",
+        "type_shape_v2": {
+          "inline_size": 4,
+          "alignment": 4,
+          "depth": 0,
+          "max_handles": 0,
+          "max_out_of_line": 0,
+          "has_padding": false,
+          "has_flexible_envelope": false
+        }
+      },
+      "experimental_maybe_from_alias": {
+        "name": "zx/Result",
+        "args": [],
+        "nullable": false
+      }
+    },
+    {
       "name": "test.zxtypes/StatusAlias",
       "location": {
         "filename": "../../tools/fidl/fidlc/testdata/zx_types.test.fidl",
@@ -1724,6 +3314,22 @@
   ],
   "new_type_declarations": [],
   "declaration_order": [
+    "test.zxtypes/ResultAlias",
+    "test.zxtypes/ResultEnum",
+    "test.zxtypes/ResultEnumAlias",
+    "test.zxtypes/ResultProtocolARequest",
+    "test.zxtypes/ResultProtocol_A_Response",
+    "test.zxtypes/ResultProtocol_A_Result",
+    "test.zxtypes/ResultProtocolBRequest",
+    "test.zxtypes/ResultProtocol_B_Response",
+    "test.zxtypes/ResultProtocol_B_Result",
+    "test.zxtypes/ResultProtocol",
+    "test.zxtypes/ResultStruct",
+    "test.zxtypes/ResultStructAlias",
+    "test.zxtypes/ResultTable",
+    "test.zxtypes/ResultTableAlias",
+    "test.zxtypes/ResultUnion",
+    "test.zxtypes/ResultUnionAlias",
     "test.zxtypes/StatusAlias",
     "test.zxtypes/StatusEnum",
     "test.zxtypes/StatusEnumAlias",
@@ -1742,21 +3348,37 @@
     "test.zxtypes/StatusUnionAlias"
   ],
   "declarations": {
+    "test.zxtypes/ResultEnum": "enum",
+    "test.zxtypes/ResultEnumAlias": "enum",
     "test.zxtypes/StatusEnum": "enum",
     "test.zxtypes/StatusEnumAlias": "enum",
+    "test.zxtypes/ResultProtocol": "protocol",
     "test.zxtypes/StatusProtocol": "protocol",
+    "test.zxtypes/ResultProtocolARequest": "struct",
+    "test.zxtypes/ResultProtocolBRequest": "struct",
+    "test.zxtypes/ResultProtocol_A_Response": "struct",
+    "test.zxtypes/ResultProtocol_B_Response": "struct",
+    "test.zxtypes/ResultStruct": "struct",
+    "test.zxtypes/ResultStructAlias": "struct",
     "test.zxtypes/StatusProtocolARequest": "struct",
     "test.zxtypes/StatusProtocolBRequest": "struct",
     "test.zxtypes/StatusProtocol_A_Response": "struct",
     "test.zxtypes/StatusProtocol_B_Response": "struct",
     "test.zxtypes/StatusStruct": "struct",
     "test.zxtypes/StatusStructAlias": "struct",
+    "test.zxtypes/ResultTable": "table",
+    "test.zxtypes/ResultTableAlias": "table",
     "test.zxtypes/StatusTable": "table",
     "test.zxtypes/StatusTableAlias": "table",
+    "test.zxtypes/ResultProtocol_A_Result": "union",
+    "test.zxtypes/ResultProtocol_B_Result": "union",
+    "test.zxtypes/ResultUnion": "union",
+    "test.zxtypes/ResultUnionAlias": "union",
     "test.zxtypes/StatusProtocol_A_Result": "union",
     "test.zxtypes/StatusProtocol_B_Result": "union",
     "test.zxtypes/StatusUnion": "union",
     "test.zxtypes/StatusUnionAlias": "union",
+    "test.zxtypes/ResultAlias": "alias",
     "test.zxtypes/StatusAlias": "alias"
   }
 }

@@ -56,12 +56,72 @@ protocol StatusProtocol {
     A(struct {
         arg zx.Status;
     }) -> (struct {
-        result zx.Status;
+        status zx.Status;
     }) error zx.Status;
 
     B(struct {
         arg StatusAlias;
     }) -> (struct {
-        result StatusAlias;
+        status StatusAlias;
     }) error StatusAlias;
+};
+
+alias ResultAlias = zx.Result;
+
+type ResultEnum = flexible enum : zx . Result {
+    OK = 0;
+};
+
+type ResultEnumAlias = flexible enum : ResultAlias {
+    OK = 0;
+};
+
+type ResultStruct = struct {
+    result zx.Result;
+    result_array array<zx.Result, 10>;
+    result_vector vector<zx.Result>;
+};
+
+type ResultStructAlias = struct {
+    result ResultAlias;
+    result_array array<ResultAlias, 10>;
+    result_vector vector<ResultAlias>;
+};
+
+type ResultTable = table {
+    1: result zx.Result;
+    2: result_array array<zx.Result, 10>;
+    3: result_vector vector<zx.Result>;
+};
+
+type ResultTableAlias = table {
+    1: result ResultAlias;
+    2: result_array array<ResultAlias, 10>;
+    3: result_vector vector<ResultAlias>;
+};
+
+type ResultUnion = union {
+    1: result zx.Result;
+    2: result_array array<zx.Result, 10>;
+    3: result_vector vector<zx.Result>;
+};
+
+type ResultUnionAlias = union {
+    1: result ResultAlias;
+    2: result_array array<ResultAlias, 10>;
+    3: result_vector vector<ResultAlias>;
+};
+
+protocol ResultProtocol {
+    A(struct {
+        arg zx.Result;
+    }) -> (struct {
+        result zx.Result;
+    }) error zx.Result;
+
+    B(struct {
+        arg ResultAlias;
+    }) -> (struct {
+        result ResultAlias;
+    }) error ResultAlias;
 };

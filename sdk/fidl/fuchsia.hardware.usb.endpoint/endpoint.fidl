@@ -107,7 +107,7 @@ type Completion = resource table {
     /// - `ZX_ERR_IO_MISSED_DEADLINE`: The transfer missed its deadline.
     /// - `ZX_ERR_IO`: General I/O error.
     /// - `ZX_ERR_IO_INVALID`: Invalid I/O operation.
-    2: status zx.Status;
+    2: status zx.Result;
     /// Bytes successfully transferred.
     3: transfer_size uint64;
     /// Wake lease if this completion took the system out of suspend.
@@ -140,7 +140,7 @@ closed protocol Endpoint {
         vmo_ids vector<fuchsia.hardware.usb.request.VmoId>:VMO_VECTOR_MAX;
     }) -> (resource struct {
         failed_vmo_ids vector<fuchsia.hardware.usb.request.VmoId>:VMO_VECTOR_MAX;
-        errors vector<zx.Status>:VMO_VECTOR_MAX;
+        errors vector<zx.Result>:VMO_VECTOR_MAX;
     });
 
     /// Submit Requests to queue. Processed starting with the 0th Request. Submitting a vector of

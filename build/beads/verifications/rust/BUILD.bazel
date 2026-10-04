@@ -2,22 +2,36 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_binary", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
 rustc_library(
-    name = "rust_example_lib",
+    name = "beads_rust_example_lib",
     srcs = ["src/lib.rs"],
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
 )
 
 rustc_binary(
-    name = "rust_example_bin",
+    name = "beads_rust_example_bin",
     srcs = ["src/main.rs"],
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
-    deps = [":rust_example_lib"],
+    deps = [":beads_rust_example_lib"],
+)
+
+build_flags(
+    name = "beads_rust_linker_args_build_flags",
+    rustflags = [
+        "-Clink-arg=--build-id=md5",
+        "-Clink-arg=--hash-style=sysv",
+    ],
+)
+
+rustc_binary(
+    name = "beads_rust_example_bin_with_linker_args",
+    srcs = ["src/main.rs"],
+    build_flags = [":beads_rust_linker_args_build_flags"],
+    edition = "2024",
+    deps = [":beads_rust_example_lib"],
 )

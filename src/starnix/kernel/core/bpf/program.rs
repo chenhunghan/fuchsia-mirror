@@ -200,8 +200,7 @@ impl Program {
             | ProgramType::LwtXmit
             | ProgramType::StructOps
             | ProgramType::Syscall
-            | ProgramType::Unspec
-            | ProgramType::Fuse => Ok(()),
+            | ProgramType::Unspec => Ok(()),
         }
     }
 

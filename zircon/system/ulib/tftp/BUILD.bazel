@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+cc_library(
+    name = "tftp",
+    srcs = [
+        "internal.h",
+        "tftp.c",
+    ],
+    hdrs = [
+        "include/tftp/tftp.h",
+    ],
+    copts = [
+        # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+        "-Wno-conversion",
+    ],
+    defines = select({
+        "//build/bazel/platforms:is_host_os": ["TFTP_HOSTLIB"],
+        "@platforms//os:fuchsia": ["TFTP_USERLIB"],
+    }),
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//src/zircon/lib/zircon"],
+        "//conditions:default": [],
+    }),
+    includes = [
+        "include",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(BUILD.gn)

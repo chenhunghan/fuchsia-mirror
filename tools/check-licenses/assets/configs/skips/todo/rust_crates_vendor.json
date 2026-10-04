@@ -8,6 +8,13 @@
             ],
             "description": "Files in the rust_crate 'vendor' directory causing issues.\nSee b/404221480 for more information",
             "bug": "https://fxbug.dev/404221480"
+        },
+        {
+            "paths": [
+                "third_party/rust_crates/vendor/moka-0.12.15/NOTICE"
+            ],
+            "description": "Skip unrecognized license text in the NOTICE file for 3p rust crate moka-0.12.15",
+            "bug": "https://fxbug.dev/42084779"
         }
     ]
 }

@@ -114,7 +114,7 @@ fn fidl_decl_derive_impl(input: syn::DeriveInput) -> TokenStream {
                 for p in ps.paths.into_iter() {
                     let t = generate_enum(
                         opts.ident.clone(),
-                        Type::Path(syn::TypePath { qself: None, path: p }),
+                        Type::Path(syn::TypePath { attrs: Vec::new(), qself: None, path: p }),
                         variants.clone(),
                     );
                     ts = quote! {
@@ -139,7 +139,7 @@ fn fidl_decl_derive_impl(input: syn::DeriveInput) -> TokenStream {
                 for p in ps.paths.into_iter() {
                     let t = generate_struct(
                         opts.ident.clone(),
-                        Type::Path(syn::TypePath { qself: None, path: p }),
+                        Type::Path(syn::TypePath { attrs: Vec::new(), qself: None, path: p }),
                         fields.fields.clone(),
                     );
                     ts = quote! {

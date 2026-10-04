@@ -21,8 +21,7 @@ void CompositeNodeSpecManager::AddSpec(
     std::unique_ptr<CompositeNodeSpec> spec,
     fit::callback<void(fit::result<fdfw::CompositeNodeSpecError>)> callback) {
   ZX_ASSERT(spec);
-  ZX_ASSERT(fidl_spec.has_name() && ((fidl_spec.has_parents() && !fidl_spec.parents().empty()) ||
-                                     fidl_spec.has_parents2() && !fidl_spec.parents2().empty()));
+  ZX_ASSERT(fidl_spec.has_name() && fidl_spec.has_parents2() && !fidl_spec.parents2().empty());
 
   auto name = std::string(fidl_spec.name().get());
   if (specs_.find(name) != specs_.end()) {
@@ -95,8 +94,8 @@ zx::result<BindSpecResult> CompositeNodeSpecManager::BindParentSpec(
 
     auto& spec_info = composite.spec();
 
-    if (!spec_info.has_name() || (!spec_info.has_parents() && !spec_info.has_parents2())) {
-      fdf_log::warn("CompositeNodeSpec missing name or parents.");
+    if (!spec_info.has_name() || !spec_info.has_parents2()) {
+      fdf_log::warn("CompositeNodeSpec missing name or parents2.");
       continue;
     }
 
@@ -112,14 +111,8 @@ zx::result<BindSpecResult> CompositeNodeSpecManager::BindParentSpec(
       return false;
     };
 
-    if (spec_info.has_parents()) {
-      if (check_parents(spec_info.parents())) {
-        continue;
-      }
-    } else {
-      if (check_parents(spec_info.parents2())) {
-        continue;
-      }
+    if (check_parents(spec_info.parents2())) {
+      continue;
     }
 
     auto& name = spec_info.name();

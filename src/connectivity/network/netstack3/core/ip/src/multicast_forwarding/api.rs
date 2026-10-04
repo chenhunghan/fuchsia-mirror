@@ -346,7 +346,9 @@ fn handle_pending_packets<I: IpLayerIpExt, CC, BC>(
     let dst_ip: SpecifiedAddr<I::Addr> = dst_addr.into();
     let src_ip: I::RecvSrcAddr = src_addr.into();
 
-    for QueuedPacket { device, packet, frame_dst, max_fragment_len } in packet_queue.into_iter() {
+    for QueuedPacket { device, packet, frame_dst, max_fragment_len, marks } in
+        packet_queue.into_iter()
+    {
         let device = match device.upgrade() {
             // Short circuit if the device was removed while the packet was
             // pending.
@@ -385,7 +387,12 @@ fn handle_pending_packets<I: IpLayerIpExt, CC, BC>(
                 for (mut packet, MulticastRouteTarget { output_interface, min_ttl }) in
                     packet_iter.zip(targets.iter())
                 {
-                    let packet_metadata = Default::default();
+                    let packet_metadata =
+                        crate::internal::base::IpLayerPacketMetadata::new_local_tx(
+                            Default::default(),
+                            marks,
+                            None,
+                        );
                     crate::internal::base::determine_ip_packet_forwarding_action::<I, _, _>(
                         core_ctx,
                         packet.parse_ip_packet_mut(),
@@ -550,6 +557,7 @@ mod tests {
                     &actual_dev,
                     FRAME_DST,
                     MAX_FRAGMENT_LEN,
+                    Default::default(),
                 ),
                 QueuePacketOutcome::QueuedInNewQueue,
             );

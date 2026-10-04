@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::MIN_INTERVAL_FOR_SYSLOG_MS;
 use crate::driver_utils::{
     Driver, connect_proxy, get_driver_topological_path, list_directory_entries,
 };
+use crate::{MIN_INTERVAL_FOR_SYSLOG_MS, round_for_syslog};
 use anyhow::{Error, Result, format_err};
 use fidl_fuchsia_gpu_magma as fgpu;
 use fidl_fuchsia_power_metrics as fmetrics;
@@ -211,7 +211,11 @@ impl GpuUsageLogger {
                         );
 
                         if self.output_samples_to_syslog {
-                            info!(name = driver_names[index].as_str(), gpu_usage; "");
+                            info!(
+                                name = driver_names[index].as_str(),
+                                gpu_usage = round_for_syslog(gpu_usage);
+                                ""
+                            );
                         }
 
                         trace_args.push(fuchsia_trace::ArgValue::of(

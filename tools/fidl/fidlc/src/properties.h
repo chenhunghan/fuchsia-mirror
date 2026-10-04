@@ -21,6 +21,11 @@ enum class Nullability : uint8_t {
   kNonnullable,
 };
 
+enum class Zeroability : uint8_t {
+  kZeroable,
+  kNotZeroable,
+};
+
 enum class Strictness : uint8_t {
   kFlexible,
   kStrict,

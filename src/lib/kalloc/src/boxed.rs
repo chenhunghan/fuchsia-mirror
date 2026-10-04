@@ -304,7 +304,7 @@ impl<T, A: Allocator> Box<[MaybeUninit<T>], A> {
     /// The caller must guarantee that the values are initialized.
     pub unsafe fn assume_init(self) -> Box<[T], A> {
         let (ptr, allocator) = Box::into_raw_with_allocator(self);
-        let ptr = ptr as *mut [core::mem::MaybeUninit<T>] as *mut [T];
+        let ptr = ptr as *mut [T];
         // SAFETY: The caller must guarantee that the values are initialized.
         unsafe { Box::from_raw_in(ptr, allocator) }
     }

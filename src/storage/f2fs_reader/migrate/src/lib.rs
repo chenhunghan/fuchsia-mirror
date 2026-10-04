@@ -17,11 +17,11 @@ use fxfs::object_store::transaction::{LockKey, Mutation, Options, Transaction, l
 use fxfs::object_store::volume::root_volume;
 use fxfs::object_store::{
     AttributeId, AttributeKey, DataObjectHandle, DirType, Directory, ExtentValue, FSCRYPT_KEY_ID,
-    FsverityMetadata, HandleOptions, NewChildStoreOptions, ObjectAttributes, ObjectDescriptor,
-    ObjectKey, ObjectKind, ObjectStore, ObjectValue, PosixAttributes, StoreOptions, Timestamp,
-    VOLUME_DATA_KEY_ID,
+    FscryptDirInfo, FscryptPolicyFlags, FsverityMetadata, HandleOptions, NewChildStoreOptions,
+    ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue,
+    PosixAttributes, StoreOptions, Timestamp, VOLUME_DATA_KEY_ID,
 };
-use fxfs_crypto::{Crypt, EncryptionKey, WrappingKeyId};
+use fxfs_crypto::{Crypt, EncryptionKey};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
@@ -127,18 +127,21 @@ fn migrate_xattr(
 }
 
 /// Helper to set the appropriate key type based on fscrypt context.
-/// Returns (wrapping_key_id, key_id, keys)
+/// Returns (fscrypt_info, key_id, keys)
 async fn keys_from_context(
     object_id: u64,
     context: &Option<fscrypt::Context>,
     owner: &Directory<ObjectStore>,
     parent_is_fscrypt: bool,
     is_file: bool,
-) -> Result<(Option<WrappingKeyId>, u64, Vec<(u64, EncryptionKey)>), Error> {
+) -> Result<(Option<FscryptDirInfo>, u64, Vec<(u64, EncryptionKey)>), Error> {
     if let Some(context) = context {
         ensure!(context.flags & fscrypt::POLICY_FLAGS_PAD_16 != 0, "require 16 byte padding");
         Ok((
-            Some(context.main_key_identifier),
+            Some(FscryptDirInfo::new(
+                context.main_key_identifier,
+                FscryptPolicyFlags::try_from(context.flags)?,
+            )),
             FSCRYPT_KEY_ID, // fscrypt always uses key_id = 1
             if context.flags & fscrypt::POLICY_FLAGS_INO_LBLK_32 != 0 {
                 if is_file {
@@ -167,7 +170,7 @@ async fn keys_from_context(
         let (key, _unwrapped_key) =
             crypt.create_key(object_id, fxfs_crypto::KeyPurpose::Data).await.unwrap();
         Ok((
-            if parent_is_fscrypt { owner.wrapping_key_id() } else { None },
+            if parent_is_fscrypt { owner.fscrypt_info() } else { None },
             VOLUME_DATA_KEY_ID,
             vec![(VOLUME_DATA_KEY_ID, EncryptionKey::Fxfs(key))],
         ))
@@ -221,7 +224,7 @@ pub async fn migrate(
             let object_id = entry.ino as u64;
             let inode = f2fs.read_inode(entry.ino).await?;
 
-            let (wrapping_key_id, key_id, keys) = keys_from_context(
+            let (fscrypt_info, key_id, keys) = keys_from_context(
                 object_id,
                 &inode.context,
                 &dir,
@@ -232,10 +235,10 @@ pub async fn migrate(
 
             let flags = inode.header.flags;
             let casefold = flags.contains(Flags::Casefold);
-            let dir_type = match (casefold, wrapping_key_id) {
-                (true, Some(id)) => DirType::EncryptedCasefold(id),
+            let dir_type = match (casefold, fscrypt_info) {
+                (true, Some(info)) => DirType::EncryptedCasefold(info),
                 (true, None) => DirType::Casefold,
-                (false, Some(id)) => DirType::Encrypted(id),
+                (false, Some(info)) => DirType::Encrypted(info),
                 (false, None) => DirType::Normal,
             };
 
@@ -611,20 +614,23 @@ pub async fn verify(
         for entry in f2fs.readdir(ino).await? {
             let object_id = entry.ino as u64;
             let inode = f2fs.read_inode(entry.ino).await.unwrap();
-            let mut wrapping_key_id = dir.wrapping_key_id();
+            let mut fscrypt_info = dir.fscrypt_info();
 
             // If f2fs inode has a context, we have an fscrypt file. In fxfs this is marked by the
             // presence of a wrapping_key_id.
             if let Some(context) = &inode.context {
-                wrapping_key_id = Some(context.main_key_identifier);
+                fscrypt_info = Some(FscryptDirInfo::new(
+                    context.main_key_identifier,
+                    FscryptPolicyFlags::try_from(context.flags)?,
+                ));
             }
 
             let flags = inode.header.flags;
             let casefold = flags.contains(Flags::Casefold);
-            let dir_type = match (casefold, wrapping_key_id) {
-                (true, Some(id)) => DirType::EncryptedCasefold(id),
+            let dir_type = match (casefold, fscrypt_info) {
+                (true, Some(info)) => DirType::EncryptedCasefold(info),
                 (true, None) => DirType::Casefold,
-                (false, Some(id)) => DirType::Encrypted(id),
+                (false, Some(info)) => DirType::Encrypted(info),
                 (false, None) => DirType::Normal,
             };
 

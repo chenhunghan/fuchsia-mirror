@@ -18,6 +18,7 @@ use futures::{FutureExt, Stream, StreamExt, pin_mut};
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use target_errors::{FfxTargetError, TargetSource};
@@ -26,6 +27,7 @@ use tokio::sync::Mutex;
 use crate::analytics::PointOfFailure;
 use crate::connection::Connection;
 use crate::ssh_connector::SshConnector;
+use crate::uart_connector::UartConnector;
 use crate::usb_connector::{UsbConnector, try_daemon_autostart};
 use crate::vsock_connector::VSockConnector;
 use crate::{TargetInfo, get_target_specifier_with_source, target_source_for_query};
@@ -38,60 +40,12 @@ const DEFAULT_SSH_TIMEOUT_MS: u64 = 10000;
 #[cfg(test)]
 use {mockall::mock, mockall::predicate::*};
 
-/// Check if daemon discovery is disabled, resolving locally if so.
-pub async fn maybe_locally_resolve_target_spec(
-    target_spec: &TargetInfoQuery,
-    env_context: &EnvironmentContext,
-) -> Result<TargetInfoQuery> {
-    // This should be read as "is discovery enabled on the daemon".
-    if crate::is_discovery_enabled(env_context) {
-        Ok(target_spec.clone())
-    } else {
-        log::warn!(
-            "crate::is_discovery_enabled is false - using local target resolution. is_usb_discovery_disabled is {}, is_mdns_discovery_disabled is {}",
-            ffx_config::is_usb_discovery_disabled(env_context),
-            ffx_config::is_mdns_discovery_disabled(env_context)
-        );
-
-        let discovery = build_discovery_from_config(env_context);
-        let resolver = DefaultTargetResolver::new(discovery);
-        locally_resolve_target_spec(target_spec, &resolver, env_context).await
-    }
-}
-
 fn replace_default_port(sa: SocketAddr) -> SocketAddr {
     let mut sa = sa;
     if sa.port() == 0 {
         sa.set_port(TARGET_DEFAULT_PORT);
     }
     sa
-}
-
-/// Attempts to resolve the query into an explicit string query that can be
-/// passed to the daemon. If already an address or serial number, just return
-/// it. Otherwise, perform discovery to find the address or serial #. Returns
-/// Some(_) if a target has been found, None otherwise.
-async fn locally_resolve_target_spec<T: TargetResolver>(
-    target_spec: &TargetInfoQuery,
-    resolver: &T,
-    env_context: &EnvironmentContext,
-) -> Result<TargetInfoQuery> {
-    let query = TargetInfoQuery::from(target_spec.clone());
-    let explicit_spec = match query {
-        // If an address is passed in, make sure that the default port is filled in if it hadn't
-        // been explicit, then just pass it on to the daemon as is
-        TargetInfoQuery::Addr(addr) => format!("{}", replace_default_port(addr)),
-        TargetInfoQuery::Id(sn) => format!("id:{sn}"),
-        _ => {
-            let source = target_source_for_query(target_spec, env_context);
-            let resolution =
-                resolver.resolve_single_target(&target_spec, true, env_context, source).await?;
-            log::debug!("Locally resolved target '{target_spec:?}' to {:?}", resolution.discovered);
-            resolution.target.to_spec()
-        }
-    };
-
-    Ok(TargetInfoQuery::try_from(explicit_spec)?)
 }
 
 fn target_error_to_analytics<'a>(
@@ -162,7 +116,6 @@ pub async fn discover_single_default_target(
     let (query_s, source) = get_target_specifier_with_source(ctx)?;
     let query = TargetInfoQuery::try_from(query_s)?;
 
-    // Note: this will use the target cache if it exists
     let handles = get_discovered_targets(query.clone(), true, true, ctx).await?;
     let res = expect_single_target(&query, handles, source)
         .or_else_maybe_analytics(|e| target_error_to_analytics(e).map(Into::into))
@@ -423,6 +376,15 @@ pub(crate) fn build_discovery_builder(
         builder = builder.with_gce_instance_root(gce_instance_root);
     }
 
+    if sources.contains(DiscoverySources::UART) {
+        let uart_driver_socket_dir = ctx
+            .get::<PathBuf, _>("shared_data")
+            .ok()
+            .or_else(|| ctx.get_shared_data_path().ok())
+            .map(|p| p.join(uart_driver_api::UART_SHARED_SUBDIR));
+        builder = builder.with_uart_driver_socket_dir(uart_driver_socket_dir);
+    }
+
     builder
 }
 
@@ -445,6 +407,9 @@ pub fn build_discovery_builder_common(ctx: &EnvironmentContext) -> DiscoveryBuil
     }
     if !ctx.get(ffx_config::keys::NETWORK_ENABLED).unwrap_or(true) {
         sources.remove(DiscoverySources::MDNS);
+    }
+    if !ctx.get(ffx_config::keys::UART_ENABLED).unwrap_or(false) {
+        sources.remove(DiscoverySources::UART);
     }
     build_discovery_builder(sources, ctx)
 }
@@ -535,6 +500,9 @@ pub fn get_discovery_stream(
     if mdns && ctx.get(keys::NETWORK_ENABLED).unwrap_or(true) {
         sources = sources | DiscoverySources::MDNS;
     }
+    if ctx.get(keys::UART_ENABLED).unwrap_or(false) {
+        sources = sources | DiscoverySources::UART;
+    }
     Ok(get_discovery_stream_with_sources(query, sources, ctx)?)
 }
 
@@ -562,6 +530,9 @@ pub async fn get_discovered_targets(
     }
     if mdns && ctx.get(keys::NETWORK_ENABLED).unwrap_or(true) {
         sources = sources | DiscoverySources::MDNS;
+    }
+    if ctx.get(keys::UART_ENABLED).unwrap_or(false) {
+        sources = sources | DiscoverySources::UART;
     }
     // Get nodename, in case we're trying to find an exact match
     Ok(get_discovered_targets_with_sources(query, sources, ctx).await?)
@@ -962,12 +933,14 @@ impl Resolution {
                         ))
                     })?
                 }
-                ResolutionTarget::Uart(_) => {
-                    return Err(crate::error::FfxTargetCrateError::Knock(
+                ResolutionTarget::Uart(endpoint) => {
+                    let connector = UartConnector::new(endpoint.clone(), context)?;
+                    emit_target_connection_event("UART").await;
+                    Connection::new(connector).await.map_err(|e| {
                         crate::KnockError::Critical(crate::KnockCriticalError::TargetError(
-                            "UART connector not yet implemented".to_string(),
-                        )),
-                    ));
+                            format!("{:?}", e),
+                        ))
+                    })?
                 }
                 ResolutionTarget::TestMock(f) => f()?,
                 ResolutionTarget::TestMockAsync(f) => f().await?,
@@ -1193,140 +1166,10 @@ mod test {
         (sa, addr_spec)
     }
 
-    #[fuchsia::test]
-    async fn test_can_resolve_target_locally_addr() {
-        let test_env = ffx_config::test_init().unwrap();
-        let resolver = MockTargetResolver::new();
-        // A network address will resolve to itself
-        let (_, addr_spec) = get_addr_and_spec();
-        // Note that this will fail if we try to call resolve_target_spec()
-        // since we haven't mocked a return value. So it's also checking that no
-        // resolution is done.
-        let target_spec =
-            locally_resolve_target_spec(&addr_spec.clone(), &resolver, &test_env.context)
-                .await
-                .unwrap();
-        assert_eq!(target_spec, addr_spec.clone().into());
-    }
-
-    #[fuchsia::test]
-    async fn test_can_resolve_target_locally_id() {
-        let test_env = ffx_config::test_init().unwrap();
-        let resolver = MockTargetResolver::new();
-        // An ID spec will resolve to itself
-        let id = "abcdef".to_string();
-        let id_spec = TargetInfoQuery::Id(id.clone());
-        // Note that this will fail if we try to call resolve_target_spec()
-        // since we still haven't mocked a return value. So it's also checking that no
-        // resolution is done.
-        let target_spec =
-            locally_resolve_target_spec(&id_spec.clone(), &resolver, &test_env.context)
-                .await
-                .unwrap();
-        assert_eq!(target_spec, id_spec.clone());
-    }
-
     fn make_target_handle_for_product(name: &str, sa: SocketAddr) -> TargetHandle {
         let state = discovery::TargetState::Product { addrs: vec![sa.into()], serial: None };
         let th = TargetHandle { node_name: Some(String::from(name)), state, manual: false };
         th
-    }
-
-    #[fuchsia::test]
-    async fn test_can_resolve_target_locally_dns() {
-        let test_env = ffx_config::test_init().unwrap();
-        let mut resolver = MockTargetResolver::new();
-        // A DNS name will satisfy the resolution request
-        let name = "foobar".to_string();
-        let name_spec = TargetInfoQuery::NodenameOrId(name.clone());
-        let (sa, addr_spec) = get_addr_and_spec();
-        let th = make_target_handle_for_product(&name, sa);
-        resolver.expect_try_resolve_manual_target().return_once(move |_, _| Ok(None));
-        resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th]));
-        let target_spec =
-            locally_resolve_target_spec(&name_spec.clone(), &resolver, &test_env.context)
-                .await
-                .unwrap();
-        assert_eq!(target_spec, addr_spec);
-    }
-
-    #[fuchsia::test]
-    async fn test_cannot_resolve_target_locally_id_name() {
-        let test_env = ffx_config::test_init().unwrap();
-        let mut resolver = MockTargetResolver::new();
-        // Test with "<id>", _not_ "id:<id>"
-        let id = "abcdef".to_string();
-        let th = TargetHandle {
-            node_name: None,
-            state: discovery::TargetState::Fastboot(discovery::FastbootTargetState {
-                serial_number: id.clone(),
-                connection_state: discovery::FastbootConnectionState::Usb,
-            }),
-            manual: false,
-        };
-        resolver.expect_try_resolve_manual_target().return_once(move |_, _| Ok(None));
-        resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th]));
-        let target_spec = locally_resolve_target_spec(
-            &(TargetInfoQuery::try_from(id.clone()).unwrap()),
-            &resolver,
-            &test_env.context,
-        )
-        .await;
-        assert!(target_spec.is_err())
-    }
-
-    #[fuchsia::test]
-    async fn test_can_resolve_target_locally_name_ambiguous() {
-        let test_env = ffx_config::test_init().unwrap();
-        let mut resolver = MockTargetResolver::new();
-        // An ambiguous name will result in an error
-        let name = "foobar".to_string();
-        let (sa, _) = get_addr_and_spec();
-        let th1 = make_target_handle_for_product(&name, sa);
-        let th2 = make_target_handle_for_product(&name, sa);
-        resolver.expect_try_resolve_manual_target().return_once(move |_, _| Ok(None));
-        resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th1, th2]));
-        let target_spec_res = locally_resolve_target_spec(
-            &(TargetInfoQuery::try_from("foo".to_string()).unwrap()),
-            &resolver,
-            &test_env.context,
-        )
-        .await;
-        assert!(target_spec_res.is_err());
-        assert!(dbg!(target_spec_res.unwrap_err().to_string()).contains("multiple targets"));
-    }
-
-    #[fuchsia::test]
-    async fn test_can_resolve_target_locally_first() {
-        let test_env = ffx_config::test_init().unwrap();
-        let mut resolver = MockTargetResolver::new();
-        // A "first" query will satisfy the resolution request
-        let first_spec = TargetInfoQuery::First;
-        let (sa, addr_spec) = get_addr_and_spec();
-        let th = make_target_handle_for_product("foo", sa);
-        resolver.expect_try_resolve_manual_target().return_once(move |_, _| Ok(None));
-        resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th]));
-        let target_spec =
-            locally_resolve_target_spec(&first_spec, &resolver, &test_env.context).await.unwrap();
-        assert_eq!(target_spec, addr_spec);
-    }
-
-    #[fuchsia::test]
-    async fn test_can_resolve_target_locally_first_ambiguous() {
-        let test_env = ffx_config::test_init().unwrap();
-        let mut resolver = MockTargetResolver::new();
-        // A "first" query will fail if there are multiple matches
-        let name = "foobar".to_string();
-        let (sa, _) = get_addr_and_spec();
-        let th1 = make_target_handle_for_product(&name, sa);
-        let th2 = make_target_handle_for_product(&name, sa);
-        resolver.expect_try_resolve_manual_target().return_once(move |_, _| Ok(None));
-        resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th1, th2]));
-        let first_spec = TargetInfoQuery::First;
-        let target_spec_res =
-            locally_resolve_target_spec(&first_spec, &resolver, &test_env.context).await;
-        assert!(target_spec_res.is_err());
-        assert!(dbg!(target_spec_res.unwrap_err().to_string()).contains("More than one device"));
     }
 
     #[fuchsia::test]
@@ -1424,18 +1267,18 @@ mod test {
         let mut resolver = MockTargetResolver::new();
         let name = "foobar".to_string();
         let name_spec = TargetInfoQuery::NodenameOrId(name.clone());
-        let (sa, addr_spec) = get_addr_and_spec();
+        let (sa, _) = get_addr_and_spec();
         let th = make_target_handle_for_product(&name, sa);
 
         // Even though cache exists (empty), because of cache miss, it must fall back to manual and discovery queries:
         resolver.expect_try_resolve_manual_target().return_once(move |_, _| Ok(None));
         resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th]));
 
-        let target_spec =
-            locally_resolve_target_spec(&name_spec.clone(), &resolver, &test_env.context)
-                .await
-                .unwrap();
-        assert_eq!(target_spec, addr_spec);
+        let resolution = resolver
+            .resolve_single_target(&name_spec, true, &test_env.context, Some(TargetSource::Default))
+            .await
+            .unwrap();
+        assert_eq!(resolution.addr().unwrap(), sa);
     }
 
     #[fuchsia::test]
@@ -1455,7 +1298,7 @@ mod test {
 
         // Write a cache file containing our target info!
         let cache_file = get_discovery_cache_file(&test_env.context).unwrap();
-        let (sa, addr_spec) = get_addr_and_spec();
+        let (sa, _) = get_addr_and_spec();
 
         let mut target_info = crate::TargetInfo::default();
         target_info.nodename = Some("foobar".to_string());
@@ -1471,11 +1314,11 @@ mod test {
         // If the resolver attempts to call them, MockTargetResolver will panic,
         // validating that discovery was indeed bypassed on cache hit.
 
-        let target_spec =
-            locally_resolve_target_spec(&name_spec.clone(), &resolver, &test_env.context)
-                .await
-                .unwrap();
-        assert_eq!(target_spec, addr_spec);
+        let resolution = resolver
+            .resolve_single_target(&name_spec, true, &test_env.context, Some(TargetSource::Default))
+            .await
+            .unwrap();
+        assert_eq!(resolution.addr().unwrap(), sa);
     }
 
     // Tests that `build_discovery_from_config` reads and applies the discovery timeout from the
@@ -1640,5 +1483,35 @@ mod test {
                 .unwrap();
         assert_eq!(res_vsock.vsock_cid(), Some(12345));
         assert_eq!(res_vsock.usb_cid(), None);
+    }
+
+    #[fuchsia::test]
+    async fn test_resolve_invalid_uart() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        // 1. Relative path (not allowed)
+        let err =
+            UartConnector::new("./my-relative-port".to_string(), &test_env.context).unwrap_err();
+        assert!(matches!(
+            err,
+            FfxTargetError::OpenTargetError { err: ffx::OpenTargetError::TargetNotFound, .. }
+        ));
+
+        // 2. Non-existent absolute path
+        let err =
+            UartConnector::new("/non/existent/port".to_string(), &test_env.context).unwrap_err();
+        assert!(matches!(
+            err,
+            FfxTargetError::OpenTargetError { err: ffx::OpenTargetError::TargetNotFound, .. }
+        ));
+
+        // 3. Regular file (invalid type)
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        let err =
+            UartConnector::new(temp_file.path().to_string_lossy().to_string(), &test_env.context)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            FfxTargetError::OpenTargetError { err: ffx::OpenTargetError::TargetNotFound, .. }
+        ));
     }
 }

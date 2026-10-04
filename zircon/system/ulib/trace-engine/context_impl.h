@@ -14,6 +14,7 @@
 #include <atomic>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 
 #include "buffer.h"
 #include "rolling_buffer.h"
@@ -96,6 +97,26 @@ struct trace_context {
   bool AllocThreadIndex(trace_thread_index_t* out_index);
   bool AllocStringIndex(trace_string_index_t* out_index);
 
+  // Looks up |bytes_pointer| in the process-wide string literal cache. If not found, allocates a
+  // new string index and invokes |write_record(index)| to write the string record before caching
+  // the assigned index.
+  template <typename WriteRecordFn>
+  bool LookupOrAllocStringIndex(const unsigned char* bytes_pointer, trace_string_index_t* out_index,
+                                WriteRecordFn&& write_record) {
+    std::scoped_lock lock(string_table_mutex_);
+    if (auto it = string_table_.find(bytes_pointer); it != string_table_.end()) {
+      *out_index = it->second;
+      return true;
+    }
+    trace_string_index_t index;
+    if (likely(AllocStringIndex(&index) && write_record(index))) {
+      string_table_.emplace(bytes_pointer, index);
+      *out_index = index;
+      return true;
+    }
+    return false;
+  }
+
   // This is called by the handler when it has been notified that a buffer
   // has been saved.
   // |wrapped_count| is the wrapped count at the time the buffer save request
@@ -145,7 +166,7 @@ struct trace_context {
 
   // The generation counter associated with this context to distinguish
   // it from previously created contexts.
-  uint32_t const generation_;
+  uint32_t generation_{0u};
 
   // The buffering mode.
   trace_buffering_mode_t const buffering_mode_;
@@ -186,6 +207,14 @@ struct trace_context {
 
   // The next string table index to be assigned.
   std::atomic<trace_string_index_t> next_string_index_{TRACE_ENCODED_STRING_REF_MIN_INDEX};
+
+  // Process-wide cache of registered string literals keyed by pointer.
+  // Deduplicates string registrations across threads so short-lived threads do
+  // not repeatedly emit duplicate kString records into the durable buffer.
+  // TODO(https://fxbug.dev/568386405): Replace these with a lockless read design.
+  std::mutex string_table_mutex_;
+  std::unordered_map<const unsigned char*, trace_string_index_t> string_table_
+      __TA_GUARDED(string_table_mutex_);
 };
 
 #endif  // ZIRCON_SYSTEM_ULIB_TRACE_ENGINE_CONTEXT_IMPL_H_

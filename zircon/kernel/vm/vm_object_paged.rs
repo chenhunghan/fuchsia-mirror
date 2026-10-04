@@ -5,15 +5,15 @@
 // https://opensource.org/licenses/MIT
 
 use super::page::VmPagePtr;
-use super::stream_size_manager::StreamSizeManager;
 use super::vm_cow_pages::VmCowPages;
-use super::vm_object::VmObject;
-use super::vm_object_paged_ffi::*;
+use super::vm_object::{VmObject, VmObjectLockClass, VmObjectReadWriteOptions};
 use crate::user_copy::{UserInIovec, UserOutIovec};
+use crate::vm::stream_size_manager::StreamSizeManager;
 use core::marker::PhantomPinned;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
 use fbl::{IsOpaqueRefCounted, RefPtr};
+use ksync::LockToken;
 use vm_object_paged_bindings as bindings;
 use zr::Opaque;
 use zx_status::Status;
@@ -26,6 +26,7 @@ pub struct VmObjectPaged {
 }
 
 impl VmObjectPaged {
+    // `VmObject::options_` bitmask is extended with:
     pub const RESIZABLE: u32 = bindings::VmObjectPaged_kResizable;
     pub const CONTIGUOUS: u32 = bindings::VmObjectPaged_kContiguous;
     pub const SLICE: u32 = bindings::VmObjectPaged_kSlice;
@@ -62,7 +63,9 @@ impl VmObjectPaged {
         unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
     }
 
-    /// Create a contiguous paged VMO.
+    /// Create a VMO backed by a contiguous range of physical memory.  The
+    /// returned vmo has all of its pages committed, and does not allow
+    /// decommitting them.
     pub fn create_contiguous(
         pmm_alloc_flags: u32,
         size: u64,
@@ -82,7 +85,7 @@ impl VmObjectPaged {
         unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
     }
 
-    /// Returns the backing `VmCowPages` hierarchy.
+    /// Exposed for testing.
     pub fn debug_get_cow_pages(&self) -> Option<RefPtr<VmCowPages>> {
         let raw = unsafe { bindings::cpp_vm_object_paged_debug_get_cow_pages(self.as_raw()) };
         unsafe { VmCowPages::from_raw(raw) }
@@ -111,26 +114,44 @@ impl VmObjectPaged {
     pub fn read_user_vector(
         &self,
         user_data: UserOutIovec,
-        offset: u64,
-        length: usize,
-    ) -> Result<usize, Status> {
-        let mut actual = 0usize;
-        let status = unsafe {
-            cpp_vm_object_paged_read_user_vector(
-                self.as_raw(),
-                user_data.as_user_out_ptr(),
-                user_data.count(),
-                offset,
-                length,
-                &mut actual,
-            )
-        };
-        if actual > 0 {
-            Ok(actual)
-        } else {
-            Status::ok(status)?;
-            Ok(0)
+        mut offset: u64,
+        mut length: usize,
+    ) -> (Result<(), Status>, usize) {
+        if length == 0 {
+            return (Ok(()), 0);
         }
+        if (length as u64) > u64::MAX - offset {
+            return (Err(Status::OUT_OF_RANGE), 0);
+        }
+
+        let mut total = 0usize;
+        let mut status = user_data.for_each(|ptr, mut capacity| {
+            if capacity > length {
+                capacity = length;
+            }
+
+            let (read_status, chunk_actual) =
+                self.read_user(ptr, offset, capacity, VmObjectReadWriteOptions::NONE);
+
+            // Always add `chunk_actual` since some bytes may have been transferred, even on error
+            total += chunk_actual;
+            if let Err(status) = read_status {
+                return status;
+            }
+
+            debug_assert!(chunk_actual == capacity);
+
+            offset += chunk_actual as u64;
+            length -= chunk_actual;
+            if length > 0 { Status::NEXT } else { Status::STOP }
+        });
+
+        // Return `Status::BUFFER_TOO_SMALL` if all of `length` was not transferred.
+        if status.is_ok() && length > 0 {
+            status = Err(Status::BUFFER_TOO_SMALL);
+        }
+
+        (status, total)
     }
 
     /// Writes data from user vectors into the VMO.
@@ -139,81 +160,100 @@ impl VmObjectPaged {
         user_data: UserInIovec,
         offset: u64,
         length: usize,
-    ) -> Result<usize, Status> {
-        let mut actual = 0usize;
-        let status = unsafe {
-            cpp_vm_object_paged_write_user_vector(
-                self.as_raw(),
-                user_data.vector(),
-                user_data.count(),
-                offset,
-                length,
-                &mut actual,
-            )
-        };
-        if actual > 0 {
-            Ok(actual)
-        } else {
-            Status::ok(status)?;
-            Ok(0)
-        }
+    ) -> (Result<(), Status>, usize) {
+        self.write_user_vector_impl(user_data, offset, length, None)
     }
 
     /// Writes data from user vectors into the VMO with progress callback.
-    #[allow(clippy::too_many_arguments)]
-    pub fn write_user_vector_progress(
+    pub fn write_user_vector_with_progress<F: FnMut(u64, usize)>(
         &self,
         user_data: UserInIovec,
         offset: u64,
         length: usize,
-        prev_stream_size: u64,
-        cb: extern "C" fn(*mut core::ffi::c_void, u64, usize),
-        cookie: *mut core::ffi::c_void,
-    ) -> Result<usize, Status> {
-        let mut actual = 0usize;
-        let status = unsafe {
-            cpp_vm_object_paged_write_user_vector_progress(
-                self.as_raw(),
-                user_data.vector(),
-                user_data.count(),
-                offset,
-                length,
-                prev_stream_size,
-                &mut actual,
-                cb,
-                cookie,
-            )
-        };
-        if actual > 0 {
-            Ok(actual)
-        } else {
-            Status::ok(status)?;
-            Ok(0)
-        }
+        mut on_bytes_transferred: F,
+    ) -> (Result<(), Status>, usize) {
+        self.write_user_vector_impl(user_data, offset, length, Some(&mut on_bytes_transferred))
     }
 
-    /// Zeroes a range of bytes in the VMO.
+    fn write_user_vector_impl(
+        &self,
+        user_data: UserInIovec,
+        mut offset: u64,
+        mut length: usize,
+        mut on_bytes_transferred: Option<&mut dyn FnMut(u64, usize)>,
+    ) -> (Result<(), Status>, usize) {
+        if length == 0 {
+            return (Ok(()), 0);
+        }
+        if (length as u64) > u64::MAX - offset {
+            return (Err(Status::OUT_OF_RANGE), 0);
+        }
+
+        let mut total = 0usize;
+        let mut status = user_data.for_each(|ptr, mut capacity| {
+            if capacity > length {
+                capacity = length;
+            }
+
+            let (write_status, chunk_actual) = match on_bytes_transferred.as_mut() {
+                Some(cb) => self.write_user_with_progress(
+                    ptr,
+                    offset,
+                    capacity,
+                    VmObjectReadWriteOptions::NONE,
+                    &mut **cb,
+                ),
+                None => self.write_user(ptr, offset, capacity, VmObjectReadWriteOptions::NONE),
+            };
+
+            // Always add `chunk_actual` since some bytes may have been transferred, even on error
+            total += chunk_actual;
+            if let Err(status) = write_status {
+                return status;
+            }
+
+            debug_assert!(chunk_actual == capacity);
+
+            offset += chunk_actual as u64;
+            length -= chunk_actual;
+            if length > 0 { Status::NEXT } else { Status::STOP }
+        });
+
+        // Return `Status::BUFFER_TOO_SMALL` if all of `length` was not transferred.
+        if status.is_ok() && length > 0 {
+            status = Err(Status::BUFFER_TOO_SMALL);
+        }
+
+        (status, total)
+    }
+
+    /// Zero a range of the VMO. May release physical pages in the process.
+    /// May block on user pager requests and must be called without locks held.
     pub fn zero_range(&self, offset: u64, length: u64) -> Result<(), Status> {
         if length == 0 {
             return Ok(());
         }
-        let status = unsafe { cpp_vm_object_paged_zero_range(self.as_raw(), offset, length) };
+        let status =
+            unsafe { bindings::cpp_vm_object_paged_zero_range(self.as_raw(), offset, length) };
         Status::ok(status)
     }
 
-    /// Zeroes a range of bytes in the VMO without tracking.
+    /// Zero a range of the VMO and also untrack it from any kind of dirty tracking. For committed
+    /// pages, this means that they are released. And any kind of zero markers or intervals that are
+    /// inserted will not subscribe to dirty tracking.
     pub fn zero_range_untracked(&self, offset: u64, length: u64) -> Result<(), Status> {
         if length == 0 {
             return Ok(());
         }
-        let status =
-            unsafe { cpp_vm_object_paged_zero_range_untracked(self.as_raw(), offset, length) };
+        let status = unsafe {
+            bindings::cpp_vm_object_paged_zero_range_untracked(self.as_raw(), offset, length)
+        };
         Status::ok(status)
     }
 
     /// Resizes the VMO.
     pub fn resize(&self, size: u64) -> Result<(), Status> {
-        let status = unsafe { cpp_vm_object_paged_resize(self.as_raw(), size) };
+        let status = unsafe { bindings::cpp_vm_object_paged_resize(self.as_raw(), size) };
         Status::ok(status)
     }
 
@@ -235,7 +275,7 @@ impl VmObjectPaged {
         let cookie = (&raw mut ctx).cast::<core::ffi::c_void>();
         // SAFETY: `self.as_raw()` is a valid `VmObjectPaged`.
         unsafe {
-            cpp_vm_object_paged_unmap_and_call(
+            bindings::cpp_vm_object_paged_unmap_and_call(
                 self.as_raw(),
                 offset,
                 length,
@@ -245,21 +285,33 @@ impl VmObjectPaged {
         }
     }
 
-    /// Sets the user-defined stream size manager for this VMO.
+    /// Provides the VMO with a user defined queryable byte aligned size. This provided size
+    /// can then be referenced in other operations, but otherwise has no effect. The VMO will
+    /// never read or act on this value unless instructed by user operations, and it is
+    /// therefore the responsibility of the user to ensure any synchronization of the
+    /// reported value with the operation being requested.
     pub fn set_user_stream_size(&self, ssm: RefPtr<StreamSizeManager>) {
         let raw_ssm = RefPtr::into_raw(ssm).cast_mut();
         // SAFETY: `self.as_raw()` and `raw_ssm` are valid pointers.
         unsafe {
-            cpp_vm_object_paged_set_user_stream_size(self.as_raw(), raw_ssm.cast());
+            bindings::cpp_vm_object_paged_set_user_stream_size(self.as_raw(), raw_ssm.cast());
         }
     }
 
-    /// Returns the user stream size if set.
-    pub fn user_stream_size(&self) -> Option<u64> {
+    /// Queries the user defined stream size, which is distinct from the VMO size.
+    ///
+    /// Stream size is byte-aligned and is not guaranteed to be in the range of the VMO. The lock
+    /// does not guard the user changing the value via a syscall, so multiple calls under the same
+    /// lock acquisition can have different results.
+    pub fn user_stream_size_locked(
+        &self,
+        _token: &LockToken<'_, VmObjectLockClass>,
+    ) -> Option<u64> {
         let mut stream_size = 0u64;
         // SAFETY: `self.as_raw()` is a valid pointer.
-        let has_value =
-            unsafe { cpp_vm_object_paged_user_stream_size(self.as_raw(), &mut stream_size) };
+        let has_value = unsafe {
+            bindings::cpp_vm_object_paged_user_stream_size_locked(self.as_raw(), &mut stream_size)
+        };
         if has_value { Some(stream_size) } else { None }
     }
 }

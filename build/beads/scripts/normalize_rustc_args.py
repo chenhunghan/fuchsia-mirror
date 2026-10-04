@@ -175,9 +175,15 @@ def normalize_rustc_arg(
 
     if arg.startswith("--remap-path-prefix="):
         val = arg[len("--remap-path-prefix=") :]
-        # Bazel rules_rust sets --remap-path-prefix=${pwd}=. for determinism,
-        # which GN omits.
-        if val in ("${pwd}=.", ".=."):
+        # Bazel rules_rust sets --remap-path-prefix=${pwd}=. (and, since
+        # rules_rust 0.74, ${exec_root} and ${output_base} as well) for
+        # determinism, which GN omits.
+        if val in (
+            "${pwd}=.",
+            "${exec_root}=.",
+            "${output_base}=.",
+            ".=.",
+        ):
             return ""
         from_path, equal, to_path = val.partition("=")
         if equal:

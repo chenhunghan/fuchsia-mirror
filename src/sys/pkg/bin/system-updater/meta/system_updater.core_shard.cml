@@ -4,6 +4,12 @@
 {
     offer: [
         {
+            protocol: "fuchsia.feedback.CrashReporter",
+            from: "#feedback",
+            to: "#system-update",
+            dependency: "weak",
+        },
+        {
             protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
             from: "#cobalt",
             to: "#system-update",
@@ -52,9 +58,13 @@
             to: "#system-update",
         },
         {
-            config: "fuchsia.system-updater.ManifestPublicKeys",
+            config: [
+                "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+                "fuchsia.system-updater.ManifestPublicKeys",
+            ],
             from: "parent",
             to: "#system-update",
+            availability: "same_as_target",
         },
         {
             protocol: "fuchsia.update.CommitStatusProvider",

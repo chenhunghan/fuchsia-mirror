@@ -78,7 +78,6 @@ def main() -> int:
     with open(args.manifest) as f:
         targets = json.load(f)
 
-    # TODO(https://fxbug.dev/502754609): Add support for clang targets.
     target_queries = [
         compare_utils.CompareCommandsQuery.from_dict(t) for t in targets
     ]
@@ -109,10 +108,11 @@ def main() -> int:
     differences_count = 0
 
     report_text = ""
+    error_report_text = ""
 
-    for idx, result in enumerate(results):
+    for result in results:
         if result.error:
-            print(result.error)
+            print(result.error, file=sys.stderr)
             all_success = False
             continue
 
@@ -120,13 +120,14 @@ def main() -> int:
         normalized_bazel_args = result.normalized_bazel_args
 
         if _DEBUG:
-            debug(f"GN normalized rustc command:\n{normalized_gn_args}\n")
-            debug(f"Bazel normalized rustc command:\n{normalized_bazel_args}\n")
+            debug(f"GN normalized command:\n{normalized_gn_args}\n")
+            debug(f"Bazel normalized command:\n{normalized_bazel_args}\n")
 
         gn_label = result.query.gn
-        bazel_label = result.query.bazel
+        bazel_label = result.query.bazel_label
+        bazel_config = result.query.bazel_config
         action_type = result.query.action_type
-        description = f"{gn_label} vs {bazel_label}, action type {action_type}"
+        description = f"{gn_label} vs {bazel_label} ({bazel_config}), action type {action_type}"
 
         differences = flags_differences.FlagsDifferences.new_from_lists(
             normalized_gn_args, normalized_bazel_args
@@ -142,10 +143,12 @@ def main() -> int:
                 else flags_differences.categorize_clang_flag
             )
 
-            report_text += "\n\n" + differences.generate_summary(
+            summary = differences.generate_summary(
                 title=description, flag_categorizer=flag_categorizer
             )
+            report_text += "\n\n" + summary
             if not result.query.allow_differences:
+                error_report_text += "\n\n" + summary
                 all_success = False
         else:
             debug(f"Match for {description}")
@@ -155,6 +158,12 @@ def main() -> int:
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(report_text)
+
+    if error_report_text:
+        print(
+            f"ERROR: Unexpected build command differences found:{error_report_text}",
+            file=sys.stderr,
+        )
 
     if all_success and args.stamp:
         with open(args.stamp, "w") as f:

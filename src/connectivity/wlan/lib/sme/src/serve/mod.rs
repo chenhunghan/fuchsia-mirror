@@ -8,6 +8,9 @@ pub mod client;
 use crate::{MlmeEventStream, MlmeStream, Station};
 use anyhow::format_err;
 use fidl::endpoints::ServerEnd;
+use fidl_fuchsia_wlan_common as fidl_common;
+use fidl_fuchsia_wlan_mlme as fidl_mlme;
+use fidl_fuchsia_wlan_sme as fidl_sme;
 use fuchsia_sync::Mutex;
 use futures::channel::mpsc;
 use futures::future::FutureObj;
@@ -19,10 +22,6 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use wlan_common::timer::{self, ScheduledEvent};
-use {
-    fidl_fuchsia_wlan_common as fidl_common, fidl_fuchsia_wlan_mlme as fidl_mlme,
-    fidl_fuchsia_wlan_sme as fidl_sme,
-};
 
 pub type ClientSmeServer = mpsc::UnboundedSender<client::Endpoint>;
 pub type ApSmeServer = mpsc::UnboundedSender<ap::Endpoint>;
@@ -64,9 +63,41 @@ async fn serve_generic_sme(
                         let (apf_responder, apf_receiver) = crate::responder::Responder::new();
                         mlme_sink
                             .send(crate::MlmeRequest::QueryApfPacketFilterSupport(apf_responder));
-                        match apf_receiver.await {
-                            Ok(apf_support) => responder.send(apf_support.as_ref().map_err(|e| *e)),
-                            Err(e) => {
+                        let (rssi_responder, rssi_receiver) = crate::responder::Responder::new();
+                        mlme_sink.send(crate::MlmeRequest::QueryRssiMonitorSupport(rssi_responder));
+
+                        let apf_support = apf_receiver.await.map(|res| match res {
+                            Ok(apf) => Ok(apf),
+                            Err(zx::sys::ZX_ERR_NOT_SUPPORTED) => {
+                                Ok(fidl_common::ApfPacketFilterSupport {
+                                    supported: Some(false),
+                                    ..Default::default()
+                                })
+                            }
+                            Err(e) => Err(e),
+                        });
+                        let rssi_support = rssi_receiver.await.map(|res| match res {
+                            Ok(rssi) => Ok(rssi),
+                            Err(zx::sys::ZX_ERR_NOT_SUPPORTED) => {
+                                Ok(fidl_common::RssiMonitorSupport {
+                                    supported: Some(false),
+                                    ..Default::default()
+                                })
+                            }
+                            Err(e) => Err(e),
+                        });
+
+                        match (apf_support, rssi_support) {
+                            (Ok(Ok(apf)), Ok(Ok(rssi))) => {
+                                let resp = fidl_sme::GenericSmeQueryIfaceCapabilitiesResponse {
+                                    apf_support: Some(apf),
+                                    rssi_monitor_support: Some(rssi),
+                                    ..Default::default()
+                                };
+                                responder.send(Ok(&resp))
+                            }
+                            (Ok(Err(e)), _) | (_, Ok(Err(e))) => responder.send(Err(e)),
+                            (Err(e), _) | (_, Err(e)) => {
                                 error!("Failed to query device capabilities: {}", e);
                                 responder.send(Err(zx::Status::INTERNAL.into_raw()))
                             }
@@ -606,18 +637,70 @@ mod tests {
         let mut query_fut = helper.proxy.query_iface_capabilities();
         assert_matches!(helper.exec.run_until_stalled(&mut serve_fut), Poll::Pending);
 
-        let query_req = assert_matches!(helper.exec.run_until_stalled(&mut helper.mlme_req_stream.next()), Poll::Ready(Some(req)) => req);
-        let query_responder = assert_matches!(query_req, crate::MlmeRequest::QueryApfPacketFilterSupport(responder) => responder);
+        let apf_req = assert_matches!(helper.exec.run_until_stalled(&mut helper.mlme_req_stream.next()), Poll::Ready(Some(req)) => req);
+        let apf_responder = assert_matches!(apf_req, crate::MlmeRequest::QueryApfPacketFilterSupport(responder) => responder);
         let apf_support = fidl_common::ApfPacketFilterSupport {
             supported: Some(true),
             version: Some(1),
             max_filter_length: Some(1024),
             ..Default::default()
         };
-        query_responder.respond(Ok(apf_support.clone()));
+        apf_responder.respond(Ok(apf_support.clone()));
+        assert_matches!(helper.exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        let rssi_req = assert_matches!(helper.exec.run_until_stalled(&mut helper.mlme_req_stream.next()), Poll::Ready(Some(req)) => req);
+        let rssi_responder = assert_matches!(rssi_req, crate::MlmeRequest::QueryRssiMonitorSupport(responder) => responder);
+        let rssi_support =
+            fidl_common::RssiMonitorSupport { supported: Some(true), ..Default::default() };
+        rssi_responder.respond(Ok(rssi_support.clone()));
 
         assert_matches!(helper.exec.run_until_stalled(&mut serve_fut), Poll::Pending);
         let query_result = assert_matches!(helper.exec.run_until_stalled(&mut query_fut), Poll::Ready(Ok(result)) => result);
-        assert_eq!(query_result, Ok(apf_support));
+        assert_eq!(
+            query_result,
+            Ok(fidl_sme::GenericSmeQueryIfaceCapabilitiesResponse {
+                apf_support: Some(apf_support),
+                rssi_monitor_support: Some(rssi_support),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn generic_sme_query_iface_capabilities_not_supported_maps_to_false() {
+        let (mut helper, mut serve_fut) =
+            start_generic_sme_test(fidl_common::WlanMacRole::Client).unwrap();
+
+        let mut query_fut = helper.proxy.query_iface_capabilities();
+        assert_matches!(helper.exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        let apf_req = assert_matches!(helper.exec.run_until_stalled(&mut helper.mlme_req_stream.next()), Poll::Ready(Some(req)) => req);
+        let apf_responder = assert_matches!(apf_req, crate::MlmeRequest::QueryApfPacketFilterSupport(responder) => responder);
+        let apf_support = fidl_common::ApfPacketFilterSupport {
+            supported: Some(true),
+            version: Some(1),
+            max_filter_length: Some(1024),
+            ..Default::default()
+        };
+        apf_responder.respond(Ok(apf_support.clone()));
+        assert_matches!(helper.exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        let rssi_req = assert_matches!(helper.exec.run_until_stalled(&mut helper.mlme_req_stream.next()), Poll::Ready(Some(req)) => req);
+        let rssi_responder = assert_matches!(rssi_req, crate::MlmeRequest::QueryRssiMonitorSupport(responder) => responder);
+        rssi_responder.respond(Err(zx::sys::ZX_ERR_NOT_SUPPORTED));
+
+        assert_matches!(helper.exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+        let query_result = assert_matches!(helper.exec.run_until_stalled(&mut query_fut), Poll::Ready(Ok(result)) => result);
+        assert_eq!(
+            query_result,
+            Ok(fidl_sme::GenericSmeQueryIfaceCapabilitiesResponse {
+                apf_support: Some(apf_support),
+                rssi_monitor_support: Some(fidl_common::RssiMonitorSupport {
+                    supported: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        );
     }
 }

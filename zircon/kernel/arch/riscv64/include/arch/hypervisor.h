@@ -10,6 +10,7 @@
 #include <debug.h>
 #include <lib/zx/result.h>
 #include <zircon/syscalls/hypervisor.h>
+#include <zircon/syscalls/object.h>
 
 #include <fbl/ref_ptr.h>
 #include <ktl/unique_ptr.h>

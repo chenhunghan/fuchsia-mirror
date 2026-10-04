@@ -348,6 +348,14 @@ class SdmmcBlockDevice : public fdf::WireServer<fuchsia_hardware_cqhci::Cqhci>,
     inspect::UintProperty max_packed_writes_effective_;  // Set once by the init thread.
     inspect::BoolProperty using_fidl_;                   // Set once by the init thread.
     inspect::BoolProperty power_suspended_;              // Updated whenever power state changes.
+    // The contents of the EXT_CSD register. Initially set during probe, and updated after a
+    // read/write request failed.
+    inspect::ByteVectorProperty ext_csd_;
+    // The monotonic time (in nanoseconds) that the ext_csd_ field above was populated.
+    inspect::UintProperty ext_csd_timestamp_;
+    // The status of the most recent attempt to read EXT_CSD. If this field indicates an error, the
+    // two fields above correspond to the most recent *successful* read of EXT_CSD.
+    inspect::StringProperty ext_csd_status_;
   } properties_;
 
   fidl::WireSyncClient<fuchsia_driver_framework::Node> block_node_;

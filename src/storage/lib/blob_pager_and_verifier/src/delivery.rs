@@ -10,8 +10,6 @@ use std::sync::Arc;
 use storage_ptr_slice::PtrByteSlice;
 use zx;
 
-pub use mapping::DELIVERY_DATA_SIZE;
-
 /// Unverified data pages delivered from the driver to be verified.
 #[derive(Copy, Clone)]
 pub struct UnverifiedPages<'a> {
@@ -61,8 +59,13 @@ pub trait DeliveryQueueProvider: Send + Sync + 'static {
     ) -> Result<(), Error>;
 
     /// Handles a RegisterBlob command using a pointer slice to shared memory.
-    fn register_blob(&self, key: u64, leaf_data: PtrByteSlice<'_>) -> Result<(), Error> {
-        let _ = (key, leaf_data);
+    fn register_blob(
+        &self,
+        key: u64,
+        leaf_data: PtrByteSlice<'_>,
+        read_alignment: usize,
+    ) -> Result<(), Error> {
+        let _ = (key, leaf_data, read_alignment);
         Ok(())
     }
 }
@@ -135,7 +138,7 @@ impl DeliveryQueueProcessor {
             while let Ok(msg) = receiver.peek() {
                 let raw_cmd = RawDeliveryCommand {
                     opcode: msg.opcode,
-                    _padding: msg._padding,
+                    read_alignment: msg.read_alignment,
                     key: msg.key,
                     target_offset: msg.target_offset,
                     length: msg.length,
@@ -197,12 +200,12 @@ impl DeliveryQueueProcessor {
                         .map_err(|s| anyhow!("Invalid unverified pages: {s}"))?;
                 provider.deliver_pages(key, target_offset, unverified_pages)?;
             }
-            DeliveryCommand::RegisterBlob { key, offset, length } => {
+            DeliveryCommand::RegisterBlob { key, offset, length, read_alignment } => {
                 if offset.checked_add(length).unwrap_or(u32::MAX) > DELIVERY_VMO_SIZE as u32 {
                     bail!("RegisterBlob payload out of bounds");
                 }
                 let leaf_data = raw_msg.payload_slice(offset, length);
-                provider.register_blob(key, leaf_data)?;
+                provider.register_blob(key, leaf_data, read_alignment as usize)?;
             }
         }
         Ok(())

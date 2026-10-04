@@ -138,7 +138,6 @@ rustc_library("fuchsia-async") {
     deps += [
       "//sdk/lib/fdio",
       "//sdk/rust/zx",
-      "//sdk/rust/zx-status-ext",
       "//third_party/rust_crates:crossbeam",
       "//third_party/rust_crates:libc",
       "//third_party/rust_crates:rustc-hash",

@@ -59,7 +59,7 @@ fpromise::result<std::unique_ptr<InputNode>, zx_status_t> InputNode::Create(
   // Note that as clients can only access the camera via camera3, and camera3 only exposes a
   // device-wide mute state (corresponding to StartStreaming/StopStreaming), individual camera2
   // stream start/stop requests from the client are ignored.
-  ZX_ASSERT(pnode->stream_.Start() == ZX_OK);
+  // The stream will be started/stopped by PipelineManager after insertion into the graph.
 
   return fpromise::ok(std::move(pnode));
 }

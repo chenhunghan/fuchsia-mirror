@@ -3,13 +3,13 @@
 // found in the LICENSE file.
 
 use fuchsia_emulated_handle::{Channel, MessageBuf, shut_down_handles};
-use futures as _;
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll};
-use zx_status::Status;
+use zx::Status;
 
-fn main() {
+#[test]
+fn test_shutdown() {
     let mut noop_ctx = Context::from_waker(&std::task::Waker::noop());
     let (a, b) = Channel::create();
 

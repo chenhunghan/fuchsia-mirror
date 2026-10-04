@@ -14,6 +14,8 @@
 #include "src/devices/usb/drivers/xhci/tests/test-env.h"
 #include "src/devices/usb/drivers/xhci/xhci-device-state.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_xhci {
 
 struct FakeTRB : TRB {
@@ -268,10 +270,10 @@ TEST_F(EndpointHarness, QueueControlRequest) {
       .defer_completion(false)
       .information(fuchsia_hardware_usb_request::RequestInfo::WithControl(
           fuchsia_hardware_usb_request::ControlRequestInfo().setup(
-              fuchsia_hardware_usb_descriptor::UsbSetup()
-                  .bm_request_type(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)
-                  .b_request(USB_REQ_GET_DESCRIPTOR)
-                  .w_value(USB_DT_DEVICE << 8)
+              fdescriptor::UsbSetup()
+                  .bm_request_type(kStandardDeviceIn)
+                  .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+                  .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
                   .w_length(static_cast<uint16_t>(zx_system_get_page_size() * 2)))))
       .data()
       .emplace()

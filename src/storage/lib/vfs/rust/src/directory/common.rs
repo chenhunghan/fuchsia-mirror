@@ -106,3 +106,90 @@ pub(crate) fn encode_dirent(
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(fuchsia_api_level_at_least = "PLATFORM", not(fuchsia_api_level_at_least = "32")))]
+    #[fuchsia::test]
+    fn test_check_child_connection_flags() {
+        let rw_parent = fio::OpenFlags::RIGHT_READABLE | fio::OpenFlags::RIGHT_WRITABLE;
+        let ro_parent = fio::OpenFlags::RIGHT_READABLE;
+
+        // Conflicting DIRECTORY and NOT_DIRECTORY flags.
+        assert_eq!(
+            check_child_connection_flags(
+                rw_parent,
+                fio::OpenFlags::DIRECTORY | fio::OpenFlags::NOT_DIRECTORY
+            ),
+            Err(Status::INVALID_ARGS)
+        );
+
+        // CREATE_IF_ABSENT without CREATE.
+        assert_eq!(
+            check_child_connection_flags(rw_parent, fio::OpenFlags::CREATE_IF_ABSENT),
+            Err(Status::INVALID_ARGS)
+        );
+
+        // CLONE_SAME_RIGHTS is not allowed on Open.
+        assert_eq!(
+            check_child_connection_flags(rw_parent, fio::OpenFlags::CLONE_SAME_RIGHTS),
+            Err(Status::INVALID_ARGS)
+        );
+
+        // POSIX flags stripped when parent lacks corresponding rights.
+        assert_eq!(
+            check_child_connection_flags(
+                ro_parent,
+                fio::OpenFlags::RIGHT_READABLE
+                    | fio::OpenFlags::POSIX_WRITABLE
+                    | fio::OpenFlags::POSIX_EXECUTABLE
+            ),
+            Ok(fio::OpenFlags::RIGHT_READABLE)
+        );
+
+        // CREATE fails when parent is not writable.
+        assert_eq!(
+            check_child_connection_flags(ro_parent, fio::OpenFlags::CREATE),
+            Err(Status::ACCESS_DENIED)
+        );
+
+        // Child requesting more rights than parent fails with ACCESS_DENIED.
+        assert_eq!(
+            check_child_connection_flags(ro_parent, fio::OpenFlags::RIGHT_WRITABLE),
+            Err(Status::ACCESS_DENIED)
+        );
+
+        // Valid CREATE with writable parent succeeds.
+        assert_eq!(
+            check_child_connection_flags(
+                rw_parent,
+                fio::OpenFlags::CREATE
+                    | fio::OpenFlags::CREATE_IF_ABSENT
+                    | fio::OpenFlags::RIGHT_WRITABLE
+            ),
+            Ok(fio::OpenFlags::CREATE
+                | fio::OpenFlags::CREATE_IF_ABSENT
+                | fio::OpenFlags::RIGHT_WRITABLE)
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_encode_dirent() {
+        let entry = EntryInfo::new(42, fio::DirentType::File);
+        let mut buf = Vec::new();
+
+        // Buffer too small returns false and leaves buf empty.
+        assert!(!encode_dirent(&mut buf, 10, &entry, "hello"));
+        assert!(buf.is_empty());
+
+        // Exact size (10 header bytes + 5 name bytes = 15) succeeds.
+        assert!(encode_dirent(&mut buf, 15, &entry, "hello"));
+        assert_eq!(buf.len(), 15);
+        assert_eq!(&buf[0..8], &42u64.to_le_bytes());
+        assert_eq!(buf[8], 5);
+        assert_eq!(buf[9], fio::DirentType::File.into_primitive());
+        assert_eq!(&buf[10..15], b"hello");
+    }
+}

@@ -10,6 +10,7 @@ python_library("usb_lib") {
   sources = [
     "__init__.py",
     "fastboot_utils.py",
+    "link_speed.py",
     "sysfs_usb.py",
     "usb_config.py",
     "usb_power_hub_base_test.py",

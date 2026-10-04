@@ -6,7 +6,7 @@ use crate::log_debug;
 use fuchsia_inspect::Node;
 use fuchsia_inspect_contrib::nodes::BoundedListNode;
 
-use starnix_sync::Mutex;
+use starnix_sync::{CoreDumpListLock, LockDepMutex};
 
 /// The maximum number of failed tasks to record.
 ///
@@ -20,7 +20,7 @@ const MAX_ARGV_LENGTH: usize = 128;
 
 /// A list of recently coredumped tasks in Inspect.
 pub struct CoreDumpList {
-    list: Mutex<BoundedListNode>,
+    list: LockDepMutex<BoundedListNode, CoreDumpListLock>,
 }
 
 #[derive(Debug)]
@@ -36,7 +36,7 @@ pub struct CoreDumpInfo {
 
 impl CoreDumpList {
     pub fn new(node: Node) -> Self {
-        Self { list: Mutex::new(BoundedListNode::new(node, MAX_NUM_COREDUMPS)) }
+        Self { list: LockDepMutex::new(BoundedListNode::new(node, MAX_NUM_COREDUMPS)) }
     }
 
     pub fn record_core_dump(&self, core_dump_info: CoreDumpInfo) {

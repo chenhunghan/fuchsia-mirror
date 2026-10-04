@@ -5,12 +5,14 @@
 // https://opensource.org/licenses/MIT
 
 pub mod arch;
+pub mod asid_allocator;
 pub mod cache;
 pub mod crashlog;
 pub mod debugger;
 pub mod exceptions;
 pub mod feature;
 pub mod fpu;
+pub mod mmu;
 pub mod mp;
 pub mod restricted;
 pub mod sbi;
@@ -19,6 +21,7 @@ pub mod thread;
 pub mod timer;
 pub mod user_copy;
 pub mod vector;
+pub mod vm;
 
 use riscv64_aspace_bindings as aspace_bindings;
 
@@ -66,24 +69,21 @@ pub const MAX_CACHE_LINE: usize = 64;
 #[repr(align(64))]
 pub struct CpuAlignMarker;
 
-/// Returns whether `va` is within the kernel address space.
-#[inline]
-pub fn is_kernel_address(va: usize) -> bool {
-    va >= KERNEL_ASPACE_BASE && va.wrapping_sub(KERNEL_ASPACE_BASE) < KERNEL_ASPACE_SIZE
-}
-
-/// Userspace threads can only set an entry point to userspace addresses, or
-/// the null pointer (for testing a thread that will always fail).
-#[inline]
-pub fn is_valid_user_pc(pc: usize) -> bool {
-    (pc == 0) || (is_user_accessible(pc) && !is_kernel_address(pc))
-}
-
 #[cfg(ktest)]
 /// Architecture unit tests for riscv64.
 #[unittest::suite(name = "riscv64")]
 mod riscv64_tests {
+    use super::vm::{is_kernel_address, is_user_accessible, is_valid_user_pc};
     use unittest::{assert_false, assert_true};
+
+    /// Tests `is_user_accessible`.
+    #[test]
+    fn test_is_user_accessible() {
+        assert_true!(is_user_accessible(0x00000000_00100000));
+        assert_true!(is_user_accessible(0x0000003f_ffffffff));
+        assert_false!(is_user_accessible(0x00000040_00000000));
+        assert_false!(is_user_accessible(0xffffffff_80000000));
+    }
 
     /// Tests `is_kernel_address`.
     #[test]
@@ -136,5 +136,5 @@ pub use thread::{
 };
 pub use user_copy::{
     arch_copy_from_user, arch_copy_from_user_capture_faults, arch_copy_to_user,
-    arch_copy_to_user_capture_faults, is_user_accessible,
+    arch_copy_to_user_capture_faults,
 };

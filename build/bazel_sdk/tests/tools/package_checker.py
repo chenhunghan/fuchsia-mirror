@@ -14,8 +14,6 @@ from typing import TypeVar
 DEFAULT_CONFIGS = [
     "--no-environment",
     "--config",
-    "daemon.autostart=false",
-    "--config",
     "log.enabled=false",
 ]
 

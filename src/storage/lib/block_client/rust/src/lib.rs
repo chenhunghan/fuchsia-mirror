@@ -23,11 +23,10 @@ use std::mem::MaybeUninit;
 use std::num::NonZero;
 use std::ops::{DerefMut, Range};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll, Waker};
 use storage_trace as trace;
-use zx::sys::zx_handle_t;
 
 pub use cache::Cache;
 
@@ -63,14 +62,6 @@ fn opcode_str(opcode: u8) -> &'static str {
         Some(BlockOpcode::CloseVmo) => "close_vmo",
         None => "unknown",
     }
-}
-
-// Generates a trace ID that will be unique across the system (as long as |request_id| isn't
-// reused within this process).
-fn generate_trace_flow_id(request_id: u32) -> u64 {
-    static SELF_HANDLE: LazyLock<zx_handle_t> =
-        LazyLock::new(|| fuchsia_runtime::process_self().raw_handle());
-    *SELF_HANDLE as u64 + (request_id as u64) << 32
 }
 
 pub enum BufferSlice<'a> {
@@ -298,6 +289,14 @@ pub trait BlockClient: Send + Sync {
     /// Detaches the given vmo-id from the device.
     fn detach_vmo(&self, vmo_id: VmoId) -> impl Future<Output = Result<(), zx::Status>> + Send;
 
+    /// Registers an inline encryption key handle with the session, returning a session-scoped slot.
+    fn register_key(
+        &self,
+        _key_token: zx::EventPair,
+    ) -> impl Future<Output = Result<u8, zx::Status>> + Send {
+        async { Err(zx::Status::NOT_SUPPORTED) }
+    }
+
     /// Reads from the device at |device_offset| into the given buffer slice.
     fn read_at(
         &self,
@@ -473,7 +472,7 @@ impl Common {
             update_outstanding_requests_counter(state.map.len());
             request.reqid = request_id;
             if request.trace_flow_id == NO_TRACE_ID {
-                request.trace_flow_id = generate_trace_flow_id(request_id);
+                request.trace_flow_id = trace::Id::new().into();
             }
             let trace_flow_id = request.trace_flow_id;
             trace::flow_begin!("storage", "block_client::send", trace_flow_id.into());
@@ -483,10 +482,10 @@ impl Common {
             }
             (request_id, trace_flow_id)
         };
-        ResponseFuture::new(self.fifo_state.clone(), request_id).await?;
+        let res = ResponseFuture::new(self.fifo_state.clone(), request_id).await;
         trace::duration!("storage", "block_client::send::end");
         trace::flow_end!("storage", "block_client::send", trace_flow_id.into());
-        Ok(())
+        res
     }
 
     fn detach_vmo(&self, vmo_id: VmoId) -> impl Future<Output = Result<(), zx::Status>> {
@@ -767,6 +766,14 @@ impl BlockClient for RemoteBlockClient {
 
     fn detach_vmo(&self, vmo_id: VmoId) -> impl Future<Output = Result<(), zx::Status>> {
         self.common.detach_vmo(vmo_id)
+    }
+
+    async fn register_key(&self, key_token: zx::EventPair) -> Result<u8, zx::Status> {
+        self.session
+            .register_key(key_token)
+            .await
+            .map_err(fidl_to_status)?
+            .map_err(zx::Status::err_from_raw)
     }
 
     fn read_at_with_opts_traced(
@@ -1325,6 +1332,12 @@ mod tests {
                                                 responder,
                                             } => responder
                                                 .send(Ok(&block::VmoId { id: 1 }))
+                                                .expect("send failed"),
+                                            block::SessionRequest::RegisterKey {
+                                                responder,
+                                                ..
+                                            } => responder
+                                                .send(Err(zx::Status::NOT_SUPPORTED.into_raw()))
                                                 .expect("send failed"),
                                             block::SessionRequest::Close { responder } => {
                                                 fifo_future_abort.abort();

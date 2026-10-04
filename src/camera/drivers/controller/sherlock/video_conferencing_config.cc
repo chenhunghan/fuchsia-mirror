@@ -69,7 +69,7 @@ static fuchsia::camera2::hal::StreamConfig VideoConfig(bool extended_fov) {
   stream.AddImageFormat(kVideoWidth, kVideoHeight, kFramePixelFormat, kGdcFRWidth, kGdcFRHeight);
   stream.AddImageFormat(kVideoWidth1, kVideoHeight1, kFramePixelFormat, kGdcFRWidth, kGdcFRHeight);
   stream.AddImageFormat(kVideoWidth2, kVideoHeight2, kFramePixelFormat, kGdcFRWidth, kGdcFRHeight);
-  stream.set_bytes_per_row_divisor(kGdcBytesPerRowDivisor);
+  stream.set_bytes_per_row_divisor(kGe2dBytesPerRowDivisor);
   stream.set_contiguous(true);
   stream.set_frames_per_second(kVideoThrottledOutputFrameRate);
   stream.set_buffer_count_for_camping(kVideoConferencingGE2DOutputBuffers);

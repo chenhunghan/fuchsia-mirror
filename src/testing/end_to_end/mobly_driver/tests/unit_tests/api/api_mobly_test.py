@@ -321,6 +321,43 @@ class ApiMoblyTest(unittest.TestCase):
                 },
             ),
             param(
+                "success_iperf_server",
+                override_args={
+                    "mobly_controllers": [
+                        {
+                            "type": "IPerfServer",
+                            "ip": "192.168.42.11",
+                            "user": "pi",
+                            "ssh_key": "some/key/path",
+                            "test_interface": "eth0",
+                        },
+                    ],
+                },
+                expected_config_obj={
+                    "MoblyParams": {"LogPath": "output_path"},
+                    "TestBeds": [
+                        {
+                            "Controllers": {
+                                "IPerfServer": [
+                                    {
+                                        "port": 5201,
+                                        "test_interface": "eth0",
+                                        "use_killall": True,
+                                        "ssh_config": {
+                                            "host": "192.168.42.11",
+                                            "user": "pi",
+                                            "identity_file": "some/key/path",
+                                        },
+                                    },
+                                ],
+                            },
+                            "Name": "tb_name",
+                            "TestParams": {},
+                        }
+                    ],
+                },
+            ),
+            param(
                 "success_access_point_ssh_config_no_ssh_path",
                 override_args={
                     "mobly_controllers": [

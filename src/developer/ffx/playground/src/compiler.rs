@@ -6,9 +6,8 @@ use fidl_codec_fdomain::Value as FidlValue;
 use futures::FutureExt;
 use futures::channel::oneshot::channel as oneshot_channel;
 use futures::future::{BoxFuture, ready};
-use num::bigint::BigInt;
-use num::rational::BigRational;
-use num::{CheckedDiv, FromPrimitive};
+use num_bigint::BigInt;
+use num_traits::{CheckedDiv, FromPrimitive};
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::iter::repeat_with;
@@ -19,7 +18,7 @@ use crate::frame::{CaptureMapEntry, CaptureSet, Frame};
 use crate::interpreter::{Exception, Interpreter, InterpreterInner};
 use crate::parser::{Mutability, Node, ParameterList, Span, StringElement};
 use crate::value::{
-    Invocable, PlaygroundValue, RangeCursor, ReplayableIterator, Value, ValueExt,
+    BigRational, Invocable, PlaygroundValue, RangeCursor, ReplayableIterator, Value, ValueExt,
     playground_semantic_compare,
 };
 

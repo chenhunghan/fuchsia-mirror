@@ -71,7 +71,7 @@ fn unique_list_with_arg(attrs: &[Attribute], call: &str) -> Result<Option<Meta>>
         ));
     }
 
-    return Ok(nested.pop().map(|pair| pair.into_value()));
+    return Ok(nested.pop());
 }
 
 fn fidl_table_strict(attrs: &[Attribute]) -> Result<Option<Vec<Ident>>> {

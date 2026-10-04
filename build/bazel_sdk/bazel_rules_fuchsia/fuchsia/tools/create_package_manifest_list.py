@@ -8,7 +8,7 @@ import json
 import os
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -29,7 +29,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def write_file(file_path, package_list):
+def write_file(file_path: str, package_list: list[str]) -> None:
     base = os.path.dirname(file_path)
     package_manifests = [
         os.path.relpath(path, base) + "\n" for path in package_list
@@ -38,7 +38,7 @@ def write_file(file_path, package_list):
         f.writelines(package_manifests)
 
 
-def main():
+def main() -> None:
     args = parse_args()
     with open(args.images_config, "r") as f:
         image_config_json = json.load(f)

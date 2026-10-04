@@ -6,6 +6,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{Error, Read};
+use zerocopy::{FromBytes, IntoBytes};
 
 /// Input event types, used in the Linux `input_event` struct.
 ///
@@ -32,7 +33,7 @@ pub enum EventType {
 ///
 /// See Linux `include/uapi/linux/time.h` for details.
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes)]
 pub struct TimeVal {
     pub tv_sec: libc::c_long,
     pub tv_usec: libc::c_long,
@@ -45,7 +46,7 @@ pub struct TimeVal {
 ///
 /// See Linux `include/uapi/linux/input.h` for details.
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes)]
 pub struct InputEvent {
     pub time: TimeVal,
     pub type_: u16,
@@ -102,13 +103,7 @@ impl EventReader {
         //
         // The Linux kernel requires us to perform the read of a full event in a single read()
         // syscall.
-        unsafe {
-            let raw_bytes = std::slice::from_raw_parts_mut(
-                &mut result as *mut _ as *mut u8,
-                std::mem::size_of::<InputEvent>(),
-            );
-            self.input.read_exact(raw_bytes)?;
-        }
+        self.input.read_exact(result.as_mut_bytes())?;
 
         Ok(result)
     }

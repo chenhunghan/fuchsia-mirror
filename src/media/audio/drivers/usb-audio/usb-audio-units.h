@@ -5,6 +5,8 @@
 #ifndef SRC_MEDIA_AUDIO_DRIVERS_USB_AUDIO_USB_AUDIO_UNITS_H_
 #define SRC_MEDIA_AUDIO_DRIVERS_USB_AUDIO_USB_AUDIO_UNITS_H_
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
+
 #include <memory>
 #include <utility>
 
@@ -31,13 +33,13 @@ class AudioUnit : public fbl::WAVLTreeContainable<fbl::RefPtr<AudioUnit>>,
 
   // clang-format off
     enum class Type : uint8_t {
-        InputTerminal  = USB_AUDIO_AC_INPUT_TERMINAL,
-        OutputTerminal = USB_AUDIO_AC_OUTPUT_TERMINAL,
-        MixerUnit      = USB_AUDIO_AC_MIXER_UNIT,
-        SelectorUnit   = USB_AUDIO_AC_SELECTOR_UNIT,
-        FeatureUnit    = USB_AUDIO_AC_FEATURE_UNIT,
-        ProcessingUnit = USB_AUDIO_AC_PROCESSING_UNIT,
-        ExtensionUnit  = USB_AUDIO_AC_EXTENSION_UNIT,
+        InputTerminal  = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kInputTerminal),
+        OutputTerminal = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kOutputTerminal),
+        MixerUnit      = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kMixerUnit),
+        SelectorUnit   = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kSelectorUnit),
+        FeatureUnit    = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kFeatureUnit),
+        ProcessingUnit = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kProcessingUnit),
+        ExtensionUnit  = static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioAcDescriptorSubtype::kExtensionUnit),
     };
   // clang-format on
 
@@ -115,7 +117,10 @@ class AudioUnit : public fbl::WAVLTreeContainable<fbl::RefPtr<AudioUnit>>,
 class Terminal : public AudioUnit {
  public:
   uint16_t terminal_type() const { return term_desc_->wTerminalType; }
-  bool is_stream_terminal() const { return terminal_type() == USB_AUDIO_TERMINAL_USB_STREAMING; }
+  bool is_stream_terminal() const {
+    return terminal_type() ==
+           static_cast<uint16_t>(fuchsia_hardware_usb_descriptor::AudioTerminalType::kUsbStreaming);
+  }
   bool is_usb_terminal() const {
     // See Universal Serial Bus Device Class Definition for Terminal Types,
     // rev 1.0 Section 2.1
@@ -256,9 +261,15 @@ class FeatureUnit : public AudioUnit {
   uint32_t source_count() const final { return 1; }
   uint32_t source_id(uint32_t ndx) const final { return feature_desc()->bSourceID; }
 
-  bool has_vol() const { return (master_feat_ | ch_feat_) & USB_AUDIO_FU_BMA_VOLUME; }
-  bool has_agc() const { return (master_feat_ | ch_feat_) & USB_AUDIO_FU_BMA_AUTOMATIC_GAIN; }
-  bool has_mute() const { return (master_feat_ | ch_feat_) & USB_AUDIO_FU_BMA_MUTE; }
+  bool has_vol() const {
+    return (master_feat_ | ch_feat_) & fuchsia_hardware_usb_descriptor::kAudioFuBmaVolume;
+  }
+  bool has_agc() const {
+    return (master_feat_ | ch_feat_) & fuchsia_hardware_usb_descriptor::kAudioFuBmaAutomaticGain;
+  }
+  bool has_mute() const {
+    return (master_feat_ | ch_feat_) & fuchsia_hardware_usb_descriptor::kAudioFuBmaMute;
+  }
 
   float vol_min_db() const { return static_cast<float>(vol_min_) * kDbPerTick; }
   float vol_max_db() const { return static_cast<float>(vol_max_) * kDbPerTick; }
@@ -294,9 +305,11 @@ class FeatureUnit : public AudioUnit {
   // A small struct used to track the various features supported by a channel
   // controlled by this feature unit.
   struct Features {
-    bool has_vol() const { return supported_ & USB_AUDIO_FU_BMA_VOLUME; }
-    bool has_mute() const { return supported_ & USB_AUDIO_FU_BMA_MUTE; }
-    bool has_agc() const { return supported_ & USB_AUDIO_FU_BMA_AUTOMATIC_GAIN; }
+    bool has_vol() const { return supported_ & fuchsia_hardware_usb_descriptor::kAudioFuBmaVolume; }
+    bool has_mute() const { return supported_ & fuchsia_hardware_usb_descriptor::kAudioFuBmaMute; }
+    bool has_agc() const {
+      return supported_ & fuchsia_hardware_usb_descriptor::kAudioFuBmaAutomaticGain;
+    }
 
     uint32_t supported_ = 0;
     int16_t vol_min_ = 0;
@@ -340,11 +353,15 @@ class FeatureUnit : public AudioUnit {
     auto mask = FeatureToBit(feature);
 
     if (master_feat_ & mask) {
-      FeatCtrlReq(proto, USB_AUDIO_SET_CUR, feature, 0, &val);
+      FeatCtrlReq(proto,
+                  static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioRequest::kSetCur),
+                  feature, 0, &val);
     } else {
       for (size_t i = 1; i < features_.size(); ++i) {
         uint8_t ch = static_cast<uint8_t>(i);
-        FeatCtrlReq(proto, USB_AUDIO_SET_CUR, feature, ch, &val);
+        FeatCtrlReq(proto,
+                    static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::AudioRequest::kSetCur),
+                    feature, ch, &val);
       }
     }
   }

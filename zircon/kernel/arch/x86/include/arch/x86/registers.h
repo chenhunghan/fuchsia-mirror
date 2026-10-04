@@ -26,6 +26,7 @@
 #define X86_CR4_OSFXSR 0x00000200           /* os supports fxsave */
 #define X86_CR4_OSXMMEXPT 0x00000400        /* os supports xmm exception */
 #define X86_CR4_UMIP 0x00000800             /* User-mode instruction prevention */
+#define X86_CR4_LA57 0x00001000             /* 57-bit linear addresses */
 #define X86_CR4_VMXE 0x00002000             /* enable vmx */
 #define X86_CR4_FSGSBASE 0x00010000         /* enable {rd,wr}{fs,gs}base */
 #define X86_CR4_PCIDE 0x00020000            /* Process-context ID enable  */

@@ -27,7 +27,7 @@ pub enum CacheEntryState {
 
 impl From<otCacheEntryState> for CacheEntryState {
     fn from(x: otCacheEntryState) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x).unwrap_or_else(|| {
             warn!("Unknown otCacheEntryState value: {x}. Falling back to default state.");
             CacheEntryState::Unknown

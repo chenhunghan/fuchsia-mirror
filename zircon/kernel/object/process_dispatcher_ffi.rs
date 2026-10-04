@@ -164,6 +164,50 @@ unsafe extern "C" {
         handle_value: zx_types::zx_handle_t,
     ) -> *mut core::ffi::c_void;
 
+    /// Maps a `Handle` pointer to its user-visible handle value for `process`.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher` and `handle` must point to a valid
+    /// `Handle`.
+    pub(crate) fn cpp_process_dispatcher_handle_table_map_handle_to_value(
+        process: *const ProcessDispatcher,
+        handle: *const core::ffi::c_void,
+    ) -> zx_types::zx_handle_t;
+
+    /// Adds an owned handle to `process`'s handle table while holding its write lock.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`, `handle` must be a valid owned
+    /// `Handle*` whose ownership is transferred, and the handle table write lock must be held.
+    pub(crate) fn cpp_process_dispatcher_handle_table_add_handle_locked(
+        process: *mut ProcessDispatcher,
+        handle: *mut core::ffi::c_void,
+    );
+
+    /// Removes a handle by value from `process`'s handle table while holding its write lock.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher` and the handle table write lock must
+    /// be held.
+    pub(crate) fn cpp_process_dispatcher_handle_table_remove_handle_locked(
+        process: *mut ProcessDispatcher,
+        handle_value: zx_types::zx_handle_t,
+    ) -> *mut core::ffi::c_void;
+
+    /// Removes a handle by pointer from `process`'s handle table while holding its write lock.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`, `handle` must point to a handle in
+    /// `process`'s handle table, and the handle table write lock must be held.
+    pub(crate) fn cpp_process_dispatcher_handle_table_remove_handle_ptr_locked(
+        process: *mut ProcessDispatcher,
+        handle: *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void;
+
     /// Returns the KOID of the handle table for the given process.
     ///
     /// # Safety

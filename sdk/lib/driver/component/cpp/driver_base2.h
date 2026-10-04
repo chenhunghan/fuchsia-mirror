@@ -317,7 +317,7 @@ class DriverBase2 {
   // and requires that the dispatcher allow sync calls.
   zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
       std::string_view node_name,
-      cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
+      cpp20::span<const fuchsia_driver_framework::NodeProperty2> properties,
       cpp20::span<const fuchsia_driver_framework::Offer> offers);
 
   // Creates an owned child node with devfs support on the node that the driver is bound to. The
@@ -334,16 +334,6 @@ class DriverBase2 {
   //
   // The |node()| must not have been moved out manually by the user. This is a synchronous call
   // and requires that the dispatcher allow sync calls.
-  zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
-      std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args,
-      cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
-      cpp20::span<const fuchsia_driver_framework::Offer> offers);
-
-  zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
-      std::string_view node_name,
-      cpp20::span<const fuchsia_driver_framework::NodeProperty2> properties,
-      cpp20::span<const fuchsia_driver_framework::Offer> offers);
-
   zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChild(
       std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args,
       cpp20::span<const fuchsia_driver_framework::NodeProperty2> properties,

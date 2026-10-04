@@ -2,14 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use crate::{EncryptionKey, UnwrappedKey, WrappedKey};
-use anyhow::Error;
+use aes::cipher::inout::InOutBuf;
+use aes::cipher::{
+    Block, BlockCipherDecrypt, BlockModeDecrypt, BlockModeEncrypt, KeyInit, KeyIvInit,
+};
+use anyhow::{Error, ensure};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 pub use storage_ptr_slice::{MutPtrByteSlice, PtrByteSlice};
 pub use storage_xts::{Tweak, XtsInPlaceProcessor, XtsProcessor};
+use zerocopy::IntoBytes;
 use zx_status as zx;
 
 pub mod fscrypt_ino_lblk32;
+pub mod fscrypt_ino_lblk64;
 #[cfg(test)]
 mod fscrypt_test_data;
 pub(crate) mod fxfs;
@@ -22,6 +28,79 @@ pub const FSCRYPT_PADDING: usize = 16;
 // Fxfs will always use a block size >= 512 bytes, so we just assume a sector size of 512 bytes,
 // which will work fine even if a different block size is used by Fxfs or the underlying device.
 const SECTOR_SIZE: u64 = 512;
+const BLOCK_SIZE: usize = 4096;
+const MAX_FILENAME_LEN: usize = 255;
+const MAX_SYMLINK_LEN: usize = 4093;
+
+fn encrypt_filename_cts(
+    cts_key: &[u8; 32],
+    iv: &[u32; 4],
+    buffer: &mut Vec<u8>,
+    max_len: usize,
+) -> Result<(), Error> {
+    ensure!(buffer.len() <= max_len, "Filename too long");
+    buffer.resize(buffer.len().next_multiple_of(FSCRYPT_PADDING), 0);
+
+    let mut cbc = cbc::Encryptor::<aes::Aes256>::new(
+        cts_key.try_into().unwrap(),
+        iv.as_bytes().try_into().unwrap(),
+    );
+    let inout = InOutBuf::<'_, '_, u8>::from(&mut buffer[..]);
+    let (mut blocks, _): (InOutBuf<'_, '_, Block<aes::Aes256>>, _) = inout.into_chunks();
+    let mut chunks = blocks.get_out();
+    cbc.encrypt_blocks(&mut chunks);
+    if chunks.len() >= 2 {
+        // We are encrypting with CTS.  In most cases, the padding will mean it's a multiple of
+        // FSCRYPT_PADDING bytes, so all we need to do is swap the last two chunks.  There is one
+        // exception: when the filename ends up being longer than max_len after padding.  In
+        // that case, all we have to do is trim the end after swapping the last two chunks.
+        chunks.swap(chunks.len() - 1, chunks.len() - 2);
+        buffer.truncate(max_len);
+    }
+    Ok(())
+}
+
+fn decrypt_filename_cts(
+    cts_key: &[u8; 32],
+    iv: &[u32; 4],
+    buffer: &mut Vec<u8>,
+    max_len: usize,
+) -> Result<(), Error> {
+    let alignment = buffer.len() % FSCRYPT_PADDING;
+    if alignment != 0 {
+        // For CTS, the only case we need to care about is when the encrypted filename is
+        // max_len bytes. In all other cases, the filename should be a multiple of FSCRYPT_PADDING
+        // bytes.
+        ensure!(buffer.len() == max_len, "Unexpected filename length");
+
+        // Decrypt the second to last block.
+        let cipher = aes::Aes256::new(cts_key.try_into().unwrap());
+        let mut out: Block<aes::Aes256> =
+            buffer[max_len - alignment - FSCRYPT_PADDING..max_len - alignment].try_into().unwrap();
+        cipher.decrypt_block(&mut out);
+
+        // Copy the extra bytes we need.
+        buffer.extend_from_slice(&out[alignment..]);
+    }
+
+    let mut cbc = cbc::Decryptor::<aes::Aes256>::new(
+        cts_key.try_into().unwrap(),
+        iv.as_bytes().try_into().unwrap(),
+    );
+    let inout = InOutBuf::<'_, '_, u8>::from(&mut buffer[..]);
+    let (mut blocks, _): (InOutBuf<'_, '_, Block<aes::Aes256>>, _) = inout.into_chunks();
+    let mut chunks = blocks.get_out();
+    if chunks.len() >= 2 {
+        chunks.swap(chunks.len() - 1, chunks.len() - 2);
+    }
+    cbc.decrypt_blocks(&mut chunks);
+
+    // Strip padding
+    while let Some(0) = buffer.last() {
+        buffer.pop();
+    }
+    Ok(())
+}
 
 /// Trait defining common methods shared across all ciphers.
 pub trait Cipher: std::fmt::Debug + Send + Sync {
@@ -109,6 +188,8 @@ pub enum KeyType {
     Fxfs,
     FscryptInoLblk32Dir,
     FscryptInoLblk32File,
+    FscryptInoLblk64Dir,
+    FscryptInoLblk64File,
 }
 
 pub trait ToKeyType {
@@ -121,6 +202,8 @@ impl ToKeyType for WrappedKey {
             WrappedKey::Fxfs(_) => Some(KeyType::Fxfs),
             WrappedKey::FscryptInoLblk32Dir { .. } => Some(KeyType::FscryptInoLblk32Dir),
             WrappedKey::FscryptInoLblk32File { .. } => Some(KeyType::FscryptInoLblk32File),
+            WrappedKey::FscryptInoLblk64Dir { .. } => Some(KeyType::FscryptInoLblk64Dir),
+            WrappedKey::FscryptInoLblk64File { .. } => Some(KeyType::FscryptInoLblk64File),
             _ => None,
         }
     }
@@ -133,6 +216,8 @@ impl ToKeyType for EncryptionKey {
             EncryptionKey::Fxfs(_) => Some(KeyType::Fxfs),
             EncryptionKey::FscryptInoLblk32Dir { .. } => Some(KeyType::FscryptInoLblk32Dir),
             EncryptionKey::FscryptInoLblk32File { .. } => Some(KeyType::FscryptInoLblk32File),
+            EncryptionKey::FscryptInoLblk64Dir { .. } => Some(KeyType::FscryptInoLblk64Dir),
+            EncryptionKey::FscryptInoLblk64File { .. } => Some(KeyType::FscryptInoLblk64File),
         }
     }
 }
@@ -154,12 +239,18 @@ pub fn key_to_cipher(
     key_type
         .to_key_type()
         .map(|key_type| match key_type {
-            KeyType::Fxfs => Arc::new(fxfs::FxfsCipher::new(&unwrapped_key)) as Arc<dyn Cipher>,
+            KeyType::Fxfs => Arc::new(fxfs::FxfsCipher::new(unwrapped_key)) as Arc<dyn Cipher>,
             KeyType::FscryptInoLblk32Dir => {
-                Arc::new(fscrypt_ino_lblk32::FscryptInoLblk32DirCipher::new(&unwrapped_key))
+                Arc::new(fscrypt_ino_lblk32::FscryptInoLblk32DirCipher::new(unwrapped_key))
             }
             KeyType::FscryptInoLblk32File => {
-                Arc::new(fscrypt_ino_lblk32::FscryptInoLblk32FileCipher::new(&unwrapped_key))
+                Arc::new(fscrypt_ino_lblk32::FscryptInoLblk32FileCipher::new(unwrapped_key))
+            }
+            KeyType::FscryptInoLblk64Dir => {
+                Arc::new(fscrypt_ino_lblk64::FscryptInoLblk64DirCipher::new(unwrapped_key))
+            }
+            KeyType::FscryptInoLblk64File => {
+                Arc::new(fscrypt_ino_lblk64::FscryptInoLblk64FileCipher::new(unwrapped_key))
             }
         })
         .ok_or(zx::Status::NOT_SUPPORTED)

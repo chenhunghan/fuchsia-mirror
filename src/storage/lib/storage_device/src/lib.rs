@@ -141,6 +141,12 @@ pub trait Device: Send + Sync {
         let _ = server_end.close_with_epitaph(zx::Status::NOT_SUPPORTED);
         Err(zx::Status::NOT_SUPPORTED)
     }
+
+    /// Registers an inline encryption key handle with the underlying block session.
+    #[cfg(target_os = "fuchsia")]
+    async fn register_key(&self, _key_token: zx::EventPair) -> Result<u8, zx::Status> {
+        Err(zx::Status::NOT_SUPPORTED)
+    }
 }
 
 // Arc<dyn Device> can easily be cloned and supports concurrent access, but sometimes exclusive

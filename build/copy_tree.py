@@ -15,7 +15,7 @@ def escape_path(path: Path | str) -> str:
     return str(path).replace(" ", "\\ ")
 
 
-def main():
+def main() -> int:
     params = argparse.ArgumentParser(
         description="Copy all files in a directory tree and touch a stamp file"
     )
@@ -37,7 +37,7 @@ def main():
 
     file_list = [args.source]
 
-    def ignore_wrapper(current, children):
+    def ignore_wrapper(current: str, children: list[str]) -> set[str]:
         nonlocal file_list, ignore
         to_ignore = set(ignore(current, children)) if ignore else set()
         file_list.extend(
@@ -68,6 +68,7 @@ def main():
                 )
 
     args.stamp.touch()
+    return 0
 
 
 if __name__ == "__main__":

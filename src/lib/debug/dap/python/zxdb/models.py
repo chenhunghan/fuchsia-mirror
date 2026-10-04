@@ -9,6 +9,7 @@ from pydap.dap_types import DapBaseModel, Thread
 from pydap.models import (
     Event,
     PauseArguments,
+    Response,
     ThreadEvent,
     ThreadEventBody,
     ThreadsResponse,
@@ -115,6 +116,34 @@ class AsyncBacktraceUpdate(Event):
     type: Literal["event"] = "event"
     event: Literal["zxdb.updateAsyncBacktrace"] = "zxdb.updateAsyncBacktrace"
     body: AsyncBacktraceUpdateBody
+
+
+class ZxdbAsyncBacktraceArguments(DapBaseModel):
+    """Arguments for `zxdb.AsyncBacktrace` request.
+
+    Attributes:
+        thread_id: Thread ID (KOID) to query async backtrace for.
+    """
+
+    thread_id: int
+
+
+class ZxdbAsyncBacktraceResponseBody(DapBaseModel):
+    """Body of response to `zxdb.AsyncBacktrace` request.
+
+    Attributes:
+        tasks: Root list of async task nodes.
+    """
+
+    tasks: list[AsyncTaskNode] = Field(default_factory=list)
+
+
+class ZxdbAsyncBacktraceResponse(Response):
+    """Response to `zxdb.AsyncBacktrace` request."""
+
+    body: ZxdbAsyncBacktraceResponseBody = Field(
+        default_factory=ZxdbAsyncBacktraceResponseBody
+    )
 
 
 AsyncTaskNode.model_rebuild()

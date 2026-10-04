@@ -86,16 +86,16 @@ chrono = { version = "0.4.45", default-features = false }
 chrono-english = "0.1.8"
 ciborium = { version = "0.2.2", features = ["std"] }
 cipher = "0.5.2"
-clap = { version = "4.6.1", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "derive"] }
+clap = { version = "4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "derive"] }
 cmac = "0.8"
 cpio = "0.4.1"
 crc = "3.4.0"
 crc32fast = "1.5.0"
 criterion = { version = "0.8.2", default-features = false, features = ["csv_output", "cargo_bench_support"] }
-crossbeam = "0.8.4"
+crossbeam = "0.8.5"
 crossbeam-utils = "0.8.23"
 csv = "1.4.0"
-darling = "0.23.0"
+darling = "0.24.1"
 data-encoding = "2.11.1"
 derivative = { version = "2.2.0", features = ["use_core"] }
 derive_builder = "0.20.2"
@@ -105,6 +105,7 @@ downcast-rs = "2.0.2"
 dyn-clone = "1.0.20"
 ecb = "0.2"
 either = "1.18.0"
+emboss_runtime = "0.1.0"
 enumn = "0.1.14"
 eui48 = { version = "1.1.0", default-features = false, features = ["serde", "disp_hexstring"] }
 event-listener = "5.4.2"
@@ -113,18 +114,18 @@ figment = "0.10.19"
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 flyweights = { version = "0.1.5", features = ["serde"] }
 foreign-types = "0.3.1"
-fragile = "=2.0.1"
+fragile = "3.0.0"
 futures = "=0.3.34"
 futures-executor = "=0.3.34"
 futures-io = "=0.3.34"
 futures-lite = "2.6.1"
 futures-test = "=0.3.34"
 futures-util = "=0.3.34"
-glob = "0.3.3"
+glob = "0.3.4"
 googletest = "0.14.2"
 gpt = "4.1.0"
 half = "2.7.1"
-handlebars = "6.4.2"
+handlebars = "6.4.4"
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more", "serde", "default-hasher"] }
 heck = { package = "heck", version = "0.5" }
 heck-0_3 = { package = "heck", version = "=0.3.1" }
@@ -166,8 +167,10 @@ nix = { version = "0.31.3", features = ["feature", "fs", "hostname", "net", "pro
 nom = { version = "8.0.0", default-features = false, features = ["std"] }
 nom-language = "0.1.0"
 nom_locate = "5.0.0"
-num = { version = "0.4.3", features = ["rand"] }
+num-bigint = "0.5.1"
 num-derive = "0.5.1"
+num-integer = "0.1.46"
+num-rational = { version = "0.4.2", default-features = false }
 num-traits = "0.2.19"
 omaha_client = "0.4.1"
 once_cell = "1.21.4"
@@ -175,7 +178,7 @@ p256 = { version = "0.14.0", features = ["ecdh", "pem", "serde"] }
 p256-0_11 = { package = "p256", version = "0.11.1", features = ["ecdh", "pem", "serde"] }
 paste = "1.0.15"
 pathdiff = { version = "0.2.3", features = ["camino"] }
-pem = "3.0.6"
+pem = "4.0.0"
 percent-encoding = "2.3.2"
 pest = "2.9.0"
 pest_derive = "2.9.0"
@@ -200,7 +203,7 @@ range-alloc = "0.1.5"
 # NOTE: Use caution when updating to a new major version of `rapidhash` as this may cause hash
 # values to change. We rely on this crate for stable hashes.
 rapidhash = { version = "1.4.0", features = ["unsafe"] }
-rayon = "1.10.0"
+rayon = "1.12.0"
 ref-cast = "1.0.26"
 regex = "1.13.1"
 regex-lite = "0.1.9"
@@ -307,6 +310,10 @@ der-0_7_10 = { package = "der", version = "0.7.10", features = ["alloc", "derive
 euclid = { version = "0.22.14", features = [ "serde" ] }
 flagset = "0.4.7"
 getopts = "0.2"
+hickory-net = { version = "0.26.3", default-features = false }
+# TODO(https://fxbug.dev/42084779): Remove empty/critical-section and once_cell remove_features when upgrading to >= 0.26.4.
+hickory-proto = { version = "0.26.3", default-features = false }
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["dnssec-ring", "metrics"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["ring", "http1", "tls12"] }
 mock-omaha-server = "0.5.0"
 openat = "0.1.21"
@@ -314,13 +321,13 @@ openssl = { version = "0.10.81", features = ["unstable_boringssl"] }
 pkcs1 = "0.7.5"
 pkcs8 = "0.11.0"
 pkcs8-0_10_2 = { package = "pkcs8", version = "0.10.2" }
-rust_icu_common = { version = "5.6.0", default-features = false, features = ["renaming"] }
-rust_icu_sys = { version = "5.6.0", default-features = false, features = ["renaming", "icu_version_in_env", "icu_version_67_plus"] }
-rust_icu_ucal = { version = "5.6.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
-rust_icu_udat = { version = "5.6.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
-rust_icu_udata = { version = "5.6.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
-rust_icu_uloc = { version = "5.6.0", default-features = false, features = ["renaming", "icu_version_in_env", "icu_version_67_plus"] }
-rust_icu_ustring = { version = "5.6.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
+rust_icu_common = { version = "5.8.0", default-features = false, features = ["renaming"] }
+rust_icu_sys = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
+rust_icu_ucal = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
+rust_icu_udat = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
+rust_icu_udata = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
+rust_icu_uloc = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
+rust_icu_ustring = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
 sec1 = { version = "0.8.1", features = ["alloc", "der", "zeroize"] }
 sec1-0_7_3 = { package = "sec1", version = "0.7.3", features = ["alloc", "der", "pkcs8", "zeroize"] }
 spki = { version = "0.8.0", features = ["alloc"] }
@@ -367,10 +374,10 @@ rustfix = "0.9.7"
 rustls-native-certs = "0.8.4"
 semver = "1.0.28"
 serde_yaml = "0.9.34+deprecated" # To use on Fuchsia, serde_yaml and unsafe-libyaml will need to be re-audited.
-serial_test = "3.5.0" # Not for use on Fuchsia, only for a single process.
+serial_test = "4.0.1" # Not for use on Fuchsia, only for a single process.
 shared_child = { version = "1.1.1", default-features = false }
 signal-hook = "0.4.4"
-syn = { version = "2.0.119", features = ["full", "visit", "visit-mut", "extra-traits"] }
+syn = { version = "3.0.6", features = ["full", "visit", "visit-mut", "extra-traits"] }
 synstructure = "0.14.0"
 tar = "0.4.46"
 term_grid = "0.2.0"
@@ -389,6 +396,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 ### In-tree Crates: crates which are on crates.io but which we build from our in-tree copy
 # keep-sorted start
 bssl-sys = { path = "intree/bssl-sys" }
+emboss_runtime = { path = "intree/emboss_runtime" }
 fuchsia-cprng = { path = "intree/fuchsia-cprng" }
 sapphire-async = { path = "intree/sunstone/sapphire-async" }
 sapphire-buffer = { path = "intree/sunstone/sapphire-buffer" }
@@ -423,10 +431,13 @@ cc = { path = "empty/cc" }
 cfg_aliases = { path = "empty/cfg_aliases"}
 clipboard-win = { path = "empty/clipboard-win" }
 core-foundation-sys = { path = "empty/core-foundation-sys" }
+# TODO(https://fxbug.dev/42084779): Remove when hickory-proto is upgraded to >= 0.26.4.
+critical-section = { path = "empty/critical-section" }
 crossterm_winapi = { path = "empty/crossterm_winapi" }
 dirs-next = { path = "empty/dirs-next-2.0.0" }
 hermit-abi = { path = "empty/hermit-abi" }
 iana-time-zone-haiku = { path = "empty/iana-time-zone-haiku" }
+jni = { path = "empty/jni" }
 js-sys-102 = { package = "js-sys", path = "empty/js-sys-102" }
 kqueue = { path = "empty/kqueue" }
 miow = { path = "empty/miow" }
@@ -656,6 +667,9 @@ groups = [
   { name = "der-0.7" }
 ]
 
+[gn.package.emboss_runtime."0.1.0"]
+existing_gn_target = "//third_party/github.com/google/experimental-emboss-rust:emboss_runtime"
+
 [gn.package.euclid."0.22.14"]
 license_files = ["LICENSE-APACHE"]
 
@@ -738,15 +752,18 @@ rustflags = []
 [gn.package.group."0.12.1"]
 license_files = ["LICENSE-APACHE"]
 
-[gn.package.handlebars."6.4.2"]
+[gn.package.handlebars."6.4.4"]
 # pest relies on this being set to find the grammar file
-env_vars = [ "CARGO_MANIFEST_DIR=${gn_source_root}/third_party/rust_crates/vendor/handlebars-6.4.2" ]
+env_vars = [ "CARGO_MANIFEST_DIR=${gn_source_root}/third_party/rust_crates/vendor/handlebars-6.4.4" ]
 
 [gn.package.heck."0.3.1"]
 group_name = "heck-0_3"
 # TODO(https://fxbug.dev/402302539) starnix tests rely on the older semantics of to_camel_case()
 visibility = [
   "//third_party/rust_crates/compat/icu:*", "//src/sys/test_runners/starnix:*", "//third_party/rust_crates:*" ]
+
+[gn.package.hickory-resolver."0.26.3"]
+env_vars = [ "CARGO_PKG_VERSION=0.26.3" ]
 
 [gn.package.hkdf."0.12.4"]
 groups = [ { name = "hkdf-0.12", visibility = [ ":*", "//src/microfuchsia/tee/runtime/api_impl:*", "//vendor/*" ] } ]
@@ -892,21 +909,8 @@ rustflags = [
   "--cfg=macos",
 ]
 
-[gn.package.num-bigint."0.4.6"]
-rustflags = [
-  "--cfg=u64_digit",
-  "--cfg=has_try_from",
-]
-env_vars = ["OUT_DIR=../../../../compat/num-bigint"]
-
-[gn.package.num-bigint."0.4.6".platform."cfg(target_arch = \"x86_64\")"]
-rustflags = ["--cfg=use_addcarry"]
-
 [gn.package.num-bigint-dig."0.8.6"]
 rustflags = ["--cfg=has_i128"]
-
-[gn.package.num-complex."0.4.6"]
-rustflags = ["--cfg=has_i128", "--cfg=has_const_fn"]
 
 [gn.package.num_cpus."1.17.0"]
 # We need to explicitly depend on num_cpus for tokio, but we're not exposing it
@@ -938,6 +942,8 @@ rustflags = [
 
 [gn.package.once_cell."1.21.4"]
 group_visibility = { import = "//third_party/rust_crates/visibility.gni", variable = "once_cell_visibility" }
+# TODO(https://fxbug.dev/42084779): Remove when hickory-proto is upgraded to >= 0.26.4.
+remove_features = [ "critical-section", "portable-atomic" ]
 
 [gn.package.openssl."0.10.81"]
 group_visibility = { import = "//third_party/rust_crates/visibility.gni", variable = "openssl_visibility" }
@@ -1019,7 +1025,7 @@ features = [
 [gn.package.rand_core."0.6.4"]
 license_files = ["LICENSE-APACHE"]
 
-[gn.package.rayon-core."1.12.1"]
+[gn.package.rayon-core."1.13.0"]
 # Has build script but no config needed.
 
 [gn.package.ref-cast."1.0.26"]
@@ -1043,6 +1049,16 @@ group_visibility = { import = "//third_party/rust_crates/visibility.gni", variab
 # Thank you!
 visibility = [
   "//third_party/rust_crates/compat/icu:*",
+  ":hickory-net-v0_26_3.actual",
+  ":hickory-net-v0_26_3.rustdoc",
+  ":hickory-net-v0_26_3.aux.deps.deps",
+  ":hickory-net-v0_26_3.aux.deps.transdeps",
+  ":hickory-net-v0_26_3.actual.rust_compilation_deps",
+  ":hickory-proto-v0_26_3.actual",
+  ":hickory-proto-v0_26_3.rustdoc",
+  ":hickory-proto-v0_26_3.aux.deps.deps",
+  ":hickory-proto-v0_26_3.aux.deps.transdeps",
+  ":hickory-proto-v0_26_3.actual.rust_compilation_deps",
   ":ring",
   ":ring-0.17.14",
   ":rustls-v0_23_42.actual",
@@ -1096,7 +1112,7 @@ configs = [
 
 # Please keep the rust_icu_* crates together in this list.
 # Refer to //build/icu/README.md for the details of the approach.
-[gn.package.rust_icu_common."5.6.0"]
+[gn.package.rust_icu_common."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 visibility = [
@@ -1105,7 +1121,7 @@ visibility = [
   "//src/lib/icu_data/rust/icu_data:*",
   "//src/lib/intl/lookup/rust:*",
 ]
-[gn.package.rust_icu_sys."5.6.0"]
+[gn.package.rust_icu_sys."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 visibility = [
@@ -1114,7 +1130,7 @@ visibility = [
   "//src/lib/intl/lookup/rust:*",
   "//src/ui/lib/input_pipeline:*",
 ]
-[gn.package.rust_icu_ucal."5.6.0"]
+[gn.package.rust_icu_ucal."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 visibility = [
@@ -1123,10 +1139,10 @@ visibility = [
   "//src/lib/icu_data/rust/icu_data:*",
   "//src/lib/intl/lookup/rust:*",
 ]
-[gn.package.rust_icu_udat."5.6.0"]
+[gn.package.rust_icu_udat."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
-[gn.package.rust_icu_udata."5.6.0"]
+[gn.package.rust_icu_udata."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 visibility = [
@@ -1135,7 +1151,7 @@ visibility = [
   "//src/lib/icu_data/rust/icu_data:*",
   "//src/lib/intl/lookup/rust:*",
 ]
-[gn.package.rust_icu_uenum."5.6.0"]
+[gn.package.rust_icu_uenum."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 visibility = [
@@ -1143,7 +1159,7 @@ visibility = [
   ":*",
   "//src/settings/intl:*",
 ]
-[gn.package.rust_icu_uloc."5.6.0"]
+[gn.package.rust_icu_uloc."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 visibility = [
@@ -1152,7 +1168,7 @@ visibility = [
   "//src/lib/intl/lookup/rust:*",
   "//src/settings/intl:*",
 ]
-[gn.package.rust_icu_ustring."5.6.0"]
+[gn.package.rust_icu_ustring."5.8.0"]
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 
@@ -1241,7 +1257,7 @@ env_vars = [
 [gn.package.serde_json."1.0.151"]
 rustflags = ["--cfg=fast_arithmetic=\\\"64\\\""]
 
-[gn.package.serial_test."3.5.0"]
+[gn.package.serial_test."4.0.1"]
 testonly = true
 
 [gn.package.sha1."0.10.7"]
@@ -1412,7 +1428,7 @@ env_vars = [ "CARGO_PKG_VERSION=\\\"0.9.0\\\"", "CARGO_PKG_NAME=\\\"unic-ucd-blo
 [gn.package.unicode-bidi."0.3.18"]
 license_files = ["LICENSE-APACHE"]
 
-[gn.package.unicode-normalization."0.1.24"]
+[gn.package.unicode-normalization."0.1.25"]
 license_files = ["LICENSE-APACHE"]
 
 [gn.package.unicode-segmentation."1.13.2"]

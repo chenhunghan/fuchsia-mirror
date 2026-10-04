@@ -79,6 +79,7 @@ using InspectConfigTest = UnitTestFixture;
 
 TEST_F(FeedbackConfigTest, MissingCrashReportUploadPolicy) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -97,6 +98,7 @@ TEST_F(FeedbackConfigTest, MissingCrashReportUploadPolicy) {
 
 TEST_F(FeedbackConfigTest, MissingDailyPerProductCrashReportQuota) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -115,6 +117,7 @@ TEST_F(FeedbackConfigTest, MissingDailyPerProductCrashReportQuota) {
 
 TEST_F(FeedbackConfigTest, MissingEnableDataRedaction) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -133,6 +136,7 @@ TEST_F(FeedbackConfigTest, MissingEnableDataRedaction) {
 
 TEST_F(FeedbackConfigTest, MissingEnableHourlySnapshots) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -151,6 +155,7 @@ TEST_F(FeedbackConfigTest, MissingEnableHourlySnapshots) {
 
 TEST_F(FeedbackConfigTest, MissingEnableLimitInspectData) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -169,6 +174,7 @@ TEST_F(FeedbackConfigTest, MissingEnableLimitInspectData) {
 
 TEST_F(FeedbackConfigTest, MissingRemoteDeviceIdProvider) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -187,6 +193,7 @@ TEST_F(FeedbackConfigTest, MissingRemoteDeviceIdProvider) {
 
 TEST_F(FeedbackConfigTest, CrashReportUploadPolicyDisabled) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -208,6 +215,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyDisabled) {
 
 TEST_F(FeedbackConfigTest, CrashReportUploadPolicyEnabled) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -229,6 +237,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyEnabled) {
 
 TEST_F(FeedbackConfigTest, CrashReportUploadPolicyReadFromPrivacySettings) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -250,6 +259,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyReadFromPrivacySettings) {
 
 TEST_F(FeedbackConfigTest, CrashReportUploadPolicyNotAllowedValue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -269,6 +279,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyNotAllowedValue) {
 
 TEST_F(FeedbackConfigTest, CrashReportUploadPolicyNotString) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -288,6 +299,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyNotString) {
 
 TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaNegative) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -308,6 +320,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaNegative) {
 
 TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaZero) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -328,6 +341,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaZero) {
 
 TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaPositive) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -348,6 +362,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaPositive) {
 
 TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaNotNumber) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -367,6 +382,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaNotNumber) {
 
 TEST_F(FeedbackConfigTest, EnableDataRedactionTrue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -387,6 +403,7 @@ TEST_F(FeedbackConfigTest, EnableDataRedactionTrue) {
 
 TEST_F(FeedbackConfigTest, EnableDataRedactionFalse) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -407,6 +424,7 @@ TEST_F(FeedbackConfigTest, EnableDataRedactionFalse) {
 
 TEST_F(FeedbackConfigTest, EnableDataRedactionNotBoolean) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -426,6 +444,7 @@ TEST_F(FeedbackConfigTest, EnableDataRedactionNotBoolean) {
 
 TEST_F(FeedbackConfigTest, EnableHourlySnapshotsTrue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -446,6 +465,7 @@ TEST_F(FeedbackConfigTest, EnableHourlySnapshotsTrue) {
 
 TEST_F(FeedbackConfigTest, EnableHourlySnapshotsFalse) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -466,6 +486,7 @@ TEST_F(FeedbackConfigTest, EnableHourlySnapshotsFalse) {
 
 TEST_F(FeedbackConfigTest, EnableHourlySnapshotsNotBoolean) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -485,6 +506,7 @@ TEST_F(FeedbackConfigTest, EnableHourlySnapshotsNotBoolean) {
 
 TEST_F(FeedbackConfigTest, EnableLimitInspectDataTrue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -505,6 +527,7 @@ TEST_F(FeedbackConfigTest, EnableLimitInspectDataTrue) {
 
 TEST_F(FeedbackConfigTest, EnableLimitInspectDataFalse) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -525,6 +548,7 @@ TEST_F(FeedbackConfigTest, EnableLimitInspectDataFalse) {
 
 TEST_F(FeedbackConfigTest, EnableLimitInspectDataNotBoolean) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -544,6 +568,7 @@ TEST_F(FeedbackConfigTest, EnableLimitInspectDataNotBoolean) {
 
 TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderTrue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -564,6 +589,7 @@ TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderTrue) {
 
 TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderFalse) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -584,6 +610,7 @@ TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderFalse) {
 
 TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderNotBoolean) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -603,6 +630,7 @@ TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderNotBoolean) {
 
 TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsTrue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -623,6 +651,7 @@ TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsTrue) {
 
 TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsFalse) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -643,6 +672,7 @@ TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsFalse) {
 
 TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsNotBoolean) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -844,8 +874,28 @@ TEST_F(FeedbackConfigTest, MissingConfigs) {
   EXPECT_FALSE(config.has_value());
 }
 
+TEST_F(FeedbackConfigTest, MissingPersistedLogsTotalSizeKib) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
 TEST_F(FeedbackConfigTest, MissingReportPersistenceMaxCacheSizeKib) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
     "snapshot_persistence_max_tmp_size_mib": 1,
@@ -864,6 +914,7 @@ TEST_F(FeedbackConfigTest, MissingReportPersistenceMaxCacheSizeKib) {
 
 TEST_F(FeedbackConfigTest, MissingReportPersistenceMaxTmpSizeKib) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
     "snapshot_persistence_max_tmp_size_mib": 1,
@@ -882,6 +933,7 @@ TEST_F(FeedbackConfigTest, MissingReportPersistenceMaxTmpSizeKib) {
 
 TEST_F(FeedbackConfigTest, MissingSnapshotPersistenceMaxCacheSizeMib) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_tmp_size_mib": 1,
@@ -900,6 +952,7 @@ TEST_F(FeedbackConfigTest, MissingSnapshotPersistenceMaxCacheSizeMib) {
 
 TEST_F(FeedbackConfigTest, MissingSnapshotPersistenceMaxTmpSizeMib) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -918,6 +971,7 @@ TEST_F(FeedbackConfigTest, MissingSnapshotPersistenceMaxTmpSizeMib) {
 
 TEST_F(FeedbackConfigTest, MissingSpontaneousRebootReason) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -936,6 +990,7 @@ TEST_F(FeedbackConfigTest, MissingSpontaneousRebootReason) {
 
 TEST_F(FeedbackConfigTest, SpuriousField) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -954,8 +1009,90 @@ TEST_F(FeedbackConfigTest, SpuriousField) {
   EXPECT_FALSE(config.has_value());
 }
 
+TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibPositive) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->persisted_logs_total_size, StorageSize::Kilobytes(512));
+}
+
+TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibZero) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 0,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
+TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibNegative) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": -1,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
+TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibNotNumber) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": "",
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeMibPositive) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -975,6 +1112,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeMibPositive) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibZero) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 0,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -994,6 +1132,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibZero) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibNegative) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": -1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1013,6 +1152,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibNegative) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibNotNumber) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": "",
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1032,6 +1172,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibNotNumber) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeMibPositive) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1051,6 +1192,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeMibPositive) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibZero) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 0,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1070,6 +1212,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibZero) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibNegative) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": -1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1089,6 +1232,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibNegative) {
 
 TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibNotNumber) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": "",
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1108,6 +1252,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibNotNumber) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibPositive) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1128,6 +1273,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibPositive) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibZero) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 0,
@@ -1148,6 +1294,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibZero) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibNegative) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": -1,
@@ -1168,6 +1315,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibNegative) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibNotNumber) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": "",
@@ -1187,6 +1335,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibNotNumber) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibPositive) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1207,6 +1356,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibPositive) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibZero) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1227,6 +1377,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibZero) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibNegative) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1247,6 +1398,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibNegative) {
 
 TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibNotNumber) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1266,6 +1418,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibNotNumber) {
 
 TEST_F(FeedbackConfigTest, SpontaneousRebootReasonNotAllowedValue) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1285,6 +1438,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonNotAllowedValue) {
 
 TEST_F(FeedbackConfigTest, SpontaneousRebootReasonNotString) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1304,6 +1458,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonNotString) {
 
 TEST_F(FeedbackConfigTest, SpontaneousRebootReasonSpontaneous) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1324,6 +1479,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonSpontaneous) {
 
 TEST_F(FeedbackConfigTest, SpontaneousRebootReasonBriefPowerLoss) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1344,6 +1500,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonBriefPowerLoss) {
 
 TEST_F(FeedbackConfigTest, SpontaneousRebootReasonHardReset) {
   const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
     "report_persistence_max_cache_size_kib": 1,
     "report_persistence_max_tmp_size_kib": 1,
     "snapshot_persistence_max_cache_size_mib": 1,
@@ -1567,13 +1724,23 @@ TEST_F(InspectConfigTest, ExposeConfig_SupportsUserInitiatedPoweroffsTrue) {
               BuildConfigMatcher({BoolIs(kSupportsUserInitiatedPoweroffsKey, true)}));
 }
 
+TEST_F(InspectConfigTest, ExposeConfig_PersistedLogsTotalSize) {
+  ExposeConfig(InspectRoot(), FeedbackConfig{
+                                  .persisted_logs_total_size = StorageSize::Kilobytes(512),
+                              });
+
+  EXPECT_THAT(InspectTree(), BuildConfigMatcher({UintIs(kPersistedLogsTotalSizeKey, 512)}));
+}
+
 TEST_F(InspectConfigTest, ExposeConfig_FeedbackConfigEnableAll) {
   ExposeConfig(InspectRoot(), FeedbackConfig{
+                                  .persisted_logs_total_size = StorageSize::Kilobytes(512),
                                   .snapshot_persistence_max_cache_size = StorageSize::Megabytes(1),
                                   .snapshot_persistence_max_tmp_size = StorageSize::Megabytes(1),
                               });
 
   EXPECT_THAT(InspectTree(), BuildConfigMatcher({
+                                 UintIs(kPersistedLogsTotalSizeKey, 512),
                                  StringIs(kSnapshotPersistenceMaxTmpSizeKey, "1"),
                                  StringIs(kSnapshotPersistenceMaxCacheSizeKey, "1"),
                                  BoolIs(kSupportsUserInitiatedPoweroffsKey, false),
@@ -1582,6 +1749,7 @@ TEST_F(InspectConfigTest, ExposeConfig_FeedbackConfigEnableAll) {
 
 TEST_F(InspectConfigTest, ExposeConfig_EnableAll) {
   ExposeConfig(InspectRoot(), FeedbackConfig{
+                                  .persisted_logs_total_size = StorageSize::Kilobytes(512),
                                   .snapshot_persistence_max_cache_size = StorageSize::Megabytes(1),
                                   .snapshot_persistence_max_tmp_size = StorageSize::Megabytes(1),
                                   .supports_user_initiated_poweroffs = true,
@@ -1596,6 +1764,7 @@ TEST_F(InspectConfigTest, ExposeConfig_EnableAll) {
                               });
 
   EXPECT_THAT(InspectTree(), BuildConfigMatcher({
+                                 UintIs(kPersistedLogsTotalSizeKey, 512),
                                  StringIs(kCrashReportUploadPolicyKey, ToString(kConfigEnabled)),
                                  StringIs(kDailyPerProductCrashReportQuotaKey, "1"),
                                  BoolIs(kEnableDataRedactionKey, true),

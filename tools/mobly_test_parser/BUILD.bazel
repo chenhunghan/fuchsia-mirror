@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "mobly_test_parser_lib",
+    srcs = ["moblytest.go"],
+    importpath = "go.fuchsia.dev/fuchsia/tools/mobly_test_parser",
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [
+        "//third_party/golibs:gopkg.in/yaml.v2",
+        "//tools/testing/runtests",
+    ],
+)
+
+host_go_test(
+    name = "mobly_test_parser_lib_tests",
+    srcs = ["moblytest_test.go"],
+    embed = [":mobly_test_parser_lib"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
+    deps = [
+        "//third_party/golibs:github.com/google/go-cmp/cmp",
+        "//third_party/golibs:github.com/google/go-cmp/cmp/cmpopts",
+    ],
+)
+
+go_binary_host_tool(
+    name = "mobly_test_parser",
+    srcs = ["cmd/main.go"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [
+        ":mobly_test_parser_lib",
+        "//tools/lib/jsonutil",
+        "//tools/lib/subprocess",
+        "//tools/testing/runtests",
+        "//tools/testing/testrunner:constants",
+    ],
+)

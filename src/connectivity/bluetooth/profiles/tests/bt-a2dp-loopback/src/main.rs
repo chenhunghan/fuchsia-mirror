@@ -9,12 +9,11 @@ use fidl_fuchsia_metrics::MetricEventLoggerFactoryMarker;
 use fidl_fuchsia_sysmem2::AllocatorMarker;
 use fidl_fuchsia_tracing_provider::RegistryMarker;
 use fuchsia_async as fasync;
-use fuchsia_component_test::{Capability, RealmInstance};
+use fuchsia_component_test::{Capability, RealmInstance, Ref, Route};
 use log::info;
 use mock_piconet_client::{BtProfileComponent, PiconetHarness};
 
-const A2DP_SOURCE_URL: &str = "#meta/bt-a2dp.cm";
-const A2DP_SINK_URL: &str = "#meta/bt-a2dp-sink.cm";
+const A2DP_URL: &str = "#meta/bt-a2dp.cm";
 const A2DP_SOURCE_MONIKER: &str = "a2dp-source";
 const A2DP_SINK_MONIKER: &str = "a2dp-sink";
 
@@ -39,7 +38,7 @@ async fn setup_piconet_with_two_a2dp_components() -> LoopbackIntegrationTest {
     let a2dp_source = test_harness
         .add_profile_with_capabilities(
             A2DP_SOURCE_MONIKER.to_string(),
-            A2DP_SOURCE_URL.to_string(),
+            A2DP_URL.to_string(),
             None,
             use_capabilities.clone(),
             vec![],
@@ -47,18 +46,102 @@ async fn setup_piconet_with_two_a2dp_components() -> LoopbackIntegrationTest {
         .await
         .expect("can add a2dp source profile");
 
+    test_harness
+        .builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.EnableSink".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(false)),
+        }))
+        .await
+        .expect("can add EnableSink config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableSink"))
+                .from(Ref::self_())
+                .to(Ref::child(A2DP_SOURCE_MONIKER)),
+        )
+        .await
+        .expect("can route EnableSink config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.Domain"))
+                .capability(Capability::configuration("fuchsia.bluetooth.SourceType"))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableAvrcpTarget"))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableAac"))
+                .capability(Capability::configuration("fuchsia.bluetooth.InitiatorDelay"))
+                .capability(Capability::configuration("fuchsia.bluetooth.ChannelMode"))
+                .from(Ref::void())
+                .to(Ref::child(A2DP_SOURCE_MONIKER)),
+        )
+        .await
+        .expect("can route optional source config capabilities from void");
+
     // Remove the Tracing profile, to confirm component works without
     let _ = use_capabilities.pop();
     let a2dp_sink = test_harness
         .add_profile_with_capabilities(
             A2DP_SINK_MONIKER.to_string(),
-            A2DP_SINK_URL.to_string(),
+            A2DP_URL.to_string(),
             None,
             use_capabilities,
             vec![],
         )
         .await
         .expect("can add a2dp sink profile");
+
+    test_harness
+        .builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.SourceType".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String("none".into())),
+        }))
+        .await
+        .expect("can add SourceType config capability");
+    test_harness
+        .builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.EnableAvrcpTarget".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(false)),
+        }))
+        .await
+        .expect("can add EnableAvrcpTarget config capability");
+    test_harness
+        .builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.InitiatorDelay".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Uint32(0)),
+        }))
+        .await
+        .expect("can add InitiatorDelay config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.SourceType"))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableAvrcpTarget"))
+                .capability(Capability::configuration("fuchsia.bluetooth.InitiatorDelay"))
+                .from(Ref::self_())
+                .to(Ref::child(A2DP_SINK_MONIKER)),
+        )
+        .await
+        .expect("can route sink config capabilities");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableSink"))
+                .capability(Capability::configuration("fuchsia.bluetooth.Domain"))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableAac"))
+                .capability(Capability::configuration("fuchsia.bluetooth.ChannelMode"))
+                .from(Ref::void())
+                .to(Ref::child(A2DP_SINK_MONIKER)),
+        )
+        .await
+        .expect("can route optional sink config capabilities from void");
 
     let test_realm = test_harness.build().await.expect("test topology should build");
     info!("Test topology built");

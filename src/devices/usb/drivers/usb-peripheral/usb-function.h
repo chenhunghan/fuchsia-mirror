@@ -20,6 +20,8 @@
 #include <usb-inspect/usb-inspect.h>
 #include <usb/usb.h>
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_peripheral {
 
 class UsbPeripheral;
@@ -49,9 +51,8 @@ class UsbFunction : public fidl::Server<fuchsia_hardware_usb_function::UsbFuncti
                      fit::callback<void(zx_status_t)> completer);
   void SetInterface(uint8_t interface, uint8_t alt_setting,
                     fit::callback<void(zx_status_t)> completer);
-  zx::result<std::vector<uint8_t>> Control(
-      const fuchsia_hardware_usb_descriptor::wire::UsbSetup& setup,
-      cpp20::span<uint8_t> write_buffer);
+  zx::result<std::vector<uint8_t>> Control(const fdescriptor::wire::UsbSetup& setup,
+                                           cpp20::span<uint8_t> write_buffer);
   size_t function_index() const { return index_; }
   std::string name() const { return name_; }
   void RequestRemoval();

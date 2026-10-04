@@ -48,7 +48,8 @@ namespace {
 bool gConstructorsCalled = false;
 
 void CallConstructors() {
-  elfldltl::InitFiniInfo<>{gPhysHandoff->init_array.get()}.CallInit();
+  auto ctors = elfldltl::InitFiniInfo<>{gPhysHandoff->init_array.get()}.callable_init_no_legacy();
+  ctors();
   gConstructorsCalled = true;
 }
 

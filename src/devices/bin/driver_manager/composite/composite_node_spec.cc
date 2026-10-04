@@ -6,10 +6,8 @@
 
 #include <bind/fuchsia/cpp/bind.h>
 
-#include "src/devices/bin/driver_manager/node_property_conversion.h"
 #include "src/devices/bin/driver_manager/resource.h"
 #include "src/devices/lib/log/log.h"
-
 namespace fdd = fuchsia_driver_development;
 
 namespace driver_manager {

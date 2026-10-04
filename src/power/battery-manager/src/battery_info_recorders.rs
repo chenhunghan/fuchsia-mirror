@@ -200,6 +200,10 @@ impl FaultDetector {
         new_raw_level: Option<f32>,
         new_charge_status: Option<ChargeStatus>,
     ) -> FaultRecoveryEvent {
+        if new_raw_level.is_none() {
+            return FaultRecoveryEvent::None;
+        }
+
         let prev_raw_level = self.state.borrow().previous_raw_level;
         let prev_charge_status = self.state.borrow().previous_charge_status;
         let mut recovery_event = FaultRecoveryEvent::None;
@@ -406,13 +410,13 @@ impl BatteryInfoRecorders {
         let present_voltage_recorder = Self::create_recorder(
             "present_voltage",
             units!(Milli, Volts),
-            MAX_POWER_CONSUMPTION_MEASUREMENTS,
+            MAX_BATTERY_LEVEL_MEASUREMENTS,
             present_voltage_opts,
         );
         let remaining_capacity_recorder = Self::create_recorder(
             "remaining_capacity",
             units!(Micro, AmpHours),
-            MAX_POWER_CONSUMPTION_MEASUREMENTS,
+            MAX_BATTERY_LEVEL_MEASUREMENTS,
             remaining_capacity_opts,
         );
         let present_current_recorder = Self::create_recorder(
@@ -460,13 +464,31 @@ impl BatteryInfoRecorders {
         }
     }
 
-    pub fn record_raw_level_on_change(&self, level: Option<f32>) {
-        if let Some(level_to_publish) = level {
+    /// Records the raw (pre-polish) battery level, bundling the state-of-charge inputs
+    /// alongside it.
+    ///
+    /// Voltage and remaining capacity are sampled here rather than on every driver update so
+    /// that each one is time-aligned with the level it corresponds to. Together with a shared
+    /// capacity, this keeps the three histories in lockstep, which is what makes them usable
+    /// for assessing state-of-charge estimation.
+    ///
+    /// The raw level is the trigger rather than the polished one because the polisher
+    /// rate-limits `level_percent`; sampling on polished transitions would skew the data away
+    /// from the fuel gauge's actual level changes.
+    pub fn record_raw_level_on_change(&self, info: &fidl_fuchsia_power_battery::BatteryInfo) {
+        if let Some(level_to_publish) = info.level_percent {
             let val = level_to_publish.round() as u8;
             let mut previous_level = self.previous_raw_level.borrow_mut();
             if Some(val) != *previous_level {
                 *previous_level = Some(val);
                 self.raw_level_percent.borrow_mut().record(val);
+
+                if let Some(voltage) = info.present_voltage_mv {
+                    self.present_voltage.borrow_mut().record(voltage);
+                }
+                if let Some(capacity) = info.remaining_charge_uah {
+                    self.remaining_capacity.borrow_mut().record(capacity);
+                }
             }
         }
     }
@@ -506,18 +528,6 @@ impl BatteryInfoRecorders {
                     }
                 }
             }
-        }
-    }
-
-    pub fn record_present_voltage(&self, voltage: Option<u32>) {
-        if let Some(voltage) = voltage {
-            self.present_voltage.borrow_mut().record(voltage);
-        }
-    }
-
-    pub fn record_remaining_capacity(&self, capacity: Option<u32>) {
-        if let Some(capacity) = capacity {
-            self.remaining_capacity.borrow_mut().record(capacity);
         }
     }
 

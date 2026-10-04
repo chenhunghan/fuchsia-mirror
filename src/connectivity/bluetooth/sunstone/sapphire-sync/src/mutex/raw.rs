@@ -30,3 +30,9 @@ pub unsafe trait RawMutex: Default {
     /// The caller must guarantee that the mutex is currently locked by the current execution context.
     unsafe fn unlock(&self);
 }
+
+/// A raw mutex that can be constructed in a const context.
+pub trait ConstInit {
+    /// An unlocked instance of the mutex.
+    const INIT: Self;
+}

@@ -28,6 +28,9 @@ use thermal_netlink::{
 };
 
 const SAMPLING_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// Temperatures at or below absolute zero (-273.15°C), such as `THERMAL_TEMP_INVALID` (-274.0°C),
+/// indicate that a sensor's power domain is off and should not be emitted as netlink samples.
+const ABSOLUTE_ZERO_C: f32 = -273.15;
 
 async fn run_samplers(
     sensor_map: HashMap<SensorProps, ThermalZone>,
@@ -57,6 +60,10 @@ async fn run_samplers(
                             continue;
                         }
                     };
+
+                    if temp_c <= ABSOLUTE_ZERO_C || temp_c.is_nan() {
+                        continue;
+                    }
 
                     sampling_sender
                         .send(vec![

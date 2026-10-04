@@ -38,6 +38,10 @@ class PartitionDevice : public block_server::DriverInterface,
 
   void SendReply(block_server::RequestId, zx::result<>);
 
+  // Registers a programmed hardware inline encryption key slot with this partition's BlockServer
+  // and returns the minted `key_token` handle.
+  zx::result<zx::eventpair> RegisterKeySlot(uint8_t hw_slot);
+
   void StopBlockServer(fit::callback<void()> callback);
 
   // block_server::DriverInterface

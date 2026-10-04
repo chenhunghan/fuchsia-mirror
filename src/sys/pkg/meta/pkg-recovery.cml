@@ -139,6 +139,7 @@
             config: [
                 "fuchsia.system-updater.ConcurrentBlobFetches",
                 "fuchsia.system-updater.ConcurrentPackageResolves",
+                "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
             ],
             from: "void",
             to: "#system-updater",
@@ -184,6 +185,12 @@
             ],
             from: "parent",
             to: "#system-updater",
+        },
+        {
+            protocol: "fuchsia.feedback.CrashReporter",
+            from: "void",
+            to: "#system-updater",
+            availability: "optional",
         },
 
         // Routes between children

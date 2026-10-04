@@ -10,8 +10,7 @@ use fuchsia_inspect::{
     Inspector, LinearHistogramParams, NumericProperty, Property,
 };
 use inspect_format::Container;
-use num::traits::FromPrimitive;
-use num::{One, pow};
+use num_traits::{FromPrimitive, One, pow};
 use rand::RngExt as _;
 use std::ops::{Add, Mul};
 

@@ -13,14 +13,13 @@ namespace dwc3 {
 class TrbFifo : public Fifo<dwc3_trb_t> {
  public:
   zx::result<> Init(zx::bti& bti, bool cached) override {
-    bool needs_init = !buffer_;
-    auto result = Fifo::Init(bti, cached);
+    zx::result<bool> result = InitBuffer(bti, cached);
     if (result.is_error()) {
       fdf::error("Failed to init FIFO {}", result);
       return result.take_error();
     }
 
-    if (needs_init) {
+    if (*result) {
       // set up link TRB pointing back to the start of the fifo
       zx_paddr_t trb_phys = Fifo::GetPhys(first_);
       last_--;
@@ -36,8 +35,11 @@ class TrbFifo : public Fifo<dwc3_trb_t> {
                                        });
           status.is_error()) {
         fdf::error("ExecuteWriteOps failed: {}", status);
+        Release();
         return status.take_error();
       }
+    } else {
+      Reset();
     }
     return zx::ok();
   }
@@ -64,6 +66,9 @@ class TrbFifo : public Fifo<dwc3_trb_t> {
   }
 
   void Reset() {
+    if (!buffer_) {
+      return;
+    }
     const size_t len = (last_ - first_) * sizeof(dwc3_trb_t);
     if (auto status = buffer_->ExecuteWriteOps(
             0, len,

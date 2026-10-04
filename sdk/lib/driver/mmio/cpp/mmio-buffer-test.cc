@@ -136,6 +136,37 @@ TEST(MmioBuffer, CppLifecycle) {
   ASSERT_DEATH(([&ptr]() { MmioWrite8(0xA5, ptr); }));
 }
 
+TEST(MmioBuffer, MoveAssignment) {
+  const size_t vmo_sz = zx_system_get_page_size();
+  MMIO_PTR volatile uint8_t* ptr1 = nullptr;
+  MMIO_PTR volatile uint8_t* ptr2 = nullptr;
+
+  {
+    zx::vmo vmo1 = CreateVmo(vmo_sz);
+    zx::vmo vmo2 = CreateVmo(vmo_sz);
+    auto mmio1 =
+        fdf::MmioBuffer::Create(0, vmo_sz, std::move(vmo1), ZX_CACHE_POLICY_UNCACHED_DEVICE);
+    auto mmio2 =
+        fdf::MmioBuffer::Create(0, vmo_sz, std::move(vmo2), ZX_CACHE_POLICY_UNCACHED_DEVICE);
+    ASSERT_OK(mmio1.status_value());
+    ASSERT_OK(mmio2.status_value());
+
+    ptr1 = reinterpret_cast<MMIO_PTR volatile uint8_t*>(mmio1->get());
+    ptr2 = reinterpret_cast<MMIO_PTR volatile uint8_t*>(mmio2->get());
+
+    // Move assign mmio2 into mmio1. mmio1's previous mapping should be unmapped.
+    *mmio1 = std::move(*mmio2);
+
+    // ptr2 should still be valid.
+    MmioWrite8(0x5A, ptr2);
+    EXPECT_EQ(0x5A, MmioRead8(ptr2));
+  }
+
+  // Both ptr1 and ptr2 should fault now after destruction.
+  ASSERT_DEATH(([&ptr1]() { MmioWrite8(0xA5, ptr1); }));
+  ASSERT_DEATH(([&ptr2]() { MmioWrite8(0xA5, ptr2); }));
+}
+
 TEST(MmioBuffer, AlreadyMapped) {
   const size_t vmo_sz = zx_system_get_page_size();
   zx::vmo vmo = CreateVmo(vmo_sz);
@@ -202,6 +233,62 @@ TEST(MmioBuffer, TestMmioBufferWithVmo) {
 
   buffer.Write32(test_val, offset);
   EXPECT_EQ(view.Read32(offset), test_val);
+}
+
+TEST(MmioBuffer, SetMmioBufferOps) {
+  size_t size = zx_system_get_page_size();
+  auto buffer = fdf_testing::CreateMmioBuffer(size);
+  EXPECT_EQ(fdf::MmioBuffer::GetDefaultOps(), &fdf::internal::kDefaultOps);
+
+  MMIO_PTR void* expected_vaddr = buffer.get();
+  size_t expected_size = buffer.get_size();
+
+  bool read_called = false;
+  static constexpr fdf::MmioBufferOps kCustomOps = {
+      .Read8 = [](const void* ctx, const mmio_buffer_t& mmio, zx_off_t offs) -> uint8_t {
+        *static_cast<bool*>(const_cast<void*>(ctx)) = true;
+        return 0x42;
+      },
+      .Read16 = nullptr,
+      .Read32 = nullptr,
+      .Read64 = nullptr,
+      .ReadBuffer = nullptr,
+      .Write8 = nullptr,
+      .Write16 = nullptr,
+      .Write32 = nullptr,
+      .Write64 = nullptr,
+      .WriteBuffer = nullptr,
+  };
+
+  buffer = fdf::SetMmioBufferOps(std::move(buffer), &kCustomOps, &read_called);
+  EXPECT_EQ(expected_vaddr, buffer.get());
+  EXPECT_EQ(expected_size, buffer.get_size());
+  EXPECT_EQ(0x42, buffer.Read8(0));
+  EXPECT_TRUE(read_called);
+
+  // Test resetting back to default ops.
+  buffer = fdf::SetMmioBufferOps(std::move(buffer));
+  buffer.Write8(0x77, 0);
+  EXPECT_EQ(0x77, buffer.Read8(0));
+
+  {
+    zx::vmo vmo = CreateVmo(size);
+    zx::vmo vmo_dup = DuplicateVmo(vmo);
+    auto src = fdf_testing::CreateMmioBuffer(std::move(vmo));
+    MMIO_PTR void* orig_vaddr = src.get();
+    auto swapped = fdf::SetMmioBufferOps(std::move(src), fdf::MmioBuffer::GetDefaultOps());
+    EXPECT_EQ(nullptr, src.get());
+    EXPECT_EQ(orig_vaddr, swapped.get());
+    EXPECT_EQ(1u, VmoNumMappings(vmo_dup));
+  }
+
+  // A null ops pointer also selects the default ops.
+  buffer = fdf::SetMmioBufferOps(std::move(buffer), &kCustomOps, &read_called);
+  buffer = fdf::SetMmioBufferOps(std::move(buffer), nullptr);
+  read_called = false;
+  buffer.Write8(0x66, 0);
+  EXPECT_EQ(0x66, buffer.Read8(0));
+  EXPECT_FALSE(read_called);
 }
 
 }  // namespace

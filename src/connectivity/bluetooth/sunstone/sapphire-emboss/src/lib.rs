@@ -10,7 +10,7 @@ pub use pw_bluetooth_l2cap_frames_emb as l2cap_frames;
 
 pub use emboss_runtime::{
     CheckComplete, CheckOk, CompleteState, Error, InfallibleRead, InfallibleWrite, IsComplete,
-    IsOk, OkState, State, UncheckedState,
+    IsOk, MutStorage, OkState, State, Storage, UncheckedState,
 };
 
 #[cfg(test)]

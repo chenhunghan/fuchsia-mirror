@@ -128,42 +128,42 @@ type SdmmcVmoRight = strict bits : uint32 {
 closed protocol Sdmmc {
     /// Get host info.
     strict HostInfo() -> (struct {
-        s zx.Status;
+        s zx.Result;
         info SdmmcHostInfo;
     });
     /// Set signal voltage.
     strict SetSignalVoltage(struct {
         voltage SdmmcVoltage;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Set bus width.
     strict SetBusWidth(struct {
         bus_width SdmmcBusWidth;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Set bus frequency, zero means disable the clock to the card.
     strict SetBusFreq(struct {
         bus_freq uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Set mmc timing.
     strict SetTiming(struct {
         timing SdmmcTiming;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Issue a hw reset.
     strict HwReset() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Perform tuning.
     strict PerformTuning(struct {
         cmd_idx uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// In the methods below, vmo_id is used to uniquely identify a VMO that will be passed to
@@ -184,14 +184,14 @@ closed protocol Sdmmc {
         size uint64;
         vmo_rights uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// The callee unmaps/unpins the VMO and returns ownership to the caller.
     strict UnregisterVmo(struct {
         vmo_id uint32;
         client_id uint8;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         vmo zx.Handle:VMO;
     });
 
@@ -215,7 +215,7 @@ closed protocol Sdmmc {
     strict Request(resource struct {
         req SdmmcReq;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         response array<uint32, 4>;
     });
 };

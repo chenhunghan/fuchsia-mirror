@@ -48,7 +48,7 @@ closed protocol Controller {
     /// Returns ZX_ERR_STOP if no new configurations are available.
     strict GetNextConfig() -> (struct {
         config box<Config>;
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Set a particular configuration and create the requested stream.

@@ -21,42 +21,42 @@ from api.stats import stats_pb2
 
 
 class ReproxyLogdirTestHarness(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self._reproxy_logdir = Path(tempfile.mkdtemp())
         # The majority of tests expect the metrics file to be present
         # as a sign that a build is done.
         self.touch_metrics_file()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         shutil.rmtree(self._reproxy_logdir)
 
     @property
-    def _stamp_file(self):
+    def _stamp_file(self) -> str:
         return os.path.join(self._reproxy_logdir, "upload_stamp")
 
     @property
-    def _build_id_file(self):
+    def _build_id_file(self) -> str:
         return os.path.join(self._reproxy_logdir, "build_id")
 
     @property
-    def _metrics_file(self):
+    def _metrics_file(self) -> str:
         return os.path.join(self._reproxy_logdir, "rbe_metrics.pb")
 
-    def touch_stamp_file(self):
+    def touch_stamp_file(self) -> None:
         with open(self._stamp_file, "w") as f:
             f.write("\n")
 
-    def touch_metrics_file(self):
+    def touch_metrics_file(self) -> None:
         with open(self._metrics_file, "wb") as f:
             f.write("\n".encode())
 
-    def write_build_id_file(self, id: str):
+    def write_build_id_file(self, id: str) -> None:
         with open(self._build_id_file, "w") as build_id_file:
             build_id_file.write(id + "\n")
 
 
 class MainUploadMetricsTest(ReproxyLogdirTestHarness):
-    def test_dry_run(self):
+    def test_dry_run(self) -> None:
         with mock.patch.object(
             upload_reproxy_logs,
             "read_reproxy_metrics_proto",
@@ -72,7 +72,7 @@ class MainUploadMetricsTest(ReproxyLogdirTestHarness):
         mock_read_proto.assert_called_once()
         self.assertEqual(exit_code, 0)
 
-    def test_mocked_upload(self):
+    def test_mocked_upload(self) -> None:
         with mock.patch.object(
             upload_reproxy_logs,
             "read_reproxy_metrics_proto",
@@ -92,7 +92,7 @@ class MainUploadMetricsTest(ReproxyLogdirTestHarness):
         mock_upload.assert_called_once()
         self.assertEqual(exit_code, 0)
 
-    def test_mocked_upload_failure(self):
+    def test_mocked_upload_failure(self) -> None:
         with mock.patch.object(
             upload_reproxy_logs,
             "read_reproxy_metrics_proto",
@@ -112,7 +112,7 @@ class MainUploadMetricsTest(ReproxyLogdirTestHarness):
         mock_upload.assert_called_once()
         self.assertEqual(exit_code, 1)
 
-    def test_empty_stats(self):
+    def test_empty_stats(self) -> None:
         with open(self._metrics_file, "wb") as metrics_file:
             pass
         with mock.patch.object(
@@ -136,10 +136,10 @@ class MainUploadMetricsTest(ReproxyLogdirTestHarness):
 
 
 class MainUploadLogsTest(unittest.TestCase):
-    def fake_log(self):
+    def fake_log(self) -> log_pb2.LogDump:
         return log_pb2.LogDump(records=[log_pb2.LogRecord()])
 
-    def test_dry_run(self):
+    def test_dry_run(self) -> None:
         with mock.patch.object(
             reproxy_logs,
             "convert_reproxy_actions_log",
@@ -157,7 +157,7 @@ class MainUploadLogsTest(unittest.TestCase):
         mock_convert_log.assert_called_once()
         self.assertEqual(exit_code, 0)
 
-    def test_mocked_upload(self):
+    def test_mocked_upload(self) -> None:
         with mock.patch.object(
             reproxy_logs,
             "convert_reproxy_actions_log",
@@ -181,7 +181,7 @@ class MainUploadLogsTest(unittest.TestCase):
         mock_upload.assert_called_once()
         self.assertEqual(exit_code, 0)
 
-    def test_mocked_upload_failure(self):
+    def test_mocked_upload_failure(self) -> None:
         with mock.patch.object(
             reproxy_logs,
             "convert_reproxy_actions_log",
@@ -205,7 +205,7 @@ class MainUploadLogsTest(unittest.TestCase):
         mock_upload.assert_called_once()
         self.assertEqual(exit_code, 1)
 
-    def test_empty_records(self):
+    def test_empty_records(self) -> None:
         with mock.patch.object(
             reproxy_logs,
             "convert_reproxy_actions_log",
@@ -231,7 +231,7 @@ class MainUploadLogsTest(unittest.TestCase):
 
 
 class ReadReproxyMetricsProto(unittest.TestCase):
-    def test_basic(self):
+    def test_basic(self) -> None:
         with mock.patch.object(__builtins__, "open") as mock_open:
             with mock.patch.object(
                 stats_pb2.Stats, "ParseFromString"
@@ -245,7 +245,7 @@ class ReadReproxyMetricsProto(unittest.TestCase):
 
 
 class BQUploadRemoteActionLogsTest(unittest.TestCase):
-    def test_batch_upload(self):
+    def test_batch_upload(self) -> None:
         bq_table = "proj.dataset.tablename"
         with mock.patch.object(
             subprocess, "call", side_effect=[0, 0]
@@ -262,7 +262,7 @@ class BQUploadRemoteActionLogsTest(unittest.TestCase):
 
 
 class BQUploadMetricsTest(unittest.TestCase):
-    def test_upload(self):
+    def test_upload(self) -> None:
         bq_table = "proj.dataset.tablename"
         with mock.patch.object(
             subprocess, "call", return_value=0
@@ -276,7 +276,7 @@ class BQUploadMetricsTest(unittest.TestCase):
 
 
 class MainSingleLogdirTest(ReproxyLogdirTestHarness):
-    def test_build_not_done_yet(self):
+    def test_build_not_done_yet(self) -> None:
         os.remove(self._metrics_file)  # cause this log dir to be skipped
         with mock.patch.object(
             upload_reproxy_logs, "main_upload_metrics"
@@ -300,7 +300,7 @@ class MainSingleLogdirTest(ReproxyLogdirTestHarness):
         self.assertEqual(exit_code, 0)
         self.assertFalse(os.path.exists(self._stamp_file))
 
-    def test_already_uploaded(self):
+    def test_already_uploaded(self) -> None:
         self.touch_stamp_file()
         self.write_build_id_file("feed-f4ce")
         with mock.patch.object(
@@ -323,7 +323,7 @@ class MainSingleLogdirTest(ReproxyLogdirTestHarness):
         mock_upload_metrics.assert_not_called()
         mock_upload_logs.assert_not_called()
 
-    def test_no_stamp_have_uuid_flag(self):
+    def test_no_stamp_have_uuid_flag(self) -> None:
         with mock.patch.object(
             upload_reproxy_logs, "main_upload_metrics", return_value=0
         ) as mock_upload_metrics:
@@ -346,7 +346,7 @@ class MainSingleLogdirTest(ReproxyLogdirTestHarness):
         self.assertTrue(os.path.isfile(self._stamp_file))
         self.assertEqual(exit_code, 0)
 
-    def test_no_stamp_have_uuid_file(self):
+    def test_no_stamp_have_uuid_file(self) -> None:
         self.write_build_id_file("feed-face")
         with mock.patch.object(
             upload_reproxy_logs, "main_upload_metrics", return_value=0
@@ -370,7 +370,7 @@ class MainSingleLogdirTest(ReproxyLogdirTestHarness):
         self.assertTrue(os.path.isfile(self._stamp_file))
         self.assertEqual(exit_code, 0)
 
-    def test_no_stamp_auto_uuid(self):
+    def test_no_stamp_auto_uuid(self) -> None:
         with mock.patch.object(
             upload_reproxy_logs, "main_upload_metrics", return_value=0
         ) as mock_upload_metrics:
@@ -394,7 +394,7 @@ class MainSingleLogdirTest(ReproxyLogdirTestHarness):
         # build_id is automatically generated
         self.assertTrue(os.path.isfile(self._build_id_file))
 
-    def test_upload_metrics_error(self):
+    def test_upload_metrics_error(self) -> None:
         self.write_build_id_file("f00d-face")
         with mock.patch.object(
             upload_reproxy_logs, "main_upload_metrics", return_value=1
@@ -414,7 +414,7 @@ class MainSingleLogdirTest(ReproxyLogdirTestHarness):
         self.assertFalse(os.path.exists(self._stamp_file))
         self.assertEqual(exit_code, 1)
 
-    def test_upload_logs_error(self):
+    def test_upload_logs_error(self) -> None:
         self.write_build_id_file("feed-fade")
         with mock.patch.object(
             upload_reproxy_logs, "main_upload_logs", return_value=1

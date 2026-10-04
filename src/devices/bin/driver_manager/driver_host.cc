@@ -14,7 +14,6 @@
 #include <memory>
 
 #include "lib/vfs/cpp/pseudo_file.h"
-#include "src/devices/bin/driver_manager/node_property_conversion.h"
 #include "src/devices/bin/driver_manager/pkg_utils.h"
 #include "src/devices/lib/log/log.h"
 #include "src/lib/fsl/handles/object_info.h"
@@ -213,27 +212,9 @@ void DriverHostComponent::Start(
   fidl::Arena arena;
   auto args = fdf::wire::DriverStartArgs::Builder(arena);
 
-  // TODO(b/361852885): Remove this once we stop supporting the deprecated dictionary.
-  fuchsia_driver_framework::wire::NodePropertyDictionary deprecated_dictionary(
-      arena, node_properties.size());
-  size_t entry_index = 0;
-  for (auto& entry : node_properties) {
-    fuchsia_driver_framework::wire::NodePropertyVector deprecated_properties(
-        arena, entry.properties.size());
-    for (size_t i = 0; i < entry.properties.size(); i++) {
-      deprecated_properties[i] = ToDeprecatedProperty(arena, entry.properties[i]);
-    }
-    deprecated_dictionary[entry_index] = fuchsia_driver_framework::wire::NodePropertyEntry{
-        .name = entry.name,
-        .properties = deprecated_properties,
-    };
-    entry_index++;
-  }
-
   args.node(std::move(client_end))
       .node_name(fidl::StringView::FromExternal(node_name))
       .node_offers(offers)
-      .node_properties(deprecated_dictionary)
       .node_properties_2(node_properties)
       .node_token(std::move(node_token))
       .url(start_info.resolved_url())

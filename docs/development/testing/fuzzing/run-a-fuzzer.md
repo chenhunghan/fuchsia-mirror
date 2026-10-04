@@ -82,9 +82,10 @@ utilities such as tab-completion. It supports a number of commands:
   </pre>
 
 Most commands require a fuzzer to be attached to the shell using the fuzzer's
-[component URL][glossary.component_url]. Once attached, the fuzzer component remains alive until it
-is stopped, either by the `stop` command or by [Test Manager][test_manager]. You can detach from a
-fuzzer and reattach to it later.
+[component URL][glossary.component-url]. Once attached, the fuzzer component
+remains alive until it is stopped, either by the `stop` command or by
+[Test Manager][test_manager]. You can detach from a fuzzer and reattach to it
+later.
 
 Note: if `attach` reports that the component cannot be found or cannot be resolved, check that the
 component is available to the [component resolver][component-resolvers]. Typically this means
@@ -170,10 +171,10 @@ See [Handling results found through fuzzing](handle-results.md#clusterfuzz-bugs)
 
 [component-resolvers]: /docs/concepts/components/v2/capabilities/resolver.md
 [clusterfuzz]: https://google.github.io/clusterfuzz/
+[glossary.component-url]: /docs/glossary/README.md#component-url
 
 [fuchsia-gn]: /docs/development/build/gn_concepts/intro.md
 [fx-serve]: /tools/devshell/serve
-[glossary.component_url]: /docs/glossary/README.md#component_url
 [options]: https://llvm.org/docs/LibFuzzer.html#options
 [package-deployment-options]: /docs/development/build/fx.md#package_deployment_options
 [test_manager]: /docs/development/testing/components/test_runner_framework.md#the_test_manager

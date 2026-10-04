@@ -415,7 +415,10 @@ impl KeyBagManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{Aes256Key, Error, KeyBagManager, UnwrapError, WrappingKey};
+    use super::{
+        AES256_KEY_SIZE, Aes256Key, Error, KeyBagManager, KeyBytes, Nonce, OpenError, UnwrapError,
+        WRAPPED_AES256_KEY_SIZE, WrappingKey,
+    };
     use assert_matches::assert_matches;
     use std::os::fd::{FromRawFd as _, IntoRawFd as _, OwnedFd};
     use tempfile::NamedTempFile;
@@ -518,5 +521,84 @@ mod tests {
         assert_eq!(keybag.unwrap_key(1, &key), Err(UnwrapError::AccessDenied));
         assert_eq!(keybag.unwrap_key(2, &key), Ok(expected));
         assert_eq!(keybag.unwrap_key(3, &key), Err(UnwrapError::SlotNotFound));
+    }
+
+    #[test]
+    fn error_to_zx_status_conversions() {
+        assert_eq!(zx::Status::from(OpenError::InvalidPath), zx::Status::INVALID_ARGS);
+        assert_eq!(
+            zx::Status::from(OpenError::FailedToOpen(std::io::Error::other("io"))),
+            zx::Status::IO
+        );
+        assert_eq!(
+            zx::Status::from(OpenError::KeyBagInvalid("bad".to_string())),
+            zx::Status::IO_DATA_INTEGRITY
+        );
+        assert_eq!(
+            zx::Status::from(OpenError::KeyBagVersionMismatch(2, 1)),
+            zx::Status::NOT_SUPPORTED
+        );
+        assert_eq!(zx::Status::from(OpenError::FailedToPersist), zx::Status::IO);
+
+        assert_eq!(zx::Status::from(Error::FailedToPersist), zx::Status::IO);
+        assert_eq!(zx::Status::from(Error::SlotNotFound), zx::Status::NOT_FOUND);
+        assert_eq!(zx::Status::from(Error::SlotAlreadyUsed), zx::Status::ALREADY_EXISTS);
+        assert_eq!(zx::Status::from(Error::Internal), zx::Status::INTERNAL);
+
+        assert_eq!(zx::Status::from(UnwrapError::SlotNotFound), zx::Status::NOT_FOUND);
+        assert_eq!(zx::Status::from(UnwrapError::AccessDenied), zx::Status::ACCESS_DENIED);
+    }
+
+    #[test]
+    fn key_bytes_and_aes256_key_methods() {
+        let mut kb = KeyBytes::try_from(vec![0x11u8; WRAPPED_AES256_KEY_SIZE]).unwrap();
+        assert_eq!(kb[0], 0x11);
+        kb[0] = 0x22;
+        assert_eq!(kb[0], 0x22);
+        assert!(KeyBytes::try_from(vec![0u8; 5]).is_err());
+
+        let mut key = Aes256Key::create([0x33u8; AES256_KEY_SIZE]);
+        assert_eq!(key[0], 0x33);
+        key[0] = 0x44;
+        assert_eq!(key[0], 0x44);
+        assert_eq!(format!("{:?}", key), "Aes256Key");
+
+        let from_vec = Aes256Key::try_from(vec![0x55u8; AES256_KEY_SIZE]).unwrap();
+        assert_eq!(from_vec[0], 0x55);
+        assert_eq!(Aes256Key::try_from(vec![0u8; 4]), Err(()));
+    }
+
+    #[test]
+    fn serde_hex_errors_and_open_edge_cases() {
+        assert!(serde_json::from_str::<Nonce>("\"not_valid_hex!\"").is_err());
+        assert!(serde_json::from_str::<Nonce>("\"0011\"").is_err());
+        assert!(serde_json::from_str::<KeyBytes>("\"not_valid_hex!\"").is_err());
+        assert!(serde_json::from_str::<KeyBytes>("\"0011\"").is_err());
+
+        // Opening a non-existent file returns Ok(None).
+        let owned_path = NamedTempFile::new().unwrap().into_temp_path();
+        let path: &std::path::Path = owned_path.as_ref();
+        std::fs::remove_file(path).unwrap();
+        let dir = open_dir(path.parent().unwrap());
+        assert!(KeyBagManager::open(dir, path).unwrap().is_none());
+
+        // Opening an empty file returns Ok(None).
+        let owned_path = NamedTempFile::new().unwrap().into_temp_path();
+        let path: &std::path::Path = owned_path.as_ref();
+        let dir = open_dir(path.parent().unwrap());
+        assert!(KeyBagManager::open(dir, path).unwrap().is_none());
+
+        // Opening invalid JSON returns KeyBagInvalid.
+        std::fs::write(path, b"{invalid json").unwrap();
+        let dir = open_dir(path.parent().unwrap());
+        assert_matches!(KeyBagManager::open(dir, path).err(), Some(OpenError::KeyBagInvalid(_)));
+
+        // Opening wrong version returns KeyBagVersionMismatch.
+        std::fs::write(path, br#"{"version": 99, "keys": {}}"#).unwrap();
+        let dir = open_dir(path.parent().unwrap());
+        assert_matches!(
+            KeyBagManager::open(dir, path).err(),
+            Some(OpenError::KeyBagVersionMismatch(99, 1))
+        );
     }
 }

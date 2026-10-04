@@ -239,3 +239,8 @@ fi-0220.test.fidl
 fi-0221.test.fidl
 fi-0222.test.fidl
 fi-0223.test.fidl
+fi-0224.test.fidl
+fi-0225-a.test.fidl
+fi-0225-b.test.fidl
+fi-0226-a.test.fidl
+fi-0226-b.test.fidl

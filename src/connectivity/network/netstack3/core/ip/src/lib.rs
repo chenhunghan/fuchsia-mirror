@@ -28,6 +28,7 @@ mod internal {
     pub(super) mod device;
     pub(super) mod fragmentation;
     pub(super) mod gmp;
+    pub(super) mod gso;
     pub(super) mod icmp;
     pub(super) mod ipv6;
     pub(super) mod local_delivery;
@@ -253,6 +254,10 @@ pub use internal::base::{
 };
 pub use internal::counters::{IpCounters, Ipv6RxCounters};
 pub use internal::fragmentation::FragmentationCounters;
+pub use internal::gso::{
+    GsoCounters, GsoSourceCounters, MaybeSegmentableTransportSerializer,
+    SegmentableTransportBuilder,
+};
 pub use internal::local_delivery::{
     IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta, TransparentLocalDelivery,
 };

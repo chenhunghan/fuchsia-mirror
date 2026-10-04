@@ -205,11 +205,11 @@ void NodeManager::CacheNatEntry(nid_t nid, RawNatEntry &raw_entry) {
       if (entry = GrabNatEntry(nid); !entry) {
         continue;
       }
+      entry->SetBlockAddress(LeToCpu(raw_entry.block_addr));
+      entry->SetIno(LeToCpu(raw_entry.ino));
+      entry->SetVersion(raw_entry.version);
+      entry->SetCheckpointed();
     }
-    entry->SetBlockAddress(LeToCpu(raw_entry.block_addr));
-    entry->SetIno(LeToCpu(raw_entry.ino));
-    entry->SetVersion(raw_entry.version);
-    entry->SetCheckpointed();
     break;
   }
 }
@@ -714,11 +714,13 @@ void NodeManager::BuildFreeNids() {
 
   // remove the free nids from current allocated nids
   std::lock_guard lock(free_nid_tree_lock_);
-  for (auto nid : free_nid_tree_) {
+  for (auto iter = free_nid_tree_.begin(); iter != free_nid_tree_.end();) {
     fs::SharedLock nat_lock(nat_tree_lock_);
-    NatEntry *entry = LookupNatCache(nid);
+    NatEntry *entry = LookupNatCache(*iter);
     if (entry && entry->GetBlockAddress() != kNullAddr) {
-      RemoveFreeNidUnsafe(nid);
+      iter = free_nid_tree_.erase(iter);
+    } else {
+      ++iter;
     }
   }
 }

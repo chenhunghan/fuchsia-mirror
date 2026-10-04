@@ -11,6 +11,10 @@ if (is_host) {
       "main_build.py",
       "signal_utils.py",
     ]
+    library_deps = [
+      "//build/auth:gcloud",
+      "//build/rbe:rbe_settings",
+    ]
   }
 
   python_library("signal_utils_lib") {
@@ -23,7 +27,12 @@ if (is_host) {
 
   python_build_time_tests("main_build_test") {
     tests = [ "main_build_test.py" ]
-    deps = [ ":main_build_lib" ]
+    deps = [
+      ":main_build_lib",
+      "//build/auth:apt",
+      "//build/auth:gcloud",
+      "//build/auth:gcloud_creds",
+    ]
   }
 
   python_build_time_tests("signal_utils_test") {

@@ -215,10 +215,14 @@ mod test {
         let _exec = TestExecutor::new();
         let (sender, mut receiver) = mpsc::channel(100);
         let mut roam_data_sender = RoamDataSender::new(sender);
-        let ind =
-            fidl_internal::SignalReportIndication { rssi_dbm: -60, snr_db: 30, tx_rate_500kbps: 0 };
+        let ind = fidl_internal::SignalReportIndication {
+            rssi_dbm: Some(-60),
+            snr_db: Some(30),
+            tx_rate_500kbps: Some(0),
+            ..Default::default()
+        };
 
-        roam_data_sender.send_signal_report_ind(ind).expect("error sending signal report");
+        roam_data_sender.send_signal_report_ind(ind.clone()).expect("error sending signal report");
 
         // Verify that roam sender packages trigger data and sends to roam monitor receiver.
         assert_matches!(receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(data)) => {
@@ -261,9 +265,10 @@ mod test {
         test_values
             .trigger_data_sender
             .try_send(RoamTriggerData::SignalReportInd(fidl_internal::SignalReportIndication {
-                rssi_dbm: -40,
-                snr_db: 40,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(-40),
+                snr_db: Some(40),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             }))
             .expect("failed to send");
 
@@ -337,9 +342,10 @@ mod test {
         test_values
             .trigger_data_sender
             .try_send(RoamTriggerData::SignalReportInd(fidl_internal::SignalReportIndication {
-                rssi_dbm: -40,
-                snr_db: 40,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(-40),
+                snr_db: Some(40),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             }))
             .expect("failed to send");
 
@@ -459,9 +465,10 @@ mod test {
         // irrelevant.
         trigger_data_sender
             .try_send(RoamTriggerData::SignalReportInd(fidl_internal::SignalReportIndication {
-                rssi_dbm: -40,
-                snr_db: 40,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(-40),
+                snr_db: Some(40),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             }))
             .expect("failed to send");
 

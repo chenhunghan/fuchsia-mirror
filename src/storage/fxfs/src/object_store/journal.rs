@@ -45,8 +45,9 @@ use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::transaction::{
-    AllocatorMutation, LockKey, Mutation, MutationV56, MutationV57, ObjectMutationIterator,
-    ObjectStoreMutation, Options, TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
+    AllocatorMutation, LockKey, Mutation, MutationV56, MutationV57, MutationV59,
+    ObjectMutationIterator, ObjectStoreMutation, Options, TRANSACTION_MAX_JOURNAL_USAGE,
+    Transaction, lock_keys,
 };
 use crate::object_store::{
     AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, HandleOwner, INVALID_OBJECT_ID,
@@ -115,16 +116,16 @@ pub struct JournalCheckpointV32 {
     pub version: Version,
 }
 
-pub type JournalRecord = JournalRecordV57;
+pub type JournalRecord = JournalRecordV59;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum JournalRecordV57 {
+pub enum JournalRecordV59 {
     EndBlock,
     Mutation {
         object_id: u64,
-        mutation: MutationV57,
+        mutation: MutationV59,
     },
     /// Commits records in the transaction.
     Commit,
@@ -132,8 +133,8 @@ pub enum JournalRecordV57 {
     Discard(u64),
     /// Indicates the device was flushed at the given journal offset.
     /// Note that this really means that at this point in the journal offset, we can be certain that
-    /// there's no remaining buffered data in the block device; the buffers and the disk contents are
-    /// consistent.
+    /// there's no remaining buffered data in the block device; the buffers and the disk contents
+    /// are consistent.
     /// We insert one of these records *after* a flush along with the *next* transaction to go
     /// through.  If that never comes (either due to graceful or hard shutdown), the journal reset
     /// on the next mount will serve the same purpose and count as a flush, although it is necessary
@@ -147,6 +148,18 @@ pub enum JournalRecordV57 {
     /// extents, we only check the checksums for a block if it has been written to for the first
     /// time since the last flush, because otherwise we can't roll it back anyway so it doesn't
     /// matter. For copy-on-write extents, the bool is always true.
+    DataChecksums(Range<u64>, crate::checksum::ChecksumsV38, bool),
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Migrate, Clone, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
+#[migrate_to_version(JournalRecordV59)]
+pub enum JournalRecordV57 {
+    EndBlock,
+    Mutation { object_id: u64, mutation: MutationV57 },
+    Commit,
+    Discard(u64),
+    DidFlushDevice(u64),
     DataChecksums(Range<u64>, crate::checksum::ChecksumsV38, bool),
 }
 

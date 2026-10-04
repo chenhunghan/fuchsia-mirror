@@ -15,6 +15,8 @@
 #include "src/devices/usb/lib/usb-endpoint/testing/fake-usb-endpoint-server.h"
 #include "src/firmware/drivers/usb-fastboot-function/usb_fastboot_function.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_fastboot_function {
 namespace {
 
@@ -197,7 +199,7 @@ class UsbFastbootFunctionTest : public ::testing::Test {
     {
       fidl::Result result = function_client_->SetConfigured({{
           .configured = true,
-          .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+          .speed = fdescriptor::UsbSpeed::kHigh,
       }});
       ASSERT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
     }

@@ -31,6 +31,10 @@
             ],
         },
         {
+            protocol: "fuchsia.feedback.CrashReporter",
+            availability: "optional",
+        },
+        {
             directory: "system",
             rights: [ "r*" ],
             path: "/system",
@@ -77,6 +81,15 @@
             type: "uint16",
             availability: "optional",
             default: 5,
+        },
+        {
+            // If non-zero, system-updater will file a crash report if a successful update takes
+            // longer than this number of seconds (excluding waiting for reboot).
+            config: "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+            key: "excessive_update_duration_seconds",
+            type: "uint32",
+            availability: "optional",
+            default: 0,
         },
     ],
     expose: [

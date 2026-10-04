@@ -186,6 +186,11 @@ class Process : public ClientObject, public unwinder::AsyncMemory::Delegate {
   // synchronous suspending and because a different continue message could race with the reply.
   virtual void Pause(fit::callback<void()> on_paused) = 0;
 
+  // Returns true if the process has at least one thread and all threads (except for an optional
+  // `ignore_thread`, e.g. a thread that is about to be destroyed) are stopped in a state that
+  // supports stack frames.
+  bool AllThreadsStopped(const Thread* ignore_thread = nullptr) const;
+
   // Applies to all threads in the process.
   // See Thread::Continue() for more detail on the forwarding of exceptions.
   virtual void Continue(bool forward_exceptions) = 0;

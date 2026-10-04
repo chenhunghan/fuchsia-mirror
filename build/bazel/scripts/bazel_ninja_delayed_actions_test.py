@@ -15,6 +15,7 @@ from bazel_ninja_delayed_actions import (
     TargetWithPlatform,
     compute_sources_by_owner,
     read_extra_bazel_targets,
+    should_update_stamp,
     validate_extra_bazel_targets,
 )
 
@@ -227,6 +228,52 @@ class ComputeSourcesByOwnerTest(unittest.TestCase):
                 {},
                 _HOST,
             )
+
+
+class ShouldUpdateStampTest(unittest.TestCase):
+    def test_missing_stamp(self) -> None:
+        self.assertTrue(
+            should_update_stamp(
+                stamp_exists=False,
+                declared_outputs=["obj/foo"],
+                updated_outputs=set(),
+                has_extra_targets=False,
+            )
+        )
+
+    def test_declared_output_updated(self) -> None:
+        self.assertTrue(
+            should_update_stamp(
+                stamp_exists=True,
+                declared_outputs=["obj/foo", "obj/bar"],
+                updated_outputs={Path("obj/bar")},
+                has_extra_targets=False,
+            )
+        )
+
+    def test_no_declared_output_updated(self) -> None:
+        # Leaving the stamp alone is what lets restat prune dependents.
+        self.assertFalse(
+            should_update_stamp(
+                stamp_exists=True,
+                declared_outputs=["obj/foo"],
+                updated_outputs={Path("obj/unrelated")},
+                has_extra_targets=False,
+            )
+        )
+
+    def test_extra_targets_always_update(self) -> None:
+        # Outputs of extra targets (e.g. a rebuilt test package's meta.far)
+        # are never declared to Ninja, so their changes can't be detected
+        # here and dependents reading them via depfiles must still rerun.
+        self.assertTrue(
+            should_update_stamp(
+                stamp_exists=True,
+                declared_outputs=["obj/foo"],
+                updated_outputs=set(),
+                has_extra_targets=True,
+            )
+        )
 
 
 if __name__ == "__main__":

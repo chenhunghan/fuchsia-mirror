@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::BLOCK_SIZE;
-use anyhow::{Error, ensure};
+use anyhow::{Error, anyhow, ensure};
 use std::borrow::Borrow;
 use std::ops::Range;
 
@@ -75,17 +75,10 @@ impl Extent {
             "logical_range.start must be <= logical_range.end, got {:?}",
             logical_range
         );
-
-        let length_blocks = (logical_range.end - logical_range.start) / BLOCK_SIZE;
-        if device_offset.is_some() {
+        if let Some(dev_offset) = device_offset {
             ensure!(
-                length_blocks <= MAX_REGULAR_EXTENT_BLOCKS,
-                "Extent length bounds exceed maximum encodeable length"
-            );
-        } else {
-            ensure!(
-                length_blocks <= MAX_SPARSE_EXTENT_BLOCKS,
-                "Extent length bounds exceed maximum encodeable length"
+                dev_offset.checked_add(logical_range.end - logical_range.start).is_some(),
+                "device_offset + extent length overflows u64"
             );
         }
         Ok(Self { logical_range, device_offset })
@@ -153,6 +146,16 @@ impl Extents {
         self.base_device_offset
     }
 
+    /// Returns the number of encoded extent entries in this container.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true if this container has no extent entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Creates an `Extents` container from an iterator of `Extent`s, returning an `Error`
     /// if validation fails.
     pub fn try_new(
@@ -197,20 +200,27 @@ impl Extents {
                     "Relative device offset ({dev_offset} - {base_device_offset} = \
                      {relative_offset}) must be a multiple of BLOCK_SIZE ({BLOCK_SIZE} bytes)"
                 );
-                let target_block = relative_offset / BLOCK_SIZE;
-                ensure!(
-                    target_block <= u32::MAX as u64,
-                    "Relative device offset block index exceeds u32::MAX"
-                );
-                ensure!(
-                    length_blocks <= MAX_REGULAR_EXTENT_BLOCKS,
-                    "Extent length bounds exceed maximum encodeable length"
-                );
-                current_logical_offset = extent.logical_range.end;
-                entries.push(ExtentEntry {
-                    end_logical_offset: current_logical_offset,
-                    device_offset: dev_offset,
-                });
+                let mut remaining_blocks = length_blocks;
+                let mut current_dev_offset = dev_offset;
+                while remaining_blocks > 0 {
+                    let entry_blocks = std::cmp::min(remaining_blocks, MAX_REGULAR_EXTENT_BLOCKS);
+                    let entry_bytes = entry_blocks * BLOCK_SIZE;
+                    let entry_relative_offset = current_dev_offset - base_device_offset;
+                    let target_block = entry_relative_offset / BLOCK_SIZE;
+                    ensure!(
+                        target_block <= u32::MAX as u64,
+                        "Relative device offset block index exceeds u32::MAX"
+                    );
+                    current_logical_offset += entry_bytes;
+                    entries.push(ExtentEntry {
+                        end_logical_offset: current_logical_offset,
+                        device_offset: current_dev_offset,
+                    });
+                    current_dev_offset = current_dev_offset
+                        .checked_add(entry_bytes)
+                        .ok_or_else(|| anyhow!("device_offset + extent length overflows u64"))?;
+                    remaining_blocks -= entry_blocks;
+                }
             } else {
                 ensure!(
                     length_blocks <= MAX_SPARSE_EXTENT_BLOCKS,
@@ -594,15 +604,62 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_extents_regular_length_overflow_errors() {
-        let result = Extent::try_new(
-            0..((MAX_REGULAR_EXTENT_BLOCKS + 1) * BLOCK_SIZE),
-            Some(10 * BLOCK_SIZE),
-        );
-        assert!(result.is_err());
+    fn test_encode_decode_large_regular_extent() {
+        let entry_bytes = MAX_REGULAR_EXTENT_BLOCKS * BLOCK_SIZE;
+        let large_len = 2 * entry_bytes + 5 * BLOCK_SIZE;
+        let start_dev = 10 * BLOCK_SIZE;
+        let next_len = 3 * BLOCK_SIZE;
+        let next_dev = 50 * BLOCK_SIZE;
+
+        let extents = Extents::try_new(
+            [
+                Extent::new(0..large_len, Some(start_dev)),
+                Extent::new(large_len..(large_len + next_len), Some(next_dev)),
+            ],
+            0,
+        )
+        .expect("Extents::try_new should split large regular extent");
+
+        let encoded: Vec<u64> = Extents::encode_extents(&extents).collect();
+        assert_eq!(encoded.len(), 4);
+
+        let extents_container = Extents::from_encoded(encoded, 0).expect("from_encoded failed");
+        assert_eq!(extents_container, extents);
+
+        let decoded = extents_container.mappings();
         assert_eq!(
-            result.unwrap_err().to_string(),
-            "Extent length bounds exceed maximum encodeable length"
+            decoded,
+            vec![
+                Extent::new(0..entry_bytes, Some(start_dev)),
+                Extent::new(entry_bytes..(2 * entry_bytes), Some(start_dev + entry_bytes)),
+                Extent::new((2 * entry_bytes)..large_len, Some(start_dev + 2 * entry_bytes)),
+                Extent::new(large_len..(large_len + next_len), Some(next_dev)),
+            ]
+        );
+
+        let mapped_second_entry =
+            extents_container.map(entry_bytes + BLOCK_SIZE).expect("should map in second entry");
+        assert_eq!(
+            mapped_second_entry.logical_range,
+            (entry_bytes + BLOCK_SIZE)..(2 * entry_bytes)
+        );
+        assert_eq!(mapped_second_entry.device_offset, Some(start_dev + entry_bytes + BLOCK_SIZE));
+    }
+
+    #[test]
+    fn test_large_regular_extent_target_block_overflow_errors() {
+        let large_len = (MAX_REGULAR_EXTENT_BLOCKS + 1) * BLOCK_SIZE;
+        let start_dev = (u32::MAX as u64 - 10) * BLOCK_SIZE;
+        let extent = Extent::try_new(0..large_len, Some(start_dev))
+            .expect("Extent::try_new should allow large length");
+        let result = Extents::try_new([extent], 0);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Relative device offset block index exceeds u32::MAX"),
+            "Second split entry exceeding u32::MAX target_block should fail"
         );
     }
 

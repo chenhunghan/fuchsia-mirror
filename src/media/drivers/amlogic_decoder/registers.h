@@ -564,23 +564,25 @@ DEFINE_REGISTER(Reset0Register, ResetRegisterIo, 0x1101 - 0x1100);
 REGISTER_NAME(Reset1Register, ResetRegisterIo, 0x1102 - 0x1100)
   DEF_BIT(8, parser);
 };
-DEFINE_REGISTER(FecInputControl, DemuxRegisterIo, 0x1602);
+// Demux registers are relative to page-aligned base 0x1800 words (Page 6 / 0x6000 bytes).
+DEFINE_REGISTER(FecInputControl, DemuxRegisterIo, 0x1802 - 0x1800);
 
-REGISTER_NAME(TsHiuCtl, DemuxRegisterIo, 0x1625)
+REGISTER_NAME(TsHiuCtl, DemuxRegisterIo, 0x1825 - 0x1800)
   DEF_BIT(7, use_hi_bsf_interface);
 };
-REGISTER_NAME(TsHiuCtl2, DemuxRegisterIo, 0x1675)
+REGISTER_NAME(TsHiuCtl2, DemuxRegisterIo, 0x1875 - 0x1800)
   DEF_BIT(7, use_hi_bsf_interface);
 };
-REGISTER_NAME(TsHiuCtl3, DemuxRegisterIo, 0x16c5)
+REGISTER_NAME(TsHiuCtl3, DemuxRegisterIo, 0x18c5 - 0x1800)
   DEF_BIT(7, use_hi_bsf_interface);
 };
 
-REGISTER_NAME(TsFileConfig, DemuxRegisterIo, 0x16f2)
+REGISTER_NAME(TsFileConfig, DemuxRegisterIo, 0x18f2 - 0x1800)
   DEF_BIT(5, ts_hiu_enable);
 };
 
-REGISTER_NAME(ParserConfig, ParserRegisterIo, 0x2965)
+// Parser registers are relative to page-aligned base 0x3800 words (Page 14 / 0xe000 bytes).
+REGISTER_NAME(ParserConfig, ParserRegisterIo, 0x3865 - 0x3800)
   enum {
     kWidth8 = 0,
     kWidth16 = 1,
@@ -593,12 +595,12 @@ REGISTER_NAME(ParserConfig, ParserRegisterIo, 0x2965)
   DEF_FIELD(9, 8, pfifo_access_width);
   DEF_FIELD(7, 0, max_fetch_cycle);
 };
-DEFINE_REGISTER(PfifoWrPtr, ParserRegisterIo, 0x2966);
-DEFINE_REGISTER(PfifoRdPtr, ParserRegisterIo, 0x2967);
-DEFINE_REGISTER(ParserSearchPattern, ParserRegisterIo, 0x2969);
-DEFINE_REGISTER(ParserSearchMask, ParserRegisterIo, 0x296a);
+DEFINE_REGISTER(PfifoWrPtr, ParserRegisterIo, 0x3866 - 0x3800);
+DEFINE_REGISTER(PfifoRdPtr, ParserRegisterIo, 0x3867 - 0x3800);
+DEFINE_REGISTER(ParserSearchPattern, ParserRegisterIo, 0x3869 - 0x3800);
+DEFINE_REGISTER(ParserSearchMask, ParserRegisterIo, 0x386a - 0x3800);
 
-REGISTER_NAME(ParserControl, ParserRegisterIo, 0x2960)
+REGISTER_NAME(ParserControl, ParserRegisterIo, 0x3860 - 0x3800)
   enum {
     kSearch = (1 << 1),
     kStart = (1 << 0),
@@ -610,28 +612,28 @@ REGISTER_NAME(ParserControl, ParserRegisterIo, 0x2960)
   DEF_FIELD(4, 0, command);
 };
 
-DEFINE_REGISTER(ParserVideoStartPtr, ParserRegisterIo, 0x2980);
-DEFINE_REGISTER(ParserVideoEndPtr, ParserRegisterIo, 0x2981);
-DEFINE_REGISTER(ParserVideoWp, ParserRegisterIo, 0x2982);
-DEFINE_REGISTER(ParserVideoRp, ParserRegisterIo, 0x2983);
+DEFINE_REGISTER(ParserVideoStartPtr, ParserRegisterIo, 0x3880 - 0x3800);
+DEFINE_REGISTER(ParserVideoEndPtr, ParserRegisterIo, 0x3881 - 0x3800);
+DEFINE_REGISTER(ParserVideoWp, ParserRegisterIo, 0x3882 - 0x3800);
+DEFINE_REGISTER(ParserVideoRp, ParserRegisterIo, 0x3883 - 0x3800);
 
-REGISTER_NAME(ParserEsControl, ParserRegisterIo, 0x2977)
+REGISTER_NAME(ParserEsControl, ParserRegisterIo, 0x3877 - 0x3800)
   // Determines if the parser should swap around the endianness of the video output.
   DEF_FIELD(3, 1, video_write_endianness);
   DEF_BIT(0, video_manual_read_ptr_update);
 };
 
-REGISTER_NAME(ParserIntStatus, ParserRegisterIo, 0x296c)
+REGISTER_NAME(ParserIntStatus, ParserRegisterIo, 0x386c - 0x3800)
   DEF_BIT(7, fetch_complete);
   DEF_BIT(0, start_code_found);
 };
-REGISTER_NAME(ParserIntEnable, ParserRegisterIo, 0x296b)
+REGISTER_NAME(ParserIntEnable, ParserRegisterIo, 0x386b - 0x3800)
   DEF_BIT(8, host_en_start_code_found);
   DEF_BIT(15, host_en_fetch_complete);
 };
 
-DEFINE_REGISTER(ParserFetchAddr, ParserRegisterIo, 0x2961);
-REGISTER_NAME(ParserFetchCmd, ParserRegisterIo, 0x2962)
+DEFINE_REGISTER(ParserFetchAddr, ParserRegisterIo, 0x3861 - 0x3800);
+REGISTER_NAME(ParserFetchCmd, ParserRegisterIo, 0x3862 - 0x3800)
   DEF_FIELD(29, 27, fetch_endian);
   DEF_FIELD(26, 0, len);
 };

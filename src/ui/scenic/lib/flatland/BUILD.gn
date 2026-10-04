@@ -16,6 +16,7 @@ source_set("flatland") {
     "flatland_presenter.h",
     "flatland_presenter_impl.cc",
     "flatland_presenter_impl.h",
+    "flatland_session_types.cc",
     "flatland_session_types.h",
     "global_matrix_data.cc",
     "global_matrix_data.h",

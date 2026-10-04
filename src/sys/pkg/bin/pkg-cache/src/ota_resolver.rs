@@ -4,6 +4,7 @@
 
 use anyhow::{Context as _, anyhow};
 use fidl::endpoints::ServerEnd;
+use fidl_connector::Connect as _;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_ext as fpkg_ext;
@@ -26,7 +27,7 @@ const INSPECT_RECENT_RESOLVE_COUNT: usize = 50;
 ///   * queries `fuchsia.fxfs/BlobCreator.NeedsOverwrite` for every blob (e.g. does not
 ///     short-circuit the blob write if a blob is readable via `fuchsia.fxfs/BlobReader.GetVmo`)
 pub(crate) struct Resolver {
-    authority: fpkg::AuthorityProxy,
+    authority: fidl_connector::ServiceReconnector<fpkg::AuthorityMarker>,
     package_fetcher: crate::package_fetcher::PackageFetcher,
     authenticator: context_authenticator::ContextAuthenticator,
     root_dir_factory: crate::root_dir::RootDirFactory,
@@ -41,7 +42,7 @@ pub(crate) struct Resolver {
 
 impl Resolver {
     pub(crate) fn new(
-        authority: fpkg::AuthorityProxy,
+        authority: fidl_connector::ServiceReconnector<fpkg::AuthorityMarker>,
         package_fetcher: crate::package_fetcher::PackageFetcher,
         authenticator: context_authenticator::ContextAuthenticator,
         root_dir_factory: crate::root_dir::RootDirFactory,
@@ -214,6 +215,8 @@ impl Resolver {
         inspect.record_string("url", url.to_string());
         let (fpkg::BlobId { merkle_root }, http_blob_dir) = self
             .authority
+            .connect()
+            .map_err(Error::ConnectToAuthority)?
             .lookup(&fpkg::PackageUrl { url: url.as_unpinned().to_string() })
             .await
             .map_err(Error::AuthorityFidl)?
@@ -293,6 +296,9 @@ pub(crate) enum Error {
     #[error("absolute package URLs must have an empty context")]
     ContextWithAbsoluteUrl,
 
+    #[error("connecting to authority")]
+    ConnectToAuthority(#[source] anyhow::Error),
+
     #[error("authority call failed")]
     AuthorityFidl(#[source] fidl::Error),
 
@@ -339,6 +345,7 @@ impl From<&Error> for fpkg::ResolveError {
         match err {
             InvalidUrl(_) => Err::InvalidUrl,
             ContextWithAbsoluteUrl => Err::InvalidContext,
+            ConnectToAuthority(_) => Err::Io,
             AuthorityFidl(_) => Err::Io,
             Authority(e) => fpkg_ext::errors::authority_to_resolve_err(e),
             InvalidBlobDirUri(_) => Err::Internal,

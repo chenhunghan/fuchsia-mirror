@@ -7,7 +7,10 @@ import("//build/python/python_host_test.gni")
 if (is_host) {
   python_host_test("adb_test") {
     main_source = "adb_test.py"
-    libraries = [ "//src/testing/end_to_end/honeydew" ]
+    libraries = [
+      "//src/testing/end_to_end/honeydew",
+      "//third_party/mobly",
+    ]
     main_callable = "unittest.main"
     extra_args = [ "-v" ]
   }

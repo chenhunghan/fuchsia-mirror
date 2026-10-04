@@ -47,6 +47,8 @@ bool cpp_dispatcher_remove_observer(Dispatcher* dispatcher, SignalObserver* obse
 zx_status_t cpp_dispatcher_get_name(const Dispatcher* disp, char out_name[ZX_MAX_NAME_LEN]);
 zx_status_t cpp_dispatcher_set_name(Dispatcher* disp, const char* name, size_t len);
 uint32_t cpp_dispatcher_current_handle_count(const Dispatcher* disp);
+bool cpp_dispatcher_is_waitable(const Dispatcher* disp);
+void cpp_dispatcher_cancel(Dispatcher* disp, const void* handle);
 }
 
 template <typename T>
@@ -155,6 +157,9 @@ void cpp_dispatcher_update_state(Dispatcher* disp, zx_signals_t clear_mask, zx_s
                                  zx_signals_t strobe_mask);
 void cpp_dispatcher_update_state_locked(Dispatcher* disp, zx_signals_t clear_mask,
                                         zx_signals_t set_mask, zx_signals_t strobe_mask);
+zx_signals_t cpp_dispatcher_raise_signals_locked(Dispatcher* disp, zx_signals_t signals);
+void cpp_dispatcher_notify_observers_locked(Dispatcher* disp, zx_signals_t signals,
+                                            void* queue_to_own);
 zx_signals_t cpp_dispatcher_signals_state_locked(const Dispatcher* disp);
 zx_koid_t cpp_dispatcher_get_related_koid(const Dispatcher* disp);
 }
@@ -371,6 +376,9 @@ class Dispatcher : private fbl::RefCountedUpgradeable<Dispatcher>,
                                           zx_signals_t set_mask, zx_signals_t strobe_mask);
   friend void cpp_dispatcher_update_state_locked(Dispatcher* disp, zx_signals_t clear_mask,
                                                  zx_signals_t set_mask, zx_signals_t strobe_mask);
+  friend zx_signals_t cpp_dispatcher_raise_signals_locked(Dispatcher* disp, zx_signals_t signals);
+  friend void cpp_dispatcher_notify_observers_locked(Dispatcher* disp, zx_signals_t signals,
+                                                     void* queue_to_own);
   friend zx_signals_t cpp_dispatcher_signals_state_locked(const Dispatcher* disp);
   void fbl_recycle();
 

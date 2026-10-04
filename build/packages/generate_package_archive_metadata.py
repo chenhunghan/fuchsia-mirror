@@ -9,14 +9,15 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Callable
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    def path_arg(validate_type=None):
-        def arg(path):
-            path = Path(path)
+    def path_arg(validate_type: str | None = None) -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             assert (
                 not validate_type
                 or validate_type == "file"

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use crate::cache_stats::{AtomicCacheStats, CacheStats, ShardedCacheStats};
-use crate::sync::RwLock;
+use crate::sync::{LockDepRwLock, SeLinuxQueryCacheResetLock};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use core::arch::asm;
 use starnix_logging::CATEGORY_STARNIX_SECURITY;
@@ -43,7 +43,7 @@ pub struct LockFreeQueryCache<
     /// Out-of-line storage.
     out_of_line_data: Box<[[AtomicU64; OUT_OF_LINE_U64S]]>,
     /// Reset lock.
-    reset_lock: RwLock<()>,
+    reset_lock: LockDepRwLock<(), SeLinuxQueryCacheResetLock>,
     /// The stats are sharded and padded to reduce cache line contention.
     stats: ShardedCacheStats,
     /// The storage strategy may contain state (this is useful in tests).
@@ -57,7 +57,8 @@ pub struct LockFreeQueryCache<
 /// responsible for encoding and decoding these.
 ///
 /// The data will be protected by seqlock: hence, relaxed loads and stores are sufficient. However,
-/// the implementation must be safe in the presence of arbitrary torn reads.
+/// the implementation must be safe in the presence of arbitrary torn reads (`check_key` and
+/// `read_value` must handle any bit pattern, including zeros, without panicking).
 pub trait StorageStrategy<
     const INLINE_U64S: usize,
     const INLINE_U32S: usize,
@@ -331,7 +332,7 @@ impl<
             buckets: buckets.into_boxed_slice(),
             out_of_line_data: outline_data.into_boxed_slice(),
             stats: ShardedCacheStats::new(),
-            reset_lock: RwLock::new(()),
+            reset_lock: LockDepRwLock::new(()),
             storage,
         }
     }

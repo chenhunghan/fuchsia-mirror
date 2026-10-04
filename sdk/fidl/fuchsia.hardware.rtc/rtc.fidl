@@ -32,7 +32,7 @@ open protocol Device {
     flexible Set(struct {
         rtc Time;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Set the RTC time.

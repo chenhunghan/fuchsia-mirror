@@ -11,6 +11,8 @@ mod descriptor_types;
 #[expect(dead_code, reason = "Used in subsequent CLs and unit tests")]
 mod indented_serializer;
 mod input_report_types;
+#[cfg(test)]
+mod testing;
 
 #[derive(FromArgs, Debug)]
 /// A tool to dump input reports from input devices.

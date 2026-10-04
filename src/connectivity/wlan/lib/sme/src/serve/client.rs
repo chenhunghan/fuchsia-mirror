@@ -163,6 +163,24 @@ async fn handle_fidl_request(
                 .unwrap_or_else(|e| error!("Error sending response: {:?}", e));
             Ok(())
         }
+        ClientSmeRequest::StartRssiMonitor { min_rssi_dbm, max_rssi_dbm, responder } => {
+            let receiver = sme.lock().start_rssi_monitor(min_rssi_dbm, max_rssi_dbm);
+            let resp = match receiver.await {
+                Ok(result) => result,
+                Err(_) => Err(zx::sys::ZX_ERR_CANCELED),
+            };
+            responder.send(resp).unwrap_or_else(|e| error!("Error sending response: {:?}", e));
+            Ok(())
+        }
+        ClientSmeRequest::StopRssiMonitor { responder } => {
+            let receiver = sme.lock().stop_rssi_monitor();
+            let resp = match receiver.await {
+                Ok(result) => result,
+                Err(_) => Err(zx::sys::ZX_ERR_CANCELED),
+            };
+            responder.send(resp).unwrap_or_else(|e| error!("Error sending response: {:?}", e));
+            Ok(())
+        }
     }
 }
 
@@ -354,6 +372,9 @@ async fn serve_connect_txn_stream(
                     }
                     ConnectTransactionEvent::OnSignalReport { ind } => {
                         handle.send_on_signal_report(&ind)
+                    }
+                    ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm } => {
+                        handle.send_on_rssi_threshold_breached(cur_rssi_dbm)
                     }
                     ConnectTransactionEvent::OnChannelSwitched { info } => {
                         handle.send_on_channel_switched(&info)
@@ -689,10 +710,14 @@ mod tests {
         });
 
         // Test sending OnSignalReport
-        let input_ind =
-            fidl_internal::SignalReportIndication { rssi_dbm: -40, snr_db: 30, tx_rate_500kbps: 0 };
+        let input_ind = fidl_internal::SignalReportIndication {
+            rssi_dbm: Some(-40),
+            snr_db: Some(30),
+            tx_rate_500kbps: Some(0),
+            ..Default::default()
+        };
         sme_proxy
-            .unbounded_send(ConnectTransactionEvent::OnSignalReport { ind: input_ind })
+            .unbounded_send(ConnectTransactionEvent::OnSignalReport { ind: input_ind.clone() })
             .expect("expect sending ConnectTransactionEvent to succeed");
         assert_matches!(exec.run_until_stalled(&mut test_fut), Poll::Pending);
         let event = assert_matches!(poll_stream_fut(&mut exec, &mut fidl_client_fut), Poll::Ready(Some(Ok(event))) => event);
@@ -925,5 +950,75 @@ mod tests {
             Poll::Ready(Ok(Err(zx::sys::ZX_ERR_CANCELED)))
         );
         assert_eq!(sme.lock().device_info().sta_addr, [0; 6]);
+    }
+
+    #[test]
+    fn test_handle_fidl_request_start_and_stop_rssi_monitor() {
+        let mut exec = fasync::TestExecutor::new();
+        let inspector = fuchsia_inspect::Inspector::default();
+        let (sme, _mlme_sink, mut mlme_stream, _time_stream) = client_sme::ClientSme::new(
+            client_sme::ClientConfig::default(),
+            test_utils::fake_device_info([0; 6].into()),
+            inspector.clone(),
+            inspector.root().create_child("sme"),
+            wlan_common::test_utils::fake_features::fake_security_support(),
+            wlan_common::test_utils::fake_features::fake_spectrum_management_support_empty(),
+        );
+        let sme = Mutex::new(sme);
+
+        let (proxy, stream) = create_proxy_and_stream::<fidl_sme::ClientSmeMarker>();
+        let mut stream = pin!(stream);
+
+        let mut start_fut = proxy.start_rssi_monitor(-80, -50);
+        assert_matches!(exec.run_until_stalled(&mut stream.next()), Poll::Ready(Some(Ok(req))) => {
+            let mut handle_fut = pin!(handle_fidl_request(&sme, req));
+            assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+
+            let (req, responder) = assert_matches!(
+                exec.run_until_stalled(&mut mlme_stream.next()),
+                Poll::Ready(Some(crate::MlmeRequest::StartRssiMonitor(req, responder))) => (req, responder)
+            );
+            assert_eq!(req.min_rssi_dbm, -80);
+            assert_eq!(req.max_rssi_dbm, -50);
+            responder.respond(Ok(()));
+
+            assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Ready(Ok(())));
+        });
+        assert_matches!(exec.run_until_stalled(&mut start_fut), Poll::Ready(Ok(Ok(()))));
+
+        let mut stop_fut = proxy.stop_rssi_monitor();
+        assert_matches!(exec.run_until_stalled(&mut stream.next()), Poll::Ready(Some(Ok(req))) => {
+            let mut handle_fut = pin!(handle_fidl_request(&sme, req));
+            assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+
+            let responder = assert_matches!(
+                exec.run_until_stalled(&mut mlme_stream.next()),
+                Poll::Ready(Some(crate::MlmeRequest::StopRssiMonitor(responder))) => responder
+            );
+            responder.respond(Ok(()));
+
+            assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Ready(Ok(())));
+        });
+        assert_matches!(exec.run_until_stalled(&mut stop_fut), Poll::Ready(Ok(Ok(()))));
+    }
+
+    #[test]
+    fn test_serve_connect_txn_stream_on_rssi_threshold_breached() {
+        let mut exec = fasync::TestExecutor::new();
+        let (txn_proxy, txn_stream) =
+            create_proxy_and_stream::<fidl_sme::ConnectTransactionMarker>();
+        let handle = txn_stream.control_handle();
+        let (mut sink, stream) = client_sme::ConnectTransactionSink::new_unbounded();
+        let mut serve_fut = pin!(serve_connect_txn_stream(Some(handle), stream));
+        let mut event_stream = txn_proxy.take_event_stream();
+
+        sink.send(ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm: -75 });
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+        assert_matches!(
+            exec.run_until_stalled(&mut event_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::ConnectTransactionEvent::OnRssiThresholdBreached {
+                cur_rssi_dbm: -75
+            })))
+        );
     }
 }

@@ -21,6 +21,7 @@ pub struct DoublyLinkedListNode<T> {
 
 impl<T> DoublyLinkedListNode<T> {
     /// Creates a new, unlinked node.
+    #[inline]
     pub const fn new() -> Self {
         Self {
             next: UnsafeCell::new(core::ptr::null_mut()),
@@ -29,17 +30,20 @@ impl<T> DoublyLinkedListNode<T> {
     }
 
     /// Returns true if the node is currently in a list.
+    #[inline]
     pub fn in_container(&self) -> bool {
         // SAFETY: `self.next.get()` returns a valid pointer to the inner field of `self.next`
         // which is a validly allocated UnsafeCell inside `self`.
         !unsafe { *self.next.get() }.is_null()
     }
 
+    #[inline]
     fn get_next(&self) -> *mut T {
         // SAFETY: `self.next.get()` is a valid pointer to `self.next` which is owned by `self`.
         unsafe { *self.next.get() }
     }
 
+    #[inline]
     fn set_next(&self, next: *mut T) {
         // SAFETY: `self.next.get()` is a valid, writable pointer to `self.next` owned by `self`.
         // UnsafeCell allows interior mutability through a shared reference.
@@ -48,11 +52,13 @@ impl<T> DoublyLinkedListNode<T> {
         }
     }
 
+    #[inline]
     fn get_prev(&self) -> *mut T {
         // SAFETY: `self.prev.get()` is a valid pointer to `self.prev` which is owned by `self`.
         unsafe { *self.prev.get() }
     }
 
+    #[inline]
     fn set_prev(&self, prev: *mut T) {
         // SAFETY: `self.prev.get()` is a valid, writable pointer to `self.prev` owned by `self`.
         // UnsafeCell allows interior mutability through a shared reference.
@@ -69,12 +75,14 @@ impl<T> core::fmt::Debug for DoublyLinkedListNode<T> {
 }
 
 impl<T> Default for DoublyLinkedListNode<T> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<T> Drop for DoublyLinkedListNode<T> {
+    #[inline]
     fn drop(&mut self) {
         debug_assert!(!self.in_container(), "Object destroyed while still in container");
     }
@@ -287,6 +295,7 @@ where
     S: SizeTracker,
 {
     /// Creates a new, empty list.
+    #[inline]
     pub fn new() -> impl PinInit<Self, core::convert::Infallible> {
         pin_init!(&this in Self {
             head: make_sentinel(this.as_ptr()),
@@ -296,10 +305,12 @@ where
         })
     }
 
+    #[inline]
     fn get_sentinel(&self) -> *mut P::Target {
         make_sentinel(self as *const Self as *mut Self)
     }
 
+    #[inline]
     fn get_tail(&self) -> *mut P::Target {
         if self.is_empty() {
             self.get_sentinel()
@@ -314,6 +325,7 @@ where
     /// # Safety
     ///
     /// The caller must ensure that the list is not empty.
+    #[inline]
     unsafe fn set_tail(&self, tail: *mut P::Target) {
         debug_assert!(!self.is_empty());
         // SAFETY: `self.head` is a valid, aligned pointer to an element in the list.
@@ -328,6 +340,7 @@ where
     ///
     /// The caller must ensure that `ptr` is a valid, aligned, and dereferenceable pointer
     /// to an initialized `P::Target` object that is alive for `'a`.
+    #[inline]
     unsafe fn get_node_ref<'a>(&self, ptr: *mut P::Target) -> &'a DoublyLinkedListNode<P::Target> {
         let _ = self;
         // SAFETY: The caller guarantees `ptr` is valid, aligned, and dereferenceable.
@@ -335,27 +348,32 @@ where
     }
 
     /// Returns true if the list is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         is_sentinel_ptr(self.head)
     }
 
     /// Returns a reference to the first element of the list, or `None` if it is empty.
+    #[inline]
     pub fn front(&self) -> Option<&P::Target> {
         if self.is_empty() { None } else { unsafe { Some(&*self.head) } }
     }
 
     /// Returns a mutable reference to the first element of the list, or `None` if it is empty.
+    #[inline]
     pub fn front_mut(&mut self) -> Option<&mut P::Target> {
         if self.is_empty() { None } else { unsafe { Some(&mut *self.head) } }
     }
 
     /// Returns a reference to the last element of the list, or `None` if it is empty.
+    #[inline]
     pub fn back(&self) -> Option<&P::Target> {
         let tail = self.get_tail();
         if is_sentinel_ptr(tail) { None } else { unsafe { Some(&*tail) } }
     }
 
     /// Returns a mutable reference to the last element of the list, or `None` if it is empty.
+    #[inline]
     pub fn back_mut(&mut self) -> Option<&mut P::Target> {
         let tail = self.get_tail();
         if is_sentinel_ptr(tail) { None } else { unsafe { Some(&mut *tail) } }
@@ -366,6 +384,7 @@ where
     /// # Panics
     ///
     /// Panics if the object is already in a container.
+    #[inline]
     pub fn push_front(&mut self, ptr: P)
     where
         P: ManagedPtr,
@@ -379,16 +398,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the object is already in a container.
+    /// Panics in debug builds if the object is already in a container.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the list.
+    /// The caller must ensure that `ptr` is a valid pointer to a `T` that is not currently in any
+    /// list, and that the object outlives the reference from the list.
+    #[inline]
     pub unsafe fn push_front_raw(&mut self, ptr: P) {
         let head = self.head;
         let mut cursor = CursorMut { list: self, current: head };
-        // SAFETY: `ptr` is valid and not in container (asserted inside insert_before_raw).
+        // SAFETY: `ptr` is valid and not in container (debug-asserted inside insert_before_raw).
         unsafe {
             cursor.insert_before_raw(ptr);
         }
@@ -399,6 +419,7 @@ where
     /// # Panics
     ///
     /// Panics if the object is already in a container.
+    #[inline]
     pub fn push_back(&mut self, ptr: P)
     where
         P: ManagedPtr,
@@ -412,12 +433,13 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the object is already in a container.
+    /// Panics in debug builds if the object is already in a container.
     ///
     /// # Safety
     ///
     /// The caller must ensure that `ptr` is a valid pointer to an object that is not
     /// currently in any list.
+    #[inline]
     pub unsafe fn push_back_raw(&mut self, ptr: P) {
         let sentinel = self.get_sentinel();
         let mut cursor = CursorMut { list: self, current: sentinel };
@@ -428,20 +450,16 @@ where
     }
 
     /// Removes and returns the first element of the list, or `None` if it is empty.
+    #[inline]
     pub fn pop_front(&mut self) -> Option<P> {
-        if self.is_empty() {
-            return None;
-        }
         let head = self.head;
         let mut cursor = CursorMut { list: self, current: head };
         cursor.erase()
     }
 
     /// Removes and returns the last element of the list, or `None` if it is empty.
+    #[inline]
     pub fn pop_back(&mut self) -> Option<P> {
-        if self.is_empty() {
-            return None;
-        }
         let tail = self.get_tail();
         let mut cursor = CursorMut { list: self, current: tail };
         cursor.erase()
@@ -449,7 +467,7 @@ where
 
     /// Removes all elements from the list.
     pub fn clear(&mut self) {
-        while let Some(_) = self.pop_front() {}
+        while self.pop_front().is_some() {}
     }
 
     /// Erases the given element from the list. Returns the erased element.
@@ -458,6 +476,7 @@ where
     ///
     /// The caller must ensure that `obj` is a valid reference to an object that is
     /// currently in this list instance.
+    #[inline]
     pub unsafe fn erase(&mut self, obj: &P::Target) -> Option<P> {
         let ptr = obj as *const P::Target as *mut P::Target;
         let node = obj.get_node();
@@ -477,6 +496,7 @@ where
     ///
     /// The caller must ensure that `obj` is a valid reference to an object that is
     /// currently in this list instance, and `replacement` is not in any list.
+    #[inline]
     pub unsafe fn replace_raw(&mut self, obj: &P::Target, replacement: P) -> Option<P> {
         let ptr = obj as *const P::Target as *mut P::Target;
         let node = obj.get_node();
@@ -493,6 +513,7 @@ where
 
     /// Finds the first element matching the predicate, removes it from the list,
     /// and returns it. Returns `None` if no element matches.
+    #[inline]
     pub fn erase_if<F>(&mut self, mut f: F) -> Option<P>
     where
         F: FnMut(&P::Target) -> bool,
@@ -509,6 +530,7 @@ where
     }
 
     /// Finds the first element that satisfies the predicate.
+    #[inline]
     pub fn find_if<F>(&self, mut f: F) -> Option<&P::Target>
     where
         F: FnMut(&P::Target) -> bool,
@@ -517,12 +539,14 @@ where
     }
 
     /// Returns a cursor positioned at the front of the list.
+    #[inline]
     pub fn cursor_front_mut(&mut self) -> CursorMut<'_, P, Tag, S> {
         let head = self.head;
         CursorMut { list: self, current: head }
     }
 
     /// Returns a cursor positioned at the back (end sentinel) of the list.
+    #[inline]
     pub fn cursor_back_mut(&mut self) -> CursorMut<'_, P, Tag, S> {
         let sentinel = self.get_sentinel();
         CursorMut { list: self, current: sentinel }
@@ -535,8 +559,9 @@ where
     /// The caller must ensure that `obj` is a member of this list.
     /// It is undefined behavior to use the returned cursor if `obj` is not in the list,
     /// or if it is in a different list.
+    #[inline]
     pub unsafe fn cursor_at(&mut self, obj: &P::Target) -> CursorMut<'_, P, Tag, S> {
-        assert!(obj.get_node().in_container(), "Object must be in a container");
+        debug_assert!(obj.get_node().in_container(), "Object must be in a container");
         CursorMut { list: self, current: obj as *const P::Target as *mut P::Target }
     }
 
@@ -545,35 +570,42 @@ where
     /// Upon completion, `other` is left empty.
     ///
     /// This operation is O(1).
+    #[inline]
     pub fn splice(&mut self, other: &mut DoublyLinkedList<P, Tag, S>) {
         self.cursor_back_mut().splice(other);
     }
 
+    #[inline]
     pub fn iter(&self) -> Iterator<'_, P, Tag> {
         Iterator::new(self)
     }
 
     /// Returns a mutable bidirectional iterator over the elements of the list.
+    #[inline]
     pub fn iter_mut(&mut self) -> IteratorMut<'_, P, Tag> {
         IteratorMut::new(self)
     }
 
     /// Returns a unidirectional forward iterator over the elements of the list.
+    #[inline]
     pub fn forward_iter(&self) -> ForwardIterator<'_, P, Tag> {
         ForwardIterator::new(self.head)
     }
 
     /// Returns a unidirectional forward mutable iterator over the elements of the list.
+    #[inline]
     pub fn forward_iter_mut(&mut self) -> ForwardIteratorMut<'_, P, Tag> {
         ForwardIteratorMut::new(self.head)
     }
 
     /// Returns a unidirectional reverse iterator over the elements of the list.
+    #[inline]
     pub fn reverse_iter(&self) -> ReverseIterator<'_, P, Tag> {
         ReverseIterator::new(self.get_tail())
     }
 
     /// Returns a unidirectional reverse mutable iterator over the elements of the list.
+    #[inline]
     pub fn reverse_iter_mut(&mut self) -> ReverseIteratorMut<'_, P, Tag> {
         ReverseIteratorMut::new(self.get_tail())
     }
@@ -585,6 +617,7 @@ where
     P::Target: DoublyLinkedListContainable<P::Target, Tag>,
 {
     /// Returns the number of elements in the list.
+    #[inline]
     pub fn len(&self) -> usize {
         self.size.get()
     }
@@ -628,14 +661,17 @@ where
     P::Target: DoublyLinkedListContainable<P::Target, Tag>,
     S: SizeTracker,
 {
+    #[inline]
     pub fn get(&self) -> Option<&P::Target> {
         if is_sentinel_ptr(self.current) { None } else { unsafe { Some(&*self.current) } }
     }
 
+    #[inline]
     pub fn get_mut(&mut self) -> Option<&mut P::Target> {
         if is_sentinel_ptr(self.current) { None } else { unsafe { Some(&mut *self.current) } }
     }
 
+    #[inline]
     pub fn move_next(&mut self) {
         if !is_sentinel_ptr(self.current) {
             // SAFETY: `self.current` is valid current node (not sentinel).
@@ -644,6 +680,7 @@ where
         }
     }
 
+    #[inline]
     pub fn move_prev(&mut self) {
         if !is_sentinel_ptr(self.current) {
             // SAFETY: `self.current` is valid current node (not sentinel).
@@ -666,10 +703,12 @@ where
     ///
     /// Panics if the object is already in a container, or if the cursor is positioned
     /// at the end sentinel.
+    #[inline]
     pub fn insert_after(&mut self, ptr: P)
     where
         P: ManagedPtr,
     {
+        debug_assert!(!ptr.get_ref().get_node().in_container());
         // SAFETY: `P` is a `ManagedPtr`, which guarantees that the pointer is valid and that the
         // object will outlive its reference from this list. `self.current` is checked to not be
         // a sentinel.
@@ -680,18 +719,20 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the object is already in a container.
+    /// Panics if the cursor is positioned at the end sentinel, or in debug builds if the object is
+    /// already in a container.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the list.
+    /// The caller must ensure that `ptr` is a valid pointer to a `T` that is not currently in any
+    /// list, and that the object outlives the reference from the list.
+    #[inline]
     pub unsafe fn insert_after_raw(&mut self, ptr: P) {
-        assert!(!is_sentinel_ptr(self.current), "Cannot insert after end sentinel");
+        debug_assert!(!is_sentinel_ptr(self.current), "Cannot insert after end sentinel");
         let raw = P::into_raw(ptr);
         // SAFETY: `raw` is valid.
         let node = unsafe { self.list.get_node_ref(raw) };
-        assert!(!node.in_container());
+        debug_assert!(!node.in_container());
 
         // SAFETY: `self.current` is valid current node (not sentinel).
         let current_node = unsafe { self.list.get_node_ref(self.current) };
@@ -713,6 +754,7 @@ where
     /// # Panics
     ///
     /// Panics if the object is already in a container.
+    #[inline]
     pub fn replace(&mut self, replacement: P) -> Option<P>
     where
         P: ManagedPtr,
@@ -727,12 +769,13 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the object is already in a container.
+    /// Panics in debug builds if the object is already in a container.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `replacement` is a valid pointer to a `T` and that the object
-    /// outlives the reference from the list.
+    /// The caller must ensure that `replacement` is a valid pointer to a `T` that is not currently
+    /// in any list, and that the object outlives the reference from the list.
+    #[inline]
     pub unsafe fn replace_raw(&mut self, replacement: P) -> Option<P> {
         if is_sentinel_ptr(self.current) {
             return None;
@@ -750,10 +793,12 @@ where
     /// # Panics
     ///
     /// Panics if the object is already in a container.
+    #[inline]
     pub fn insert_before(&mut self, ptr: P)
     where
         P: ManagedPtr,
     {
+        debug_assert!(!ptr.get_ref().get_node().in_container());
         // SAFETY: `P` is a `ManagedPtr`, which guarantees that the pointer is valid and that the
         // object will outlive its reference from this list.
         unsafe { self.insert_before_raw(ptr) }
@@ -763,17 +808,18 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the object is already in a container.
+    /// Panics in debug builds if the object is already in a container.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the list.
+    /// The caller must ensure that `ptr` is a valid pointer to a `T` that is not currently in any
+    /// list, and that the object outlives the reference from the list.
+    #[inline]
     pub unsafe fn insert_before_raw(&mut self, ptr: P) {
         let raw = P::into_raw(ptr);
         // SAFETY: `raw` is valid.
         let node = unsafe { self.list.get_node_ref(raw) };
-        assert!(!node.in_container());
+        debug_assert!(!node.in_container());
 
         // SAFETY: `raw` is a single node, so it is a valid chain of 1 element.
         unsafe {
@@ -791,60 +837,52 @@ where
     /// - The chain is not empty.
     /// - The elements in the chain are NOT currently in any list.
     /// - `count` is the exact number of elements in the chain.
+    #[inline]
     unsafe fn insert_chain_before(
         &mut self,
         chain_head: *mut P::Target,
         chain_tail: *mut P::Target,
         count: usize,
     ) {
+        let head = self.list.head;
+        let before = self.current;
         // SAFETY: `chain_tail` is valid from caller.
         let chain_tail_node = unsafe { self.list.get_node_ref(chain_tail) };
-        chain_tail_node.set_next(self.current);
+        // SAFETY: `chain_head` is valid from caller.
+        let chain_head_node = unsafe { self.list.get_node_ref(chain_head) };
 
-        if self.list.is_empty() {
-            // SAFETY: `chain_head` is valid from caller.
-            let chain_head_node = unsafe { self.list.get_node_ref(chain_head) };
+        if is_sentinel_ptr(head) {
+            chain_tail_node.set_next(before);
             chain_head_node.set_prev(chain_tail);
             self.list.head = chain_head;
+        } else if before == head {
+            // SAFETY: `head` is not a sentinel, so it is a valid node.
+            let head_node = unsafe { self.list.get_node_ref(head) };
+            let tail = head_node.get_prev();
+            chain_tail_node.set_next(before);
+            chain_head_node.set_prev(tail);
+            head_node.set_prev(chain_tail);
+            self.list.head = chain_head;
+        } else if is_sentinel_ptr(before) {
+            // SAFETY: `head` is not a sentinel, so it is a valid node.
+            let head_node = unsafe { self.list.get_node_ref(head) };
+            let tail = head_node.get_prev();
+            // SAFETY: `tail` is a valid node in a non-empty list.
+            let tail_node = unsafe { self.list.get_node_ref(tail) };
+            chain_tail_node.set_next(before);
+            chain_head_node.set_prev(tail);
+            tail_node.set_next(chain_head);
+            head_node.set_prev(chain_tail);
         } else {
-            let prev = if self.current == self.list.head || is_sentinel_ptr(self.current) {
-                self.list.get_tail()
-            } else {
-                // SAFETY: `self.current` is valid.
-                let current_node = unsafe { self.list.get_node_ref(self.current) };
-                current_node.get_prev()
-            };
-
-            // SAFETY: `chain_head` is valid from caller.
-            let chain_head_node = unsafe { self.list.get_node_ref(chain_head) };
+            // SAFETY: `before` is not a sentinel, so it is a valid node.
+            let current_node = unsafe { self.list.get_node_ref(before) };
+            let prev = current_node.get_prev();
+            // SAFETY: `prev` is a valid predecessor node.
+            let prev_node = unsafe { self.list.get_node_ref(prev) };
+            chain_tail_node.set_next(before);
             chain_head_node.set_prev(prev);
-
-            // 1. Update predecessor's next if we are not inserting at head
-            if self.current != self.list.head {
-                // SAFETY: `prev` is valid predecessor.
-                let prev_node = unsafe { self.list.get_node_ref(prev) };
-                prev_node.set_next(chain_head);
-            }
-
-            // 2. Update successor's prev if we are not inserting at sentinel
-            if !is_sentinel_ptr(self.current) {
-                // SAFETY: `self.current` is valid.
-                let current_node = unsafe { self.list.get_node_ref(self.current) };
-                current_node.set_prev(chain_tail);
-            }
-
-            // 3. Update head if we are inserting at head
-            if self.current == self.list.head {
-                self.list.head = chain_head;
-            }
-
-            // 4. Update tail if we are inserting at sentinel
-            if is_sentinel_ptr(self.current) {
-                // SAFETY: `chain_tail` becomes the new tail.
-                unsafe {
-                    self.list.set_tail(chain_tail);
-                }
-            }
+            prev_node.set_next(chain_head);
+            current_node.set_prev(chain_tail);
         }
 
         if S::IS_TRACKING {
@@ -899,7 +937,7 @@ where
     ///
     /// This operation is O(1) for lists with non-tracking size.
     pub fn split_after(&mut self, dest: &mut CursorMut<'_, P, Tag, S>) {
-        assert!(!is_sentinel_ptr(self.current), "Cannot split after end sentinel");
+        debug_assert!(!is_sentinel_ptr(self.current), "Cannot split after end sentinel");
 
         // SAFETY: `self.current` is not sentinel.
         let curr_node = unsafe { self.list.get_node_ref(self.current) };
@@ -1016,11 +1054,13 @@ where
         }
     }
 
+    #[inline]
     pub fn erase(&mut self) -> Option<P> {
-        if is_sentinel_ptr(self.current) {
+        let ptr = self.current;
+        if is_sentinel_ptr(ptr) {
             return None;
         }
-        let ptr = self.current;
+        let head = self.list.head;
         // SAFETY: `ptr` is valid current node.
         let node = unsafe { self.list.get_node_ref(ptr) };
         let next = node.get_next();
@@ -1028,39 +1068,19 @@ where
 
         self.list.size.decrement();
 
-        if self.list.head == ptr && is_sentinel_ptr(next) {
-            self.list.head = self.list.get_sentinel();
+        let tgt_prev_node = if is_sentinel_ptr(next) { head } else { next };
+        // SAFETY: Both `head` and `next` (when not sentinel) are valid nodes in a non-empty list.
+        unsafe { self.list.get_node_ref(tgt_prev_node) }.set_prev(prev);
+
+        if ptr == head {
+            self.list.head = next;
         } else {
-            // 1. Update predecessor's next if we are not erasing head
-            if self.current != self.list.head {
-                // SAFETY: `prev` is valid predecessor.
-                let prev_node = unsafe { self.list.get_node_ref(prev) };
-                prev_node.set_next(next);
-            }
-
-            // 2. Update successor's prev if we are not erasing tail
-            if !is_sentinel_ptr(next) {
-                // SAFETY: `next` is valid successor.
-                let next_node = unsafe { self.list.get_node_ref(next) };
-                next_node.set_prev(prev);
-            }
-
-            // 3. Update head if we are erasing head
-            if self.current == self.list.head {
-                self.list.head = next;
-            }
-
-            // 4. Update tail if we are erasing tail
-            if is_sentinel_ptr(next) {
-                // SAFETY: `prev` becomes the new tail.
-                unsafe {
-                    self.list.set_tail(prev);
-                }
-            }
+            // SAFETY: `prev` is a valid predecessor node.
+            unsafe { self.list.get_node_ref(prev) }.set_next(next);
         }
 
-        node.set_next(core::ptr::null_mut());
         node.set_prev(core::ptr::null_mut());
+        node.set_next(core::ptr::null_mut());
 
         self.current = next;
         // SAFETY: `ptr` was popped, safe to reconstruct.
@@ -1108,11 +1128,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let met = self.front.current == self.back.current;
         let item = self.front.next();
-        if item.is_some() {
-            if met {
-                self.front.current = crate::make_sentinel_null();
-                self.back.current = crate::make_sentinel_null();
-            }
+        if item.is_some() && met {
+            self.front.current = crate::make_sentinel_null();
+            self.back.current = crate::make_sentinel_null();
         }
         item
     }
@@ -1126,11 +1144,9 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         let met = self.front.current == self.back.current;
         let item = self.back.next();
-        if item.is_some() {
-            if met {
-                self.front.current = crate::make_sentinel_null();
-                self.back.current = crate::make_sentinel_null();
-            }
+        if item.is_some() && met {
+            self.front.current = crate::make_sentinel_null();
+            self.back.current = crate::make_sentinel_null();
         }
         item
     }
@@ -1161,7 +1177,7 @@ where
     ///
     /// Panics if the object is not in a container.
     pub fn from_element(obj: &'a P::Target) -> Self {
-        assert!(obj.get_node().in_container(), "Object must be in a container");
+        debug_assert!(obj.get_node().in_container(), "Object must be in a container");
         Self { current: obj as *const _ as *mut _, _phantom: core::marker::PhantomData }
     }
 }
@@ -1212,7 +1228,7 @@ where
     ///
     /// Panics if the object is not in a container.
     pub fn from_element(obj: &'a P::Target) -> Self {
-        assert!(obj.get_node().in_container(), "Object must be in a container");
+        debug_assert!(obj.get_node().in_container(), "Object must be in a container");
         Self { current: obj as *const _ as *mut _, _phantom: core::marker::PhantomData }
     }
 }
@@ -1336,7 +1352,7 @@ where
     ///
     /// Panics if the object is not in a container.
     pub fn from_element(obj: &'a mut P::Target) -> Self {
-        assert!(obj.get_node().in_container(), "Object must be in a container");
+        debug_assert!(obj.get_node().in_container(), "Object must be in a container");
         Self { current: obj as *mut _, _phantom: core::marker::PhantomData }
     }
 }
@@ -1387,7 +1403,7 @@ where
     ///
     /// Panics if the object is not in a container.
     pub fn from_element(obj: &'a mut P::Target) -> Self {
-        assert!(obj.get_node().in_container(), "Object must be in a container");
+        debug_assert!(obj.get_node().in_container(), "Object must be in a container");
         Self { current: obj as *mut _, _phantom: core::marker::PhantomData }
     }
 }
@@ -1429,29 +1445,52 @@ where
 /// The caller must ensure that `obj` is currently in a valid list instance that does NOT
 /// track its size (uses `NonTrackingSize`), and that no other mutable references to that
 /// list are active.
+#[inline]
 pub unsafe fn remove_from_container<T, Tag, P>(obj: &T) -> Option<P>
 where
     P: PtrTraits<Target = T>,
     T: DoublyLinkedListContainable<T, Tag>,
 {
     let node = obj.get_node();
-    if !node.in_container() {
+    let next = node.get_next();
+    if next.is_null() {
         return None;
     }
+    let prev = node.get_prev();
+    debug_assert!(!prev.is_null());
 
-    let mut current = obj as *const T as *mut T;
+    // SAFETY: Caller guarantees `obj` is in a valid untracked list and no other references to the
+    // list are active.
     unsafe {
-        while !is_sentinel_ptr(current) {
-            current = (*current).get_node().get_next();
-        }
+        let tgt_prev = if is_sentinel_ptr(next) {
+            let list_ptr = crate::sentinel::unmake_sentinel::<
+                DoublyLinkedList<P, Tag, NonTrackingSize>,
+                T,
+            >(next);
+            (*(*list_ptr).head).get_node().prev.get()
+        } else {
+            (*next).get_node().prev.get()
+        };
 
-        let list_ptr = crate::sentinel::unmake_sentinel::<
-            DoublyLinkedList<P, Tag, NonTrackingSize>,
-            T,
-        >(current);
-        let list_ref = &mut *list_ptr;
+        let prev_node = (*prev).get_node();
+        let prev_next = prev_node.get_next();
+        let tgt_next = if is_sentinel_ptr(prev_next) {
+            let list_ptr = crate::sentinel::unmake_sentinel::<
+                DoublyLinkedList<P, Tag, NonTrackingSize>,
+                T,
+            >(prev_next);
+            &raw mut (*list_ptr).head
+        } else {
+            prev_node.next.get()
+        };
 
-        list_ref.erase(obj)
+        *tgt_prev = prev;
+        *tgt_next = next;
+
+        node.set_next(core::ptr::null_mut());
+        node.set_prev(core::ptr::null_mut());
+
+        Some(P::from_raw(obj as *const T as *mut T))
     }
 }
 

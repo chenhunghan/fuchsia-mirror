@@ -5,6 +5,8 @@
 """Create a directory that contains a Bazel binary, its extracted install_base
 files as well as a wrapper script named 'bazel'."""
 
+from __future__ import annotations
+
 import argparse
 import os
 import shutil
@@ -21,15 +23,15 @@ _INFRA_3PP_GIT_COMMIT = "70a9ea9b301f158a76c1cd31ecac359d2cbaf515"
 
 
 class OutputTree(object):
-    def __init__(self, dst_dir, exist_ok=False):
+    def __init__(self, dst_dir: str, exist_ok: bool = False) -> None:
         self._dst_dir = os.path.abspath(dst_dir)
         self._exist_ok = exist_ok
         os.makedirs(dst_dir, exist_ok=exist_ok)
 
-    def add_file(self, src_path, dst_path):
+    def add_file(self, src_path: str, dst_path: str) -> None:
         copy_dst = os.path.join(self._dst_dir, dst_path)
 
-        def do_copy():
+        def do_copy() -> None:
             shutil.copy2(src_path, copy_dst)
 
         try:
@@ -38,10 +40,10 @@ class OutputTree(object):
             os.unlink(copy_dst)
             do_copy()
 
-    def add_tree(self, src_path, dst_path):
+    def add_tree(self, src_path: str, dst_path: str) -> None:
         copy_dst = os.path.join(self._dst_dir, dst_path)
 
-        def do_copy():
+        def do_copy() -> None:
             shutil.copytree(
                 src_path,
                 copy_dst,
@@ -58,34 +60,34 @@ class OutputTree(object):
             shutil.rmtree(copy_dst)
             do_copy()
 
-    def close(self):
+    def close(self) -> None:
         pass
 
 
 class OutputArchive(object):
-    def __init__(self, output_path):
+    def __init__(self, output_path: str) -> None:
         self._zip = zipfile.ZipFile(
             output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
         )
 
-    def add_file(self, src_path, dst_path):
+    def add_file(self, src_path: str, dst_path: str) -> None:
         self._zip.write(src_path, dst_path)
 
-    def add_tree(self, src_path, dst_path):
+    def add_tree(self, src_path: str, dst_path: str) -> None:
         src_path = os.path.abspath(src_path)
         for root, subdirs, filenames in os.walk(src_path):
             dst_subdir = os.path.join(dst_path, os.path.relpath(root, src_path))
             for filename in filenames:
-                dst_path = os.path.join(dst_subdir, filename)
-                src_path = os.path.join(root, filename)
-                self._zip.write(src_path, dst_path)
+                dst_file = os.path.join(dst_subdir, filename)
+                src_file = os.path.join(root, filename)
+                self._zip.write(src_file, dst_file)
 
-    def close(self):
+    def close(self) -> None:
         self._zip.close()
 
 
-def git_clone_commit(git_url, git_commit, dst_dir):
-    def git_cmd(args):
+def git_clone_commit(git_url: str, git_commit: str, dst_dir: str) -> None:
+    def git_cmd(args: list[str]) -> None:
         subprocess.check_call(["git", "-C", dst_dir] + args)
 
     git_cmd(["init"])
@@ -114,7 +116,7 @@ def get_bazel_download_url(version: str) -> str:
     return f"https://github.com/bazelbuild/bazel/releases/download/{version}/bazel-{version}-{host_os}-{host_cpu}{ext}"
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     bazel_group = parser.add_mutually_exclusive_group(required=True)
     bazel_group.add_argument(
@@ -233,6 +235,7 @@ def main():
         )
 
         # Copy to the install dir or the output archive
+        out: OutputTree | OutputArchive
         if args.install_dir:
             print(
                 "\nCopying to install directory: %s" % args.install_dir,

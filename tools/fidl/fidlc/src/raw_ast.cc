@@ -167,7 +167,9 @@ void RawProtocolMethod::Accept(TreeVisitor* visitor) const {
     visitor->OnParameterList(maybe_response);
   }
   if (maybe_error_ctor != nullptr) {
+    visitor->OnProtocolMethodErrorEnter();
     visitor->OnTypeConstructor(maybe_error_ctor);
+    visitor->OnProtocolMethodErrorExit();
   }
 }
 

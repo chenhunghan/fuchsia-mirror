@@ -16,6 +16,7 @@
         {
             protocol: [
                 "fuchsia.net.filter.deprecated.Filter",
+                "fuchsia.net.name.DnsServerWatcher",
                 "fuchsia.net.stack.Log",
             ],
         },
@@ -38,6 +39,7 @@
         {
             protocol: [
                 "fuchsia.net.filter.deprecated.Filter",
+                "fuchsia.net.name.DnsServerWatcher",
                 "fuchsia.net.stack.Log",
             ],
             from: "self",

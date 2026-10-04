@@ -54,7 +54,6 @@ fidl_fuchsia_net_routes_ext_lib("fidl_fuchsia_net_routes_ext") {
     "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust_flex",
     "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust_flex",
     "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust_flex",
-    "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust_flex",
     "//src/lib/fdomain/client:flex_fidl",
     "//src/lib/network/fidl_fuchsia_net_matchers_ext",
   ]
@@ -70,7 +69,6 @@ fidl_fuchsia_net_routes_ext_lib("fidl_fuchsia_net_routes_ext_fdomain") {
     "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust_fdomain_flex",
     "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust_fdomain_flex",
     "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust_fdomain_flex",
-    "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust_fdomain_flex",
     "//src/lib/fdomain/client:flex_fdomain",
     "//src/lib/network/fidl_fuchsia_net_matchers_ext:fidl_fuchsia_net_matchers_ext_fdomain",
   ]

@@ -169,6 +169,10 @@ pub struct PersistenceConfig {
     /// Battery percentage threshold to trigger an inspect snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub low_battery_threshold_percent: Option<u64>,
+
+    /// Whether to enable collecting an inspect snapshot upon shutdown.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub enable_shutdown_snapshot: bool,
 }
 
 /// Diagnostics configuration options for the sampler configuration area.

@@ -395,10 +395,16 @@ async fn test_crypto_icce_recovery() {
         })
     };
 
-    // Issue a task with invalid crypto slot. This should fail and trigger recovery.
-    let bad_opts = ReadOptions { inline_crypto: InlineCryptoOptions::enabled(99, 100) };
-
+    // Issue a task with an invalidated crypto slot. Register it with the session first so
+    // `block_server` forwards the request to CQHCI, where it should fail with ICCE and trigger
+    // recovery.
+    let crypto_proxy = connect_inline_encryption_proxy(&started_driver, "user");
+    let key_token = crypto_proxy.program_key(b"key1", 4096).await.unwrap().unwrap();
     let bad_client = connect_block_client(&started_driver, "user").await;
+    let slot = bad_client.register_key(key_token).await.expect("register_key failed");
+    fixture.invalidate_crypto_slot(slot);
+    let bad_opts = ReadOptions { inline_crypto: InlineCryptoOptions::enabled(slot, 100) };
+
     let mut buf = vec![0u8; 512];
     let result = bad_client
         .read_at_with_opts_traced(
@@ -885,7 +891,7 @@ async fn test_inline_crypto() {
         .await
         .expect("FIDL error")
         .expect("program_key failed");
-    assert_eq!(response, 0);
+    assert!(!response.is_invalid());
 
     let response = proxy
         .derive_raw_secret(b"my-wrapped-key")
@@ -905,9 +911,11 @@ async fn test_crypto_data_integrity() {
     let block_client = connect_block_client(&started_driver, "user").await;
     let crypto_proxy = connect_inline_encryption_proxy(&started_driver, "user");
 
-    // Program two keys to get valid slots.
-    let slot1 = crypto_proxy.program_key(b"key1", 4096).await.unwrap().unwrap();
-    let slot2 = crypto_proxy.program_key(b"key2", 4096).await.unwrap().unwrap();
+    // Program two keys and register them with the session to get valid slots.
+    let key_token1 = crypto_proxy.program_key(b"key1", 4096).await.unwrap().unwrap();
+    let key_token2 = crypto_proxy.program_key(b"key2", 4096).await.unwrap().unwrap();
+    let slot1 = block_client.register_key(key_token1).await.expect("register_key failed");
+    let slot2 = block_client.register_key(key_token2).await.expect("register_key failed");
     assert_eq!(slot1, 0);
     assert_eq!(slot2, 1);
 

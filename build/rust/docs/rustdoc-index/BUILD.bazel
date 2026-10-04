@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "rustdoc-index",
+    srcs = ["src/lib.rs"],
+    compile_data = [
+        "header.md",
+        "//docs/reference/rust/_common:_crates_list.md",
+    ],
+    edition = "2024",
+    visibility = ["//build/rust:__subpackages__"],
+)

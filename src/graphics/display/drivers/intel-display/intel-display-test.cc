@@ -8,8 +8,8 @@
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/loop.h>
+#include <lib/driver/mmio/testing/cpp/test-helper.h>
 #include <lib/driver/testing/cpp/scoped_global_logger.h>
-#include <lib/mmio-ptr/fake.h>
 
 #include <gtest/gtest.h>
 
@@ -149,15 +149,6 @@ TEST_F(ControllerWithFakeSysmemTest, ImportBufferCollection) {
   }
 }
 
-fdf::MmioBuffer MakeMmioBuffer(uint8_t* buffer, size_t size) {
-  return fdf::MmioBuffer({
-      .vaddr = FakeMmioPtr(buffer),
-      .offset = 0,
-      .size = size,
-      .vmo = ZX_HANDLE_INVALID,
-  });
-}
-
 TEST(IntelDisplay, ImportImage) {
   fdf_testing::ScopedGlobalLogger logger;
   async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
@@ -195,9 +186,8 @@ TEST(IntelDisplay, ImportImage) {
   constexpr size_t kGraphicsTranslationTableSizeBytes = (1 << 21);
   ASSERT_OK(pci.WriteConfig16(registers::GmchGfxControl::kAddr,
                               registers::GmchGfxControl().set_gtt_size(0x01).reg_value()));
-  auto buffer = std::make_unique<uint8_t[]>(kGraphicsTranslationTableSizeBytes);
-  memset(buffer.get(), 0, kGraphicsTranslationTableSizeBytes);
-  fdf::MmioBuffer mmio = MakeMmioBuffer(buffer.get(), kGraphicsTranslationTableSizeBytes);
+  fdf::MmioBuffer mmio =
+      fdf_testing::CreateMmioBuffer(kGraphicsTranslationTableSizeBytes, ZX_CACHE_POLICY_CACHED);
   ASSERT_OK(display.InitGttForTesting(pci, std::move(mmio), /*fb_offset=*/0));
 
   // Import buffer collection.

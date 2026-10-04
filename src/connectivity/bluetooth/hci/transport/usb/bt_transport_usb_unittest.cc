@@ -59,19 +59,19 @@ class FakeUsbDevice : public ddk::UsbProtocol<FakeUsbDevice> {
     // Endpoint indices are per direction (in/out).
     usb::InterfaceBuilder interface_0_builder(/*config_num=*/0);
     usb::EndpointBuilder bulk_in_endpoint_builder(
-        /*config_num=*/0, static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+        /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
         /*endpoint_index=*/0, /*in=*/true);
     interface_0_builder.AddEndpoint(bulk_in_endpoint_builder);
     bulk_in_addr_ = usb::EpIndexToAddress(usb::kInEndpointStart);
 
     usb::EndpointBuilder bulk_out_endpoint_builder(
-        /*config_num=*/0, static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+        /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
         /*endpoint_index=*/0, /*in=*/false);
     interface_0_builder.AddEndpoint(bulk_out_endpoint_builder);
     bulk_out_addr_ = usb::EpIndexToAddress(usb::kOutEndpointStart);
 
     usb::EndpointBuilder interrupt_endpoint_builder(
-        /*config_num=*/0, static_cast<uint8_t>(fdescriptor::EndpointType::kInterrupt),
+        /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kInterrupt),
         /*endpoint_index=*/1, /*in=*/true);
     // The endpoint packet size must be large enough to send test packets.
     interrupt_endpoint_builder.set_max_packet_size(kInterruptPacketSize);
@@ -85,16 +85,14 @@ class FakeUsbDevice : public ddk::UsbProtocol<FakeUsbDevice> {
       for (uint8_t alt_setting = 0; alt_setting < 6; alt_setting++) {
         usb::InterfaceBuilder interface_1_builder(/*config_num=*/0, alt_setting);
         usb::EndpointBuilder isoc_out_endpoint_builder(
-            /*config_num=*/0,
-            static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous),
+            /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kIsochronous),
             /*endpoint_index=*/1, /*in=*/false);
         isoc_out_endpoint_builder.set_max_packet_size(kScoMaxPacketSize);
         interface_1_builder.AddEndpoint(isoc_out_endpoint_builder);
         isoc_out_addr_ = usb::EpIndexToAddress(usb::kOutEndpointStart + 1);
 
         usb::EndpointBuilder isoc_in_endpoint_builder(
-            /*config_num=*/0,
-            static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous),
+            /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kIsochronous),
             /*endpoint_index=*/2, /*in=*/true);
         isoc_in_endpoint_builder.set_max_packet_size(kScoMaxPacketSize);
         interface_1_builder.AddEndpoint(isoc_in_endpoint_builder);
@@ -817,7 +815,7 @@ TEST_F(BtTransportUsbBindFailureTest, ConfigurationDescriptorWithIncorrectNumber
 
   usb::InterfaceBuilder interface_builder(/*config_num=*/0);
   usb::EndpointBuilder interrupt_endpoint_builder(
-      /*config_num=*/0, static_cast<uint8_t>(fdescriptor::EndpointType::kInterrupt),
+      /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kInterrupt),
       /*endpoint_index=*/1, /*in=*/true);
   interface_builder.AddEndpoint(interrupt_endpoint_builder);
   usb::ConfigurationBuilder config_builder(/*config_num=*/0);
@@ -839,18 +837,17 @@ TEST_F(BtTransportUsbBindFailureTest,
 
   usb::InterfaceBuilder interface_0_builder(/*config_num=*/0);
   usb::EndpointBuilder interrupt_endpoint_builder(
-      /*config_num=*/0, static_cast<uint8_t>(fdescriptor::EndpointType::kInterrupt),
+      /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kInterrupt),
       /*endpoint_index=*/0, /*in=*/true);
   interface_0_builder.AddEndpoint(interrupt_endpoint_builder);
   usb::EndpointBuilder bulk_in_endpoint_builder(
-      /*config_num=*/0, static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       /*endpoint_index=*/1, /*in=*/true);
   interface_0_builder.AddEndpoint(bulk_in_endpoint_builder);
 
   // Add isoc endpoint instead of expected bulk out endpoint.
   usb::EndpointBuilder bulk_out_endpoint_builder(
-      /*config_num=*/0,
-      static_cast<uint8_t>(fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous),
+      /*config_num=*/0, fidl::ToUnderlying(fdescriptor::EndpointType::kIsochronous),
       /*endpoint_index=*/0, /*in=*/false);
   interface_0_builder.AddEndpoint(bulk_out_endpoint_builder);
 

@@ -11,6 +11,11 @@ use driver_manager_firmware_crash::FirmwareCrashService;
 use driver_manager_shutdown::ShutdownManager;
 use driver_manager_utils::DictionaryUtil;
 use fidl::endpoints::{Proxy, create_endpoints};
+use fidl_fuchsia_component as fcomponent;
+use fidl_fuchsia_component_sandbox as fsandbox;
+use fidl_fuchsia_driver_index as fdi;
+use fidl_fuchsia_io as fio;
+use fidl_fuchsia_ldsvc as fldsvc;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::server::ServiceFs;
 use futures::channel::{mpsc, oneshot};
@@ -19,10 +24,6 @@ use futures::select;
 use log::{error, info};
 use std::ops::ControlFlow;
 use std::rc::Rc;
-use {
-    fidl_fuchsia_component as fcomponent, fidl_fuchsia_component_sandbox as fsandbox,
-    fidl_fuchsia_driver_index as fdi, fidl_fuchsia_io as fio, fidl_fuchsia_ldsvc as fldsvc,
-};
 
 #[fuchsia::main]
 async fn main() -> Result<(), Error> {
@@ -113,7 +114,7 @@ async fn main() -> Result<(), Error> {
     let firmware_crash_service = Rc::new(FirmwareCrashService::default());
     firmware_crash_service.publish(&mut fs);
 
-    let shutdown_manager = ShutdownManager::new(driver_runner.clone());
+    let shutdown_manager = ShutdownManager::from_incoming(driver_runner.clone());
     shutdown_manager.publish(&mut fs);
 
     // Serve devfs from outgoing directory.

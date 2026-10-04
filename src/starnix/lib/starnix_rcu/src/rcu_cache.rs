@@ -4,7 +4,7 @@
 
 use fuchsia_rcu::{RcuDroppable, RcuReadScope};
 use fuchsia_rcu_collections::rcu_raw_hash_map::{InsertionResult, RcuRawHashMap};
-use starnix_sync::{Mutex, MutexGuard};
+use starnix_sync::{LockDepGuard, LockDepMutex, RcuCacheLock};
 use std::hash::Hash;
 
 pub enum RcuCacheInsertionResult<V> {
@@ -46,7 +46,7 @@ where
     map: RcuRawHashMap<K, V, S>,
 
     /// A mutex to provide synchronization for writing to the map.
-    mutex: Mutex<()>,
+    mutex: LockDepMutex<(), RcuCacheLock>,
 }
 
 impl<K, V> RcuCache<K, V, rapidhash::RapidBuildHasher>
@@ -56,7 +56,11 @@ where
 {
     /// Creates a new `RcuCache` with the specified capacity.
     pub fn new(capacity: usize) -> Self {
-        Self { capacity, map: RcuRawHashMap::with_capacity(capacity + 1), mutex: Mutex::new(()) }
+        Self {
+            capacity,
+            map: RcuRawHashMap::with_capacity(capacity + 1),
+            mutex: LockDepMutex::new(()),
+        }
     }
 }
 
@@ -71,7 +75,7 @@ where
         Self {
             capacity,
             map: RcuRawHashMap::with_capacity_and_hasher(capacity + 1, hash_builder),
-            mutex: Mutex::new(()),
+            mutex: LockDepMutex::new(()),
         }
     }
 }
@@ -125,7 +129,7 @@ where
     S: std::hash::BuildHasher + Send + Sync + 'static,
 {
     cache: &'a RcuCache<K, V, S>,
-    _guard: MutexGuard<'a, ()>,
+    _guard: LockDepGuard<'a, ()>,
 }
 
 impl<'a, K, V, S> RcuCacheGuard<'a, K, V, S>

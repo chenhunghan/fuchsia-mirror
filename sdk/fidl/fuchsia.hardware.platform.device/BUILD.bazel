@@ -15,7 +15,7 @@ fidl_library(
     api_area = "Drivers",
     category = "partner",
     enable_rust_next = True,
-    stable = True,
+    stable = False,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.driver.framework",

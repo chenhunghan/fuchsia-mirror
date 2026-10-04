@@ -10,8 +10,15 @@ use storage_ptr_slice::MutPtrByteSlice;
 pub trait PageRequest: DataBuffer {
     /// Prepares the target buffer for reading `read_range`.
     ///
+    /// `read_alignment` specifies the alignment boundary used when delivering chunks for Merkle
+    /// verification (ignored by direct pager implementations that supply pages without a verifier).
+    ///
     /// Must be called at most once prior to accessing the buffer slice or committing data.
-    fn prepare(&mut self, read_range: Range<u64>) -> Result<(), ChunkedArchiveError>;
+    fn prepare(
+        &mut self,
+        read_range: Range<u64>,
+        read_alignment: usize,
+    ) -> Result<(), ChunkedArchiveError>;
 }
 
 /// A no-op [`PageRequest`] for intermediate mapper sessions that do not run a kernel pager thread.
@@ -32,7 +39,11 @@ impl DataBuffer for NullPageRequest {
 }
 
 impl PageRequest for NullPageRequest {
-    fn prepare(&mut self, _read_range: Range<u64>) -> Result<(), ChunkedArchiveError> {
+    fn prepare(
+        &mut self,
+        _read_range: Range<u64>,
+        _read_alignment: usize,
+    ) -> Result<(), ChunkedArchiveError> {
         Ok(())
     }
 }
@@ -45,7 +56,7 @@ mod tests {
     fn test_null_page_request() {
         let mut req = NullPageRequest;
         assert_eq!(req.range(), 0..0);
-        assert!(req.prepare(0..4096).is_ok());
+        assert!(req.prepare(0..4096, 128 * 1024).is_ok());
         assert_eq!(req.mut_ptr_slice().len(), 0);
         assert!(req.commit(0).is_ok());
     }

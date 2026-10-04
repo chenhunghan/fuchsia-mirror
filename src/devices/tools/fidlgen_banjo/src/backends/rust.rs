@@ -245,7 +245,11 @@ fn table_field_to_rust_str(field: &TableMember, ir: &FidlIr) -> Result<String, E
 fn get_base_type_from_alias(alias: &Option<&String>) -> Option<String> {
     if let Some(name) = alias {
         if name.starts_with("zx/") {
-            return Some(format!("zircon_types::zx_{}_t", to_c_name(&name[3..])));
+            if *name == "zx/Result" {
+                return Some("zircon_types::zx_status_t".to_string());
+            } else {
+                return Some(format!("zircon_types::zx_{}_t", to_c_name(&name[3..])));
+            }
         }
     }
     None

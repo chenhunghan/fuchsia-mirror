@@ -84,20 +84,6 @@ impl EnvironmentContext {
         self.env_kind().get_build_config_file()
     }
 
-    pub fn get_default_ascendd_path(&self) -> std::result::Result<PathBuf, PathsError> {
-        match (self.env_var("ASCENDD"), self.env_kind()) {
-            (Ok(path), _) => Ok(PathBuf::from(&path)),
-            (_, EnvironmentKind::InTree { build_dir: Some(p), .. }) => {
-                Ok(p.join(".ffx-daemon/daemon.sock"))
-            }
-            (_, EnvironmentKind::Isolated { isolate_root }) => Ok(isolate_root.join("daemon.sock")),
-            (_, EnvironmentKind::ConfigDomain { isolate_root: Some(isolate_root), .. }) => {
-                Ok(isolate_root.join("daemon.sock").into())
-            }
-            (_, _) => Ok(default_ascendd_path()),
-        }
-    }
-
     pub fn get_runtime_path(&self) -> std::result::Result<PathBuf, PathsError> {
         match self.env_kind().isolate_root() {
             Some(isolate_root) => Ok(isolate_root.join("runtime")),
@@ -172,12 +158,6 @@ fn get_runtime_base() -> std::result::Result<PathBuf, PathsError> {
             Ok(home)
         })
     }
-}
-
-fn default_ascendd_path() -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push("ascendd");
-    path
 }
 
 fn get_runtime_base_path() -> std::result::Result<PathBuf, PathsError> {

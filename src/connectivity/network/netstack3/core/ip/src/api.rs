@@ -12,7 +12,7 @@ use net_types::{SpecifiedAddr, Witness as _};
 use netstack3_base::sync::PrimaryRc;
 use netstack3_base::{
     AnyDevice, ContextPair, DeferredResourceRemovalContext, DeviceIdContext, InspectableValue,
-    Inspector, InspectorDeviceExt, MarkDomain, MarkMatcher, Marks, ReferenceNotifiersExt as _,
+    Inspector, InspectorDeviceExt, Marks, ReferenceNotifiersExt as _,
     RemoveResourceResultWithContext, StrongDeviceIdentifier, SubnetMatcher, WrapBroadcastMarker,
 };
 
@@ -253,25 +253,7 @@ where
                         for (domain, matcher) in
                             mark_matchers.iter().filter_map(|(d, m)| m.map(|m| (d, m)))
                         {
-                            let domain_str = match domain {
-                                MarkDomain::Mark1 => "Mark1",
-                                MarkDomain::Mark2 => "Mark2",
-                            };
-                            match matcher {
-                                MarkMatcher::Unmarked => {
-                                    inspector.record_str(domain_str, "Unmarked")
-                                }
-                                MarkMatcher::Marked { start, end, mask, invert } => {
-                                    inspector.record_child(domain_str, |inspector| {
-                                        inspector.record_uint("Mask", mask);
-                                        inspector.record_child("Range", |inspector| {
-                                            inspector.record_uint("StartInclusive", start);
-                                            inspector.record_uint("EndInclusive", end);
-                                        });
-                                        inspector.record_bool("Invert", invert);
-                                    })
-                                }
-                            }
+                            matcher.record(domain.name(), inspector);
                         }
                     });
                     match action {

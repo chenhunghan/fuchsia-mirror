@@ -2,11 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 load("@rules_cc//cc:defs.bzl", "cc_library")
-
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
 )
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_test.bzl",
+    "fx_test",
+)
+
+package(default_applicable_licenses = ["//:license"])
 
 cc_library(
     name = "files",
@@ -32,9 +47,88 @@ cc_library(
         "//sdk/lib/utf-utils",
         "//src/lib/fxl:memory",
     ],
+    visibility = [
+        "//examples:__subpackages__",
+        "//sdk/lib:__subpackages__",
+        "//src:__subpackages__",
+        "//tools/symbolizer:__pkg__",
+        "//vendor:__subpackages__",
+        "//zircon/system/ulib/debugdata/test:__pkg__",
+    ],
     deps = [
         "//src/lib/fxl:strings",
         "//zircon/system/ulib/fbl",
     ],
     alwayslink = True,
+)
+
+# @bazel2gn:skip
+fx_cc_binary(
+    name = "files_unittests_bin",
+    testonly = True,
+    srcs = [
+        "directory_unittest.cc",
+        "file_descriptor_unittest.cc",
+        "file_unittest.cc",
+        "glob_unittest.cc",
+        "path_unittest.cc",
+        "scoped_temp_dir_unittest.cc",
+    ],
+    tags = ["manual"],
+    deps = [
+        ":files",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl:common",
+        "//src/lib/fxl:strings",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "files_unittests_packaged_bin",
+    testonly = True,
+    binary = ":files_unittests_bin",
+    binary_name = "files_unittests",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "files-tests-manifest",
+    testonly = True,
+    component_name = "files-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/files_unittests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "files-tests-component",
+    compiled_manifest = ":files-tests-manifest",
+    component_name = "files-tests",
+    deps = [
+        ":files_unittests_packaged_bin",
+    ],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "files-tests-package",
+    package_name = "files-tests",
+    test_components = [
+        ":files-tests-component",
+    ],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "files-tests",
+    package = ":files-tests-package",
 )

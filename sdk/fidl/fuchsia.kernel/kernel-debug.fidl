@@ -16,13 +16,13 @@ closed protocol DebugBroker {
     strict SendDebugCommand(struct {
         command string:DEBUG_COMMAND_MAX;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Sets whether kernel tracing (ktrace) is enabled or disabled.
     strict SetTracingEnabled(struct {
         enabled bool;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

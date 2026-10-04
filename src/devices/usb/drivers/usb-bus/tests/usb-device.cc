@@ -14,6 +14,7 @@
 #include <thread>
 
 #include <fbl/ref_counted.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 #include <zxtest/zxtest.h>
 
@@ -21,6 +22,8 @@
 #include "src/devices/usb/drivers/usb-bus/tests/common.h"
 #include "src/devices/usb/drivers/usb-bus/usb-bus.h"
 #include "src/lib/utf_conversion/utf_conversion.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_bus {
 
@@ -172,7 +175,7 @@ TEST_F(DeviceTest, ControlIn) {
     void* mapped_data;
     request->Mmap(&mapped_data);
     memcpy(mapped_data, const_data, sizeof(const_data));
-    EXPECT_EQ(request->request()->setup.bm_request_type, 5 | USB_DIR_IN);
+    EXPECT_EQ(request->request()->setup.bm_request_type, 5 | fdescriptor::EndpointDirection::kIn);
     EXPECT_EQ(request->request()->setup.b_request, 97);
     EXPECT_EQ(request->request()->setup.w_value, 8);
     EXPECT_EQ(request->request()->setup.w_index, 12);
@@ -182,7 +185,8 @@ TEST_F(DeviceTest, ControlIn) {
   });
   uint8_t buffer[5];
   size_t actual;
-  ASSERT_OK(usb.ControlIn(5 | USB_DIR_IN, 97, 8, 12, 9001, buffer, sizeof(buffer), &actual));
+  ASSERT_OK(usb.ControlIn(5 | fdescriptor::EndpointDirection::kIn, 97, 8, 12, 9001, buffer,
+                          sizeof(buffer), &actual));
   ASSERT_EQ(0, memcmp(buffer, const_data, sizeof(buffer)));
 }
 
@@ -217,9 +221,8 @@ TEST_F(DeviceTest, SetInterface) {
     auto requests = get_pending_requests();
     auto request = requests.pop();
     EXPECT_EQ(request->request()->header.ep_address, 0);
-    EXPECT_EQ(request->request()->setup.bm_request_type,
-              USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE);
-    EXPECT_EQ(request->request()->setup.b_request, USB_REQ_SET_INTERFACE);
+    EXPECT_EQ(request->request()->setup.bm_request_type, kStandardInterfaceOut);
+    EXPECT_EQ(request->request()->setup.b_request, fdescriptor::StandardRequest::kSetInterface);
     EXPECT_EQ(request->request()->setup.w_value, 5);
     EXPECT_EQ(request->request()->setup.w_index, 98);
     request->Complete(ZX_OK, 0);
@@ -469,9 +472,8 @@ TEST_F(DeviceTest, FidlSetInterface) {
     auto requests = get_pending_requests();
     auto request = requests.pop();
     EXPECT_EQ(request->request()->header.ep_address, 0);
-    EXPECT_EQ(request->request()->setup.bm_request_type,
-              USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE);
-    EXPECT_EQ(request->request()->setup.b_request, USB_REQ_SET_INTERFACE);
+    EXPECT_EQ(request->request()->setup.bm_request_type, kStandardInterfaceOut);
+    EXPECT_EQ(request->request()->setup.b_request, fdescriptor::StandardRequest::kSetInterface);
     EXPECT_EQ(request->request()->setup.w_value, 5);
     EXPECT_EQ(request->request()->setup.w_index, 98);
     request->Complete(ZX_OK, 0);
@@ -511,6 +513,11 @@ TEST_F(DeviceTest, FidlSetConfiguration) {
   ASSERT_EQ(get_configuration(), 2);
 }
 
+TEST_F(DeviceTest, ReinitializeWithoutResettingFails) {
+  auto& device = get_device();
+  EXPECT_EQ(device.Reinitialize(), ZX_ERR_BAD_STATE);
+}
+
 // A fake HCI that pretends to be a device that does dodgy things with
 // configuration descriptors: namely, changing the size they claim to be
 // depending on how many requests for config descriptors have been made
@@ -527,18 +534,17 @@ class EvilFakeHci : public FakeHci {
                           const usb_request_complete_callback_t* complete_cb_) override {
     usb::BorrowedRequest<void> request(usb_request_, *complete_cb_, sizeof(usb_request_t));
     EXPECT_EQ(request.request()->header.ep_address, 0);
-    EXPECT_EQ(request.request()->setup.bm_request_type,
-              USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE);
-    EXPECT_EQ(request.request()->setup.b_request, USB_REQ_GET_DESCRIPTOR);
+    EXPECT_EQ(request.request()->setup.bm_request_type, kStandardDeviceIn);
+    EXPECT_EQ(request.request()->setup.b_request, fdescriptor::StandardRequest::kGetDescriptor);
 
     if (request.request()->header.ep_address == 0) {
-      if ((request.request()->setup.bm_request_type ==
-           (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)) &&
-          (request.request()->setup.b_request == USB_REQ_GET_DESCRIPTOR)) {
-        uint8_t type = static_cast<uint8_t>(request.request()->setup.w_value >> 8);
-        uint8_t index = static_cast<uint8_t>(request.request()->setup.w_value);
+      if (request.request()->setup.bm_request_type == kStandardDeviceIn &&
+          request.request()->setup.b_request ==
+              fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor)) {
+        auto type = usb_descriptor_type_from_w_value(request.request()->setup.w_value);
+        uint8_t index = usb_descriptor_index_from_w_value(request.request()->setup.w_value);
         switch (type) {
-          case USB_DT_DEVICE: {
+          case fdescriptor::DescriptorType::kDevice: {
             usb_device_descriptor_t* descriptor;
             request.Mmap(reinterpret_cast<void**>(&descriptor));
             descriptor->b_num_configurations = 2;
@@ -550,7 +556,7 @@ class EvilFakeHci : public FakeHci {
             request.Complete(ZX_OK, sizeof(*descriptor));
           }
             return;
-          case USB_DT_CONFIG: {
+          case fdescriptor::DescriptorType::kConfiguration: {
             usb_configuration_descriptor_t* descriptor;
             request.Mmap(reinterpret_cast<void**>(&descriptor));
             // Use the config descriptor lengths described in the constructor
@@ -563,6 +569,8 @@ class EvilFakeHci : public FakeHci {
             request.Complete(ZX_OK, sizeof(*descriptor));
           }
             return;
+          default:
+            break;
         }
       }
 

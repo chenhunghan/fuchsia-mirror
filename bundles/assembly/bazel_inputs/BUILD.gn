@@ -41,7 +41,6 @@ _AIB_TOOLS_DEPS = [
   "//src/storage/blobfs/tools:bazel_input($host_toolchain)",
   "//src/storage/fxfs/fxfs_pbtool:bazel_input($host_toolchain)",
   "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
-  "//tools/cmc:bazel_input($host_toolchain)",
   "//zircon/tools/zbi:bazel_input($host_toolchain)",
 ]
 
@@ -263,7 +262,6 @@ group("usb_host_drivers") {
     "//bundles/assembly/bazel_inputs/src/connectivity/ethernet/drivers/asix-88772b:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/ethernet/drivers/usb-cdc-ecm:package",
     "//bundles/assembly/bazel_inputs/src/devices/block/drivers/usb-mass-storage:package",
-    "//bundles/assembly/bazel_inputs/src/devices/ml/drivers/usb-harriet:package",
     "//bundles/assembly/bazel_inputs/src/devices/serial/drivers/ftdi:package",
     "//bundles/assembly/bazel_inputs/src/devices/serial/drivers/usb-cdc-acm:package",
     "//bundles/assembly/bazel_inputs/src/devices/usb/drivers/usb-composite:package",
@@ -807,8 +805,7 @@ group("cobalt_default_config") {
 }
 
 group("factory_reset_trigger") {
-  deps =
-      [ "//bundles/assembly/bazel_inputs/src/recovery/factory-reset-trigger" ]
+  deps = []
 }
 
 group("common_standard") {

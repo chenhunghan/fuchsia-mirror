@@ -83,8 +83,9 @@ impl fmt::Display for NaturalTypeTemplate<'_> {
             TypeKind::Primitive { subtype } => {
                 if matches!(subtype, PrimSubtype::Int32)
                     && self.from_alias.is_some_and(|from_alias| {
+                        let decl_name = from_alias.name.decl_name().non_canonical();
                         from_alias.name.library() == "zx"
-                            && from_alias.name.decl_name().non_canonical() == "Status"
+                            && (decl_name == "Status" || decl_name == "Result")
                     })
                 {
                     write!(f, "::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>")?;

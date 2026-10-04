@@ -10,7 +10,7 @@ use super::on_signals::OnSignalsRef;
 use super::{Handle, HandleDisposition, HandleInfo, MessageBuf, MessageBufEtc, Signals};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use zx_status;
+use zx;
 
 /// An I/O object representing a `Channel`.
 pub struct Channel {
@@ -62,7 +62,7 @@ impl Channel {
     }
 
     /// Writes a message into the channel.
-    pub fn write(&self, bytes: &[u8], handles: &mut [Handle]) -> Result<(), zx_status::Status> {
+    pub fn write(&self, bytes: &[u8], handles: &mut [Handle]) -> Result<(), zx::Status> {
         self.channel.write(bytes, handles)
     }
 
@@ -71,7 +71,7 @@ impl Channel {
         &self,
         bytes: &[u8],
         handles: &mut [HandleDisposition<'a>],
-    ) -> Result<(), zx_status::Status> {
+    ) -> Result<(), zx::Status> {
         self.channel.write_etc(bytes, handles)
     }
 
@@ -91,7 +91,7 @@ impl Channel {
         cx: &mut Context<'_>,
         bytes: &mut Vec<u8>,
         handles: &mut Vec<Handle>,
-    ) -> Poll<Result<(), zx_status::Status>> {
+    ) -> Poll<Result<(), zx::Status>> {
         self.channel.poll_read(cx, bytes, handles)
     }
 
@@ -114,7 +114,7 @@ impl Channel {
         cx: &mut Context<'_>,
         bytes: &mut [u8],
         handles: &mut [std::mem::MaybeUninit<Handle>],
-    ) -> Poll<Result<(Result<(), zx_status::Status>, usize, usize), (usize, usize)>> {
+    ) -> Poll<Result<(Result<(), zx::Status>, usize, usize), (usize, usize)>> {
         self.channel.poll_read_raw(cx, bytes, handles)
     }
 
@@ -128,7 +128,7 @@ impl Channel {
         cx: &mut Context<'_>,
         bytes: &mut Vec<u8>,
         handles: &mut Vec<HandleInfo>,
-    ) -> Poll<Result<(), zx_status::Status>> {
+    ) -> Poll<Result<(), zx::Status>> {
         self.channel.poll_read_etc(cx, bytes, handles)
     }
 
@@ -138,7 +138,7 @@ impl Channel {
         &self,
         ctx: &mut Context<'_>,
         buf: &mut MessageBuf,
-    ) -> Poll<Result<(), zx_status::Status>> {
+    ) -> Poll<Result<(), zx::Status>> {
         let (bytes, handles) = buf.split_mut();
         self.read(ctx, bytes, handles)
     }
@@ -149,7 +149,7 @@ impl Channel {
         &self,
         ctx: &mut Context<'_>,
         buf: &mut MessageBufEtc,
-    ) -> Poll<Result<(), zx_status::Status>> {
+    ) -> Poll<Result<(), zx::Status>> {
         let (bytes, handles) = buf.split_mut();
         self.read_etc(ctx, bytes, handles)
     }
@@ -188,7 +188,7 @@ pub struct RecvMsg<'a> {
 }
 
 impl<'a> futures::Future for RecvMsg<'a> {
-    type Output = Result<(), zx_status::Status>;
+    type Output = Result<(), zx::Status>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -206,7 +206,7 @@ pub struct RecvEtcMsg<'a> {
 }
 
 impl<'a> futures::Future for RecvEtcMsg<'a> {
-    type Output = Result<(), zx_status::Status>;
+    type Output = Result<(), zx::Status>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;

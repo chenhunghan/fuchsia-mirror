@@ -8,12 +8,14 @@ import json
 import unittest
 from typing import Any
 
+from pydantic import ValidationError
 from pydap.client import DapClient, DapError
-from pydap.dap_types import Source, SourceBreakpoint
+from pydap.dap_types import DataBreakpoint, Source, SourceBreakpoint
 from pydap.models import (
     AttachRequestArguments,
     ContinueArguments,
     ContinueResponse,
+    DataBreakpointInfoArguments,
     DisconnectArguments,
     EvaluateArguments,
     InitializeArguments,
@@ -22,6 +24,7 @@ from pydap.models import (
     PauseArguments,
     ScopesArguments,
     SetBreakpointsArguments,
+    SetDataBreakpointsArguments,
     StackTraceArguments,
     StepInArguments,
     StepOutArguments,
@@ -1013,4 +1016,214 @@ class TestDapClient(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sent_fut.cancelled())
         # Verify nothing was written to writer
         self.assertEqual(len(writer.buffer.getvalue()), 0)
+        await client.close()
+
+    async def test_data_breakpoint_info(self) -> None:
+        client = DapClient()
+        reader, writer = self._start_client(client)
+
+        send_task = asyncio.create_task(
+            client.data_breakpoint_info(
+                DataBreakpointInfoArguments(
+                    name="my_var",
+                    frame_id=10,
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        await client._write_queue.join()
+
+        buffer_val = writer.buffer.getvalue()
+        _, body = buffer_val.split(b"\r\n\r\n", 1)
+        sent = json.loads(body.decode("utf-8"))
+        self.assertEqual(sent["command"], "dataBreakpointInfo")
+        self.assertEqual(sent["arguments"], {"name": "my_var", "frameId": 10})
+
+        feed_dap_response(
+            reader,
+            {
+                "seq": 1,
+                "type": "response",
+                "request_seq": sent["seq"],
+                "success": True,
+                "command": "dataBreakpointInfo",
+                "body": {
+                    "dataId": "17601:0x1234:4",
+                    "description": "my_var (4 bytes @ 0x1234)",
+                    "accessTypes": ["write", "read", "readWrite"],
+                    "canPersist": False,
+                },
+            },
+        )
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.body.data_id, "17601:0x1234:4")
+        self.assertEqual(resp.body.description, "my_var (4 bytes @ 0x1234)")
+        self.assertEqual(resp.body.access_types, ["write", "read", "readWrite"])
+        self.assertEqual(resp.body.can_persist, False)
+        await client.close()
+
+    async def test_data_breakpoint_info_bytes_count(self) -> None:
+        client = DapClient()
+        reader, writer = self._start_client(client)
+
+        send_task = asyncio.create_task(
+            client.data_breakpoint_info(
+                DataBreakpointInfoArguments(
+                    name="my_var",
+                    frame_id=10,
+                    bytes_count=4,
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        await client._write_queue.join()
+
+        buffer_val = writer.buffer.getvalue()
+        _, body = buffer_val.split(b"\r\n\r\n", 1)
+        sent = json.loads(body.decode("utf-8"))
+        self.assertEqual(sent["command"], "dataBreakpointInfo")
+        self.assertEqual(
+            sent["arguments"],
+            {"name": "my_var", "frameId": 10, "bytes": 4},
+        )
+
+        # Verify construction via alias `bytes=4` also sets bytes_count.
+        args_alias = DataBreakpointInfoArguments(
+            name="my_var", frame_id=10, bytes=4
+        )
+        self.assertEqual(args_alias.bytes_count, 4)
+        self.assertEqual(
+            args_alias.dump_dap(),
+            {"name": "my_var", "frameId": 10, "bytes": 4},
+        )
+
+        # Verify response with null dataId succeeds.
+        feed_dap_response(
+            reader,
+            {
+                "seq": 1,
+                "type": "response",
+                "request_seq": sent["seq"],
+                "success": True,
+                "command": "dataBreakpointInfo",
+                "body": {
+                    "dataId": None,
+                    "description": "cannot watch",
+                },
+            },
+        )
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertIsNone(resp.body.data_id)
+        self.assertEqual(resp.body.description, "cannot watch")
+        await client.close()
+
+    async def test_data_breakpoint_info_missing_data_id(self) -> None:
+        client = DapClient()
+        reader, writer = self._start_client(client)
+
+        send_task = asyncio.create_task(
+            client.data_breakpoint_info(
+                DataBreakpointInfoArguments(
+                    name="my_var",
+                    frame_id=10,
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        await client._write_queue.join()
+
+        buffer_val = writer.buffer.getvalue()
+        _, body = buffer_val.split(b"\r\n\r\n", 1)
+        sent = json.loads(body.decode("utf-8"))
+
+        # Missing dataId from body must fail validation.
+        feed_dap_response(
+            reader,
+            {
+                "seq": 1,
+                "type": "response",
+                "request_seq": sent["seq"],
+                "success": True,
+                "command": "dataBreakpointInfo",
+                "body": {
+                    "description": "missing data id",
+                },
+            },
+        )
+
+        with self.assertRaises(ValidationError):
+            await send_task
+        await client.close()
+
+    async def test_set_data_breakpoints(self) -> None:
+        client = DapClient()
+        reader, writer = self._start_client(client)
+
+        send_task = asyncio.create_task(
+            client.set_data_breakpoints(
+                SetDataBreakpointsArguments(
+                    breakpoints=[
+                        DataBreakpoint(
+                            data_id="17601:0x1234:4",
+                            access_type="write",
+                            condition="x > 5",
+                            hit_condition="2",
+                        )
+                    ]
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        await client._write_queue.join()
+
+        buffer_val = writer.buffer.getvalue()
+        _, body = buffer_val.split(b"\r\n\r\n", 1)
+        sent = json.loads(body.decode("utf-8"))
+        self.assertEqual(sent["command"], "setDataBreakpoints")
+        self.assertEqual(
+            sent["arguments"],
+            {
+                "breakpoints": [
+                    {
+                        "dataId": "17601:0x1234:4",
+                        "accessType": "write",
+                        "condition": "x > 5",
+                        "hitCondition": "2",
+                    }
+                ]
+            },
+        )
+
+        feed_dap_response(
+            reader,
+            {
+                "seq": 1,
+                "type": "response",
+                "request_seq": sent["seq"],
+                "success": True,
+                "command": "setDataBreakpoints",
+                "body": {
+                    "breakpoints": [
+                        {
+                            "id": 1,
+                            "verified": False,
+                            "instructionReference": "0x1234",
+                        }
+                    ]
+                },
+            },
+        )
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.body.breakpoints), 1)
+        self.assertEqual(resp.body.breakpoints[0].id, 1)
+        self.assertFalse(resp.body.breakpoints[0].verified)
+        self.assertEqual(
+            resp.body.breakpoints[0].instruction_reference, "0x1234"
+        )
         await client.close()

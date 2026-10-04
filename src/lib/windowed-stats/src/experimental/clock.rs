@@ -9,7 +9,7 @@
 
 //! Monotonic clock and chronological APIs.
 
-use num::Integer;
+use num_integer::Integer;
 use std::fmt::Display;
 use std::mem;
 use thiserror::Error;

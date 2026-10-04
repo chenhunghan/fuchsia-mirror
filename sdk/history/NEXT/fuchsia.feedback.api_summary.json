@@ -710,11 +710,6 @@
     },
     {
         "kind": "enum/member",
-        "name": "fuchsia.feedback/RebootReason.NETSTACK_MIGRATION",
-        "value": "20"
-    },
-    {
-        "kind": "enum/member",
         "name": "fuchsia.feedback/RebootReason.RETRY_SYSTEM_UPDATE",
         "value": "17"
     },

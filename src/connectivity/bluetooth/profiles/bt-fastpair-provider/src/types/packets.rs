@@ -24,6 +24,17 @@ const GATT_RESPONSE_BUFFER_SIZE: usize = 16;
 /// Defined in https://developers.google.com/nearby/fast-pair/specifications/extensions/personalizedname
 const PERSONALIZED_NAME_DATA_ID: u8 = 0x01;
 
+/// The size, in bytes, of the truncated HMAC-SHA256 at the start of an Additional Data packet.
+/// Defined in https://developers.google.com/nearby/fast-pair/specifications/characteristics#AdditionalData
+const ADDITIONAL_DATA_HMAC_SIZE: usize = 8;
+
+/// The size, in bytes, of the nonce in an Additional Data packet.
+const ADDITIONAL_DATA_NONCE_SIZE: usize = 8;
+
+/// The size, in bytes, of the Additional Data packet header - the truncated HMAC-SHA256 followed
+/// by the nonce.
+const ADDITIONAL_DATA_HEADER_SIZE: usize = ADDITIONAL_DATA_HMAC_SIZE + ADDITIONAL_DATA_NONCE_SIZE;
+
 /// Attempts to parse the provided key-based pairing `request`.
 /// Returns the encrypted portion of the request and an optional Public Key on success.
 pub fn parse_key_based_pairing_request(
@@ -254,6 +265,14 @@ pub fn passkey_response(key: &SharedSecret, passkey: u32) -> Vec<u8> {
     key.encrypt(&response).to_vec()
 }
 
+/// Computes and returns the HMAC-SHA256 over the contents of an Additional Data packet - the `nonce` followed
+/// by the encrypted data - keyed with the provided `key`.
+fn compute_personalized_name_hmac(key: &SharedSecret, nonce_and_data: &[u8]) -> HmacSha256 {
+    let mut hmac = HmacSha256::new_from_slice(key.as_bytes()).expect("valid key");
+    hmac.update(nonce_and_data);
+    hmac
+}
+
 /// Builds and returns an encrypted response for notifying the device's personalized name.
 /// Defined in https://developers.google.com/nearby/fast-pair/specifications/characteristics#AdditionalData
 pub fn personalized_name_response(key: &SharedSecret, name: String) -> Vec<u8> {
@@ -273,9 +292,11 @@ fn personalized_name_response_internal(
     // The HMAC-SHA256 is calculated using the encrypted data (Step 4).
     let mut encrypted_data_with_nonce = nonce.to_vec();
     encrypted_data_with_nonce.extend_from_slice(&encrypted_blocks);
-    let mut hmac = HmacSha256::new_from_slice(key.as_bytes()).expect("valid key");
-    hmac.update(&encrypted_data_with_nonce[..]);
-    let hashed_encrypted_data: [u8; 32] = hmac.finalize().into_bytes().into();
+    let hashed_encrypted_data: [u8; 32] =
+        compute_personalized_name_hmac(key, &encrypted_data_with_nonce[..])
+            .finalize()
+            .into_bytes()
+            .into();
 
     // The encrypted output consists of:
     // 1) First 8-bytes of the HMAC-SHA256 calculation.
@@ -319,12 +340,25 @@ pub fn decrypt_personalized_name_request(
     key: &SharedSecret,
     request: Vec<u8>,
 ) -> Result<String, Error> {
-    // First 8 bytes is the HMAC-SHA256 and is ignored.
-    // Next 8 bytes is the nonce.
+    // The packet must be large enough to contain the truncated HMAC-SHA256 and the nonce.
+    if request.len() < ADDITIONAL_DATA_HEADER_SIZE {
+        return Err(Error::Packet);
+    }
+
+    // The first 8 bytes are the truncated HMAC-SHA256 over (8-byte nonce || encrypted data).
+    // Computes it locally and compare against the received value.
+    // This prevents bit-flipping attacks on the encrypted name.
+    let (hmac, nonce_and_data) = request.split_at(ADDITIONAL_DATA_HMAC_SIZE);
+    compute_personalized_name_hmac(key, nonce_and_data)
+        .verify_truncated_left(hmac)
+        .map_err(|_| Error::InvalidHmac)?;
+
+    // The next 8 bytes are the nonce, and the remainder is the encrypted data.
+    let (nonce, encrypted_data) = nonce_and_data.split_at(ADDITIONAL_DATA_NONCE_SIZE);
     let mut block_mask = [0; 16];
-    block_mask[8..].copy_from_slice(&request[8..16]);
+    block_mask[8..].copy_from_slice(nonce);
     let mut decrypted_blocks = vec![];
-    for (i, block) in request[16..].chunks(16).enumerate() {
+    for (i, block) in encrypted_data.chunks(16).enumerate() {
         block_mask[0] = i as u8;
         let decrypted_block = key.encrypt(&block_mask);
         let mut combined_decrypted_block =
@@ -419,6 +453,7 @@ pub(crate) mod tests {
 
     use crate::types::keys::tests::{bob_public_key_bytes, encrypt_message, example_aes_key};
     use assert_matches::assert_matches;
+    use test_case::test_case;
 
     /// Returns a key-based pairing request with the provided `flags`. A fixed address of
     /// 0x010203040506 is used.
@@ -726,6 +761,17 @@ pub(crate) mod tests {
         ])
     }
 
+    /// The Additional Data packet used in the Personalized Name test cases in the GFPS.
+    /// Encodes the personalized name "Someone's Google Headphone" under `personalized_name_key`.
+    /// See https://developers.google.com/nearby/fast-pair/specifications/appendix/testcases
+    fn personalized_name_packet() -> Vec<u8> {
+        vec![
+            0x55, 0xEC, 0x5E, 0x60, 0x55, 0xAF, 0x6E, 0x92, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x07, 0xEE, 0x4A, 0x24, 0x83, 0x73, 0x80, 0x52, 0xE4, 0x4E, 0x9B, 0x2A, 0x14,
+            0x5E, 0x5D, 0xDF, 0xAA, 0x44, 0xB9, 0xE5, 0x53, 0x6A, 0xF4, 0x38, 0xE1, 0xE5, 0xC6,
+        ]
+    }
+
     /// This test verifies the encryption of the personalized name.
     /// The contents of this test case are pulled from the GFPS specification.
     /// See https://developers.google.com/nearby/fast-pair/specifications/appendix/testcases#aes-ctr_encryption
@@ -750,7 +796,7 @@ pub(crate) mod tests {
     /// The contents of this test case are pulled from the GFPS specification.
     /// See https://developers.google.com/nearby/fast-pair/specifications/appendix/testcases#encode_personalized_name_to_additional_data_packet
     #[test]
-    fn personalized_name_response() {
+    fn personalized_name_notification_data() {
         let name = String::from_utf8(vec![
             0x53, 0x6F, 0x6D, 0x65, 0x6F, 0x6E, 0x65, 0x27, 0x73, 0x20, 0x47, 0x6F, 0x6F, 0x67,
             0x6C, 0x65, 0x20, 0x48, 0x65, 0x61, 0x64, 0x70, 0x68, 0x6F, 0x6E, 0x65,
@@ -772,11 +818,7 @@ pub(crate) mod tests {
     /// See https://developers.google.com/nearby/fast-pair/specifications/appendix/testcases#decode_additional_data_packet_to_get_personalized_name
     #[test]
     fn personalized_name_request() {
-        let encrypted_request = vec![
-            0x55, 0xEC, 0x5E, 0x60, 0x55, 0xAF, 0x6E, 0x92, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
-            0x06, 0x07, 0xEE, 0x4A, 0x24, 0x83, 0x73, 0x80, 0x52, 0xE4, 0x4E, 0x9B, 0x2A, 0x14,
-            0x5E, 0x5D, 0xDF, 0xAA, 0x44, 0xB9, 0xE5, 0x53, 0x6A, 0xF4, 0x38, 0xE1, 0xE5, 0xC6,
-        ];
+        let encrypted_request = personalized_name_packet();
 
         let parsed_name =
             decrypt_personalized_name_request(&personalized_name_key(), encrypted_request)
@@ -787,5 +829,49 @@ pub(crate) mod tests {
         ])
         .expect("valid utf8 string");
         assert_eq!(parsed_name, expected_name);
+    }
+
+    /// A request whose ciphertext was modified in transit must be rejected. The encryption is a
+    /// stream cipher, so flipping a bit in the ciphertext flips the same bit in the decrypted
+    /// name. Verifying the HMAC is what prevents an in-range attacker from renaming the device
+    /// without knowledge of the shared secret.
+    #[test]
+    fn decrypt_personalized_name_request_with_tampered_ciphertext() {
+        let mut request = personalized_name_packet();
+        // Flip bits in ciphertext byte: turn leading 'S' (0x53) of the name into 'X' (0x58).
+        request[16] ^= 0x53 ^ 0x58;
+
+        let result = decrypt_personalized_name_request(&personalized_name_key(), request);
+        assert_matches!(result, Err(Error::InvalidHmac));
+    }
+
+    #[test]
+    fn decrypt_personalized_name_request_with_tampered_hmac() {
+        let mut request = personalized_name_packet();
+        request[0] ^= 0x01;
+
+        let result = decrypt_personalized_name_request(&personalized_name_key(), request);
+        assert_matches!(result, Err(Error::InvalidHmac));
+    }
+
+    /// A request that is too small to contain the header must be rejected rather than panicking on
+    /// an out-of-bounds slice.
+    #[test_case(vec![]; "empty")]
+    #[test_case(vec![0x55; 8]; "hmac only")]
+    #[test_case(vec![0x55; 15]; "partial nonce")]
+    fn decrypt_personalized_name_request_too_small(request: Vec<u8>) {
+        let result = decrypt_personalized_name_request(&personalized_name_key(), request);
+        assert_matches!(result, Err(Error::Packet));
+    }
+
+    /// A packet produced by the encoder must be accepted by the decoder.
+    #[test]
+    fn personalized_name_roundtrip() {
+        let key = personalized_name_key();
+        let name = "myfuchsia".to_string();
+
+        let packet = personalized_name_response(&key, name.clone());
+        let parsed = decrypt_personalized_name_request(&key, packet).expect("valid packet");
+        assert_eq!(parsed, name);
     }
 }

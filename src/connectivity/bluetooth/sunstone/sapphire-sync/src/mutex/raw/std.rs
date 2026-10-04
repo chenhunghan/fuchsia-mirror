@@ -5,7 +5,7 @@
 use parking_lot::RawFairMutex;
 use parking_lot::lock_api::RawMutex as _;
 
-use crate::mutex::raw::RawMutex;
+use crate::mutex::raw::{ConstInit, RawMutex};
 
 /// Multi-threaded mutex implementation based on a [`parking_lot::RawFairMutex`]
 pub struct Mutex {
@@ -22,6 +22,10 @@ impl Mutex {
     pub const fn new() -> Self {
         Self { lock: RawFairMutex::INIT }
     }
+}
+
+impl ConstInit for Mutex {
+    const INIT: Self = Self::new();
 }
 
 // SAFETY: parking_lot::RawMutex has the same internal guarantees

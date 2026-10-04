@@ -1744,6 +1744,7 @@ impl PmmNode {
     }
 
     /// Retrieve access to the page queues.
+    #[inline]
     pub fn page_queues(&self) -> &PageQueues {
         // SAFETY: page_queues is valid for the lifetime of PmmNode.
         unsafe { &*self.page_queues.get() }
@@ -2066,6 +2067,7 @@ impl PmmNode {
     }
 
     /// Returns a reference to the evictor.
+    #[inline]
     pub fn evictor(&self) -> &Evictor {
         // SAFETY: evictor is valid for the lifetime of PmmNode.
         unsafe { &*self.evictor.get() }

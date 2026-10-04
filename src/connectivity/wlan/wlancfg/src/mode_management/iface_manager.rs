@@ -94,10 +94,11 @@ async fn create_client_state_machine(
     dev_monitor_proxy: &mut fidl_fuchsia_wlan_device_service::DeviceMonitorProxy,
     client_update_sender: listener::ClientListenerMessageSender,
     saved_networks: Arc<dyn SavedNetworksManagerApi>,
-    connect_selection: Option<client_types::ConnectSelection>,
+    connect_selection: client_types::ConnectSelection,
     telemetry_sender: TelemetrySender,
     defect_sender: mpsc::Sender<Defect>,
     roam_manager: RoamManager,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 ) -> Result<
     (
         Box<dyn client_fsm::ClientApi>,
@@ -107,9 +108,7 @@ async fn create_client_state_machine(
     ),
     Error,
 > {
-    if connect_selection.is_some() {
-        telemetry_sender.send(TelemetryEvent::StartEstablishConnection { reset_start_time: false });
-    }
+    telemetry_sender.send(TelemetryEvent::StartEstablishConnection { reset_start_time: false });
 
     // Create a client state machine for the newly discovered interface.
     let (sender, receiver) = mpsc::channel(1);
@@ -139,6 +138,7 @@ async fn create_client_state_machine(
         defect_sender,
         roam_manager,
         publisher,
+        power_manager,
     )
     .then(|()| async move {
         if !termination_notifier.signal() {
@@ -183,6 +183,7 @@ pub(crate) struct IfaceManagerService {
     defect_sender: mpsc::Sender<Defect>,
     _node: fuchsia_inspect::Node,
     recovery_node: BoundedListNode,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 }
 
 impl IfaceManagerService {
@@ -197,6 +198,7 @@ impl IfaceManagerService {
         telemetry_sender: TelemetrySender,
         defect_sender: mpsc::Sender<Defect>,
         _node: fuchsia_inspect::Node,
+        power_manager: Arc<dyn wlan_power_manager::PowerManager>,
     ) -> Self {
         let recovery_node = _node.create_child("recovery_record");
         let recovery_node = BoundedListNode::new(recovery_node, INSPECT_RECOVERY_INTERFACE_RECORDS);
@@ -217,6 +219,7 @@ impl IfaceManagerService {
             defect_sender,
             _node,
             recovery_node,
+            power_manager,
         }
     }
 
@@ -250,20 +253,6 @@ impl IfaceManagerService {
             }
         };
         self.setup_client_container(iface_id).await
-    }
-
-    // Retrieves a client iface container where the config has been set to Configured for a given
-    // network id.
-    fn get_configured_client(
-        &mut self,
-        network_id: client_types::NetworkIdentifier,
-    ) -> Result<ClientIfaceContainer, Error> {
-        if let Some(removal_index) = self.clients.iter().position(|client_container| {
-            client_container.config == ClientIfaceContainerConfig::Configured(network_id.clone())
-        }) {
-            return Ok(self.clients.remove(removal_index));
-        }
-        Err(format_err!("No configured client iface container found for network id"))
     }
 
     /// Remove the client iface from the list of configured ifaces if it is there, and create a
@@ -415,9 +404,31 @@ impl IfaceManagerService {
     ) -> LocalBoxFuture<'static, Result<(), Error>> {
         // Cancel any ongoing connection selections for the given network id and any autoconnect
         // selections. Any targeted connection selections for different networks are unaffected.
-        self.connection_selection_manager
+        let cancelled_connect_request = self
+            .connection_selection_manager
             .cancel(&SelectionIdentifier::ConnectRequest(network_id.clone()));
-        self.connection_selection_manager.cancel(&SelectionIdentifier::Automatic);
+        let _ = self.connection_selection_manager.cancel(&SelectionIdentifier::Automatic);
+
+        if cancelled_connect_request {
+            // If a ConnectRequest selection was still ongoing for this network, there is a
+            // lingering `Connecting` client state update that must be closed with `Disconnected`.
+            let networks = vec![listener::ClientNetworkState {
+                id: network_id.clone(),
+                state: client_types::ConnectionState::Disconnected,
+                status: Some(client_types::DisconnectStatus::ConnectionStopped),
+            }];
+            let update = listener::ClientStateUpdate {
+                state: client_types::ClientState::ConnectionsEnabled,
+                networks,
+            };
+            if let Err(e) = self
+                .client_update_sender
+                .clone()
+                .unbounded_send(listener::Message::NotifyListeners(update))
+            {
+                error!("failed to send state update: {:?}", e);
+            }
+        }
 
         // Find the client interface associated with the given network config and disconnect from
         // the network.
@@ -432,9 +443,9 @@ impl IfaceManagerService {
                 // loop discovers the completed future and attempts to reconnect the interface.
                 ClientIfaceContainerConfig::Configured(id) if id == &network_id => {
                     client.config = ClientIfaceContainerConfig::Unconfigured;
-                    let (responder, receiver) = oneshot::channel();
-                    match client.client_state_machine.as_mut() {
-                        Some(state_machine) => match state_machine.disconnect(reason, responder) {
+                    if let Some(state_machine) = client.client_state_machine.as_mut() {
+                        let (responder, receiver) = oneshot::channel();
+                        match state_machine.disconnect(reason, responder) {
                             Ok(()) => {}
                             Err(e) => {
                                 client.client_state_machine = None;
@@ -444,39 +455,11 @@ impl IfaceManagerService {
                                 )))
                                 .boxed();
                             }
-                        },
-                        None => {
-                            // If there is a Configured client for this network with no client state
-                            // machine, it means this disconnect came before a state machine could
-                            // be set up fully (e.g. if connection selection was still ongoing). In
-                            // this case, there will be a lingering `connecting` client state update
-                            // for the given network that we must handle here, rather than in a
-                            // client state machine. Note that automatic connection selections do
-                            // _not_ send an initial 'Connecting' state update, and thus aren't
-                            // handled here.
-                            let networks = vec![listener::ClientNetworkState {
-                                id: network_id,
-                                state: client_types::ConnectionState::Disconnected,
-                                status: Some(client_types::DisconnectStatus::ConnectionStopped),
-                            }];
-                            let update = listener::ClientStateUpdate {
-                                state: client_types::ClientState::ConnectionsEnabled,
-                                networks,
-                            };
-                            match self
-                                .client_update_sender
-                                .clone()
-                                .unbounded_send(listener::Message::NotifyListeners(update))
-                            {
-                                Ok(_) => (),
-                                Err(e) => error!("failed to send state update: {:?}", e),
-                            };
-                            return ready(Ok(())).boxed();
                         }
+                        fsm_ack_receiver = Some(receiver);
+                        iface_id = Some(client.iface_id);
                     }
                     client.client_state_machine = None;
-                    fsm_ack_receiver = Some(receiver);
-                    iface_id = Some(client.iface_id);
                     break;
                 }
                 _ => {}
@@ -515,13 +498,6 @@ impl IfaceManagerService {
             }
         }
 
-        // Cancel any ongoing connection attempts for OTHER networks.
-        for id in self.connection_selection_manager.active_selections() {
-            if id != SelectionIdentifier::ConnectRequest(connect_request.network.clone()) {
-                self.connection_selection_manager.cancel(&id);
-            }
-        }
-
         // Check if we are already connecting to THIS network.
         let selection_id = SelectionIdentifier::ConnectRequest(connect_request.network.clone());
         if self.connection_selection_manager.active_selections().contains(&selection_id) {
@@ -542,30 +518,26 @@ impl IfaceManagerService {
             }
         }
 
+        // Ensure a client interface is available before starting connection selection.
+        let client_iface = self.get_client(None).await?;
+        self.clients.push(client_iface);
+
         let mut networks = vec![];
 
-        // Any clients that had been configured but don't have state machines are pending connect
-        // requests that we just cancelled. We have to add a "Disconnected" listener update for
-        // them and mark as Unconfigured.
-        for client in self.clients.iter_mut() {
-            if let ClientIfaceContainerConfig::Configured(id) = &client.config
-                && client.client_state_machine.as_mut().is_none()
+        // Cancel any ongoing connection attempts for OTHER networks, and emit a "Disconnected"
+        // listener update for any cancelled ConnectRequest.
+        for id in self.connection_selection_manager.active_selections() {
+            if id != selection_id
+                && self.connection_selection_manager.cancel(&id)
+                && let SelectionIdentifier::ConnectRequest(cancelled_id) = id
             {
                 networks.push(listener::ClientNetworkState {
-                    id: id.clone(),
+                    id: cancelled_id,
                     state: client_types::ConnectionState::Disconnected,
                     status: Some(client_types::DisconnectStatus::ConnectionStopped),
                 });
-                client.config = ClientIfaceContainerConfig::Unconfigured;
             }
         }
-
-        // Get a client, and mark its config as Configured, reserving it for this connect
-        // attempt
-        let mut client_iface = self.get_client(None).await?;
-        client_iface.config =
-            ClientIfaceContainerConfig::Configured(connect_request.network.clone());
-        self.clients.push(client_iface);
 
         self.telemetry_sender
             .send(TelemetryEvent::StartEstablishConnection { reset_start_time: true });
@@ -590,17 +562,9 @@ impl IfaceManagerService {
     }
 
     async fn connect(&mut self, selection: client_types::ConnectSelection) -> Result<(), Error> {
-        // Get a client iface, preferring one that was reserved for this connect attempt, if
-        // applicable.
-        let mut client_iface = match self.get_configured_client(selection.target.network.clone()) {
-            Ok(container) => container,
-            Err(_) => {
-                let mut client = self.get_client(None).await?;
-                client.config =
-                    ClientIfaceContainerConfig::Configured(selection.target.network.clone());
-                client
-            }
-        };
+        let mut client_iface = self.get_client(None).await?;
+        client_iface.config =
+            ClientIfaceContainerConfig::Configured(selection.target.network.clone());
 
         // Check if there's an existing state machine we can use
         match client_iface.client_state_machine.as_mut() {
@@ -614,10 +578,11 @@ impl IfaceManagerService {
                     &mut self.dev_monitor_proxy,
                     self.client_update_sender.clone(),
                     self.saved_networks.clone(),
-                    Some(selection),
+                    selection,
                     self.telemetry_sender.clone(),
                     self.defect_sender.clone(),
                     self.roam_manager.clone(),
+                    self.power_manager.clone(),
                 )
                 .await?;
                 client_iface.status = status;
@@ -700,10 +665,11 @@ impl IfaceManagerService {
                         &mut self.dev_monitor_proxy,
                         self.client_update_sender.clone(),
                         self.saved_networks.clone(),
-                        Some(connect_selection.clone()),
+                        connect_selection.clone(),
                         self.telemetry_sender.clone(),
                         self.defect_sender.clone(),
                         self.roam_manager.clone(),
+                        self.power_manager.clone(),
                     )
                     .await?;
 
@@ -740,7 +706,7 @@ impl IfaceManagerService {
 
         match iface_info.role {
             fidl_fuchsia_wlan_common::WlanMacRole::Client => {
-                let mut client_iface = self.get_client(Some(iface_id)).await?;
+                let client_iface = self.get_client(Some(iface_id)).await?;
 
                 // If this client has already been recorded and it has a client state machine
                 // running, return success early.
@@ -749,29 +715,32 @@ impl IfaceManagerService {
                     return Ok(());
                 }
 
-                // Create the state machine and controller.  The state machine is setup with no
-                // initial network config.  This will cause it to quickly exit, notifying the
-                // monitor loop that the interface needs attention.
-                let (new_client, state_machine_task, termination_fut, status) =
-                    create_client_state_machine(
-                        client_iface.iface_id,
-                        &mut self.dev_monitor_proxy,
-                        self.client_update_sender.clone(),
-                        self.saved_networks.clone(),
-                        None,
-                        self.telemetry_sender.clone(),
-                        self.defect_sender.clone(),
-                        self.roam_manager.clone(),
-                    )
+                // Ensure the lower-layer SME is disconnected from any previous state before the
+                // interface is made available for client connections (even if no saved networks
+                // exist yet to spawn a ClientStateMachine).
+                client_iface
+                    .sme_proxy
+                    .disconnect(fidl_fuchsia_wlan_sme::UserDisconnectReason::Startup)
                     .await?;
 
-                // Begin running and monitoring the client state machine future.
-                self.fsm_termination_futures.push(termination_fut);
+                // Notify listeners that client connections are now enabled (symmetrical with
+                // `stop_client_connections` and `handle_removed_iface`, which send
+                // `ConnectionsDisabled`).
+                let update = listener::ClientStateUpdate {
+                    state: fidl_fuchsia_wlan_policy::WlanClientState::ConnectionsEnabled,
+                    networks: vec![],
+                };
+                if let Err(e) = self
+                    .client_update_sender
+                    .unbounded_send(listener::Message::NotifyListeners(update))
+                {
+                    error!("Failed to send state update: {:?}", e);
+                }
 
-                client_iface.status = status;
-                client_iface.client_state_machine = Some(new_client);
-                client_iface.state_machine_task = Some(state_machine_task);
+                // Record the unconfigured client interface as idle and immediately check if we can
+                // autoconnect to a saved network.
                 self.clients.push(client_iface);
+                initiate_automatic_connection_selection(self).await;
             }
             fidl_fuchsia_wlan_common::WlanMacRole::Ap => {
                 let ap_iface = self.get_ap(Some(iface_id)).await?;
@@ -868,11 +837,20 @@ impl IfaceManagerService {
         self.telemetry_sender.send(TelemetryEvent::ClearEstablishConnectionStartTime);
 
         // Cancel any ongoing network selection, since a disconnect makes it invalid.
+        let mut cancelled_connection_networks = vec![];
         if !self.connection_selection_manager.active_selections().is_empty() {
             info!(
                 "Client connections stopping, ignoring results from ongoing connection selections."
             );
-            self.connection_selection_manager.cancel_all();
+            for id in self.connection_selection_manager.cancel_all() {
+                if let SelectionIdentifier::ConnectRequest(network_id) = id {
+                    cancelled_connection_networks.push(listener::ClientNetworkState {
+                        id: network_id,
+                        state: client_types::ConnectionState::Disconnected,
+                        status: Some(client_types::DisconnectStatus::ConnectionStopped),
+                    });
+                }
+            }
         }
 
         let client_ifaces: Vec<ClientIfaceContainer> = std::mem::take(&mut self.clients);
@@ -881,30 +859,18 @@ impl IfaceManagerService {
 
         let fut = async move {
             // Disconnect and discard all of the configured client ifaces.
-            let mut cancelled_connection_networks = vec![];
             for mut client_iface in client_ifaces {
-                if let ClientIfaceContainerConfig::Configured(network_id) = client_iface.config {
+                if let ClientIfaceContainerConfig::Configured(_) = client_iface.config {
                     client_iface.config = ClientIfaceContainerConfig::Unconfigured;
-                    match client_iface.client_state_machine.as_mut() {
-                        Some(state_machine) => {
-                            let (responder, receiver) = oneshot::channel();
-                            match state_machine.disconnect(reason, responder) {
-                                Ok(()) => {}
-                                Err(e) => error!("failed to issue disconnect: {:?}", e),
-                            }
-                            match receiver.await {
-                                Ok(()) => {}
-                                Err(e) => error!("failed to disconnect: {:?}", e),
-                            }
+                    if let Some(state_machine) = client_iface.client_state_machine.as_mut() {
+                        let (responder, receiver) = oneshot::channel();
+                        match state_machine.disconnect(reason, responder) {
+                            Ok(()) => {}
+                            Err(e) => error!("failed to issue disconnect: {:?}", e),
                         }
-                        None => {
-                            // Any pending connections have been cancelled. Send a listener update
-                            // to marked them as Disconnected.
-                            cancelled_connection_networks.push(listener::ClientNetworkState {
-                                id: network_id,
-                                state: client_types::ConnectionState::Disconnected,
-                                status: Some(client_types::DisconnectStatus::ConnectionStopped),
-                            });
+                        match receiver.await {
+                            Ok(()) => {}
+                            Err(e) => error!("failed to disconnect: {:?}", e),
                         }
                     }
                 }
@@ -1432,6 +1398,7 @@ async fn serve_iface_functionality(
             initiate_record_defect(iface_manager.phy_manager.clone(), defect).await;
         },
         action = recovery_action_receiver.select_next_some() => {
+            let _wake_lease = iface_manager.power_manager.take_wake_lease("wlancfg-recovery").await;
             let client_statuses = InspectListClosure(&iface_manager.clients, |node_writer, key, client| {
                 if let Ok(status) = client.status.read_status() {
                     inspect_insert!(node_writer, var key: {
@@ -1558,6 +1525,7 @@ mod tests {
         pub connection_selection_requester: ConnectionSelectionRequester,
         pub connection_selection_request_receiver: mpsc::Receiver<ConnectionSelectionRequest>,
         pub roam_manager: RoamManager,
+        pub power_manager: Arc<TestPowerManager>,
     }
 
     /// Create a TestValues for a unit test.
@@ -1586,6 +1554,7 @@ mod tests {
 
         let (roam_service_request_sender, _roam_service_request_receiver) = mpsc::channel(100);
         let roam_manager = RoamManager::new(roam_service_request_sender);
+        let power_manager = Arc::new(TestPowerManager::new());
 
         TestValues {
             monitor_service_proxy,
@@ -1606,6 +1575,7 @@ mod tests {
             connection_selection_requester,
             connection_selection_request_receiver,
             roam_manager,
+            power_manager,
         }
     }
 
@@ -1853,6 +1823,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node.clone_weak(),
+            test_values.power_manager.clone(),
         );
 
         if configured {
@@ -1921,6 +1892,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node.clone_weak(),
+            test_values.power_manager.clone(),
         );
 
         iface_manager.aps.push(ap_container);
@@ -2389,6 +2361,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Call connect on the IfaceManager
@@ -2429,6 +2402,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Construct the connect request.
@@ -2584,6 +2558,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Call disconnect on the IfaceManager
@@ -2727,6 +2702,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Call stop_client_connections.
@@ -2847,6 +2823,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Call stop_client_connections.
@@ -2998,6 +2975,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         {
@@ -3090,26 +3068,26 @@ mod tests {
 
             // The request should stall out while attempting to get a client interface.
             assert_matches!(exec.run_until_stalled(&mut start_fut), Poll::Pending);
-            assert_matches!(
+            let mut sme_stream = assert_matches!(
                 exec.run_until_stalled(&mut test_values.monitor_service_stream.next()),
                 Poll::Ready(Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-                    iface_id: TEST_CLIENT_IFACE_ID, sme_server: _, responder
+                    iface_id: TEST_CLIENT_IFACE_ID, sme_server, responder
                 }))) => {
                     // Send back a positive acknowledgement.
                     assert!(responder.send(Ok(())).is_ok());
+                    sme_server.into_stream()
                 }
             );
 
-            // Expect that we have requested a client SME proxy from creating the client state
-            // machine.
+            // Expect an initial disconnect request on the client SME.
             assert_matches!(exec.run_until_stalled(&mut start_fut), Poll::Pending);
             assert_matches!(
-                exec.run_until_stalled(&mut test_values.monitor_service_stream.next()),
-                Poll::Ready(Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-                    iface_id: TEST_CLIENT_IFACE_ID, sme_server: _, responder
+                exec.run_until_stalled(&mut sme_stream.next()),
+                Poll::Ready(Some(Ok(fidl_fuchsia_wlan_sme::ClientSmeRequest::Disconnect {
+                    reason: fidl_fuchsia_wlan_sme::UserDisconnectReason::Startup,
+                    responder,
                 }))) => {
-                    // Send back a positive acknowledgement.
-                    assert!(responder.send(Ok(())).is_ok());
+                    responder.send().expect("Failed to send disconnect response");
                 }
             );
 
@@ -3118,7 +3096,7 @@ mod tests {
         }
 
         assert!(!iface_manager.clients.is_empty());
-        assert!(!iface_manager.fsm_termination_futures.is_empty());
+        assert!(iface_manager.fsm_termination_futures.is_empty());
     }
 
     /// Tests the case where the IfaceManager is able to request that the AP state machine start
@@ -3186,6 +3164,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Call start_ap.
@@ -3326,6 +3305,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
         let fut = iface_manager.stop_ap(TEST_SSID.clone(), TEST_PASSWORD.as_bytes().to_vec());
         let mut fut = pin!(fut);
@@ -3489,6 +3469,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         let fut = iface_manager.stop_all_aps();
@@ -3800,10 +3781,21 @@ mod tests {
         })
     }
 
-    #[fuchsia::test]
-    fn test_add_client_iface() {
+    #[test_case(false)]
+    #[test_case(true)]
+    #[fuchsia::test(add_test_attr = false)]
+    fn test_add_client_iface(has_saved_network: bool) {
         let mut exec = fuchsia_async::TestExecutor::new();
-        let test_values = test_setup(&mut exec);
+        let mut test_values = test_setup(&mut exec);
+
+        if has_saved_network {
+            let network_id =
+                NetworkIdentifier { ssid: TEST_SSID.clone(), security_type: SecurityType::Wpa };
+            let credential = Credential::Password(TEST_PASSWORD.as_bytes().to_vec());
+            let _ = exec
+                .run_singlethreaded(test_values.saved_networks.store(network_id, credential))
+                .expect("failed to store a network");
+        }
 
         // Create an empty PhyManager and IfaceManager.
         let phy_manager = phy_manager::PhyManager::new(
@@ -3826,6 +3818,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         {
@@ -3857,28 +3850,26 @@ mod tests {
 
             // Expect that we have requested a client SME proxy from get_client.
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-            assert_matches!(
+            let mut sme_stream = assert_matches!(
                 poll_service_req(&mut exec, &mut monitor_service_fut),
                 Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-                    iface_id: TEST_CLIENT_IFACE_ID, sme_server: _, responder
+                    iface_id: TEST_CLIENT_IFACE_ID, sme_server, responder
                 }) => {
                     // Send back a positive acknowledgement.
                     assert!(responder.send(Ok(())).is_ok());
+                    sme_server.into_stream()
                 }
             );
 
-            assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-
-            // Expect that we have requested a client SME proxy from creating the client state
-            // machine.
+            // Expect an initial disconnect request on the client SME.
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
             assert_matches!(
-                poll_service_req(&mut exec, &mut monitor_service_fut),
-                Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-                    iface_id: TEST_CLIENT_IFACE_ID, sme_server: _, responder
-                }) => {
-                    // Send back a positive acknowledgement.
-                    assert!(responder.send(Ok(())).is_ok());
+                exec.run_until_stalled(&mut sme_stream.next()),
+                Poll::Ready(Some(Ok(fidl_fuchsia_wlan_sme::ClientSmeRequest::Disconnect {
+                    reason: fidl_fuchsia_wlan_sme::UserDisconnectReason::Startup,
+                    responder,
+                }))) => {
+                    responder.send().expect("Failed to send disconnect response");
                 }
             );
 
@@ -3886,9 +3877,31 @@ mod tests {
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Ok(())));
         }
 
-        // Ensure that the client interface has been added.
+        // Ensure that the client interface has been added as unconfigured with no state machine.
         assert!(iface_manager.aps.is_empty());
         assert_eq!(iface_manager.clients[0].iface_id, TEST_CLIENT_IFACE_ID);
+        assert_eq!(iface_manager.clients[0].config, ClientIfaceContainerConfig::Unconfigured);
+        assert!(iface_manager.clients[0].client_state_machine.is_none());
+        assert!(iface_manager.fsm_termination_futures.is_empty());
+
+        // Verify that a ConnectionsEnabled update was sent to listeners.
+        assert_matches!(
+            test_values.client_update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(listener::ClientStateUpdate {
+                state: fidl_fuchsia_wlan_policy::WlanClientState::ConnectionsEnabled,
+                networks,
+            })) => {
+                assert!(networks.is_empty());
+            }
+        );
+
+        // Verify whether automatic connection selection was initiated based on saved networks.
+        let expected_selections =
+            if has_saved_network { vec![SelectionIdentifier::Automatic] } else { vec![] };
+        assert_eq!(
+            iface_manager.connection_selection_manager.active_selections(),
+            expected_selections
+        );
     }
 
     #[fuchsia::test]
@@ -3917,6 +3930,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         {
@@ -3994,6 +4008,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         {
@@ -4465,6 +4480,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Create mpsc channel to handle requests.
@@ -4521,25 +4537,26 @@ mod tests {
 
         // Expect that we have requested a client SME proxy from get_client.
         assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
-        assert_matches!(
+        let mut sme_stream = assert_matches!(
             poll_service_req(&mut exec, &mut monitor_service_fut),
             Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-                iface_id: TEST_CLIENT_IFACE_ID, sme_server: _, responder
+                iface_id: TEST_CLIENT_IFACE_ID, sme_server, responder
             }) => {
                 // Send back a positive acknowledgement.
                 assert!(responder.send(Ok(())).is_ok());
+                sme_server.into_stream()
             }
         );
 
-        // Expect that we have requested a client SME proxy from creating the client state machine.
+        // Expect an initial disconnect request on the client SME.
         assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
         assert_matches!(
-            poll_service_req(&mut exec, &mut monitor_service_fut),
-            Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetClientSme {
-                iface_id: TEST_CLIENT_IFACE_ID, sme_server: _, responder
-            }) => {
-                // Send back a positive acknowledgement.
-                assert!(responder.send(Ok(())).is_ok());
+            exec.run_until_stalled(&mut sme_stream.next()),
+            Poll::Ready(Some(Ok(fidl_fuchsia_wlan_sme::ClientSmeRequest::Disconnect {
+                reason: fidl_fuchsia_wlan_sme::UserDisconnectReason::Startup,
+                responder,
+            }))) => {
+                responder.send().expect("Failed to send disconnect response");
             }
         );
 
@@ -4578,6 +4595,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Report a new interface.
@@ -4682,6 +4700,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Make start client connections request
@@ -4760,6 +4779,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Make stop client connections request
@@ -4982,6 +5002,7 @@ mod tests {
             test_values.telemetry_sender,
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Update the saved networks with knowledge of the test SSID and credentials.
@@ -5507,6 +5528,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender,
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // If the test calls for it, create an AP interface to test that the IfaceManager preserves
@@ -5624,6 +5646,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Send a defect to the IfaceManager service loop.
@@ -5681,6 +5704,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Send a recovery summary to the IfaceManager service loop.
@@ -5743,6 +5767,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Send an AP start failure + reset PHY recovery summary to the IfaceManager service loop.
@@ -5825,6 +5850,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node,
+            test_values.power_manager.clone(),
         );
 
         // Send an AP start failure + reset PHY recovery summary to the IfaceManager service loop.
@@ -5916,6 +5942,7 @@ mod tests {
             test_values.telemetry_sender.clone(),
             test_values.defect_sender.clone(),
             test_values.node.clone_weak(),
+            test_values.power_manager.clone(),
         );
 
         // Set up a fake client and fake AP and write some fake statuses for them.
@@ -6074,5 +6101,91 @@ mod tests {
             Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, disconnected_state_update);
         });
+    }
+
+    #[fuchsia::test]
+    fn test_disconnect_update_on_stopped_connection_after_record_idle_client() {
+        let mut exec = fuchsia_async::TestExecutor::new();
+        let mut test_values = test_setup(&mut exec);
+
+        // Set up iface manager with an unconfigured client.
+        let (mut iface_manager, _stream) = create_iface_manager_with_client(&test_values, false);
+
+        let connect_selection = generate_connect_selection();
+        let connect_req = ConnectAttemptRequest::new(
+            connect_selection.target.network.clone(),
+            connect_selection.target.credential,
+            client_types::ConnectReason::FidlConnectRequest,
+        );
+        {
+            let connect_fut = iface_manager.handle_connect_request(connect_req);
+            let mut connect_fut = pin!(connect_fut);
+            assert_matches!(exec.run_until_stalled(&mut connect_fut), Poll::Ready(Ok(())));
+        }
+
+        // Consume the initial "Connecting" update.
+        assert_matches!(
+            test_values.client_update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(_))
+        );
+
+        // Simulate a prior/startup state machine terminating while ConnectRequest selection is
+        // still in flight.
+        iface_manager.record_idle_client(TEST_CLIENT_IFACE_ID);
+
+        // Disconnect the network while selection is still ongoing.
+        {
+            let disconnect_fut = iface_manager.disconnect(
+                connect_selection.target.network.clone(),
+                client_types::DisconnectReason::NetworkUnsaved,
+            );
+            let mut disconnect_fut = pin!(disconnect_fut);
+            assert_matches!(exec.run_until_stalled(&mut disconnect_fut), Poll::Ready(Ok(())));
+        }
+
+        // Expect a "Disconnected" update with status "ConnectionStopped".
+        let disconnected_state_update = listener::ClientStateUpdate {
+            state: fidl_fuchsia_wlan_policy::WlanClientState::ConnectionsEnabled,
+            networks: vec![listener::ClientNetworkState {
+                id: connect_selection.target.network.clone(),
+                state: client_types::ConnectionState::Disconnected,
+                status: Some(client_types::DisconnectStatus::ConnectionStopped),
+            }],
+        };
+        assert_matches!(
+            test_values.client_update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
+            assert_eq!(updates, disconnected_state_update);
+        });
+    }
+
+    #[fuchsia::test]
+    fn test_iface_manager_wake_leases() {
+        let mut exec = fuchsia_async::TestExecutor::new();
+        let mut test_values = test_setup(&mut exec);
+        let (iface_manager, _) = create_iface_manager_with_client(&test_values, false);
+
+        let defect = Defect::Iface(IfaceFailure::ApStartFailure { iface_id: 0 });
+        let action =
+            recovery::RecoveryAction::PhyRecovery(recovery::PhyRecoveryOperation::ResetPhy {
+                phy_id: 0,
+            });
+        test_values
+            .recovery_sender
+            .try_send(recovery::RecoverySummary { defect, action })
+            .expect("failed to send recovery summary");
+
+        let (_, receiver) = mpsc::channel(0);
+        let serve_fut = serve_iface_manager_requests(
+            iface_manager,
+            receiver,
+            test_values.defect_receiver,
+            test_values.recovery_receiver,
+        );
+        let mut serve_fut = pin!(serve_fut);
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        let calls = test_values.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-recovery".to_string()));
     }
 }

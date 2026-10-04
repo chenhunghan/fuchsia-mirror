@@ -36,6 +36,7 @@ rustc_library(
     disable_clippy = True,
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
+    with_unit_tests = True,
     deps = [
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:zerocopy",

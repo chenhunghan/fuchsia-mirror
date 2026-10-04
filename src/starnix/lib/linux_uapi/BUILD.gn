@@ -2,6 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/components.gni")
+
+group("tests") {
+  testonly = true
+  deps = [ ":linux_uapi-tests" ]
+}
+
+fuchsia_unittest_package("linux_uapi-tests") {
+  deps = [ ":linux_uapi_test" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -63,6 +74,7 @@ rustc_library("linux_uapi") {
   disable_clippy = true
   edition = "2024"
   lint_config = "//src/starnix/build:kernel_library_config"
+  with_unit_tests = true
   deps = [
     "//third_party/rust_crates:static_assertions",
     "//third_party/rust_crates:zerocopy",

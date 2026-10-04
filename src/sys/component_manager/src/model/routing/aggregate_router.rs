@@ -346,15 +346,8 @@ impl AnonymizedAggregateCapabilityProvider for AnonymizedAggregateServiceProvide
                     for (child_name, child_instance) in children_in_collection {
                         // If we can't resolve the child, then it's not contributing to this
                         // service.
-                        if let Ok(child_resolved_state) = child_instance.lock_resolved_state().await
-                        {
-                            if child_resolved_state
-                                .sandbox
-                                .component_output
-                                .capabilities()
-                                .get(&self.service_name)
-                                .is_some()
-                            {
+                        if let Ok(child_output) = child_instance.get_component_output_dict().await {
+                            if child_output.get(&self.service_name).is_some() {
                                 instances.push(AggregateInstance::Child(child_name));
                             }
                         }
@@ -402,32 +395,16 @@ impl AnonymizedAggregateCapabilityProvider for AnonymizedAggregateServiceProvide
                         "found a static child in a collection? this is impossible, and surely a bug"
                     );
                 }
-                let child_instance = {
-                    let component = self.component.upgrade()?;
-                    let resolved_state = component.lock_resolved_state().await.map_err(|err| {
-                        RoutingError::from(ComponentInstanceError::ResolveFailed {
-                            moniker: self.component.moniker.clone(),
-                            err: anyhow::format_err!("{:?}", err).into(),
-                        })
-                    })?;
-                    resolved_state
-                        .get_child(child_name)
-                        .ok_or_else(|| {
-                            RoutingError::from(ComponentInstanceError::InstanceNotFound {
-                                moniker: self.component.moniker.child(child_name.clone()),
-                            })
-                        })?
-                        .clone()
-                };
-                let child_resolved_state =
-                    child_instance.lock_resolved_state().await.map_err(|err| {
-                        RoutingError::from(ComponentInstanceError::ResolveFailed {
+                let component = self.component.upgrade()?;
+                let child_instance =
+                    component.get_child_maybe_resolve(child_name).await?.ok_or_else(|| {
+                        RoutingError::from(ComponentInstanceError::InstanceNotFound {
                             moniker: self.component.moniker.child(child_name.clone()),
-                            err: anyhow::format_err!("{:?}", err).into(),
                         })
                     })?;
-                let capability = child_resolved_state
-                    .sandbox
+                let capability = child_instance
+                    .component_sandbox()
+                    .await?
                     .component_output
                     .capabilities()
                     .get(&self.service_name)

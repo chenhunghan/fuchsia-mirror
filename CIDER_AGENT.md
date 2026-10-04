@@ -2,7 +2,7 @@
 
 This document contains essential instructions and troubleshooting steps for AI
 agents operating within the Fuchsia Cog workspace. For comprehensive details on
-Fuchsia development, please always refer to @GEMINI.md
+Fuchsia development, please always refer to @AGENTS.md
 
 ## 1. Running `fx` Commands
 * The safest and most reliable way to run `fx` is to invoke it directly using
@@ -22,11 +22,11 @@ Fuchsia development, please always refer to @GEMINI.md
 ## 3. Configuring the Build
 * Before building or running tests, ensure your build configuration is set up
   correctly.
-* See `GEMINI.md` for more details on `fx set`, `fx build`, and building
+* See `AGENTS.md` for more details on `fx set`, `fx build`, and building
   specific targets.
 
 ## 4. Additional Reference
 * For broader guidelines regarding C++/Rust development, writing tests, finding
   FIDL methods, formatting commit messages, and managing Git in a multi-repo
-  environment (`jiri`), please consult the `GEMINI.md` file located at the root
+  environment (`jiri`), please consult the `AGENTS.md` file located at the root
   of the Fuchsia directory.

@@ -4,16 +4,8 @@ The [`ffx log`][ffx-log] commands can monitor and filter log messages from a Fuc
 
 ## Concepts
 
-The `ffx` daemon, which runs in the background on the host machine, proactively discovers
-Fuchsia devices and automatically connects to them as they become reachable. With the
-[proactive logging][proactive-logging] feature enabled (which is the default setting for
-`ffx`), the `ffx` daemon starts reading device logs from the target device and
-caches the logs on the host machine, up to a configured space limit.
-
-When the space limit for the stored logs is reached on the host machine, the logs get
-rotated, meaning the oldest logs are deleted to make room for the latest ones. Additionally,
-logs are [symbolized][symbolize-logs] in the background as they are read from the device,
-before they are written to the cache on the host machine.
+The `ffx log` command connects directly to the target device to stream and display
+system logs. Logs are [symbolized][symbolize-logs] as they are read from the device.
 
 By default, the `ffx log` command prints all device logs and leaves the connection open
 to continuously stream new logs from the target device.

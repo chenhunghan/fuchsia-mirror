@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.update.installer",
+    srcs = [
+        "installer.fidl",
+        "progress.fidl",
+    ],
+    visibility = [
+        "//src/developer/ffx/build:__pkg__",
+        "//src/developer/ffx/plugins/target/update:__pkg__",
+        "//src/security/tests/pkg_test/tests/access_ota_blob_as_executable:__pkg__",
+        "//src/security/tests/pkg_test/tests/bad_signature_update:__pkg__",
+        "//src/sys/pkg:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.net.http",
+        "//sdk/fidl/fuchsia.pkg",
+    ],
+)

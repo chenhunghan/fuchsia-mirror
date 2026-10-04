@@ -142,17 +142,6 @@ impl TryFrom<mdns_discovery::MdnsEventType> for TargetEvent {
     }
 }
 
-impl From<emulator_instance::EmulatorTargetAction> for TargetEvent {
-    fn from(e: emulator_instance::EmulatorTargetAction) -> Self {
-        match e {
-            emulator_instance::EmulatorTargetAction::Add(info) => TargetEvent::Added(info.into()),
-            emulator_instance::EmulatorTargetAction::Remove(info) => {
-                TargetEvent::Removed(info.into())
-            }
-        }
-    }
-}
-
 impl TryFrom<mdns_discovery::MdnsTargetInfo> for TargetHandle {
     type Error = Error;
 
@@ -621,40 +610,21 @@ mod test {
     }
 
     #[test]
-    fn test_from_emulatoreventtype_for_targetevent() -> Result<()> {
+    fn test_from_emulator_target_info_for_targethandle() -> Result<()> {
         let addr = TargetAddr::from_str("127.0.0.1:8080").unwrap();
         {
             let info = emulator_instance::EmulatorTargetInfo {
                 nodename: "foo".to_string(),
                 addresses: vec![emulator_instance::EmulatorAddr::LoopbackPort(8080)],
                 serial_number: None,
-                ssh_port: Some(8080),
             };
-            let emulator_event = emulator_instance::EmulatorTargetAction::Add(info);
             assert_eq!(
-                TargetEvent::from(emulator_event),
-                TargetEvent::Added(TargetHandle {
+                TargetHandle::from(info),
+                TargetHandle {
                     node_name: Some("foo".to_string()),
                     state: TargetState::Product { addrs: vec![addr.clone()], serial: None },
                     manual: false,
-                })
-            );
-        }
-        {
-            let info = emulator_instance::EmulatorTargetInfo {
-                nodename: "foo".to_string(),
-                addresses: vec![emulator_instance::EmulatorAddr::LoopbackPort(8080)],
-                serial_number: None,
-                ssh_port: Some(8080),
-            };
-            let emulator_event = emulator_instance::EmulatorTargetAction::Remove(info);
-            assert_eq!(
-                TargetEvent::from(emulator_event),
-                TargetEvent::Removed(TargetHandle {
-                    node_name: Some("foo".to_string()),
-                    state: TargetState::Product { addrs: vec![addr.clone()], serial: None },
-                    manual: false,
-                })
+                }
             );
         }
         {
@@ -662,19 +632,17 @@ mod test {
                 nodename: "foo".to_string(),
                 addresses: vec![emulator_instance::EmulatorAddr::LoopbackPort(8080)],
                 serial_number: Some("EM-9876".to_string()),
-                ssh_port: Some(8080),
             };
-            let emulator_event = emulator_instance::EmulatorTargetAction::Add(info);
             assert_eq!(
-                TargetEvent::from(emulator_event),
-                TargetEvent::Added(TargetHandle {
+                TargetHandle::from(info),
+                TargetHandle {
                     node_name: Some("foo".to_string()),
                     state: TargetState::Product {
                         addrs: vec![addr],
                         serial: Some("EM-9876".to_string()),
                     },
                     manual: false,
-                })
+                }
             );
         }
         Ok(())
@@ -769,7 +737,6 @@ mod test {
                 emulator_instance::EmulatorAddr::LoopbackPort(8022),
             ],
             serial_number: None,
-            ssh_port: Some(8022),
         };
         let handle = TargetHandle::from(emu_info);
         assert_eq!(handle.node_name.as_deref(), Some("fuchsia-emulator-hybrid"));

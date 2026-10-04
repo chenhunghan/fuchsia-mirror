@@ -385,56 +385,60 @@ pub fn get_deprecated_key_identifiers() -> HashMap<u32, String> {
 }
 
 pub fn get_deprecated_key_identifier(key: u32) -> Option<String> {
+    get_deprecated_key_identifier_str(key).map(str::to_string)
+}
+
+pub fn get_deprecated_key_identifier_str(key: u32) -> Option<&'static str> {
     match key {
-        0x0001 => Some("fuchsia.BIND_PROTOCOL".to_string()),
-        0x0002 => Some("fuchsia.BIND_AUTOBIND".to_string()),
-        0x0003 => Some("fuchsia.BIND_COMPOSITE".to_string()),
+        0x0001 => Some("fuchsia.BIND_PROTOCOL"),
+        0x0002 => Some("fuchsia.BIND_AUTOBIND"),
+        0x0003 => Some("fuchsia.BIND_COMPOSITE"),
 
         // PCI binding variables at 0x01XX.
-        0x0100 => Some("fuchsia.BIND_PCI_VID".to_string()),
-        0x0101 => Some("fuchsia.BIND_PCI_DID".to_string()),
-        0x0102 => Some("fuchsia.BIND_PCI_CLASS".to_string()),
-        0x0103 => Some("fuchsia.BIND_PCI_SUBCLASS".to_string()),
-        0x0104 => Some("fuchsia.BIND_PCI_INTERFACE".to_string()),
-        0x0105 => Some("fuchsia.BIND_PCI_REVISION".to_string()),
-        0x0107 => Some("fuchsia.BIND_PCI_TOPO".to_string()),
+        0x0100 => Some("fuchsia.BIND_PCI_VID"),
+        0x0101 => Some("fuchsia.BIND_PCI_DID"),
+        0x0102 => Some("fuchsia.BIND_PCI_CLASS"),
+        0x0103 => Some("fuchsia.BIND_PCI_SUBCLASS"),
+        0x0104 => Some("fuchsia.BIND_PCI_INTERFACE"),
+        0x0105 => Some("fuchsia.BIND_PCI_REVISION"),
+        0x0107 => Some("fuchsia.BIND_PCI_TOPO"),
 
         // USB binding variables at 0x02XX.
-        0x0200 => Some("fuchsia.BIND_USB_VID".to_string()),
-        0x0201 => Some("fuchsia.BIND_USB_PID".to_string()),
-        0x0202 => Some("fuchsia.BIND_USB_CLASS".to_string()),
-        0x0203 => Some("fuchsia.BIND_USB_SUBCLASS".to_string()),
-        0x0204 => Some("fuchsia.BIND_USB_PROTOCOL".to_string()),
-        0x0205 => Some("fuchsia.BIND_USB_INTERFACE_NUMBER".to_string()),
+        0x0200 => Some("fuchsia.BIND_USB_VID"),
+        0x0201 => Some("fuchsia.BIND_USB_PID"),
+        0x0202 => Some("fuchsia.BIND_USB_CLASS"),
+        0x0203 => Some("fuchsia.BIND_USB_SUBCLASS"),
+        0x0204 => Some("fuchsia.BIND_USB_PROTOCOL"),
+        0x0205 => Some("fuchsia.BIND_USB_INTERFACE_NUMBER"),
 
         // Platform bus binding variables at 0x03XX.
-        0x0300 => Some("fuchsia.BIND_PLATFORM_DEV_VID".to_string()),
-        0x0301 => Some("fuchsia.BIND_PLATFORM_DEV_PID".to_string()),
-        0x0302 => Some("fuchsia.BIND_PLATFORM_DEV_DID".to_string()),
-        0x0304 => Some("fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID".to_string()),
-        0x0305 => Some("fuchsia.BIND_PLATFORM_DEV_INTERRUPT_ID".to_string()),
+        0x0300 => Some("fuchsia.BIND_PLATFORM_DEV_VID"),
+        0x0301 => Some("fuchsia.BIND_PLATFORM_DEV_PID"),
+        0x0302 => Some("fuchsia.BIND_PLATFORM_DEV_DID"),
+        0x0304 => Some("fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID"),
+        0x0305 => Some("fuchsia.BIND_PLATFORM_DEV_INTERRUPT_ID"),
 
         // ACPI binding variables at 0x04XX.
-        0x0400 => Some("fuchsia.BIND_ACPI_BUS_TYPE".to_string()),
-        0x0401 => Some("fuchsia.BIND_ACPI_ID".to_string()),
+        0x0400 => Some("fuchsia.BIND_ACPI_BUS_TYPE"),
+        0x0401 => Some("fuchsia.BIND_ACPI_ID"),
 
         // Intel HDA Codec binding variables at 0x05XX.
-        0x0500 => Some("fuchsia.BIND_IHDA_CODEC_VID".to_string()),
-        0x0501 => Some("fuchsia.BIND_IHDA_CODEC_DID".to_string()),
+        0x0500 => Some("fuchsia.BIND_IHDA_CODEC_VID"),
+        0x0501 => Some("fuchsia.BIND_IHDA_CODEC_DID"),
 
         // Serial binding variables at 0x06XX.
-        0x0600 => Some("fuchsia.BIND_SERIAL_CLASS".to_string()),
+        0x0600 => Some("fuchsia.BIND_SERIAL_CLASS"),
 
         // NAND binding variables at 0x07XX.
-        0x0700 => Some("fuchsia.BIND_NAND_CLASS".to_string()),
+        0x0700 => Some("fuchsia.BIND_NAND_CLASS"),
 
         // SDIO binding variables at 0x09XX.
-        0x0900 => Some("fuchsia.BIND_SDIO_VID".to_string()),
-        0x0901 => Some("fuchsia.BIND_SDIO_PID".to_string()),
-        0x0902 => Some("fuchsia.BIND_SDIO_FUNCTION".to_string()),
+        0x0900 => Some("fuchsia.BIND_SDIO_VID"),
+        0x0901 => Some("fuchsia.BIND_SDIO_PID"),
+        0x0902 => Some("fuchsia.BIND_SDIO_FUNCTION"),
 
         // Init step binding variables at 0x0A6X.
-        0x0A60 => Some("fuchsia.BIND_INIT_STEP".to_string()),
+        0x0A60 => Some("fuchsia.BIND_INIT_STEP"),
 
         _ => None,
     }

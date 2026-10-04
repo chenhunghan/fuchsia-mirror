@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 use crate::buffer_reader::{BufferReader, IntoBufferReader};
-use crate::{ie, UnalignedView};
+use crate::{UnalignedView, ie};
 use fidl_fuchsia_wlan_common as fidl_common;
 use ieee80211::MacAddr;
-use num::Unsigned;
+use num_traits::Unsigned;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, Ref, SplitByteSlice};
 
 mod ctrl;

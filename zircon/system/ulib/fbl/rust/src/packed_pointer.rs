@@ -64,7 +64,7 @@ impl<T, const DATA_BITS: usize, const CHECK_ALIGNMENT: bool> PartialEq<*const T>
     for PackedPointer<T, DATA_BITS, CHECK_ALIGNMENT>
 {
     fn eq(&self, other: &*const T) -> bool {
-        self.ptr() as *const T == *other
+        core::ptr::eq(self.ptr(), *other)
     }
 }
 
@@ -92,7 +92,7 @@ impl<T, const DATA_BITS: usize, const CHECK_ALIGNMENT: bool>
     /// Panics in debug builds if the pointer is not aligned to the required boundary,
     /// or if the data exceeds the allowed number of bits.
     pub fn new(ptr: *mut T, data: usize) -> Self {
-        let _ = Self::_ASSERT;
+        const { Self::_ASSERT };
         debug_assert!(
             ptr.addr() & Self::DATA_MASK == 0,
             "Pointer {:?} is not aligned to at least {} bytes",
@@ -107,7 +107,7 @@ impl<T, const DATA_BITS: usize, const CHECK_ALIGNMENT: bool>
 
     /// Creates a new, empty packed pointer.
     pub const fn null() -> Self {
-        let _ = Self::_ASSERT;
+        const { Self::_ASSERT };
         Self { ptr: core::ptr::null_mut() }
     }
 
@@ -122,7 +122,7 @@ impl<T, const DATA_BITS: usize, const CHECK_ALIGNMENT: bool>
     ///
     /// Panics if the data exceeds the allowed number of bits.
     pub const fn from_data(data: usize) -> Self {
-        let _ = Self::_ASSERT;
+        const { Self::_ASSERT };
         assert!(data & Self::PTR_MASK == 0, "Data exceeds allowed bits");
 
         Self { ptr: (data & Self::DATA_MASK) as *mut T }

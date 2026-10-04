@@ -72,7 +72,7 @@ def _platform_artifacts_impl(ctx):
         ctx.file._blobfs_tool,
         ctx.file._fvm_tool,
         ctx.file._zbi_tool,
-        ctx.file._cmc_tool,
+        ctx.executable._cmc_tool,
         ctx.file._fxfs_pbtool,
     ]
 
@@ -124,8 +124,9 @@ platform_artifacts = rule(
             allow_single_file = True,
         ),
         "_cmc_tool": attr.label(
-            default = "@gn_targets//toolchain_host_x64/tools/cmc:cmc",
-            allow_single_file = True,
+            default = "//tools/cmc:cmc",
+            executable = True,
+            cfg = "exec",
         ),
         "_fxfs_pbtool": attr.label(
             default = "@gn_targets//toolchain_host_x64/src/storage/fxfs/fxfs_pbtool:fxfs_pbtool",

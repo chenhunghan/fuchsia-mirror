@@ -12,6 +12,8 @@
 
 #include "src/devices/usb/drivers/usb-virtual-bus/usb-virtual-bus.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_virtual_bus {
 namespace {
 
@@ -653,10 +655,10 @@ TEST_F(UsbVirtualBusTest, FidlControlRequestTest) {
     std::vector<frequest::Request> requests;
     requests.emplace_back(std::move(frequest::Request().information(
         frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
-            fuchsia_hardware_usb_descriptor::UsbSetup()
-                .bm_request_type(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)
-                .b_request(USB_REQ_GET_DESCRIPTOR)
-                .w_value(static_cast<uint16_t>(USB_DT_DEVICE << 8))
+            fdescriptor::UsbSetup()
+                .bm_request_type(kStandardDeviceIn)
+                .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+                .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
                 .w_index(0)
                 .w_length(sizeof(usb_device_descriptor_t)))))));
 
@@ -682,10 +684,10 @@ TEST_F(UsbVirtualBusTest, FidlControlRequestTest) {
     requests.emplace_back(std::move(
         frequest::Request()
             .information(frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
-                fuchsia_hardware_usb_descriptor::UsbSetup()
-                    .bm_request_type(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)
-                    .b_request(USB_REQ_GET_DESCRIPTOR)
-                    .w_value(static_cast<uint16_t>(USB_DT_DEVICE << 8))
+                fdescriptor::UsbSetup()
+                    .bm_request_type(kStandardDeviceIn)
+                    .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+                    .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
                     .w_index(0)
                     .w_length(sizeof(usb_device_descriptor_t)))))
             .data(std::move(buffer))));
@@ -703,7 +705,7 @@ TEST_F(UsbVirtualBusTest, FidlControlRequestTest) {
 TEST_F(UsbVirtualBusTest, FidlOutRequestTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 1 | USB_DIR_OUT;
+  const uint8_t kEpAddr = 1 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -752,7 +754,7 @@ TEST_F(UsbVirtualBusTest, FidlOutRequestTest) {
 TEST_F(UsbVirtualBusTest, FidlInRequestTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -804,7 +806,7 @@ TEST_F(UsbVirtualBusTest, FidlInRequestTest) {
 TEST_F(UsbVirtualBusTest, FidlOutRequestUnderflowTransferTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 1 | USB_DIR_OUT;
+  const uint8_t kEpAddr = 1 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -854,7 +856,7 @@ TEST_F(UsbVirtualBusTest, FidlOutRequestUnderflowTransferTest) {
 TEST_F(UsbVirtualBusTest, FidlInRequestShortTransferTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -909,7 +911,7 @@ TEST_F(UsbVirtualBusTest, FidlInRequestShortTransferTest) {
 TEST_F(UsbVirtualBusTest, FidlInRequestOverrunTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -968,7 +970,7 @@ TEST_F(UsbVirtualBusTest, FidlInRequestOverrunTest) {
 TEST_F(UsbVirtualBusTest, FidlOutRequestMultipleDeviceRequestsTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 1 | USB_DIR_OUT;
+  const uint8_t kEpAddr = 1 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -1030,7 +1032,7 @@ TEST_F(UsbVirtualBusTest, FidlOutRequestMultipleDeviceRequestsTest) {
 TEST_F(UsbVirtualBusTest, FidlInRequestMultipleDeviceRequestsTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler host_event_handler;
   fidl::SyncClient<fendpoint::Endpoint> device_ep(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
@@ -1094,10 +1096,10 @@ TEST_F(UsbVirtualBusTest, QueueControlRequestBeforeConnectTest) {
     std::vector<frequest::Request> requests;
     requests.emplace_back(std::move(frequest::Request().information(
         frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
-            fuchsia_hardware_usb_descriptor::UsbSetup()
-                .bm_request_type(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)
-                .b_request(USB_REQ_GET_DESCRIPTOR)
-                .w_value(static_cast<uint16_t>(USB_DT_DEVICE << 8))
+            fdescriptor::UsbSetup()
+                .bm_request_type(kStandardDeviceIn)
+                .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+                .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
                 .w_index(0)
                 .w_length(sizeof(usb_device_descriptor_t)))))));
 
@@ -1117,7 +1119,7 @@ TEST_F(UsbVirtualBusTest, QueueNormalRequestBeforeConnectedTest) {
   ASSERT_TRUE(enable_result.ok());
   ASSERT_EQ(enable_result->status, ZX_OK);
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> ep_client(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler event_handler;
 
@@ -1156,10 +1158,10 @@ TEST_F(UsbVirtualBusTest, UnexpectedDisconnectDuringControlTest) {
     std::vector<frequest::Request> requests;
     requests.emplace_back(std::move(frequest::Request().information(
         frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
-            fuchsia_hardware_usb_descriptor::UsbSetup()
-                .bm_request_type(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)
-                .b_request(USB_REQ_GET_DESCRIPTOR)
-                .w_value(static_cast<uint16_t>(USB_DT_DEVICE << 8))
+            fdescriptor::UsbSetup()
+                .bm_request_type(kStandardDeviceIn)
+                .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+                .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
                 .w_index(0)
                 .w_length(sizeof(usb_device_descriptor_t)))))));
 
@@ -1186,7 +1188,7 @@ TEST_F(UsbVirtualBusTest, UnexpectedDisconnectDuringControlTest) {
 TEST_F(UsbVirtualBusTest, UnexpectedDisconnectDuringHostNormalTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> ep_client(ConnectToEndpoint<fhci::UsbHciService>(kEpAddr));
   EndpointHandler event_handler;
 
@@ -1223,7 +1225,7 @@ TEST_F(UsbVirtualBusTest, UnexpectedDisconnectDuringHostNormalTest) {
 TEST_F(UsbVirtualBusTest, UnexpectedDisconnectDuringDeviceNormalTest) {
   EnableAndConnect();
 
-  const uint8_t kEpAddr = 2 | USB_DIR_IN;
+  const uint8_t kEpAddr = 2 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   fidl::SyncClient<fendpoint::Endpoint> ep_client(ConnectToEndpoint<fdci::UsbDciService>(kEpAddr));
   EndpointHandler event_handler;
 
@@ -1277,7 +1279,7 @@ TEST_F(UsbVirtualBusTest, GetHardwareInfo) {
   ASSERT_TRUE(info.endpoints()->at(0).supported_types().has_value());
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->size(), 3u);
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->at(0).endpoint_type(),
-            fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+            fdescriptor::EndpointType::kBulk);
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->at(0).max_packet_size_limit(), 65535u);
 
   // Verify first IN endpoint (0x81) at index 15
@@ -1285,7 +1287,7 @@ TEST_F(UsbVirtualBusTest, GetHardwareInfo) {
   ASSERT_TRUE(info.endpoints()->at(15).supported_types().has_value());
   EXPECT_EQ(info.endpoints()->at(15).supported_types()->size(), 3u);
   EXPECT_EQ(info.endpoints()->at(15).supported_types()->at(0).endpoint_type(),
-            fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+            fdescriptor::EndpointType::kBulk);
   EXPECT_EQ(info.endpoints()->at(15).supported_types()->at(0).max_packet_size_limit(), 65535u);
 }
 

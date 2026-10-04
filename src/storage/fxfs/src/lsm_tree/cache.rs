@@ -62,3 +62,53 @@ pub trait ObjectCache<K: Key, V: Value>: Send + Sync {
         0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_store::object_record::{ObjectKey, ObjectValue};
+    use fuchsia_sync::{Mutex, MutexGuard};
+
+    struct DummyPlaceholder;
+    impl ObjectCachePlaceholder<ObjectValue> for DummyPlaceholder {
+        fn complete(self: Box<Self>, _value: Option<&ObjectValue>) {}
+    }
+
+    struct DummyCache;
+    impl ObjectCache<ObjectKey, ObjectValue> for DummyCache {
+        fn lookup_or_reserve(&self, _key: &ObjectKey) -> ObjectCacheResult<'_, ObjectValue> {
+            ObjectCacheResult::NoCache
+        }
+        fn is_cacheable(&self, _key: &ObjectKey) -> bool {
+            false
+        }
+        fn invalidate(&self, _key: &ObjectKey, _value: Option<ObjectValue>) {}
+        fn clear(&self) {}
+    }
+
+    #[fuchsia::test]
+    fn test_object_cache_result_debug_and_default_len() {
+        let mutex = Mutex::new(ObjectValue::None);
+        let guard = MutexGuard::map(mutex.lock(), |v| v);
+        let val_res: ObjectCacheResult<'_, ObjectValue> = ObjectCacheResult::Value(guard);
+        assert!(format!("{:?}", val_res).contains("Value"));
+
+        let placeholder_res: ObjectCacheResult<'_, ObjectValue> =
+            ObjectCacheResult::Placeholder(Box::new(DummyPlaceholder));
+        assert!(format!("{:?}", placeholder_res).contains("Placeholder"));
+
+        let no_cache_res: ObjectCacheResult<'_, ObjectValue> = ObjectCacheResult::NoCache;
+        assert!(format!("{:?}", no_cache_res).contains("NoCache"));
+
+        let cache = DummyCache;
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.is_cacheable(&ObjectKey::object(1)));
+        assert!(matches!(
+            cache.lookup_or_reserve(&ObjectKey::object(1)),
+            ObjectCacheResult::NoCache
+        ));
+        cache.invalidate(&ObjectKey::object(1), None);
+        cache.clear();
+        Box::new(DummyPlaceholder).complete(None);
+    }
+}

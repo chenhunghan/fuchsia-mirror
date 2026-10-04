@@ -61,7 +61,7 @@ Commands:
   package           Create and publish Fuchsia packages
   sdk               Modify or query the installed SDKs
   target            Interact with a target device or emulator
-  version           Print out ffx tool and daemon versions
+  version           Print out ffx tool version information
 ```
 
 You can use `ffx help <subcommand>` or `ffx <subcommand> --help` to see
@@ -185,42 +185,26 @@ ffx --target $NODENAME repository server start
 
 ### Making a direct connection
 
-The normal behavior of `ffx` is to make an indirect connection to the target, mediated
-by the `ffx daemon`. The daemon will eventually be deprecated and removed, however,
-due to its complexity and statefulness. It is possible, meanwhile, to make a connection
-without going through the daemon, by passing the `-d`/`--direct` flag, e.g.
-
-```posix-terminal
-ffx -d target echo
-```
-
-To change the default behavior for all `ffx` invocations, you can instead set
-the `connectivity.direct` configuration option to `true`:
-
-```posix-terminal
-ffx config set connectivity.direct true
-```
+`ffx` connects directly to the target device. To specify a target for a command,
+pass the `-t`/`--target` flag, or configure the default target.
 
 #### Mitigating connection delays
 
-Direct connections provide improved predictability and reliability over
-daemon-based connections, but they also introduce some delays. The next two
-sections describe how to remove both delays. With both of these mitigations
-enabled, target connections are as fast as when running with the daemon.
+Direct connections provide improved predictability and reliability, but they
+can introduce some initial delays. The next two sections describe how to remove
+both delays.
 
 ##### Caching the discovered targets
 
-When using a direct connection, the `ffx` invocation must first determine
-how to connect to the desired target, by finding its address (or if no target
-is specified, by discovering all accessible targets). When using the daemon,
-discovery results are stored by the daemon. But when making the connection
-directly, every command may need to perform a (relatively) slow discovery
-process, which can take a second or more.
+When connecting to a target, `ffx` must first determine how to connect to the
+desired target, by finding its address (or if no target is specified, by
+discovering all accessible targets). Every command may need to perform a
+discovery process, which can take a second or more.
 
 To eliminate this delay, you can run `ffx target discover`, which will start
 a background process to discover the available targets and make them available
 when connecting to the target. This discovery cache is refreshed by default
-every 6o seconds, but if you want to refresh it more quickly (e.g. because you
+every 60 seconds, but if you want to refresh it more quickly (e.g. because you
 have just disconnected a target), you can simply run `ffx target discover` again
 to update the cache immediately.
 
@@ -527,10 +511,6 @@ Doctor summary (to see all details, run ffx doctor -v):
         [✓] /usr/local/google/home/username/global_ffx_config.json locked by /usr/local/google/home/username/global_ffx_config.json.lock
     [✓] SSH Public/Private keys match
 
-[✓] Checking daemon
-    [✓] Daemon found: [3338687]
-    [✓] Connecting to daemon
-
 [✓] Searching for targets
     [✓] 1 targets found
 
@@ -565,15 +545,6 @@ Doctor summary:
         [✓] /usr/local/google/home/username/global_ffx_config.json locked by /usr/local/google/home/username/global_ffx_config.json.lock
     [✓] SSH Public/Private keys match
 
-[✓] Checking daemon
-    [✓] Daemon found: [3338687]
-    [✓] Connecting to daemon
-    [✓] Daemon version: 2025-03-25T18:48:31+00:00
-    [✓] path: /usr/local/google/home/username/fuchsia/out/default/host_x64/ffx
-    [✓] abi-revision: 0xB5D2EBDA9DA50585
-    [✓] api-level: 26
-    [✓] Default target: (none)
-
 [✓] Searching for targets
     [✓] 1 targets found
 
@@ -591,11 +562,9 @@ Doctor summary:
 
 The `ffx` command is useful when writing integration tests which need to interact
 with the Fuchsia environment. However, since `ffx` is primarily designed for
-developers, it inspects the current environment for configuration and also starts
-a daemon in the background to coordinate communication with Fuchsia devices. This
-makes it more complex to write automated tests that use `ffx` since the configuration
-and daemon should be isolated in order to avoid side effects, or interference from
-the global environment.
+developers, it inspects the current environment for configuration. This makes it
+necessary to isolate the configuration in order to avoid side effects or
+interference from the global environment.
 
 To achieve this isolation, test authors need to use [isolate directories][isolate-dir]
 when running tests which use `ffx`.

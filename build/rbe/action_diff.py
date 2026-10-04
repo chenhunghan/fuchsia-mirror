@@ -14,7 +14,6 @@ import itertools
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import AbstractSet
 
 import cl_utils
 import remotetool
@@ -23,7 +22,7 @@ import reproxy_logs
 _SCRIPT_BASENAME = Path(__file__).name
 
 
-def msg(text: str):
+def msg(text: str) -> None:
     print(f"[{_SCRIPT_BASENAME}] {text}")
 
 
@@ -78,7 +77,7 @@ class RootCause(object):
         return "\n  ".join(self.explanation)
 
 
-def verbose_root_cause(explanation: Sequence[str], indent: str):
+def verbose_root_cause(explanation: Sequence[str], indent: str) -> RootCause:
     for line in explanation:
         print(f"{indent}{line}")
     return RootCause(explanation=explanation)
@@ -105,7 +104,7 @@ class ActionDiffer(object):
 
     @property
     def reproxy_cfg(self) -> dict[str, str]:
-        return self._remote_tool.config
+        return self._remotetool.config
 
     def trace_artifact(self, filepath: Path) -> Iterable[RootCause]:
         """Recursively finds action and output differences.
@@ -120,11 +119,11 @@ class ActionDiffer(object):
         Yields:
           reasons for differences.
         """
-        visited = set()  # cache already visited paths
+        visited: set[Path] = set()  # cache already visited paths
         yield from self._trace_artifact(filepath, visited, 0)
 
     def _trace_artifact(
-        self, filepath: Path, visited: AbstractSet[Path], level: int
+        self, filepath: Path, visited: set[Path], level: int
     ) -> Iterable[RootCause]:
         """Recursively finds action and output differences.
 
@@ -147,7 +146,7 @@ class ActionDiffer(object):
         else:
             visited.add(filepath)
 
-        def root_cause(explanation: Sequence[str]) -> RootCause:
+        def root_cause(explanation: list[str]) -> RootCause:
             return verbose_root_cause(
                 [f"path: {filepath}"] + explanation, indent
             )
@@ -233,7 +232,7 @@ class ActionDiffer(object):
         Yields:
           reasons for differences.
         """
-        visited = set()  # cache already visited paths
+        visited: set[Path] = set()  # cache already visited paths
         yield from self._trace_actions(
             left_action_digest, right_action_digest, visited, 0
         )
@@ -242,7 +241,7 @@ class ActionDiffer(object):
         self,
         left_action_digest: str,
         right_action_digest: str,
-        visited: AbstractSet[Path],
+        visited: set[Path],
         level: int,
         remote_working_dir: Path | None = None,
     ) -> Iterable[RootCause]:
@@ -281,7 +280,7 @@ class ActionDiffer(object):
                 [
                     f"Actions {left_action_digest} and {right_action_digest} have different remote commands:"
                 ]
-                + diff.command_unified_diffs
+                + list(diff.command_unified_diffs)
             )
             have_root_cause = True
 

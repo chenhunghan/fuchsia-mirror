@@ -79,7 +79,7 @@ def get_build_flags_targets_from_ast(
         ):
             continue
         func_name = node.func.id
-        if func_name != "build_flags":
+        if func_name not in ("build_flags", "compiler_build_flags"):
             continue
         for kw in node.keywords:
             if kw.arg == "name" and isinstance(kw.value, ast.Constant):

@@ -527,6 +527,83 @@ class DebugSymbolsManifestParserTest(unittest.TestCase):
             )
         )
 
+        # Check that the same binary referenced by multiple targets is not a
+        # conflict, and that the first label wins.
+        manifest = [
+            {
+                "label": "//src:test_1",
+                "debug": "obj/src/test_bin",
+                "elf_build_id": "123456789",
+            },
+            {
+                "label": "//src:test_2",
+                "debug": "obj/src/test_bin",
+                "elf_build_id": "123456789",
+            },
+        ]
+        parser = DebugSymbolsManifestParser(self._root)
+        parser.parse_manifest_json(manifest, "manifest.json")
+        parser.deduplicate_entries()
+        self.assertListEqual(
+            parser.entries,
+            [
+                {
+                    "label": "//src:test_1",
+                    "debug": "obj/src/test_bin",
+                    "elf_build_id": "123456789",
+                },
+            ],
+        )
+
+        # Check that other keys still conflict when labels also differ.
+        manifest = [
+            {
+                "label": "//src:test_1",
+                "debug": "obj/src/test_bin",
+                "cpu": "x64",
+            },
+            {
+                "label": "//src:test_2",
+                "debug": "obj/src/test_bin",
+                "cpu": "arm64",
+            },
+        ]
+        parser = DebugSymbolsManifestParser(self._root)
+        parser.parse_manifest_json(manifest, "manifest.json")
+        with self.assertRaises(ValueError) as cm:
+            parser.deduplicate_entries()
+        self.assertTrue(
+            str(cm.exception).startswith("Incompatible 'cpu' value between ")
+        )
+        self.assertNotIn("'label' value", str(cm.exception))
+
+        # Check that elf_build_id_file is dropped once the merge resolves the
+        # elf_build_id value.
+        manifest = [
+            {
+                "debug": "obj/src/prog",
+                "elf_build_id_file": "obj/src/prog.build-id.stamp",
+            },
+            {
+                "label": "//src:prog",
+                "debug": "obj/src/prog",
+                "elf_build_id": "123456789",
+            },
+        ]
+        parser = DebugSymbolsManifestParser(self._root)
+        parser.parse_manifest_json(manifest, "manifest.json")
+        parser.deduplicate_entries()
+        self.assertListEqual(
+            parser.entries,
+            [
+                {
+                    "label": "//src:prog",
+                    "debug": "obj/src/prog",
+                    "elf_build_id": "123456789",
+                },
+            ],
+        )
+
         # Check that the input manifest is unchanged when there are no duplicates.
         manifest = [
             {

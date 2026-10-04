@@ -45,6 +45,7 @@ fidl("fuchsia.diagnostics") {
     "sample.fidl",
     "selector.fidl",
     "severity.fidl",
+    "system_activity_monitor.fidl",
   ]
   sdk_area = "Diagnostics"
   sdk_category = "partner"

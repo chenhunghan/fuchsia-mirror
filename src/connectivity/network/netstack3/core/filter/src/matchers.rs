@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::fmt::Debug;
 use netstack3_base::{
-    AddressMatcher, InspectableValue, InterfaceMatcher, InterfaceProperties, Matcher,
+    AddressMatcher, InspectableValue, InterfaceMatcher, InterfaceProperties, MarkMatchers, Matcher,
     MatcherBindingsTypes, PortMatcher,
 };
 
@@ -111,6 +111,8 @@ pub struct PacketMatcher<I: IpExt, BT: MatcherBindingsTypes> {
     pub transport_protocol: Option<TransportProtocolMatcher<I::Proto>>,
     /// A custom matcher to run on the packet.
     pub external_matcher: Option<BT::BindingsPacketMatcher>,
+    /// Matchers for packet marks.
+    pub mark_matcher: Option<MarkMatchers>,
 }
 
 impl<I, BT> PacketMatcher<I, BT>
@@ -136,6 +138,7 @@ where
             dst_address,
             transport_protocol,
             external_matcher,
+            mark_matcher,
         } = self;
         let Interfaces { ingress: in_if, egress: out_if } = interfaces;
 
@@ -146,6 +149,7 @@ where
             && dst_address.matches(&packet.dst_addr())
             && transport_protocol.matches(&(packet.protocol(), packet.maybe_transport_packet()))
             && external_matcher.as_ref().map_or(true, |m| m.matches(packet, interfaces, meta))
+            && mark_matcher.matches(meta.marks())
     }
 }
 
@@ -157,7 +161,9 @@ mod tests {
     use test_case::test_case;
 
     use netstack3_base::testutil::{FakeDeviceClass, FakeMatcherDeviceId};
-    use netstack3_base::{AddressMatcherType, SegmentHeader, SubnetMatcher};
+    use netstack3_base::{
+        AddressMatcherType, MarkDomain, MarkMatcher, Marks, SegmentHeader, SubnetMatcher,
+    };
 
     use super::*;
     use crate::context::testutil::{FakeBindingsCtx, FakeBindingsPacketMatcher};
@@ -165,7 +171,7 @@ mod tests {
         ArbitraryValue, FakeIcmpEchoRequest, FakeIpPacket, FakeNullPacket, FakeTcpSegment,
         FakeUdpPacket, TestIpExt, TransportPacketExt,
     };
-    use crate::state::FakePacketMetadata;
+    use crate::state::testutil::FakePacketMetadata;
 
     #[test_case(InterfaceMatcher::Id(FakeMatcherDeviceId::wlan_interface().id))]
     #[test_case(InterfaceMatcher::Name(FakeMatcherDeviceId::wlan_interface().name))]
@@ -541,5 +547,41 @@ mod tests {
             result
         );
         assert_eq!(external_matcher.num_calls(), 1);
+    }
+
+    #[test]
+    fn match_on_mark() {
+        let matcher = PacketMatcher::<Ipv4, FakeBindingsCtx<Ipv4>> {
+            mark_matcher: Some(MarkMatchers::new([(
+                MarkDomain::Mark1,
+                MarkMatcher::Marked { mask: !0, start: 100, end: 100, invert: false },
+            )])),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            matcher.matches(
+                &FakeIpPacket::<Ipv4, FakeTcpSegment>::arbitrary_value(),
+                Interfaces { ingress: None, egress: None },
+                &FakePacketMetadata::new(Marks::new([(MarkDomain::Mark1, 100)])),
+            ),
+            true
+        );
+        assert_eq!(
+            matcher.matches(
+                &FakeIpPacket::<Ipv4, FakeTcpSegment>::arbitrary_value(),
+                Interfaces { ingress: None, egress: None },
+                &FakePacketMetadata::new(Marks::new([(MarkDomain::Mark1, 200)])),
+            ),
+            false
+        );
+        assert_eq!(
+            matcher.matches(
+                &FakeIpPacket::<Ipv4, FakeTcpSegment>::arbitrary_value(),
+                Interfaces { ingress: None, egress: None },
+                &FakePacketMetadata::default(),
+            ),
+            false
+        );
     }
 }

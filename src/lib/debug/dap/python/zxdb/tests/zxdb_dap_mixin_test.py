@@ -13,6 +13,7 @@ from pydap.client import DapError
 from zxdb_dap import (
     AsyncBacktraceUpdate,
     ThreadEvent,
+    ZxdbAsyncBacktraceArguments,
     ZxdbDapClient,
     ZxdbDetachArguments,
     ZxdbPauseArguments,
@@ -586,6 +587,95 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
         }
         with self.assertRaises(ValidationError):
             AsyncBacktraceUpdate.model_validate(event_dict)
+
+    async def test_zxdb_async_backtrace(self) -> None:
+        """Tests sending zxdb.AsyncBacktrace request and parsing response."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        args = ZxdbAsyncBacktraceArguments(thread_id=5678)
+
+        send_task = asyncio.create_task(client.zxdb_async_backtrace(args))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        seq = req_val["seq"]
+
+        self.assertEqual(req_val["command"], "zxdb.AsyncBacktrace")
+        self.assertEqual(req_val["arguments"]["threadId"], 5678)
+        self.assertNotIn("processId", req_val["arguments"])
+
+        response = {
+            "seq": 11,
+            "type": "response",
+            "request_seq": seq,
+            "success": True,
+            "command": "zxdb.AsyncBacktrace",
+            "body": {
+                "tasks": [
+                    {
+                        "id": "task_1",
+                        "name": "my_async_fn",
+                        "file": "foo.rs",
+                        "line": 100,
+                        "children": [
+                            {
+                                "id": "task_2",
+                                "name": "child_fn",
+                                "file": "bar.rs",
+                                "line": 200,
+                                "children": [],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        feed_dap_response(reader, response)
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.body.tasks), 1)
+        self.assertEqual(resp.body.tasks[0].id, "task_1")
+        self.assertEqual(resp.body.tasks[0].name, "my_async_fn")
+        self.assertEqual(resp.body.tasks[0].file, "foo.rs")
+        self.assertEqual(resp.body.tasks[0].line, 100)
+        self.assertEqual(len(resp.body.tasks[0].children), 1)
+        self.assertEqual(resp.body.tasks[0].children[0].id, "task_2")
+        self.assertEqual(resp.body.tasks[0].children[0].name, "child_fn")
+
+    async def test_zxdb_async_backtrace_failure(self) -> None:
+        """Tests sending zxdb.AsyncBacktrace request when server returns error."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        args = ZxdbAsyncBacktraceArguments(thread_id=9999)
+
+        send_task = asyncio.create_task(client.zxdb_async_backtrace(args))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        seq = req_val["seq"]
+
+        response = {
+            "seq": 12,
+            "type": "response",
+            "request_seq": seq,
+            "success": False,
+            "command": "zxdb.AsyncBacktrace",
+            "message": "All threads must be stopped before requesting async-backtrace.",
+        }
+
+        feed_dap_response(reader, response)
+
+        with self.assertRaises(DapError) as ctx:
+            await send_task
+        self.assertIn("All threads must be stopped", str(ctx.exception))
 
 
 if __name__ == "__main__":

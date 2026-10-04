@@ -69,9 +69,12 @@ void ProcessNode::SendFrame(uint32_t index, frame_metadata_t metadata,
   TRACE_DURATION("camera", "ProcessNode::SendFrame", "this", this, "index", index);
   ZX_ASSERT(metadata.timestamp > 0);
   ZX_ASSERT(metadata.capture_timestamp > 0);
-  // If the node is shutting down, immediately release the frame.
+  // If the node is shutting down, drop the frame. Do NOT invoke release_callback():
+  // for InputNode the underlying banjo OutputStream ctx (arm-isp StreamContext) is
+  // synchronously freed inside stream_.Shutdown() before this task runs, so
+  // release_callback() -> stream_.ReleaseFrame() would dereference a freed pointer.
+  // The ISP side reclaims the buffer via Stream::FinalizeShutdown() regardless.
   if (shutdown_state_.requested) {
-    release_callback();
     return;
   }
   // Wrap the node-provided callback in a trace flow.

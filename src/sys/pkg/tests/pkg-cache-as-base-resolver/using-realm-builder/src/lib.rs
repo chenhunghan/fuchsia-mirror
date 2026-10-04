@@ -230,11 +230,17 @@ impl TestEnvBuilder {
         builder
             .add_route(
                 Route::new()
+                    .capability(Capability::protocol_by_name(format!(
+                        "{}-base",
+                        fpkg::PackageResolverMarker::PROTOCOL_NAME
+                    )))
+                    .capability(Capability::protocol_by_name(format!(
+                        "{}-base",
+                        fcomponent_resolution::ResolverMarker::PROTOCOL_NAME
+                    )))
                     .capability(Capability::protocol::<fpkg::PackageCacheMarker>())
                     .capability(Capability::protocol::<fpkg::RetainedPackagesMarker>())
                     .capability(Capability::protocol::<fpkg_gc::ManagerMarker>())
-                    .capability(Capability::protocol::<fpkg::PackageResolverMarker>())
-                    .capability(Capability::protocol::<fcomponent_resolution::ResolverMarker>())
                     .capability(Capability::directory("pkgfs"))
                     .capability(Capability::directory("system"))
                     .capability(Capability::directory("pkgfs-packages"))
@@ -255,7 +261,13 @@ struct TestEnv {
 
 impl TestEnv {
     fn package_resolver(&self) -> fpkg::PackageResolverProxy {
-        self.realm_instance.root.connect_to_protocol_at_exposed_dir().unwrap()
+        self.realm_instance
+            .root
+            .connect_to_named_protocol_at_exposed_dir::<fpkg::PackageResolverMarker>(&format!(
+                "{}-base",
+                fpkg::PackageResolverMarker::PROTOCOL_NAME
+            ))
+            .expect("connect to base package resolver")
     }
 
     async fn resolve_package(
@@ -290,7 +302,12 @@ impl TestEnv {
     }
 
     fn component_resolver(&self) -> fcomponent_resolution::ResolverProxy {
-        self.realm_instance.root.connect_to_protocol_at_exposed_dir().unwrap()
+        self.realm_instance
+            .root
+            .connect_to_named_protocol_at_exposed_dir::<fcomponent_resolution::ResolverMarker>(
+                &format!("{}-base", fcomponent_resolution::ResolverMarker::PROTOCOL_NAME),
+            )
+            .expect("connect to base component resolver")
     }
 
     async fn resolve_component(

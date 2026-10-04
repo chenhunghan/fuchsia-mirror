@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "usb_driver_api",
+    edition = "2024",
+    target_compatible_with = HOST_CONSTRAINTS,
+    test_deps = [
+        "//src/developer/ffx/lib/metrics:lib",
+        "//src/developer/ffx/lib/usb_vsock_host",
+        "//src/developer/ffx/tools/usb_driver/impl:lib",
+        "//src/developer/lib/usb_vsock",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//src/developer/ffx/fidl/usb:fuchsia.ffx.usb_rust_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust/fidl_message",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tokio",
+    ],
+)

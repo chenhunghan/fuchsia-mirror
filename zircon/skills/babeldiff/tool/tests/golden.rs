@@ -1,0 +1,869 @@
+//! End-to-end tests over the fixtures in `tests/fixtures`.
+//!
+//! Each test renders a report and compares it with an `expected*.txt` file
+//! next to the fixture. Run with `BLESS=1` to rewrite the expected output
+//! after an intentional change, and review the diff.
+
+use babeldiff::analyze::{CppOrigin, Link, NoFinder, Options, Report};
+use babeldiff::check::{Category, Severity};
+use babeldiff::git::{Git, RepoFinder};
+use babeldiff::input::ChangeSet;
+use babeldiff::render::{render, Layout, RenderOptions};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn check_golden(path: &Path, actual: &str) {
+    if std::env::var_os("BLESS").is_some() {
+        std::fs::write(path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("missing {}; run with BLESS=1", path.display()));
+    if expected != actual {
+        let first = expected
+            .lines()
+            .zip(actual.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or(expected.lines().count().min(actual.lines().count()));
+        panic!(
+            "{} differs from the actual output starting at line {}:\n  expected: {:?}\n  actual:   {:?}\nRun with BLESS=1 to update.",
+            path.display(),
+            first + 1,
+            expected.lines().nth(first),
+            actual.lines().nth(first)
+        );
+    }
+}
+
+fn opts(layout: Layout) -> RenderOptions {
+    RenderOptions {
+        layout,
+        width: 160,
+        context: None,
+        summary_only: false,
+    }
+}
+
+/// A synthetic port with no planted differences, read from a patch.
+fn beacon_report() -> Report {
+    let text = std::fs::read_to_string(fixture("beacon/beacon.patch")).unwrap();
+    let files = babeldiff::patch::parse(&text);
+    let cs = ChangeSet::from_patch(&files, &mut |_| None);
+    babeldiff::run(&cs, &Options::default(), &mut NoFinder)
+}
+
+#[test]
+fn beacon_golden() {
+    let report = beacon_report();
+    check_golden(
+        &fixture("beacon/expected.txt"),
+        &render(&report, &opts(Layout::SideBySide)),
+    );
+}
+
+#[test]
+fn beacon_follows_ffi_shims_without_false_positives() {
+    let report = beacon_report();
+    let pair = report
+        .pairs
+        .iter()
+        .find(|p| p.cpp.name == "BeaconDispatcher::Subscribe")
+        .expect("Subscribe is paired");
+    assert_eq!(pair.rust.name, "BeaconDispatcher::subscribe");
+    assert!(
+        matches!(&pair.link, Link::Ffi { shim, .. } if shim == "rust_beacon_dispatcher_subscribe")
+    );
+    // A faithful port: every function pairs and none has an issue.
+    assert_eq!(report.pairs.len(), 7);
+    for p in &report.pairs {
+        assert_eq!(p.issues(), 0, "{}: {:#?}", p.cpp.name, p.findings);
+        assert_eq!(
+            p.summary.cpp_errors, p.summary.rust_errors,
+            "{}",
+            p.cpp.name
+        );
+    }
+    assert!(report.unmatched_cpp.is_empty());
+    assert!(report.unmatched_rust.is_empty());
+    // Safety comments and `# Safety` docs are expected in Rust: no finding.
+    for name in [
+        "BeaconDispatcher::FindLocked",
+        "BeaconDispatcher::GetSubscriber",
+    ] {
+        let p = report.pairs.iter().find(|p| p.cpp.name == name).unwrap();
+        let safety: Vec<usize> = p
+            .rust
+            .units
+            .iter()
+            .filter(|u| u.features.safety)
+            .map(|u| u.start_line)
+            .collect();
+        assert!(!safety.is_empty(), "{name}");
+        for f in &p.findings {
+            assert!(
+                f.rust_line.is_none_or(|l| !safety.contains(&l)),
+                "{name}: {f:?}"
+            );
+        }
+    }
+    // ksync token plumbing has no C++ counterpart and is not a finding, and
+    // the lock is still compared as a lock.
+    let fc = report
+        .pairs
+        .iter()
+        .find(|p| p.cpp.name == "BeaconDispatcher::FlashCount")
+        .unwrap();
+    assert!(fc.rust.units.iter().any(|u| u.features.lock_plumbing));
+    assert!(fc
+        .findings
+        .iter()
+        .all(|f| f.severity == Severity::Note && f.category == Category::Comment));
+    assert_eq!(fc.summary.cpp_locks, fc.summary.rust_locks);
+    // Shims are reported as shims, not as unpaired Rust.
+    assert!(report
+        .shims
+        .iter()
+        .any(|s| s.shim.name == "rust_beacon_dispatcher_flash"
+            && s.target.as_deref() == Some("BeaconDispatcher::flash")));
+}
+
+/// Builds a git repository with the fixture's `before` and `after` trees as
+/// two commits.
+fn two_commit_repo(fixture_name: &str, name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .output()
+            .expect("git is installed");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let copy = |from: &Path| {
+        for entry in walk(from) {
+            let rel = entry.strip_prefix(from).unwrap();
+            let to = dir.join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(&entry, &to).unwrap();
+        }
+    };
+    git(&["init", "-q"]);
+    copy(&fixture(&format!("{fixture_name}/before")));
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "before"]);
+    std::fs::remove_dir_all(dir.join("zircon")).unwrap();
+    copy(&fixture(&format!("{fixture_name}/after")));
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "after"]);
+    dir
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out.sort();
+    out
+}
+
+fn git_report(fixture_name: &str, name: &str) -> Report {
+    let repo = two_commit_repo(fixture_name, name);
+    let git = Git::new(&repo);
+    let (base, head) = Git::range("HEAD");
+    let cs = git.changeset(&base, &head).unwrap();
+    let mut finder = RepoFinder::new(git, base);
+    let report = babeldiff::run(&cs, &Options::default(), &mut finder);
+    let _ = std::fs::remove_dir_all(&repo);
+    report
+}
+
+fn fifo_report(name: &str) -> Report {
+    git_report("fifo", name)
+}
+
+#[test]
+fn fifo_golden() {
+    let report = fifo_report("fifo-golden");
+    check_golden(
+        &fixture("fifo/expected.txt"),
+        &render(&report, &opts(Layout::SideBySide)),
+    );
+    check_golden(
+        &fixture("fifo/expected-stacked.txt"),
+        &render(&report, &opts(Layout::Stacked)),
+    );
+}
+
+#[test]
+fn fifo_finds_planted_differences() {
+    let report = fifo_report("fifo-planted");
+    let pair = |name: &str| report.pairs.iter().find(|p| p.cpp.name == name).unwrap();
+    let has = |name: &str, needle: &str| {
+        pair(name)
+            .findings
+            .iter()
+            .any(|f| f.severity == Severity::Issue && f.message.contains(needle))
+    };
+    // A different error code.
+    assert!(has(
+        "FifoDispatcher::WriteFromUser",
+        "C++ returns PEER_CLOSED, Rust returns BAD_STATE"
+    ));
+    // A rollback path replaced by `?`.
+    assert!(has(
+        "FifoDispatcher::WriteSelfLocked",
+        "C++ handles this call's error in its own branch, but Rust propagates it"
+    ));
+    assert!(has("FifoDispatcher::WriteSelfLocked", "only in C++"));
+    // The lock is taken before the argument checks in Rust, after in C++.
+    assert!(has("FifoDispatcher::ReadToUser", "order may differ"));
+    // Comments carried over from the header's declaration comments.
+    assert_eq!(
+        pair("FifoDispatcher::WriteFromUser").summary.comments_same,
+        2
+    );
+    // C++ the change left alone is found in the repository.
+    let full = pair("FifoDispatcher::IsFullLocked");
+    assert_eq!(full.origin, CppOrigin::Unchanged);
+    assert_eq!(full.rust.name, "FifoDispatcher::is_full_locked");
+    assert_eq!(full.issues(), 0);
+}
+
+#[test]
+fn cli_exit_status_reflects_issues() {
+    let bin = env!("CARGO_BIN_EXE_babeldiff");
+    let before = fixture("fifo/before/zircon/kernel/object/fifo_dispatcher.cc");
+    let after = fixture("fifo/after/zircon/kernel/object/fifo_dispatcher.rs");
+    let out = Command::new(bin)
+        .args(["--summary", "files"])
+        .arg(&before)
+        .arg(&after)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("FifoDispatcher::WriteSelfLocked  <->  FifoDispatcher::write_self_locked")
+    );
+
+    let same = Command::new(bin)
+        .args(["files"])
+        .arg(&before)
+        .arg(&before)
+        .output()
+        .unwrap();
+    assert_eq!(same.status.code(), Some(0));
+}
+
+#[test]
+fn html_report_is_self_contained() {
+    use babeldiff::html::{render_html, HtmlOptions};
+    let report = fifo_report("fifo-html");
+    let html = render_html(
+        &report,
+        &HtmlOptions {
+            title: "fifo <test>".into(),
+        },
+    );
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(html.contains("<title>babeldiff: fifo &lt;test&gt;</title>"));
+    // Nothing is loaded from elsewhere.
+    for needle in ["<link", "src=", "http://", "https://", "@import", "url("] {
+        assert!(!html.contains(needle), "found {needle:?}");
+    }
+    // One section per pair, and a row for the planted error-code change.
+    assert_eq!(
+        html.matches("<section class=\"pair ").count(),
+        report.pairs.len()
+    );
+    assert!(html.contains("error code differs: C++ returns PEER_CLOSED, Rust returns BAD_STATE"));
+    assert!(html.contains("data-k=\"e:PEER_CLOSED\""));
+    assert!(html.contains("data-k=\"e:BAD_STATE\""));
+    // Runs of equivalent rows fold, and functions can be filtered by what
+    // they carry.
+    assert!(html.contains("class=\"fold\" title=\"Show these rows\">"));
+    assert!(html.contains("<option value=\"findings\">functions with issues or notes</option>"));
+    // Source text is escaped.
+    assert!(!html.contains("<const"));
+    assert!(html.contains("&lt;<span class=\"kw\">const</span>"));
+    // Each code block names its files and functions, so that a line
+    // comment can say where it points.
+    let p = &report.pairs[0];
+    assert!(html.contains(&format!(
+        "<div class=\"code\" data-cp=\"{}\" data-rp=\"{}\"",
+        p.cpp.path, p.rust.path
+    )));
+    assert!(html.contains("id=\"comments-text\""));
+}
+
+#[test]
+fn cli_writes_html() {
+    let bin = env!("CARGO_BIN_EXE_babeldiff");
+    let out_path =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("beacon-{}.html", std::process::id()));
+    let out = Command::new(bin)
+        .args(["patch", "--format", "html", "-o"])
+        .arg(&out_path)
+        .arg(fixture("beacon/beacon.patch"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = std::fs::read_to_string(&out_path).unwrap();
+    let _ = std::fs::remove_file(&out_path);
+    assert!(html.contains(
+        "<title>babeldiff: [kernel] Port BeaconDispatcher subscriptions to Rust</title>"
+    ));
+    assert_eq!(html.matches("<section class=\"pair ").count(), 7);
+}
+
+/// A dispatcher hierarchy folded into one Rust type with an enum, two
+/// same-named `create` functions behind shims, syscalls with a handle
+/// lookup, status chaining and a status set in each branch, four planted
+/// mistakes in the Rust, and one planted change to C++ that stays C++.
+fn doorbell_report(name: &str) -> Report {
+    git_report("doorbell", name)
+}
+
+#[test]
+fn doorbell_golden() {
+    let report = doorbell_report("doorbell-golden");
+    check_golden(
+        &fixture("doorbell/expected.txt"),
+        &render(&report, &opts(Layout::Stacked)),
+    );
+}
+
+#[test]
+fn doorbell_finds_exactly_the_planted_mistakes() {
+    let report = doorbell_report("doorbell-planted");
+    let pair = |name: &str| report.pairs.iter().find(|p| p.cpp.name == name).unwrap();
+
+    // Each static Create pairs with its own Rust `create`, told apart by the
+    // type path the shim calls.
+    assert_eq!(
+        pair("ChimeDoorbellDispatcher::Create").rust.name,
+        "ChimeDoorbellDispatcher::create"
+    );
+    assert_eq!(
+        pair("BuzzerDoorbellDispatcher::Create").rust.name,
+        "BuzzerDoorbellDispatcher::create"
+    );
+    // Both overrides of Ring fold into the one Rust `ring`.
+    let ring = pair("ChimeDoorbellDispatcher::Ring");
+    assert_eq!(ring.rust.name, "DoorbellDispatcher::ring");
+    let ovs: Vec<&str> = ring.overrides.iter().map(|o| o.cpp.name.as_str()).collect();
+    assert_eq!(ovs, ["BuzzerDoorbellDispatcher::Ring"]);
+    assert!(report.unmatched_cpp.is_empty());
+    assert!(report.unmatched_rust.is_empty());
+
+    let mut issues: Vec<String> = report
+        .pairs
+        .iter()
+        .flat_map(|p| p.all_findings())
+        .filter(|f| f.severity == Severity::Issue)
+        .map(|f| format!("{} {}", f.category.name(), f.message))
+        .collect();
+    issues.sort();
+    assert_eq!(
+        issues,
+        [
+            "comment comment only in C++",
+            "control-flow Rust's condition adds a test that C++ doesn't make: tone == 0",
+            "error-path error codes differ: C++ [NO_MEMORY], Rust [NO_RESOURCES]",
+            "trace trace/print statement only in C++",
+        ]
+    );
+    // The dropped comment is the Buzzer override's.
+    let lost = ring.overrides[0]
+        .findings
+        .iter()
+        .find(|f| f.message == "comment only in C++")
+        .unwrap();
+    assert_eq!(
+        ring.overrides[0].cpp.line(lost.cpp_line.unwrap()).trim(),
+        "// A buzzer rings once, however long it buzzes."
+    );
+    // Status chaining in the syscall is `?` in Rust.
+    assert_eq!(pair("sys_doorbell_ring").issues(), 0);
+    assert_eq!(pair("sys_doorbell_create").issues(), 0);
+
+    // The one C++ change that stays C++ is listed; the forwarders into Rust
+    // and the FFI declarations are not.
+    let changes: Vec<(usize, &str)> = report
+        .cpp_changes
+        .iter()
+        .map(|c| (c.start_line, c.text.as_str()))
+        .collect();
+    assert_eq!(
+        changes,
+        [(
+            24,
+            "ChimeDoorbellDispatcher::ChimeDoorbellDispatcher(uint32_t notes) : notes_(notes + 1) {}"
+        )]
+    );
+
+    // One of each rubric lint is planted: an `extern "C"` parameter of the
+    // wrong width, an unsafe block without a SAFETY comment, and a C++ FFI
+    // helper that branches.
+    let lints: Vec<(&str, usize, &str)> = report
+        .lints
+        .iter()
+        .map(|l| (l.path.rsplit('/').next().unwrap(), l.line, l.kind.name()))
+        .collect();
+    assert_eq!(
+        lints,
+        [
+            ("doorbell_dispatcher_ffi.cc", 17, "shim-logic"),
+            ("doorbell_dispatcher_ffi.rs", 15, "extern-signature"),
+            ("doorbell_dispatcher_ffi.rs", 61, "unsafe-safety"),
+        ]
+    );
+    assert_eq!(report.lint_issues(), 3);
+}
+
+#[test]
+fn json_lists_findings_with_locations() {
+    let report = doorbell_report("doorbell-json");
+    let json = babeldiff::json::render_json(&report, "doorbell");
+    assert!(json.starts_with("{\"version\":1,\"title\":\"doorbell\""));
+    assert!(json.contains("\"summary\":{\"pairs\":7,\"issues\":4,"));
+    assert!(json.contains(
+        "\"severity\":\"issue\",\"category\":\"error-path\",\"rubric\":\"behavioral parity of error paths\",\"message\":\"error codes differ: C++ [NO_MEMORY], Rust [NO_RESOURCES]\""
+    ));
+    assert!(json.contains("\"override\":\"BuzzerDoorbellDispatcher::Ring\""));
+    assert!(json.contains("\"lint_issues\":3,\"lint_notes\":0"));
+    assert!(json.contains("{\"kind\":\"extern-signature\",\"severity\":\"issue\",\"rubric\":\"FFI declarations match on both sides\",\"message\":\"cpp_doorbell_dispatcher_log: parameter 2: C++ `uint32_t kind`, Rust `u64` (4-byte vs 8-byte value)\",\"location\":{\"path\":\"zircon/kernel/object/doorbell_dispatcher_ffi.rs\",\"line\":15},\"related\":{\"path\":\"zircon/kernel/object/doorbell_dispatcher_ffi.cc\",\"line\":15}}"));
+    assert!(json.contains("\"path\":\"zircon/kernel/object/doorbell_dispatcher.rs\",\"line\":28,\"text\":\"if tone == 0 || tone > MAX_TONE {\""));
+}
+
+#[test]
+fn issues_only_drops_notes_and_clean_pairs() {
+    let mut report = doorbell_report("doorbell-issues");
+    report.retain_issues();
+    assert_eq!(report.notes(), 0);
+    assert_eq!(report.issues(), 4);
+    assert!(report.pairs.iter().all(|p| p.issues() > 0));
+    assert_eq!(report.pairs.len(), 2);
+}
+
+fn lantern_report(name: &str) -> Report {
+    git_report("lantern", name)
+}
+
+#[test]
+fn lantern_golden() {
+    let report = lantern_report("lantern-golden");
+    check_golden(
+        &fixture("lantern/expected.txt"),
+        &render(&report, &opts(Layout::Stacked)),
+    );
+}
+
+/// The lantern fixture plants the mistakes found reviewing a large
+/// conversion by hand: a second copy of a function that drops a mask, a
+/// constant the C++ never used, a mask the Rust adds, a macro and a helper
+/// expanded inline, a call moved out of `DEBUG_ASSERT`, `ASSERT(false)`
+/// turned into an error, an added check, a function in an unrelated file,
+/// a reference with an invented lifetime and "Ported from" comments.
+#[test]
+fn lantern_finds_the_planted_mistakes() {
+    let report = lantern_report("lantern-planted");
+    let mut issues: Vec<String> = report
+        .pairs
+        .iter()
+        .flat_map(|p| p.all_findings())
+        .filter(|f| f.severity == Severity::Issue)
+        .map(|f| format!("{} {}", f.category.name(), f.message))
+        .collect();
+    issues.sort();
+    assert_eq!(
+        issues,
+        [
+            "assert C++ calls is_lit_locked only inside DEBUG_ASSERT, so only in debug builds; the Rust calls it unconditionally at line 56",
+            "assert C++ panics here (ASSERT(false)); the Rust returns NOT_SUPPORTED instead (line 73)",
+            "call C++ calls the helper copy_color at 3 places (lines 44, 45, 46); the Rust never calls it, so its code is repeated inline",
+            "call C++ macro COPY_WICKS is expanded inline in the Rust; keep it as a macro (macro_rules!) and use it where the C++ does",
+            "call C++ macro COPY_WICKS is expanded inline in the Rust; keep it as a macro (macro_rules!) and use it where the C++ does",
+            "comment doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY",
+            "comment doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY",
+            "error-path Rust adds a check `lantern.is_null() || out.is_null()`, returning INVALID_ARGS, that the C++ doesn't make",
+            "pairing the change defines read_brightness twice, here and at zircon/kernel/arch/toy/src/lantern.rs:8, and the copies differ; both are compared with the C++, and callers may reach either",
+            "value C++ sets LANTERN_BRIGHT_MASK here, and the Rust doesn't",
+            "value Rust also clears LANTERN_FLAGS_RESUME, which the C++ doesn't",
+            "value only Rust uses LANTERN_OFF_MASK (0x700); the C++ function never mentions it",
+        ]
+    );
+    // Both copies of read_brightness are compared with the C++.
+    let copies: Vec<&str> = report
+        .pairs
+        .iter()
+        .filter(|p| p.cpp.name == "read_brightness")
+        .map(|p| p.rust.path.rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(copies, ["lantern.rs", "glow.rs"]);
+    // The lock the closure runs under lines up with the C++ guard.
+    let state = report
+        .pairs
+        .iter()
+        .find(|p| p.cpp.name == "lantern_get_state")
+        .unwrap();
+    assert_eq!(state.summary.cpp_locks, state.summary.rust_locks);
+
+    let lints: Vec<(&str, usize, &str)> = report
+        .lints
+        .iter()
+        .map(|l| (l.path.rsplit('/').next().unwrap(), l.line, l.kind.name()))
+        .collect();
+    assert_eq!(
+        lints,
+        [
+            ("lantern.cc", 1, "file-placement"),
+            ("glow.rs", 31, "invented-lifetime"),
+            ("lantern.rs", 4, "provenance-comment"),
+        ]
+    );
+    let placement: Vec<(&str, Vec<(&str, bool)>)> = report
+        .placement
+        .iter()
+        .map(|p| {
+            (
+                p.cpp_path.rsplit('/').next().unwrap(),
+                p.targets
+                    .iter()
+                    .map(|t| (t.rust_path.rsplit('/').next().unwrap(), t.expected))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        placement,
+        [("lantern.cc", vec![("lantern.rs", true), ("glow.rs", false)])]
+    );
+}
+
+#[test]
+fn chain_lock_callback_lines_up_with_a_guard() {
+    let cpp = "zx_status_t lamp_get(Lamp* lamp, uint32_t* out) {\n  SingleChainLockGuard guard{IrqSaveOption, lamp->get_lock(), CLT_TAG(\"lamp_get\")};\n  // Only a lit lamp has a color.\n  if (!lamp->lit()) {\n    return ZX_ERR_BAD_STATE;\n  }\n  *out = lamp->color();\n  return ZX_OK;\n}\n";
+    let rust = "pub unsafe fn lamp_get(lamp: *mut Lamp, out: &mut u32) -> zx_status_t {\n    // SAFETY: `lamp` is valid.\n    unsafe {\n        lamp::with_chain_lock(lamp, |lamp| {\n            // Only a lit lamp has a color.\n            if !lamp::lit(lamp) {\n                return ZX_ERR_BAD_STATE;\n            }\n            *out = lamp::color(lamp);\n            ZX_OK\n        })\n    }\n}\n";
+    let cs = ChangeSet::from_files(&[
+        ("lamp.cc".into(), cpp.into()),
+        ("lamp.rs".into(), rust.into()),
+    ]);
+    let report = babeldiff::run(&cs, &Options::default(), &mut NoFinder);
+    assert_eq!(report.pairs.len(), 1);
+    let p = &report.pairs[0];
+    let issues: Vec<&str> = p
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Issue)
+        .map(|f| f.message.as_str())
+        .collect();
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_eq!(p.summary.cpp_locks, p.summary.rust_locks);
+}
+
+#[test]
+fn unchanged_cpp_comes_from_the_same_architecture() {
+    // Rust under arch/x86 with no removed C++ must not be paired with a
+    // same-named method under arch/riscv64.
+    let report = git_report("compass", "compass");
+    let names: Vec<(&str, &str)> = report
+        .pairs
+        .iter()
+        .map(|p| (p.cpp.path.as_str(), p.rust.base.as_str()))
+        .collect();
+    assert!(
+        names.contains(&("zircon/kernel/arch/x86/compass.cc", "heading")),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|(c, _)| c.contains("riscv64")),
+        "{names:?}"
+    );
+}
+
+fn only_issues(cpp: &str, rust: &str) -> Vec<String> {
+    let cs = ChangeSet::from_files(&[
+        ("lamp.cc".into(), cpp.into()),
+        ("lamp.rs".into(), rust.into()),
+    ]);
+    let report = babeldiff::run(&cs, &Options::default(), &mut NoFinder);
+    assert_eq!(report.pairs.len(), 1);
+    report.pairs[0]
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Issue)
+        .map(|f| f.message.clone())
+        .collect()
+}
+
+const LAMP_ON_CPP: &str = "void lamp_on(Lamp* lamp) {\n  lamp->power(true);\n#if __has_feature(safe_stack)\n  lamp->reset_shadow(lamp->shadow_top());\n#else\n  lamp->reset();\n#endif\n  lamp->glow();\n}\n";
+
+#[test]
+fn conditional_compilation_must_stay_conditional() {
+    // The `#if` became a run-time stub, so the guarded code always runs
+    // and the `#else` branch is gone.
+    let stub = "pub fn lamp_on(lamp: &mut Lamp) {\n    lamp.power(true);\n    let _ = has_feature(\"safe_stack\");\n    lamp.reset_shadow(lamp.shadow_top());\n    lamp.glow();\n}\n";
+    let issues = only_issues(LAMP_ON_CPP, stub);
+    assert!(
+        issues.iter().any(|m| m
+            .starts_with("C++ compiles line 4 only when `#if __has_feature(safe_stack)`")
+            && m.contains("Rust line 3")),
+        "{issues:?}"
+    );
+
+    // A `#[cfg]` on each branch keeps it conditional.
+    let cfg = "pub fn lamp_on(lamp: &mut Lamp) {\n    lamp.power(true);\n    #[cfg(sanitize = \"safestack\")]\n    lamp.reset_shadow(lamp.shadow_top());\n    #[cfg(not(sanitize = \"safestack\"))]\n    lamp.reset();\n    lamp.glow();\n}\n";
+    let issues = only_issues(LAMP_ON_CPP, cfg);
+    assert!(issues.is_empty(), "{issues:?}");
+}
+
+fn all_findings(cpp: &str, rust: &str) -> Vec<String> {
+    let cs = ChangeSet::from_files(&[
+        ("lamp.cc".into(), cpp.into()),
+        ("lamp.rs".into(), rust.into()),
+    ]);
+    let report = babeldiff::run(&cs, &Options::default(), &mut NoFinder);
+    assert_eq!(report.pairs.len(), 1);
+    report.pairs[0]
+        .findings
+        .iter()
+        .map(|f| f.message.clone())
+        .collect()
+}
+
+#[test]
+fn static_assert_matches_a_const_assert() {
+    let cpp = "int lamp_pages(Lamp* lamp) {\n  static_assert(kLampSize == 3 * kPageSize);\n  return lamp->pages();\n}\n";
+    let rust = "pub fn lamp_pages(lamp: &Lamp) -> i32 {\n    const {\n        assert!(LAMP_SIZE == 3 * PAGE_SIZE);\n    }\n    lamp.pages()\n}\n";
+    let found = all_findings(cpp, rust);
+    assert!(!found.iter().any(|m| m.contains("assert")), "{found:?}");
+
+    // Dropping the assertion is still reported.
+    let dropped = "pub fn lamp_pages(lamp: &Lamp) -> i32 {\n    lamp.pages()\n}\n";
+    let found = all_findings(cpp, dropped);
+    assert!(found.iter().any(|m| m.contains("assert")), "{found:?}");
+}
+
+#[test]
+fn is_err_early_return_matches_cpp_is_error_check() {
+    let cpp = "zx::result<> lamp_init(Lamp& lamp) {\n  auto result = lamp.SetPower(kOn, 0);\n  if (result.is_error()) {\n    return result;\n  }\n  result = lamp.SetColor(kWhite);\n  if (result.is_error()) {\n    return result;\n  }\n  return zx::ok();\n}\n";
+    let rust = "pub fn lamp_init(lamp: &mut Lamp) -> Result<(), Status> {\n    let mut result = lamp.set_power(ON, 0);\n    if result.is_err() {\n        return result;\n    }\n    result = lamp.set_color(WHITE);\n    if result.is_err() {\n        return result;\n    }\n    Ok(())\n}\n";
+    let found = all_findings(cpp, rust);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn do_while_matches_loop_break() {
+    let cpp = "void wait_for_event(Lamp* lamp, uint32_t prev_seq, uint32_t prev_idx) {\n  do {\n    lamp->poll();\n  } while (prev_seq != lamp->seq() || lamp->idx() != prev_idx);\n}\n";
+    let rust = "pub fn wait_for_event(lamp: &mut Lamp, prev_seq: u32, prev_idx: u32) {\n    loop {\n        lamp.poll();\n        if prev_seq == lamp.seq() && lamp.idx() == prev_idx {\n            break;\n        }\n    }\n}\n";
+    let cs = ChangeSet::from_files(&[
+        ("lamp.cc".into(), cpp.into()),
+        ("lamp.rs".into(), rust.into()),
+    ]);
+    let report = babeldiff::run(&cs, &Options::default(), &mut NoFinder);
+    assert_eq!(report.pairs.len(), 1);
+    let p = &report.pairs[0];
+    assert!(p.findings.is_empty(), "{:?}", p.findings);
+    for (_, a, b) in &p.summary.flow {
+        assert_eq!(a, b, "flow counts should match: {:?}", p.summary.flow);
+    }
+    let rendered = render(
+        &report,
+        &RenderOptions {
+            layout: Layout::Stacked,
+            ..RenderOptions::default()
+        },
+    );
+    assert!(
+        rendered.contains("} while (prev_seq != lamp->seq() || lamp->idx() != prev_idx);"),
+        "stacked output should include trailing while line:\n{rendered}"
+    );
+
+    // Dropping one of the loop-exit checks is still reported as an issue.
+    let dropped = "pub fn wait_for_event(lamp: &mut Lamp, prev_seq: u32, prev_idx: u32) {\n    loop {\n        lamp.poll();\n        if prev_seq == lamp.seq() {\n            break;\n        }\n    }\n}\n";
+    let issues = only_issues(cpp, dropped);
+    assert!(
+        issues.iter().any(|m| m.contains("condition tests")),
+        "{issues:?}"
+    );
+}
+
+fn version(path: &str, text: &str) -> babeldiff::input::Version {
+    babeldiff::input::Version {
+        path: path.into(),
+        text: text.into(),
+        changed: None,
+    }
+}
+
+const LAMP_OLD_CC: &str = r#"
+uint16_t Panel::Read(Field16 field) {
+  uint64_t value = vmread(field.value);
+  return static_cast<uint16_t>(value);
+}
+
+uint32_t Panel::Read(Field32 field) {
+  uint64_t value = vmread(field.value);
+  return static_cast<uint32_t>(value);
+}
+
+uint32_t Lamp::Traps() {
+  uint32_t count = traps_.count();
+  return count + pending_;
+}
+
+void lamp_xsetbv(uint32_t reg, uint64_t val) {
+  uint32_t lo = static_cast<uint32_t>(val);
+  uint32_t hi = static_cast<uint32_t>(val >> 32);
+  __asm__ volatile("xsetbv" ::"c"(reg), "a"(lo), "d"(hi));
+}
+
+void Lamp::Init(uint32_t level) {
+  level_ = level;
+  pending_ = 0;
+  Configure(level);
+}
+
+uint8_t LampId::stepping() const {
+  uint32_t eax = regs_.eax;
+  return static_cast<uint8_t>(eax & 0xf);
+}
+"#;
+
+const LAMP_NEW_H: &str = r#"
+void Lamp::Init(uint32_t level) {
+  level_ = level;
+  pending_ = 0;
+  Configure(level);
+}
+
+uint8_t LampId::stepping() const { return rust_lamp_id_stepping(&regs_); }
+"#;
+
+const LAMP_RS: &str = r#"
+impl Panel {
+    pub fn read_16(&self, field: Field16) -> u16 {
+        let value = vmread(field.value);
+        value as u16
+    }
+
+    pub fn read_32(&self, field: Field32) -> u32 {
+        let value = vmread(field.value);
+        value as u32
+    }
+}
+
+fn traps() -> u32 {
+    0
+}
+
+pub fn lamp_xsetbv(reg: u32, val: u64) {
+    unsafe { xsetbv(reg, val) }
+}
+
+unsafe fn xsetbv(reg: u32, val: u64) {
+    let lo = val as u32;
+    let hi = (val >> 32) as u32;
+    unsafe { core::arch::asm!("xsetbv", in("ecx") reg, in("eax") lo, in("edx") hi) };
+}
+
+impl LampId {
+    pub fn new(regs: Regs) -> Self {
+        LampId { regs }
+    }
+
+    pub fn stepping(&self) -> u8 {
+        let eax = self.regs.eax;
+        (eax & 0xf) as u8
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_lamp_id_stepping(regs: &Regs) -> u8 {
+    LampId::new(*regs).stepping()
+}
+
+#[cfg(test)]
+mod tests {
+    struct TestLamp {
+        level: u32,
+        pending: u32,
+    }
+
+    impl TestLamp {
+        fn init(&mut self, level: u32) {
+            self.level = level;
+            self.pending = 0;
+            configure(level);
+        }
+    }
+}
+"#;
+
+#[test]
+fn pairs_follow_names_types_and_real_bodies() {
+    let cs = ChangeSet {
+        cpp_old: vec![version("lamp/lamp.cc", LAMP_OLD_CC)],
+        cpp_new: vec![version("lamp/lamp.h", LAMP_NEW_H)],
+        rust_new: vec![version("lamp/lamp.rs", LAMP_RS)],
+    };
+    let report = babeldiff::run(&cs, &Options::default(), &mut NoFinder);
+    let pairs: Vec<(String, usize, String)> = report
+        .pairs
+        .iter()
+        .map(|p| (p.cpp.name.clone(), p.cpp.start_line, p.rust.name.clone()))
+        .collect();
+    let has = |c: &str, r: &str| pairs.iter().any(|(pc, _, pr)| pc == c && pr == r);
+    // Overloads go to the Rust function named for their parameter type.
+    let read: Vec<&str> = pairs
+        .iter()
+        .filter(|(c, _, _)| c == "Panel::Read")
+        .map(|(_, _, r)| r.as_str())
+        .collect();
+    assert_eq!(read, ["Panel::read_16", "Panel::read_32"], "{pairs:?}");
+    // A placeholder returning a constant is not the port.
+    assert!(
+        !pairs.iter().any(|(c, _, _)| c == "Lamp::Traps"),
+        "{pairs:?}"
+    );
+    // A wrapper that only passes its arguments on stands in for its callee.
+    assert!(has("lamp_xsetbv", "xsetbv"), "{pairs:?}");
+    // C++ that moved into a header is not ported by a test double.
+    assert!(
+        !pairs.iter().any(|(c, _, _)| c == "Lamp::Init"),
+        "{pairs:?}"
+    );
+    // The shim calls `LampId::new(..).stepping()`: its target is `stepping`.
+    assert!(has("LampId::stepping", "LampId::stepping"), "{pairs:?}");
+}

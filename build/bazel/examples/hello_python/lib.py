@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 
-def Fib(n):
+def Fib(n: int) -> int:
     if n == 0 or n == 1:
         return n
     return Fib(n - 1) + Fib(n - 2)

@@ -225,7 +225,7 @@ open protocol IsochronousStream {
 
         /// A result of ZX_ERR_INTERNAL indicates that the controller received a request
         /// but was unable to establish the stream.
-        1: result zx.Status;
+        1: result zx.Result;
 
         /// This field is always present if a stream was successfully established.
         2: established_params CisEstablishedParameters;

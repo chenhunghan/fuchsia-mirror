@@ -367,7 +367,7 @@ TEST(EngineTests, TestRegisterCurrentThreadMultipleThreads) {
 
   fbl::Vector<trace::Record> records;
   ASSERT_TRUE(fixture_read_records(&records));
-  EXPECT_EQ(records.size(), 7);
+  ASSERT_EQ(records.size(), 6);
 
   EXPECT_EQ(records[0].type(), trace::RecordType::kInitialization);
 
@@ -382,16 +382,12 @@ TEST(EngineTests, TestRegisterCurrentThreadMultipleThreads) {
   EXPECT_EQ(records[3].type(), trace::RecordType::kThread);
   EXPECT_EQ(records[3].GetThread().index, 1);
 
-  EXPECT_EQ(records[4].type(), trace::RecordType::kString);
-  EXPECT_EQ(records[4].GetString().index, 2);
-  EXPECT_EQ(records[4].GetString().string, "process");
+  EXPECT_EQ(records[4].type(), trace::RecordType::kKernelObject);
+  EXPECT_EQ(records[4].GetKernelObject().object_type, ZX_OBJ_TYPE_THREAD);
+  EXPECT_EQ(records[4].GetKernelObject().koid, t2_koid);
 
-  EXPECT_EQ(records[5].type(), trace::RecordType::kKernelObject);
-  EXPECT_EQ(records[5].GetKernelObject().object_type, ZX_OBJ_TYPE_THREAD);
-  EXPECT_EQ(records[5].GetKernelObject().koid, t2_koid);
-
-  EXPECT_EQ(records[6].type(), trace::RecordType::kThread);
-  EXPECT_EQ(records[6].GetThread().index, 2);
+  EXPECT_EQ(records[5].type(), trace::RecordType::kThread);
+  EXPECT_EQ(records[5].GetThread().index, 2);
 
   END_TRACE_TEST;
 }
@@ -481,14 +477,12 @@ TEST(EngineTests, TestRegisterStringLiteralMultipleThreads) {
   EXPECT_NE(a1.encoded_value, a2.encoded_value);
   EXPECT_NE(b1.encoded_value, b2.encoded_value);
 
-  // Each thread has its own string pool.
-  EXPECT_NE(a1.encoded_value, b1.encoded_value);
-  EXPECT_NE(a2.encoded_value, b2.encoded_value);
+  // String literals are deduplicated across threads in the same trace context.
+  EXPECT_EQ(a1.encoded_value, b1.encoded_value);
+  EXPECT_EQ(a2.encoded_value, b2.encoded_value);
 
   ASSERT_RECORDS(R"X(String(index: 1, "string1")
 String(index: 2, "string2")
-String(index: 3, "string1")
-String(index: 4, "string2")
 )X",
                  "");
 

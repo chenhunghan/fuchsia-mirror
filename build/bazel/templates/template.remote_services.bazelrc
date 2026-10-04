@@ -52,6 +52,10 @@ build:_bes_common --bes_keywords=fuchsia
 build:_bes_infra --experimental_build_event_upload_retry_minimum_delay=30s
 # --bes_proxy may be passed at run time, with a pointer to a temporary socket.
 
+# Reduce log text that is attributed to repetitive progress messages in a noninteractive scenario.
+build:_bes_infra --show_progress_rate_limit=5.0
+build:_bes_infra --noshow_loading_progress
+
 # Users and infra share the same service, but users are less patient, hence a smaller delay.
 build:_bes_user --experimental_build_event_upload_retry_minimum_delay=10s
 

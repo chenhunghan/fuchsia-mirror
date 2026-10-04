@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <usb/descriptors.h>
+
 #include "src/devices/usb/drivers/dwc3/dwc3-test-fixture.h"
 
 namespace dwc3 {
@@ -501,7 +503,10 @@ TEST_F(UnmanagedTestFixture, ZeroLengthPacket) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
     // Setup packet with wLength = 0
-    auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 0);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 0);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
 
     // Push placeholder TRB to avoid AdvanceRead error
@@ -562,7 +567,10 @@ TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransfer) {
 
     // Use high-level construct to simulate Setup received!
     Dwc3TestHelper::SimulateSetupReceived(
-        drv, MakeSetupPacket(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 65535));
+        drv,
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 65535));
   });
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
@@ -596,7 +604,10 @@ TEST_F(UnmanagedTestFixture, ZlpInTransferRequired) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
     // Setup packet with wLength = 1024
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 1024);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 1024);
 
     // Write setup packet to buffer
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
@@ -661,7 +672,10 @@ TEST_F(UnmanagedTestFixture, ZlpInNotRequiredExactMatch) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
     // Setup packet with wLength = 512 (Exact match)
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 512);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 512);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
 
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);  // 0 is kEp0Out
@@ -711,7 +725,10 @@ TEST_F(UnmanagedTestFixture, ZlpInNotRequiredShortPacketTerminated) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
     // Setup packet with wLength = 1024
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 1024);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 1024);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
 
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);  // 0 is kEp0Out
@@ -763,7 +780,10 @@ TEST_F(UnmanagedTestFixture, WaitZlpInTransferCompleteMismatch) {
     Dwc3TestHelper::Ep0QueueSetup(drv);
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 1024);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 1024);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
 
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);  // Setup
@@ -819,7 +839,10 @@ TEST_F(UnmanagedTestFixture, WaitZlpInTransferNotReadyMismatch) {
     Dwc3TestHelper::Ep0QueueSetup(drv);
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 1024);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 1024);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
 
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);  // Setup
@@ -1085,7 +1108,9 @@ TEST_F(UnmanagedTestFixture, ControlReadShortPacketDataIn) {
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
     auto setup = MakeGetDescriptorSetup(64);
-    setup.bm_request_type = USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+    setup.bm_request_type = fdescriptor::EndpointDirection::kIn |
+                            fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice;
     setup.b_request = 0x01;
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
   });
@@ -1138,7 +1163,9 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlReadOversizedStallIn) {
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
     auto setup = MakeGetDescriptorSetup(64);
-    setup.bm_request_type = USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+    setup.bm_request_type = fdescriptor::EndpointDirection::kIn |
+                            fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice;
     setup.b_request = 0x01;
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
   });
@@ -1186,7 +1213,10 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteComplete) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
-    auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x99, 0, 0, 8);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x99, 0, 0, 8);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
     Dwc3TestHelper::ClearSharedFifo(drv);
@@ -1227,7 +1257,10 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteDataOutOverflow) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
-    auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 8);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 8);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
     Dwc3TestHelper::ClearSharedFifo(drv);
@@ -1278,7 +1311,10 @@ TEST_F(UnmanagedTestFixture, ControlWriteShortPacketDataOut) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
-    auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x01, 0, 0, 16);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 16);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
     Dwc3TestHelper::ClearSharedFifo(drv);
@@ -1327,7 +1363,9 @@ TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransferIn) {
 
     // Setup packet with wLength = 65535
     fuchsia_hardware_usb_descriptor::wire::UsbSetup setup;
-    setup.bm_request_type = USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+    setup.bm_request_type = fdescriptor::EndpointDirection::kIn |
+                            fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice;
     setup.b_request = 0x01;
     setup.w_length = 65535;
 
@@ -1367,7 +1405,9 @@ TEST_F(UnmanagedTestFixture, DISABLED_ZlpOutTransferRequired) {
 
     // Setup packet with wLength = 512 (multiple of MPS)
     fuchsia_hardware_usb_descriptor::wire::UsbSetup setup;
-    setup.bm_request_type = USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE;
+    setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                            fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice;
     setup.b_request = 0x01;
     setup.w_length = 512;
 
@@ -1434,7 +1474,10 @@ TEST_F(UnmanagedTestFixture, Ep0ControlInThenNextSetupPacket) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x42, 0, 0, 32);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x42, 0, 0, 32);
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
   });
 
@@ -1462,8 +1505,8 @@ TEST_F(UnmanagedTestFixture, Ep0ControlInThenNextSetupPacket) {
   // 2. Immediately deliver the NEXT Setup packet (SET_CONFIGURATION request = 0x09)
   dut_.RunInDriverContext([&](Dwc3& drv) {
     fuchsia_hardware_usb_descriptor::wire::UsbSetup next_setup;
-    next_setup.bm_request_type = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
-    next_setup.b_request = USB_REQ_SET_CONFIGURATION;
+    next_setup.bm_request_type = kStandardDeviceOut;
+    next_setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
     next_setup.w_value = 1;
     next_setup.w_index = 0;
     next_setup.w_length = 0;
@@ -1523,8 +1566,10 @@ TEST_F(UnmanagedTestFixture, MultipleSequentialControlTransfers) {
   for (uint8_t iter = 0; iter < 5; ++iter) {
     // 1. Control IN transfer
     dut_.RunInDriverContext([&](Dwc3& drv) {
-      auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-                                   static_cast<uint8_t>(0x10 + iter), 0, 0, 64);
+      auto setup =
+          MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                              fdescriptor::RequestRecipient::kDevice,
+                          static_cast<uint8_t>(0x10 + iter), 0, 0, 64);
       Dwc3TestHelper::SimulateSetupReceived(drv, setup);
     });
 
@@ -1547,8 +1592,9 @@ TEST_F(UnmanagedTestFixture, MultipleSequentialControlTransfers) {
 
     // 2. Control OUT 2-stage transfer (SET_ADDRESS)
     dut_.RunInDriverContext([&](Dwc3& drv) {
-      auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                                   USB_REQ_SET_ADDRESS, static_cast<uint16_t>(1 + iter), 0, 0);
+      auto setup = MakeSetupPacket(kStandardDeviceOut,
+                                   fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress),
+                                   static_cast<uint16_t>(1 + iter), 0, 0);
       Dwc3TestHelper::SimulateSetupReceived(drv, setup);
       EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitHost);
       Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
@@ -1589,8 +1635,9 @@ TEST_F(UnmanagedTestFixture, TwoStageControlOutThenNextSetupPacket) {
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
     // 1. First 2-stage SET_ADDRESS request
-    auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                                 USB_REQ_SET_ADDRESS, 0x05, 0, 0);
+    auto setup =
+        MakeSetupPacket(kStandardDeviceOut,
+                        fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 0x05, 0, 0);
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitHost);
     Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
@@ -1602,9 +1649,12 @@ TEST_F(UnmanagedTestFixture, TwoStageControlOutThenNextSetupPacket) {
   });
 
   // Verify that the driver decoded the next request
-  EXPECT_TRUE(dut_.runtime().RunWithTimeoutOrUntil(
-      [&]() { return received_request->load() == USB_REQ_GET_DESCRIPTOR; }, zx::sec(10)));
-  EXPECT_EQ(received_request->load(), static_cast<uint8_t>(USB_REQ_GET_DESCRIPTOR));
+  dut_.runtime().RunUntil([&]() {
+    return received_request->load() ==
+           fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor);
+  });
+  EXPECT_EQ(received_request->load(),
+            fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor));
 
   if (binding.has_value()) {
     binding->Unbind();
@@ -1644,7 +1694,10 @@ TEST_F(UnmanagedTestFixture, ControlDataOutWithResidualBufferData) {
     Dwc3TestHelper::WriteEp0Buffer(drv, garbage, 0, sizeof(garbage));
 
     // Setup 16-byte Vendor OUT transfer
-    auto setup = MakeSetupPacket(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x33, 0, 0, 16);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x33, 0, 0, 16);
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
   });
 
@@ -1700,7 +1753,10 @@ TEST_F(UnmanagedTestFixture, ControlInZlpThenNextSetupPacket) {
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x50, 0, 0, 1024);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x50, 0, 0, 1024);
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
   });
 
@@ -1724,7 +1780,9 @@ TEST_F(UnmanagedTestFixture, ControlInZlpThenNextSetupPacket) {
 
     // Deliver next Setup packet
     auto next_setup =
-        MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x51, 0, 0, 64);
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x51, 0, 0, 64);
     Dwc3TestHelper::SimulateSetupReceived(drv, next_setup);
   });
 
@@ -1773,7 +1831,10 @@ TEST_F(UnmanagedTestFixture, Ep0StallRecoveryLeavesCleanBufferForNextSetup) {
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
 
     // 2. Deliver new Setup packet (which clears stall)
-    auto setup = MakeSetupPacket(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0x60, 0, 0, 64);
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kIn | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x60, 0, 0, 64);
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
     EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
   });
@@ -1827,8 +1888,8 @@ TEST_F(UnmanagedTestFixture, Ep0QueueSetupWithDirtyCacheDoesNotClobberIncomingDm
     // 2. Simulate hardware DMA writing a fresh incoming Setup packet directly to backing physical
     // RAM/VMO
     fuchsia_hardware_usb_descriptor::wire::UsbSetup new_setup;
-    new_setup.bm_request_type = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
-    new_setup.b_request = USB_REQ_SET_CONFIGURATION;
+    new_setup.bm_request_type = kStandardDeviceOut;
+    new_setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
     new_setup.w_value = 1;
     new_setup.w_index = 0;
     new_setup.w_length = 0;
@@ -1863,6 +1924,52 @@ TEST_F(UnmanagedTestFixture, Ep0QueueSetupWithDirtyCacheDoesNotClobberIncomingDm
     binding->Unbind();
     dut_.runtime().RunUntilIdle();
   }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, Ep0OutBabbleUnderflow) {
+  SetUpAndPowerOnDriver();
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::DataOut);
+    Dwc3TestHelper::SetEp0CurTransferLen(drv, 16);
+
+    const uint64_t initial_bytes = Dwc3TestHelper::GetEp0OutTotalBytes(drv);
+
+    dwc3_trb_t trb{};
+    trb.status = TRB_BUFSIZ(32);
+    Dwc3TestHelper::PushTrbToSharedFifo(drv, trb);
+
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
+
+    EXPECT_EQ(Dwc3TestHelper::GetEp0OutTotalBytes(drv), initial_bytes);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+  });
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, Ep0InBabbleUnderflow) {
+  SetUpAndPowerOnDriver();
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::DataIn);
+    Dwc3TestHelper::SetEp0CurTransferLen(drv, 16);
+
+    const uint64_t initial_bytes = Dwc3TestHelper::GetEp0InTotalBytes(drv);
+
+    dwc3_trb_t trb{};
+    trb.status = TRB_BUFSIZ(32);
+    Dwc3TestHelper::PushTrbToSharedFifo(drv, trb);
+
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+
+    EXPECT_EQ(Dwc3TestHelper::GetEp0InTotalBytes(drv), initial_bytes);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyOut);
+  });
 
   TearDownAndPowerOffDriver();
 }

@@ -401,6 +401,9 @@ zx_status_t SimFirmware::BusTxCtl(unsigned char* msg, unsigned int len) {
     return ZX_ERR_INVALID_ARGS;
   }
   dcmd = reinterpret_cast<brcmf_proto_bcdc_dcmd*>(msg);
+  if (command_hook_) {
+    command_hook_(dcmd->cmd);
+  }
   // The variable-length payload immediately follows the header
   uint8_t* data = reinterpret_cast<uint8_t*>(dcmd) + hdr_size;
   size_t data_len = len - hdr_size;
@@ -700,9 +703,11 @@ zx_status_t SimFirmware::BusTxCtl(unsigned char* msg, unsigned int len) {
 
             // And Enable Rx
             hw_.EnableRx();
-            // Send the AP_STARTED event after a delay
-            SendEventToDriver(0, nullptr, BRCMF_E_AP_STARTED, BRCMF_E_STATUS_SUCCESS,
-                              softap_ifidx_.value(), nullptr, 0, 0, kZeroMac, kApStartedEventDelay);
+            std::optional<uint64_t> event_id = SendEventToDriver(
+                0, nullptr, BRCMF_E_AP_STARTED, BRCMF_E_STATUS_SUCCESS, softap_ifidx_.value(),
+                nullptr, 0, 0, kZeroMac, kApStartedEventDelay);
+            ZX_ASSERT(event_id.has_value());
+            iface_tbl_[ifidx].ap_config.started_event_id = event_id.value();
           } else {
             // AP stop
             // Note that SoftAP may have been only partially started (maybe one
@@ -924,6 +929,14 @@ zx_status_t SimFirmware::BusTxFrames(cpp20::span<wlan::drivers::components::Fram
 
 // Stop the SoftAP
 void SimFirmware::StopSoftAP(uint16_t ifidx) {
+  if (iface_tbl_[ifidx].ap_config.link_event_id.has_value()) {
+    hw_.CancelCallback(*iface_tbl_[ifidx].ap_config.link_event_id);
+    iface_tbl_[ifidx].ap_config.link_event_id = std::nullopt;
+  }
+  if (iface_tbl_[ifidx].ap_config.started_event_id.has_value()) {
+    hw_.CancelCallback(*iface_tbl_[ifidx].ap_config.started_event_id);
+    iface_tbl_[ifidx].ap_config.started_event_id = std::nullopt;
+  }
   // Disassoc and remove all the associated clients
   for (auto client : iface_tbl_[ifidx].ap_config.clients) {
     simulation::SimDisassocReqFrame disassoc_req_frame(
@@ -939,12 +952,17 @@ void SimFirmware::StopSoftAP(uint16_t ifidx) {
 }
 
 void SimFirmware::SendAPStartLinkEvent(uint16_t ifidx) {
+  iface_tbl_[ifidx].ap_config.link_event_id = std::nullopt;
   SendEventToDriver(0, nullptr, BRCMF_E_LINK, BRCMF_E_STATUS_SUCCESS, ifidx, nullptr,
                     BRCMF_EVENT_MSG_LINK);
 }
 
 void SimFirmware::ScheduleLinkEvent(zx::duration when, uint16_t ifidx) {
-  hw_.RequestCallback(std::bind(&SimFirmware::SendAPStartLinkEvent, this, ifidx), when);
+  uint64_t event_id = 0;
+  hw_.RequestCallback(std::bind(&SimFirmware::SendAPStartLinkEvent, this, ifidx), when, &event_id);
+  if (event_id != 0) {
+    iface_tbl_[ifidx].ap_config.link_event_id = event_id;
+  }
 }
 
 uint16_t SimFirmware::GetNumClients(uint16_t ifidx) {
@@ -1115,6 +1133,14 @@ zx_status_t SimFirmware::HandleIfaceTblReq(const bool add_entry, const void* dat
           *iface_id = iface_tbl_[i].iface_id;
         // If AP is in started state, send disassoc req to all clients
         if (iface_tbl_[i].ap_mode) {
+          if (iface_tbl_[i].ap_config.link_event_id.has_value()) {
+            hw_.CancelCallback(*iface_tbl_[i].ap_config.link_event_id);
+            iface_tbl_[i].ap_config.link_event_id = std::nullopt;
+          }
+          if (iface_tbl_[i].ap_config.started_event_id.has_value()) {
+            hw_.CancelCallback(*iface_tbl_[i].ap_config.started_event_id);
+            iface_tbl_[i].ap_config.started_event_id = std::nullopt;
+          }
           if (iface_tbl_[i].ap_config.ap_started) {
             BRCMF_DBG(SIM, "AP is still started...disassoc all clients");
             for (auto client : iface_tbl_[i].ap_config.clients) {
@@ -3705,18 +3731,17 @@ std::shared_ptr<std::vector<uint8_t>> SimFirmware::CreateEventBuffer(
   return buf;
 }
 
-void SimFirmware::SendEventToDriver(size_t payload_size,
-                                    std::shared_ptr<std::vector<uint8_t>> buffer_in,
-                                    uint32_t event_type, uint32_t status, uint16_t ifidx,
-                                    char* ifname, uint16_t flags, uint32_t reason,
-                                    std::optional<MacAddr> addr,
-                                    std::optional<zx::duration> delay) {
+std::optional<uint64_t> SimFirmware::SendEventToDriver(
+    size_t payload_size, std::shared_ptr<std::vector<uint8_t>> buffer_in, uint32_t event_type,
+    uint32_t status, uint16_t ifidx, char* ifname, uint16_t flags, uint32_t reason,
+    std::optional<MacAddr> addr, std::optional<zx::duration> delay) {
   BRCMF_DBG(SIM, "*****Sending Event: %d*****", event_type);
   brcmf_event_msg_be* msg_be;
   size_t payload_offset;
   // Assert if ifidx is not valid
-  if (event_type != BRCMF_E_IF)
+  if (event_type != BRCMF_E_IF) {
     ZX_ASSERT(ifidx < kMaxIfSupported && iface_tbl_[ifidx].allocated);
+  }
 
   auto buf = CreateEventBuffer(payload_size, &msg_be, &payload_offset);
   msg_be->flags = htobe16(flags);
@@ -3727,11 +3752,13 @@ void SimFirmware::SendEventToDriver(size_t payload_size,
   msg_be->ifidx = ifidx;
   msg_be->bsscfgidx = iface_tbl_[ifidx].bsscfgidx;
 
-  if (ifname)
+  if (ifname) {
     memcpy(msg_be->ifname, ifname, IFNAMSIZ);
+  }
 
-  if (addr)
+  if (addr) {
     memcpy(msg_be->addr, addr->byte, ETH_ALEN);
+  }
 
   if (payload_size != 0) {
     ZX_ASSERT(buffer_in != nullptr);
@@ -3741,11 +3768,13 @@ void SimFirmware::SendEventToDriver(size_t payload_size,
 
   if (delay && delay->get() > 0) {
     // Setup the callback and return.
-    hw_.RequestCallback(std::bind(&brcmf_sim_rx_event, simdev_, buf), delay.value());
-    return;
+    uint64_t event_id = 0;
+    hw_.RequestCallback(std::bind(&brcmf_sim_rx_event, simdev_, buf), delay.value(), &event_id);
+    return event_id;
   } else {
     BRCMF_DBG(SIM, "Sending Event: %d", event_type);
     brcmf_sim_rx_event(simdev_, std::move(buf));
+    return std::nullopt;
   }
 }
 
@@ -3788,10 +3817,6 @@ zx_status_t SimFirmware::BusSuspend() { return suspend_hook_ ? suspend_hook_() :
 
 zx_status_t SimFirmware::BusResume() { return resume_hook_ ? resume_hook_() : ZX_OK; }
 
-void SimFirmware::BusRecovery() {
-  if (recovery_hook_) {
-    recovery_hook_();
-  }
-}
+zx_status_t SimFirmware::BusRecovery() { return recovery_hook_ ? recovery_hook_() : ZX_OK; }
 
 }  // namespace wlan::brcmfmac

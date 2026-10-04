@@ -254,4 +254,11 @@ TEST(SyscallResultMatchersTest, SyscallResultIsErrno) {
   EXPECT_THAT(ok_result, ::testing::Not(SyscallResultIsErrno(ENOENT)));
 }
 
+TEST(TestHelperTest, GetTaskState) {
+  EXPECT_EQ(test_helper::GetTaskState("123 (test_binary) S 1 123 123 0 -1"), "S");
+  EXPECT_EQ(test_helper::GetTaskState("456 (name (with) parens) R 1 456 456"), "R");
+  EXPECT_EQ(test_helper::GetTaskState("789 (Z) T 1 789 789"), "T");
+  EXPECT_EQ(test_helper::GetTaskState("invalid stat"), std::nullopt);
+}
+
 }  // namespace

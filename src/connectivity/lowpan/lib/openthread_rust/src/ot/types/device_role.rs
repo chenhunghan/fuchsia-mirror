@@ -41,7 +41,7 @@ impl DeviceRole {
 
 impl From<otDeviceRole> for DeviceRole {
     fn from(x: otDeviceRole) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x).unwrap_or_else(|| panic!("Unknown otDeviceRole value: {x}"))
     }
 }

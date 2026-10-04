@@ -1294,6 +1294,25 @@ TEST_F(SdhciTest, DmaRequest32Bit) {
   EXPECT_EQ(descriptors[4].address, FAKE_BTI_PHYS_ADDR + 208);
   EXPECT_EQ(descriptors[4].length, 512 * 7);
 
+  // Changing Capabilities0 after initialization should not change the descriptor format.
+  Capabilities0::Get()
+      .ReadFrom(driver_test().driver()->mmio_)
+      .set_v3_64_bit_system_address_support(1)
+      .WriteTo(driver_test().driver()->mmio_);
+  memset(driver_test().driver()->iobuf_virt(), 0, zx_system_get_page_size());
+
+  client_.buffer(arena)
+      ->Request(fidl::VectorView<fuchsia_hardware_sdmmc::wire::SdmmcReq>::FromExternal(&request, 1))
+      .ThenExactlyOnce([](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+      });
+  driver_test().runtime().RunUntilIdle();
+
+  EXPECT_EQ(descriptors[0].attr, 0b100'001u);
+  EXPECT_EQ(descriptors[0].address, FAKE_BTI_PHYS_ADDR + 80);
+  EXPECT_EQ(descriptors[0].length, 512u);
+
   ASSERT_OK(StopDriver());
 }
 

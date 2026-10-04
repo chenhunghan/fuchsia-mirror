@@ -176,10 +176,14 @@ impl<T, Cfg: BroadcastCfg, F: Filter<Item = T>> FilteredBroadcastChannelState<T,
 
     /// Attempts to push a payload to the back of the queue, incrementing `next_global_idx` on success.
     ///
+    /// A payload that no subscriber is interested in is dropped without needing queue space.
+    ///
     /// Returns `Err(payload)` if the queue is full and cannot grow.
     fn try_publish(&mut self, payload: T, not_full: &Notification<Cfg::Mtx>) -> Result<(), T> {
         if self.queue.try_reserve(1).is_err() {
-            return Err(payload);
+            let interested =
+                self.subscribers.values().any(|sub| sub.filter.interest(&payload).is_interested());
+            return if interested { Err(payload) } else { Ok(()) };
         }
         assert!(
             self.force_publish(payload, not_full).is_none(),
@@ -270,6 +274,16 @@ impl<T: Clone, Cfg: BroadcastCfg, F: Filter<Item = T>> FilteredBroadcastChannel<
     pub fn force_publish(&self, payload: T) -> Option<T> {
         let state = &mut *self.state.lock();
         state.force_publish(payload, &self.not_full)
+    }
+
+    /// Publishes a payload without waiting or evicting.
+    ///
+    /// A payload that no subscriber is interested in is dropped and always succeeds.
+    ///
+    /// Returns `Err(payload)` if the queue is full.
+    pub fn try_publish(&self, payload: T) -> Result<(), T> {
+        let state = &mut *self.state.lock();
+        state.try_publish(payload, &self.not_full)
     }
 }
 
@@ -449,6 +463,43 @@ mod tests {
             s.block_on(async {
                 assert_eq!(sub1.next().await, Err(MissedMessages { count: 1 }));
                 assert_eq!(sub1.next().await, Ok(4));
+            });
+        });
+    }
+
+    #[test]
+    fn test_filtered_broadcast_try_publish_fails_when_full() {
+        type TestFilteredChannel = FilteredBroadcastChannel<i32, StackCfg<1, 1>>;
+        let channel = TestFilteredChannel::new();
+
+        let mut sub = channel.subscribe(|_| Interest::Interested).unwrap();
+
+        assert_eq!(channel.try_publish(1), Ok(()));
+        assert_eq!(channel.try_publish(2), Err(2));
+
+        BoundedExecutor::new(TestExecutor::new(), |s| {
+            s.block_on(async {
+                assert_eq!(sub.next().await, Ok(1));
+            });
+        });
+        assert_eq!(channel.try_publish(3), Ok(()));
+    }
+
+    #[test]
+    fn test_filtered_broadcast_try_publish_uninteresting_succeeds_when_full() {
+        type TestFilteredChannel = FilteredBroadcastChannel<i32, StackCfg<1, 1>>;
+        let channel = TestFilteredChannel::new();
+
+        let mut sub = channel
+            .subscribe(|x| if *x % 2 == 0 { Interest::Interested } else { Interest::Uninterested })
+            .unwrap();
+
+        assert_eq!(channel.try_publish(10), Ok(()));
+        assert_eq!(channel.try_publish(11), Ok(()));
+
+        BoundedExecutor::new(TestExecutor::new(), |s| {
+            s.block_on(async {
+                assert_eq!(sub.next().await, Ok(10));
             });
         });
     }

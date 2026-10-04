@@ -1,0 +1,109 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "trace",
+    srcs = ["src/lib.rs"] + select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": ["src/noop.rs"],
+    }),
+    crate_features = select({
+        "@platforms//os:fuchsia": ["tracing"],
+        "//conditions:default": [],
+    }),
+    crate_name = "storage_trace",
+    edition = "2024",
+    test_deps = ["//src/lib/fuchsia"],
+    visibility = ["//src/storage:__subpackages__"],
+    with_unit_tests = True,
+    deps = select({
+        "@platforms//os:fuchsia": ["//src/lib/trace/rust:trace"],
+        "//conditions:default": [],
+    }),
+)
+
+rustc_library(
+    name = "storage_trace_enabled_rust",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_features = ["tracing"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    test_deps = ["//src/lib/fuchsia"],
+    with_unit_tests = True,
+    deps = ["//src/lib/trace/rust:trace"],
+)
+
+rustc_library(
+    name = "storage_trace_disabled_rust",
+    testonly = True,
+    srcs = [
+        "src/lib.rs",
+        "src/noop.rs",
+    ],
+    edition = "2024",
+    test_deps = ["//src/lib/fuchsia"],
+    with_unit_tests = True,
+)
+
+fx_cc_library(
+    name = "storage_trace_enabled_cpp",
+    srcs = ["trace_enabled.cc"],
+    hdrs = ["trace_enabled.h"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//zircon/system/ulib/trace",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "storage_trace_disabled_cpp",
+    hdrs = ["trace_disabled.h"],
+    deps = ["//zircon/system/ulib/fbl"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "cpp",
+    hdrs = ["trace.h"],
+    defines = select({
+        "@platforms//os:fuchsia": ["STORAGE_ENABLE_TRACING"],
+        "//conditions:default": [],
+    }),
+    public_configs = select({
+        "@platforms//os:fuchsia": [":enable_tracing"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//src/storage:__subpackages__"],
+    deps = select({
+        "@platforms//os:fuchsia": [":storage_trace_enabled_cpp"],
+        "//conditions:default": [":storage_trace_disabled_cpp"],
+    }),
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "storage_trace_force_enabled_cpp",
+    testonly = True,
+    hdrs = ["trace.h"],
+    defines = ["STORAGE_ENABLE_TRACING"],
+    public_configs = [":enable_tracing"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":storage_trace_enabled_cpp"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "storage_trace_force_disabled_cpp",
+    testonly = True,
+    hdrs = ["trace.h"],
+    deps = [":storage_trace_disabled_cpp"],
+    alwayslink = True,
+)

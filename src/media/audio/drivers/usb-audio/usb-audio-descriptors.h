@@ -5,6 +5,7 @@
 #ifndef SRC_MEDIA_AUDIO_DRIVERS_USB_AUDIO_USB_AUDIO_DESCRIPTORS_H_
 #define SRC_MEDIA_AUDIO_DRIVERS_USB_AUDIO_USB_AUDIO_DESCRIPTORS_H_
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fuchsia/hardware/usb/c/banjo.h>
 #include <sys/types.h>
 #include <threads.h>

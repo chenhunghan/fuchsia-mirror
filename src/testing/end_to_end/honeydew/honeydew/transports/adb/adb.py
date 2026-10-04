@@ -8,6 +8,7 @@ import contextlib
 import glob
 import logging
 import os
+import shlex
 import shutil
 import stat
 import tarfile
@@ -30,6 +31,10 @@ _ADB_PATH_ENV_VAR = "HONEYDEW_ADB_OVERRIDE"
 # waits until the device is booted completely (wait_for_boot_complete), which can take
 # multiple minutes.
 _DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS: float = 300.0
+
+_BOOT_COMPLETED_GETPROP_TIMEOUT_SECS: float = 10.0
+
+_DEFAULT_RUN_ATTEMPTS: int = 3
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -341,7 +346,7 @@ class Adb:
                         vendor_keys_path=self._vendor_keys_path,
                     )
                     self._adb_server.start()
-                except Exception as err:
+                except errors.HoneydewError as err:
                     raise adb_errors.InitializationError(
                         f"Failed to start isolated ADB server for {self._device_name}: {err}"
                     ) from err
@@ -351,7 +356,7 @@ class Adb:
             # a wedged adbd out-of-band if ADB later becomes unresponsive.
             self._cache_adbd_pid()
             atexit.register(self.close)
-        except Exception:
+        except BaseException:
             self.close()
             raise
 
@@ -422,7 +427,7 @@ class Adb:
                     self._device_name,
                     self._cached_adbd_pid,
                 )
-        except Exception as err:
+        except errors.HoneydewError as err:
             _LOGGER.debug(
                 "Failed to cache remote adbd PID for %s: %s",
                 self._device_name,
@@ -447,7 +452,7 @@ class Adb:
                 ["starnix", "kill", "-p", self._cached_adbd_pid, "-s", "9"],
                 timeout=10.0,
             )
-        except Exception as err:
+        except errors.HoneydewError as err:
             _LOGGER.warning(
                 "Failed to kill remote adbd (pid=%s) on %s via FFX: %s",
                 self._cached_adbd_pid,
@@ -473,7 +478,7 @@ class Adb:
                 timeout=10.0,
                 env=self._get_command_env(),
             )
-        except Exception as err:
+        except errors.HoneydewError as err:
             _LOGGER.warning(
                 "`adb reconnect offline` failed for %s: %s",
                 self._device_name,
@@ -500,7 +505,7 @@ class Adb:
                         timeout=30.0,
                         env=self._get_command_env(),
                     )
-            except Exception as err:
+            except errors.HoneydewError as err:
                 _LOGGER.warning(
                     "Failed to restore root privileges on %s after ADB recovery: %s",
                     self._device_name,
@@ -563,7 +568,7 @@ class Adb:
             )
         except adb_errors.AdbConnectionError:
             raise
-        except Exception as err:
+        except errors.HoneydewError as err:
             raise adb_errors.AdbConnectionError(
                 f"ADB connection check failed for {self._device_name} with err: {err}"
             ) from err
@@ -573,17 +578,19 @@ class Adb:
         cmd: list[str],
         timeout: float | None = None,
         include_serial: bool = True,
+        attempts: int = _DEFAULT_RUN_ATTEMPTS,
     ) -> str:
         """Runs an ADB command and returns the output.
 
         Args:
             cmd: ADB command as a list of strings (excluding 'adb' and '-s <serial>' if include_serial=True).
-            timeout: Maximum amount of time in seconds to wait for the command to finish.
-                Defaults to None (no time limit), which is recommended to avoid flakiness
+            timeout: Maximum amount of time in seconds to wait for the command to finish across all
+                attempts. Defaults to None (no time limit), which is recommended to avoid flakiness
                 on slow or overloaded test environments. Only pass a timeout when explicitly
                 required or for commands expected to fail fast.
             include_serial: Whether to include '-s <serial_number>' in the command.
                 Defaults to True. Should be set to False for commands like 'adb devices'.
+            attempts: Maximum number of attempts to run the command. Defaults to 3.
 
         Returns:
             The combined stdout and stderr of the command.
@@ -593,15 +600,17 @@ class Adb:
             adb_errors.AdbTimeoutError: If the command times out.
             adb_errors.AdbCommandError: If the command fails.
         """
+        timeout_per_attempt: float | None = None
         if timeout is not None:
+            timeout_per_attempt = timeout / attempts
             _LOGGER.info(
-                "Timeout of %ss is set for ADB command '%s'. Note that timeouts "
-                "can cause flakiness on overloaded test environments.",
+                "Timeout of %ss (%ss per attempt) is set for ADB command '%s'. "
+                "Note that timeouts can cause flakiness on overloaded test environments.",
                 timeout,
+                timeout_per_attempt,
                 " ".join(cmd),
             )
 
-        max_attempts = 3
         attempt = 1
         while True:
             # Construct adb_cmd inside the loop to ensure we use the updated port if restarted
@@ -610,7 +619,7 @@ class Adb:
             _LOGGER.debug(
                 "Running ADB command (attempt %d/%d): %s",
                 attempt,
-                max_attempts,
+                attempts,
                 adb_cmd,
             )
             env = self._get_command_env()
@@ -621,7 +630,7 @@ class Adb:
                         cmd=adb_cmd,
                         capture_output=True,
                         capture_error_in_output=True,
-                        timeout=timeout,
+                        timeout=timeout_per_attempt,
                         env=env,
                     )
                     or ""
@@ -631,7 +640,7 @@ class Adb:
                 return output
 
             except errors.HoneydewTimeoutError as err:
-                if attempt < max_attempts and self._adb_server:
+                if attempt < attempts and self._adb_server:
                     _LOGGER.warning(
                         "ADB command timed out. "
                         "Attempting to restart isolated ADB server and retry..."
@@ -661,7 +670,7 @@ class Adb:
                         "cannot connect",
                     ]
                 )
-                if is_retriable and attempt < max_attempts:
+                if is_retriable and attempt < attempts:
                     if "offline" in err_msg_lower and attempt == 1:
                         self._reconnect_offline()
                         time.sleep(2)
@@ -678,7 +687,7 @@ class Adb:
                         continue
                 raise adb_errors.AdbCommandError(str(err)) from err
 
-            except Exception as err:
+            except errors.HoneydewError as err:
                 raise adb_errors.AdbCommandError(
                     f"Failed to run ADB command '{adb_cmd}': {err}"
                 ) from err
@@ -769,7 +778,10 @@ class Adb:
             value,
             self._device_name,
         )
-        self.run(["shell", "setprop", prop_name, value], timeout=timeout)
+        self.run(
+            ["shell", "setprop", shlex.quote(prop_name), shlex.quote(value)],
+            timeout=timeout,
+        )
 
     def getprop(self, prop_name: str, timeout: float | None = None) -> str:
         """Gets a system property from the device via `adb shell getprop <prop_name>`.
@@ -785,7 +797,7 @@ class Adb:
             AdbCommandError: If the command fails or times out.
         """
         value = self.run(
-            ["shell", "getprop", prop_name], timeout=timeout
+            ["shell", "getprop", shlex.quote(prop_name)], timeout=timeout
         ).strip()
         _LOGGER.debug(
             "Got property '%s' = '%s' on %s",
@@ -812,7 +824,13 @@ class Adb:
 
         def _is_boot_completed() -> bool:
             try:
-                return self.getprop("sys.boot_completed") == "1"
+                return (
+                    self.getprop(
+                        "sys.boot_completed",
+                        timeout=_BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
+                    )
+                    == "1"
+                )
             except adb_errors.AdbError as err:
                 _LOGGER.debug(
                     "Error querying sys.boot_completed on %s during boot: %s",
@@ -835,12 +853,19 @@ class Adb:
             ) from err
 
     def close(self) -> None:
-        """Cleans up the ADB transport."""
+        """Cleans up the ADB transport.
+
+        Safe to call multiple times.
+        """
+        # Unregister so an explicit close() is not repeated at process exit and
+        # the atexit registry no longer keeps this instance alive.
+        atexit.unregister(self.close)
         if self._adb_server:
             _LOGGER.info(
                 "Stopping isolated ADB server for %s", self._device_name
             )
             self._adb_server.stop()
+            self._adb_server = None
         if self._temp_vendor_keys_dir:
             self._temp_vendor_keys_dir.cleanup()
             self._temp_vendor_keys_dir = None

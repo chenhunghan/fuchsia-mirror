@@ -12,7 +12,7 @@ use net_types::Witness as _;
 use net_types::ip::Ipv6;
 use netemul::RealmUdpSocket as _;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{Netstack2, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use netsvc_proto::{debuglog, netboot, tftp};
 use packet::{
@@ -387,7 +387,7 @@ async fn with_netsvc_and_netstack_full<F1, F2, Fut2, X, A, V>(
         .expect("add virtual device");
 
     let netstack_realm =
-        sandbox.create_netstack_realm::<Netstack2, _>(&ns_name).expect("create netstack realm");
+        sandbox.create_netstack_realm::<Netstack3, _>(&ns_name).expect("create netstack realm");
 
     let interface: netemul::TestInterface<'_> =
         netstack_realm.join_network(&network, &ns_name).await.expect("join network");

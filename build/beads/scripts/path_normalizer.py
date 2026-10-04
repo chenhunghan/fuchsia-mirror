@@ -229,6 +229,22 @@ class BazelPathNormalizer(PathNormalizer):
                 raise ValueError(
                     f"Unexpected unresolved relative path in Bazel command: {path}"
                 )
+
+            # Bazel rules (such as rules_rust) may create symlinks under
+            # bazel-out/<config>/bin/<package>/... for in-tree source files when
+            # generated files (e.g. compile_data or generated sources) are present.
+            # If the path under the bin directory corresponds to an existing file
+            # in the source tree, normalize it to {SOURCE_ROOT}.
+            parts = p.split("/")
+            if (
+                len(parts) >= 4
+                and parts[0] == "bazel-out"
+                and parts[2] in ("bin", "genfiles")
+            ):
+                subpath = "/".join(parts[3:])
+                if (self._fuchsia_dir / subpath).is_file():
+                    return f"{{SOURCE_ROOT}}/{subpath}"
+
             return f"{{BAZEL_OUT}}/{remainder}"
         if p == "bazel-out":
             return "{BAZEL_OUT}"

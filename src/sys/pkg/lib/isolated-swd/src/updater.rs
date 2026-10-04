@@ -423,8 +423,15 @@ pub(crate) mod for_tests {
                             "fuchsia.system-updater.ConcurrentPackageResolves",
                         ))
                         .capability(Capability::configuration(
+                            "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+                        ))
+                        .capability(Capability::configuration(
                             "fuchsia.system-updater.VerifyExistingBlobs",
                         ))
+                        .capability(
+                            Capability::protocol_by_name("fuchsia.feedback.CrashReporter")
+                                .optional(),
+                        )
                         .from(Ref::void())
                         .to(&system_updater),
                 )

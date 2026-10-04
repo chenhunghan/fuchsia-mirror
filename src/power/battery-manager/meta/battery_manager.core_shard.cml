@@ -29,7 +29,10 @@
             subdir: "config/battery_manager",
         },
         {
-            service: [ "fuchsia.hardware.power.battery.Service" ],
+            service: [
+                "fuchsia.hardware.power.battery.Service",
+                "fuchsia.hardware.power.charger.Service",
+            ],
             from: "parent",
             to: "#battery_manager",
             availability: "optional",

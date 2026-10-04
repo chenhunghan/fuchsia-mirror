@@ -121,6 +121,7 @@ class Flags:
     env: typing.List[str]
     allow_temporary_package_server: bool
     allow_temporary_emulator: bool
+    preflight: bool
     ffx_usb_socket_path: str | None
 
     output: bool
@@ -789,6 +790,13 @@ def parse_args(
         help=adv_help(
             "Allow this script to start a temporary emulator if no active device is detected. Default is True."
         ),
+        default=True,
+    )
+
+    execution.add_argument(
+        "--preflight",
+        action=argparse.BooleanOptionalAction,
+        help="Perform preflight device reachability and emulator checks before running tests. Use --no-preflight to skip these checks for faster startup when the device is already running. Default is True.",
         default=True,
     )
 

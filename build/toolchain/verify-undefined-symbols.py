@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ignore-unresolved-symbol",
@@ -91,6 +91,7 @@ def main():
         str(objfile),
     ]
     with subprocess.Popen(readelf_cmd, stdout=subprocess.PIPE) as proc:
+        assert proc.stdout is not None
         data = json.load(proc.stdout)
         if proc.wait() != 0:
             raise subprocess.CalledProcessError(proc.returncode, readelf_cmd)

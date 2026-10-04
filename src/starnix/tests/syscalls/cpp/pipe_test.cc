@@ -15,6 +15,10 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
+#ifndef O_NOTIFICATION_PIPE
+#define O_NOTIFICATION_PIPE O_EXCL  // As defined in <linux/watch_queue.h>.
+#endif
+
 namespace {
 
 TEST(PipeTest, NonBlockingPartialWrite) {
@@ -71,6 +75,36 @@ TEST(PipeTest, TeeFromEmptyPipe) {
   close(pipe_a[0]);
   close(pipe_b[0]);
   close(pipe_b[1]);
+}
+
+TEST(PipeTest, NotificationPipeUnsupported) {
+  int pipefd[2] = {-1, -1};
+  int result = pipe2(pipefd, O_NOTIFICATION_PIPE);
+  if (result == 0) {
+    fbl::unique_fd read_end(pipefd[0]);
+    fbl::unique_fd write_end(pipefd[1]);
+    // The host kernel was built with `CONFIG_WATCH_QUEUE`.
+    ASSERT_FALSE(test_helper::IsStarnix()) << "Starnix must not support notification pipes.";
+    GTEST_SKIP() << "Notification pipes are supported by this kernel.";
+  }
+  // Without `CONFIG_WATCH_QUEUE`, Linux reports ENOPKG. Starnix doesn't support notification pipes.
+  EXPECT_THAT(result, SyscallFailsWithErrno(ENOPKG));
+  EXPECT_THAT(pipe2(pipefd, O_NOTIFICATION_PIPE | O_CLOEXEC | O_NONBLOCK),
+              SyscallFailsWithErrno(ENOPKG));
+  EXPECT_THAT(pipe2(pipefd, O_NOTIFICATION_PIPE | O_DIRECT), SyscallFailsWithErrno(ENOPKG));
+  // No file descriptors were returned.
+  EXPECT_EQ(pipefd[0], -1);
+  EXPECT_EQ(pipefd[1], -1);
+}
+
+TEST(PipeTest, NotificationPipeWithInvalidFlags) {
+  int pipefd[2] = {-1, -1};
+  // Invalid flags are reported with EINVAL, even when combined with `O_NOTIFICATION_PIPE`.
+  EXPECT_THAT(pipe2(pipefd, O_NOTIFICATION_PIPE | O_APPEND), SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(pipe2(pipefd, O_APPEND), SyscallFailsWithErrno(EINVAL));
+  // No file descriptors were returned.
+  EXPECT_EQ(pipefd[0], -1);
+  EXPECT_EQ(pipefd[1], -1);
 }
 
 std::string CreateNewFifo() {

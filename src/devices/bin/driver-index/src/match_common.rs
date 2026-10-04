@@ -7,6 +7,7 @@ use bind::compiler::Symbol;
 use bind::interpreter::decode_bind_rules::DecodedCompositeBindRules;
 use bind::interpreter::match_bind::{DeviceProperties, PropertyKey};
 use fidl_fuchsia_driver_framework as fdf;
+use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 use zx::Status;
 use zx::sys::zx_status_t;
@@ -19,36 +20,42 @@ static BIND_AUTOBIND_KEY: LazyLock<PropertyKey> =
 pub fn node_to_device_property(
     node_properties: &Vec<fdf::NodeProperty2>,
 ) -> Result<DeviceProperties, zx_status_t> {
-    let mut device_properties = DeviceProperties::new();
+    let mut device_properties = DeviceProperties::with_capacity(node_properties.len());
 
     for property in node_properties {
         let key = PropertyKey::StringKey(property.key.clone());
 
         let value = match &property.value {
-            fdf::NodePropertyValue::IntValue(i) => Symbol::NumberValue(i.clone().into()),
+            fdf::NodePropertyValue::IntValue(i) => Symbol::NumberValue((*i).into()),
             fdf::NodePropertyValue::StringValue(s) => Symbol::StringValue(s.clone()),
             fdf::NodePropertyValue::EnumValue(s) => Symbol::EnumValue(s.clone()),
-            fdf::NodePropertyValue::BoolValue(b) => Symbol::BoolValue(b.clone()),
+            fdf::NodePropertyValue::BoolValue(b) => Symbol::BoolValue(*b),
             _ => {
                 return Err(Status::INVALID_ARGS.into_raw());
             }
         };
 
-        // TODO(https://fxbug.dev/42175777): Platform bus devices may contain two different BIND_PROTOCOL values.
-        // The duplicate key needs to be fixed since this is incorrect and is working by luck.
-        if key != *BIND_PROTOCOL_KEY {
-            if device_properties.contains_key(&key) && device_properties.get(&key) != Some(&value) {
-                log::error!(
-                    "Node property key {:?} contains multiple values: {:?} and {:?}",
-                    key,
-                    device_properties.get(&key),
-                    value
-                );
-                return Err(Status::INVALID_ARGS.into_raw());
+        // TODO(https://fxbug.dev/42175777): Platform bus devices may contain two different
+        // BIND_PROTOCOL values. The duplicate key needs to be fixed since this is incorrect and is
+        // working by luck.
+        match device_properties.entry(key) {
+            Entry::Occupied(mut entry) => {
+                if *entry.key() == *BIND_PROTOCOL_KEY {
+                    entry.insert(value);
+                } else if *entry.get() != value {
+                    log::error!(
+                        "Node property key {:?} contains multiple values: {:?} and {:?}",
+                        entry.key(),
+                        entry.get(),
+                        value
+                    );
+                    return Err(Status::INVALID_ARGS.into_raw());
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(value);
             }
         }
-
-        device_properties.insert(key, value);
     }
 
     Ok(device_properties)
@@ -58,9 +65,6 @@ pub fn node_to_device_property_no_autobind(
     node_properties: &Vec<fdf::NodeProperty2>,
 ) -> Result<DeviceProperties, zx_status_t> {
     let mut properties = node_to_device_property(node_properties)?;
-    if properties.contains_key(&BIND_AUTOBIND_KEY) {
-        properties.remove(&BIND_AUTOBIND_KEY);
-    }
     properties.insert(BIND_AUTOBIND_KEY.clone(), Symbol::NumberValue(0));
     Ok(properties)
 }

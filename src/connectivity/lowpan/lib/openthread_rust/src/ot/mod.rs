@@ -247,7 +247,7 @@ pub enum ThreadVersion {
 /// is configured to use. This is the safe equivalent of
 /// [`otsys::otThreadGetVersion()`](crate::otsys::otThreadGetVersion()).
 pub fn get_thread_version() -> ThreadVersion {
-    use num::FromPrimitive;
+    use num_traits::FromPrimitive;
 
     // SAFETY: otThreadGetVersion() is guaranteed to be safe to call in any context.
     let ver = unsafe { otThreadGetVersion() };

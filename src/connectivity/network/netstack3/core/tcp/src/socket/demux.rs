@@ -27,8 +27,8 @@ use netstack3_filter::{
 use netstack3_hashmap::hash_map;
 use netstack3_ip::socket::{IpSockCreationError, IpSocketArgs, MmsError};
 use netstack3_ip::{
-    IpHeaderInfo, IpTransportContext, LocalDeliveryPacketInfo, ReceiveIpPacketMeta,
-    TransportIpContext,
+    IpHeaderInfo, IpTransportContext, LocalDeliveryPacketInfo, MaybeSegmentableTransportSerializer,
+    ReceiveIpPacketMeta, TransportIpContext,
 };
 use netstack3_trace::trace_duration;
 use packet::{
@@ -1291,10 +1291,13 @@ pub(super) fn tcp_serialize_segment<'a, I, P>(
     header: &'a SegmentHeader,
     data: P,
     conn_addr: ConnIpAddr<I::Addr, NonZeroU16, NonZeroU16>,
-) -> impl TransportPacketSerializer<I, Buffer = EmptyBuf> + Debug + 'a
+) -> impl TransportPacketSerializer<I, Buffer = EmptyBuf>
++ MaybeSegmentableTransportSerializer
++ Debug
++ 'a
 where
     I: FilterIpExt,
-    P: InnerPacketBuilder + Debug + Payload + 'a,
+    P: InnerPacketBuilder + Copy + Debug + Payload + 'a,
 {
     let SegmentHeader { seq, ack, wnd, control, options, push } = header;
     let ConnIpAddr { local: (local_ip, local_port), remote: (remote_ip, remote_port) } = conn_addr;

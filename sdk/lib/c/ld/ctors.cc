@@ -5,9 +5,7 @@
 #include <lib/elfldltl/init-fini.h>
 #include <lib/ld/module.h>
 
-#include <algorithm>
 #include <mutex>
-#include <ranges>
 
 #include "../dlfcn/dlfcn-abi.h"
 #include "../startup/start-main.h"
@@ -28,16 +26,15 @@ void StartupCtors() {
   // modules' ctors.
 
   // Only the executable's DT_PREINIT_ARRAY is recorded in the passive ABI, so
-  // it's outside the Module.  Run those first.  The bias for CallInit doesn't
-  // need to be fetched because that's only used for the legacy pointer when
-  // the array is relocated (as it is here), and preinit has no legacy pointer.
-  InitFiniInfo{_ld_abi.preinit_array}.CallInit(0);
+  // it's outside the Module.  Run those first.  The load bias doesn't need to
+  // be fetched because that's only used for the legacy pointer when the array
+  // is relocated (as it is here), and preinit has no legacy pointer.
+  auto preinit = InitFiniInfo{_ld_abi.preinit_array}.callable_init_no_legacy();
+  preinit();
 
-  // Run normal initializers for all the modules (the executable's run last).
-  std::ranges::for_each(
-      // Modules get their initializers run in reverse load order.
-      std::views::reverse(ld::AbiLoadedModules(_ld_abi)),
-      [](const auto& module) { module.init.CallInit(module.link_map.addr); });
+  // Run normal initializers for all the modules.
+  auto init = ld::AbiCallableInit(_ld_abi);
+  init();
 }
 
 }  // namespace LIBC_NAMESPACE_DECL

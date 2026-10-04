@@ -121,6 +121,8 @@ class Linter {
 
   std::string MakeCopyrightBlock();
 
+  void CheckZxTypes(RawCompoundIdentifier& identifier);
+
   // All check types created in during |Linter| construction. The |std::set|
   // ensures each CheckDef has a unique |id|, and an iterator will traverse
   // the set in lexicographical order.
@@ -133,6 +135,8 @@ class Linter {
   const CheckDef kLibraryNameComponentCheck;
   const CheckDef kLibraryPrefixCheck;
   const CheckDef kInvalidCopyrightCheck;
+  const CheckDef kZxResultInErrorCheck;
+  const CheckDef kZxStatusNotInErrorCheck;
 
   const std::vector<std::string> kCopyrightLines;
   const std::string kCopyrightBlock;
@@ -167,6 +171,9 @@ class Linter {
 
   // true if a const declaration was entered, and not yet exited.
   bool in_const_declaration_ = false;
+
+  // true if a method error was entered, and not yet exited.
+  bool in_method_error_ = false;
 
   // The first name in the FIDL library declaration; for example, for:
   //   library fidl.types;

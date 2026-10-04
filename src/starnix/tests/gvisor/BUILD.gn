@@ -52,6 +52,7 @@ gvisor_benchmarks = [
 test_runfiles = [
   "exec_assert_closed_workload",
   "exec_basic_workload",
+  "exec_etxtbsy_workload",
   "exec_proc_exe_workload",
   "exec_state_workload",
   "priority_execve",

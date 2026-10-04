@@ -30,8 +30,6 @@ use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
 pub struct FastbootProxy<T: AsyncRead + AsyncWrite + Unpin + Send> {
-    #[allow(dead_code)]
-    target_id: String,
     interface: Option<T>,
     interface_factory: Box<dyn InterfaceFactory<T> + Send>,
     ctx: FastbootContext,
@@ -136,12 +134,11 @@ impl fastboot::UploadProgressListener for ProgressListener<'_> {
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Debug + Send> FastbootProxy<T> {
     pub fn new(
-        target_id: String,
+        _target_id: String,
         interface: T,
         interface_factory: impl InterfaceFactory<T> + Send + 'static,
     ) -> Self {
         Self {
-            target_id,
             interface: Some(interface),
             interface_factory: Box::new(interface_factory),
             ctx: FastbootContext::new(),
@@ -721,7 +718,6 @@ mod test {
             let mut test_transport = TestTransport::new();
             test_transport.push(Reply::Okay("0.4\0\0".to_string()));
             let mut fastboot_client = FastbootProxy::<TestTransport> {
-                target_id: "foo".to_string(),
                 interface: Some(test_transport),
                 interface_factory: Box::new(TestTransportFactory {}),
                 ctx: FastbootContext::new(),
@@ -733,26 +729,22 @@ mod test {
             let mut test_transport = TestTransport::new();
             test_transport.push(Reply::Fail("variable doesnt exist".to_string()));
             let mut fastboot_client = FastbootProxy::<TestTransport> {
-                target_id: "foo".to_string(),
                 interface: Some(test_transport),
                 interface_factory: Box::new(TestTransportFactory {}),
                 ctx: FastbootContext::new(),
             };
 
-            assert_eq!(fastboot_client.target_id, "foo");
             assert!(fastboot_client.get_var("version").await.is_err())
         }
         {
             let mut test_transport = TestTransport::new();
             test_transport.push(Reply::Data(1234));
             let mut fastboot_client = FastbootProxy::<TestTransport> {
-                target_id: "foo".to_string(),
                 interface: Some(test_transport),
                 interface_factory: Box::new(TestTransportFactory {}),
                 ctx: FastbootContext::new(),
             };
 
-            assert_eq!(fastboot_client.target_id, "foo");
             assert!(fastboot_client.get_var("version").await.is_err())
         }
         Ok(())
@@ -773,7 +765,6 @@ mod test {
             Reply::Okay("Done".to_string()),
         ]);
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -804,7 +795,6 @@ mod test {
         test_transport
             .extend([Reply::Info("alt:kiriona".to_string()), Reply::Fail("Done".to_string())]);
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -828,13 +818,11 @@ mod test {
         test_transport.push(Reply::Info("info line 1".to_string()));
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         assert!(fastboot_client.oem("version").await.is_ok());
         Ok(())
     }
@@ -843,13 +831,11 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("this command failed".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         assert!(fastboot_client.oem("version").await.is_err());
 
         Ok(())
@@ -859,13 +845,11 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         assert!(fastboot_client.oem("version").await.is_err());
 
         Ok(())
@@ -880,13 +864,11 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         fastboot_client.erase("slotA").await?;
         Ok(())
     }
@@ -896,7 +878,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not erase".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -911,7 +892,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -931,13 +911,11 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         fastboot_client.boot().await?;
         Ok(())
     }
@@ -947,7 +925,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not boot".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -963,7 +940,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -983,13 +959,11 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         fastboot_client.reboot().await?;
         Ok(())
     }
@@ -999,7 +973,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not reboot".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1014,7 +987,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1034,7 +1006,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1043,7 +1014,6 @@ mod test {
         let (var_client, mut var_server): (Sender<RebootEvent>, Receiver<RebootEvent>) =
             mpsc::channel(3);
 
-        assert_eq!(fastboot_client.target_id, "foo");
         fastboot_client.reboot_bootloader(var_client).await?;
 
         assert_eq!(var_server.recv().await, Some(RebootEvent::OnReboot));
@@ -1055,7 +1025,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not reboot bootloader".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1074,7 +1043,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1098,7 +1066,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1113,7 +1080,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not continue boot".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1128,7 +1094,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1148,13 +1113,11 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Okay("done".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
         };
 
-        assert_eq!(fastboot_client.target_id, "foo");
         fastboot_client.set_active("slotA").await?;
         Ok(())
     }
@@ -1164,7 +1127,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not set active".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1179,7 +1141,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Data(1234));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1209,7 +1170,6 @@ mod test {
         ]);
 
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1229,7 +1189,6 @@ mod test {
         let mut test_transport = TestTransport::new();
         test_transport.push(Reply::Fail("could not get staged".to_string()));
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1262,7 +1221,6 @@ mod test {
             Reply::Okay("done".to_string()), // Download Okay
         ]);
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1302,7 +1260,6 @@ mod test {
         test_transport.push(Reply::Fail("could not stage".to_string()));
 
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1343,7 +1300,6 @@ mod test {
         ]);
 
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1384,7 +1340,6 @@ mod test {
         test_transport.push(Reply::Fail("could not stage".to_string()));
 
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1415,7 +1370,6 @@ mod test {
         ]);
 
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: FastbootContext::new(),
@@ -1452,7 +1406,6 @@ mod test {
 
         let ctx = FastbootContext::new();
         let mut fastboot_client = FastbootProxy::<TestTransport> {
-            target_id: "foo".to_string(),
             interface: Some(test_transport),
             interface_factory: Box::new(TestTransportFactory {}),
             ctx: ctx.clone(),

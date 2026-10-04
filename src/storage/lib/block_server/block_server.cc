@@ -95,6 +95,19 @@ void BlockServer::SendReply(RequestId request_id, zx::result<> result) const {
   }
 }
 
+zx::result<zx::eventpair> BlockServer::RegisterKeySlot(uint8_t hw_slot) const {
+  std::scoped_lock lock(mutex_);
+  if (!server_ || shutdown_) {
+    return zx::error(ZX_ERR_BAD_STATE);
+  }
+  zx_handle_t handle = ZX_HANDLE_INVALID;
+  zx_status_t status = block_server_register_key_slot(server_, hw_slot, &handle);
+  if (status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok(zx::eventpair(handle));
+}
+
 Request SplitRequest(Request& request, uint32_t block_offset, uint32_t block_size) {
   Request head = request;
   switch (request.operation.tag) {

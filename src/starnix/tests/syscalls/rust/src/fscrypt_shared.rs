@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use linux_uapi::{__IncompleteArrayField, __u8, __u32};
+use linux_uapi::{__IncompleteArrayField, __u32, __u8};
 use serde::{Deserialize, Serialize};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FscryptOutput {
@@ -51,20 +51,12 @@ pub struct fscrypt_identifier {
 
 impl Default for fscrypt_key_specifier__bindgen_ty_1 {
     fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
+        Self::new_zeroed()
     }
 }
 impl Default for fscrypt_key_specifier {
     fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
+        Self::new_zeroed()
     }
 }
 
@@ -80,10 +72,6 @@ pub struct fscrypt_add_key_arg {
 }
 impl Default for fscrypt_add_key_arg {
     fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
+        Self::new_zeroed()
     }
 }

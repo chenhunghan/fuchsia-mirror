@@ -34,6 +34,10 @@ pub struct TaskRunningState {
     pub mm: RcuArc<MemoryManager>,
 
     /// The file system for this task.
+    ///
+    /// This is always `Some` while the task is running. It becomes `None` upon exit, so that the
+    /// `FsContext` (and possibly the whole mount namespace) is released on the exiting thread rather
+    /// than by whichever thread happens to drop the last reference to this `TaskRunningState`.
     pub fs: RcuArc<FsContext>,
 
     /// The namespace for abstract AF_UNIX sockets for this task.
@@ -75,8 +79,13 @@ impl TaskRunningState {
         self.mm.upgrade().ok_or_else(|| errno!(EINVAL))
     }
 
-    pub fn fs(&self) -> Arc<FsContext> {
-        self.fs.upgrade().expect("TaskRunningState fs should never be None")
+    /// Returns the file system context for this task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(ESRCH)`] if the task has exited and released its file system context.
+    pub fn fs(&self) -> Result<Arc<FsContext>, Errno> {
+        self.fs.upgrade().ok_or_else(|| errno!(ESRCH))
     }
 }
 

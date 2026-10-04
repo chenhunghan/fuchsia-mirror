@@ -4,7 +4,7 @@
 
 use crate::prelude_internal::*;
 use anyhow::format_err;
-use num::FromPrimitive;
+use num_traits::FromPrimitive;
 use std::os::raw::c_char;
 
 // This mirrors the behavior from ot-br-posix

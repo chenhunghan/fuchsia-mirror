@@ -18,11 +18,12 @@ import (
 )
 
 type MockFFXInstance struct {
-	CmdsCalled  []string
-	TestOutcome string
-	Output      string
-	stdout      io.Writer
-	stderr      io.Writer
+	CmdsCalled   []string
+	TestOutcome  string
+	Output       string
+	StderrOutput string
+	stdout       io.Writer
+	stderr       io.Writer
 }
 
 func (f *MockFFXInstance) SetTarget(target string) {
@@ -76,6 +77,9 @@ func (f *MockFFXInstance) TestRun(_ context.Context, testList build.TestList, ou
 	if _, err := f.Stdout().Write([]byte(f.Output)); err != nil {
 		return nil, err
 	}
+	if _, err := f.Stderr().Write([]byte(f.StderrOutput)); err != nil {
+		return nil, err
+	}
 	return f.WriteRunResult(testList, outDir)
 }
 
@@ -96,17 +100,21 @@ func (f *MockFFXInstance) WriteRunResult(testList build.TestList, outDir string)
 		if err := os.WriteFile(filepath.Join(outDir, relTestDir, "report.txt"), []byte("stdio"), os.ModePerm); err != nil {
 			return nil, err
 		}
-		suiteResult := SuiteResult{
-			Outcome: outcome,
-			Name:    test.Execution.ComponentURL,
-			Cases: []CaseResult{
+		var cases []CaseResult
+		if outcome != TestNotStarted {
+			cases = []CaseResult{
 				{
 					Outcome:              outcome,
 					Name:                 "case1",
 					StartTime:            time.Now().UnixMilli(),
 					DurationMilliseconds: 1000,
 				},
-			},
+			}
+		}
+		suiteResult := SuiteResult{
+			Outcome:              outcome,
+			Name:                 test.Execution.ComponentURL,
+			Cases:                cases,
 			StartTime:            time.Now().UnixMilli(),
 			DurationMilliseconds: 1000,
 			Artifacts: map[string]ArtifactMetadata{

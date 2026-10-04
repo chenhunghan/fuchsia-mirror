@@ -8,8 +8,8 @@ use crate::sae::{PweMethod, SaeParameters};
 use anyhow::{Error, bail};
 use ieee80211::MacAddr;
 use log::warn;
-use num::ToPrimitive;
-use num::integer::Integer;
+use num_integer::Integer;
+use num_traits::ToPrimitive;
 
 /// An elliptic curve group to be used as the finite cyclic group for SAE.
 pub struct Group {

@@ -17,31 +17,16 @@ namespace fdf_devicetree::testing {
 std::vector<uint8_t> LoadTestBlob(const char* name);
 
 bool CheckHasProperties(
-    std::vector<fuchsia_driver_framework::NodeProperty> expected,
-    const std::vector<::fuchsia_driver_framework::NodeProperty>& node_properties,
-    bool allow_additional_properties);
-
-bool CheckHasProperties(
     std::vector<fuchsia_driver_framework::NodeProperty2> expected,
     const std::vector<::fuchsia_driver_framework::NodeProperty2>& node_properties,
     bool allow_additional_properties);
-
-bool CheckHasBindRules(std::vector<fuchsia_driver_framework::BindRule> expected,
-                       const std::vector<::fuchsia_driver_framework::BindRule>& node_rules,
-                       bool allow_additional_rules);
 
 bool CheckHasBindRules(std::vector<fuchsia_driver_framework::BindRule2> expected,
                        const std::vector<::fuchsia_driver_framework::BindRule2>& node_rules,
                        bool allow_additional_rules);
 
 std::string DebugStringifyProperty(
-    const fuchsia_driver_framework::NodePropertyKey& key,
-    const std::vector<fuchsia_driver_framework::NodePropertyValue>& values);
-
-std::string DebugStringifyProperty(
     const std::string& key, const std::vector<fuchsia_driver_framework::NodePropertyValue>& values);
-
-
 
 class ManagerTestHelper {
  public:

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
 fn main() {
+    let _rcu_registration = fuchsia_rcu::register_thread();
     let mut c = FuchsiaCriterion::default();
     let internal_c: &mut Criterion = &mut c;
     *internal_c = std::mem::take(internal_c)
@@ -88,6 +89,7 @@ fn bench_read_scope_with_contention(
         let stop = Arc::clone(&stop);
         let ready = Arc::clone(&ready_barrier);
         handles.push(std::thread::spawn(move || {
+            let _rcu_registration = fuchsia_rcu::register_thread();
             let _ = ready.wait();
             while !stop.load(Ordering::Relaxed) {
                 for _ in 0..100 {

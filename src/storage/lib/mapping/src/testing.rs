@@ -4,7 +4,7 @@
 
 use crate::{DeliveryHandler, PageRequest};
 use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
-use fuchsia_sync::Mutex;
+use fuchsia_sync::{Condvar, Mutex};
 use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 use storage_ptr_slice::MutPtrByteSlice;
@@ -87,15 +87,35 @@ pub struct TestVecBufferInner {
 }
 
 #[derive(Clone)]
-pub struct TestVecBufferReceiver(pub Arc<Mutex<TestVecBufferInner>>);
+pub struct TestVecBufferReceiver {
+    pub inner: Arc<Mutex<TestVecBufferInner>>,
+    on_commit: Arc<Condvar>,
+}
+
+impl Default for TestVecBufferReceiver {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(TestVecBufferInner::default())),
+            on_commit: Arc::new(Condvar::new()),
+        }
+    }
+}
 
 impl TestVecBufferReceiver {
     pub fn commits(&self) -> Vec<(u64, usize)> {
-        self.0.lock().commits.clone()
+        self.inner.lock().commits.clone()
+    }
+
+    pub fn wait_for_commits(&self, count: usize) -> Vec<(u64, usize)> {
+        let mut inner = self.inner.lock();
+        while inner.commits.len() < count {
+            self.on_commit.wait(&mut inner);
+        }
+        inner.commits.clone()
     }
 
     pub fn output(&self) -> Vec<u8> {
-        self.0.lock().output.clone()
+        self.inner.lock().output.clone()
     }
 }
 
@@ -113,7 +133,7 @@ impl TestVecBuffer {
     }
 
     pub fn new_with_offset(size: usize, offset: u64) -> (Self, TestVecBufferReceiver) {
-        let receiver = TestVecBufferReceiver(Arc::new(Mutex::new(TestVecBufferInner::default())));
+        let receiver = TestVecBufferReceiver::default();
         let range = offset..offset + size as u64;
         let buf = Self {
             data: AlignedBuffer::new(size),
@@ -127,7 +147,7 @@ impl TestVecBuffer {
 
     pub fn new_with_range(range: Range<u64>) -> (Self, TestVecBufferReceiver) {
         let size = (range.end - range.start) as usize;
-        let receiver = TestVecBufferReceiver(Arc::new(Mutex::new(TestVecBufferInner::default())));
+        let receiver = TestVecBufferReceiver::default();
         let buf = Self {
             data: AlignedBuffer::new(size),
             offset: range.start,
@@ -143,7 +163,7 @@ impl TestVecBuffer {
     }
 
     pub fn new_unprepared_with_range(range: Range<u64>) -> (Self, TestVecBufferReceiver) {
-        let receiver = TestVecBufferReceiver(Arc::new(Mutex::new(TestVecBufferInner::default())));
+        let receiver = TestVecBufferReceiver::default();
         let buf = Self {
             data: AlignedBuffer::default(),
             range,
@@ -166,17 +186,22 @@ impl DataBuffer for TestVecBuffer {
     }
 
     fn commit(&mut self, size: usize) -> Result<(), ChunkedArchiveError> {
-        let mut inner = self.receiver.0.lock();
+        let mut inner = self.receiver.inner.lock();
         inner.commits.push((self.offset, size));
         inner.output = self.data.to_vec();
         self.offset += size as u64;
         self.committed_len += size;
+        self.receiver.on_commit.notify_all();
         Ok(())
     }
 }
 
 impl PageRequest for TestVecBuffer {
-    fn prepare(&mut self, read_range: Range<u64>) -> Result<(), ChunkedArchiveError> {
+    fn prepare(
+        &mut self,
+        read_range: Range<u64>,
+        _read_alignment: usize,
+    ) -> Result<(), ChunkedArchiveError> {
         let size = (read_range.end - read_range.start) as usize;
         if self.data.len() < size {
             self.data.resize(size, 0);

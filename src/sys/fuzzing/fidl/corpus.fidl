@@ -29,6 +29,6 @@ closed protocol CorpusReader {
     strict Next(resource struct {
         test_input Input;
     }) -> (struct {
-        result zx.Status;
+        result zx.Result;
     });
 };

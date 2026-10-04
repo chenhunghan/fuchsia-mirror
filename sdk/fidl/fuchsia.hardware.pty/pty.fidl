@@ -71,7 +71,7 @@ closed protocol Device {
         id uint32;
         client server_end:Device;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// allowed on Client PTYs
@@ -81,13 +81,13 @@ closed protocol Device {
         clr uint32;
         set uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         features uint32;
     });
 
     /// Obtain the window size (in character cells)
     strict GetWindowSize() -> (struct {
-        status zx.Status;
+        status zx.Result;
         size WindowSize;
     });
 
@@ -98,12 +98,12 @@ closed protocol Device {
     strict MakeActive(struct {
         client_pty_id uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Returns pending OOB events, simultaneously clearing them
     strict ReadEvents() -> (struct {
-        status zx.Status;
+        status zx.Result;
         events uint32;
     });
 
@@ -113,7 +113,7 @@ closed protocol Device {
     strict SetWindowSize(struct {
         size WindowSize;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

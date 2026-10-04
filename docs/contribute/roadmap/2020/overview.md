@@ -39,8 +39,8 @@ to improve network performance.
 
 ## Components v2
 
-[Components v2](/docs/glossary/README.md#components-v2) is Fuchsia's component
-architecture that replaces Components v1.
+[Components v2](/docs/glossary/README.md#component-framework) is Fuchsia's
+component architecture that replaces Components v1.
 
 The following projects are currently underway:
 

@@ -18,6 +18,12 @@ __BEGIN_CDECLS
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t
+cpp_vmar_dispatcher_create(VmAddressRegion* vmar, uint32_t base_arch_mmu_flags,
+                           ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* handle_out,
+                           ffi::Uninitialized<zx_rights_t>* rights_out);
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t
 cpp_vmar_dispatcher_set_memory_priority(VmAddressRegionDispatcher* vmar, uint32_t priority);
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.

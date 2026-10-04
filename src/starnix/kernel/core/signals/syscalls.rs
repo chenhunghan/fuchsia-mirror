@@ -2324,9 +2324,9 @@ mod tests {
                 assert_eq!(sig.code, SI_QUEUE);
                 if let SignalDetail::Raw { data } = sig.detail {
                     // offsets into the raw portion of the signal info
-                    let offset_pid = PID_DATA_OFFSET - SI_HEADER_SIZE;
-                    let offset_uid = UID_DATA_OFFSET - SI_HEADER_SIZE;
-                    let offset_value = VALUE_DATA_OFFSET - SI_HEADER_SIZE;
+                    let offset_pid = PID_DATA_OFFSET - ARCH64_SI_HEADER_SIZE;
+                    let offset_uid = UID_DATA_OFFSET - ARCH64_SI_HEADER_SIZE;
+                    let offset_value = VALUE_DATA_OFFSET - ARCH64_SI_HEADER_SIZE;
                     let pid =
                         pid_t::from_ne_bytes(data[offset_pid..offset_pid + 4].try_into().unwrap());
                     let uid =

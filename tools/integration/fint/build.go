@@ -130,7 +130,7 @@ type buildModules interface {
 
 type buildAPIClient interface {
 	ExportDebugSymbols(context.Context, string, bool) error
-	AffectedTests(context.Context, string) ([]string, error)
+	AffectedTests(context.Context, string) (*build.AffectedTestsResult, error)
 }
 
 type ninjaDebugFileSet struct {
@@ -569,7 +569,7 @@ func buildImpl(
 	// it's not the end of the world to do this analysis unnecessarily, since it
 	// only takes ~10 seconds and we do use the results most of the time,
 	// including on all the slowest infra builders.
-	newArtifacts, err := affectedImpl(ctx, runner, buildAPIClient, contextSpec, modules, platform, targets)
+	newArtifacts, err := affectedImpl(ctx, buildAPIClient, contextSpec, modules)
 	if err != nil {
 		return artifacts, err
 	}

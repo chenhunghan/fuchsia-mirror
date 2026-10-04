@@ -219,7 +219,7 @@ class OdpmPowerMetricsTest(unittest.TestCase):
                 )
 
     def test_process_metrics_selected_rails(self) -> None:
-        """Verifies aggregate metrics calculation only for selected rails in order."""
+        """Verifies metrics calculation only for selected rails in order."""
         model = self.construct_trace_model()
         processor = odpm_power.OdpmPowerMetricsProcessor(
             rails=["gpu", "cpu_big"]
@@ -228,40 +228,16 @@ class OdpmPowerMetricsTest(unittest.TestCase):
 
         expected = [
             TestCaseResult(
-                label="MinPower_gpu",
+                label="Power_rail_gpu",
                 unit=U.watts,
-                values=[0.5],
-                doc="ODPM power usage sampled for rail gpu, minimum",
+                values=[0.5, 1.5],
+                doc="ODPM power usage samples for rail gpu",
             ),
             TestCaseResult(
-                label="MeanPower_gpu",
+                label="Power_rail_cpu_big",
                 unit=U.watts,
-                values=[1.0],
-                doc="ODPM power usage sampled for rail gpu, mean",
-            ),
-            TestCaseResult(
-                label="MaxPower_gpu",
-                unit=U.watts,
-                values=[1.5],
-                doc="ODPM power usage sampled for rail gpu, maximum",
-            ),
-            TestCaseResult(
-                label="MinPower_cpu_big",
-                unit=U.watts,
-                values=[1.0],
-                doc="ODPM power usage sampled for rail cpu_big, minimum",
-            ),
-            TestCaseResult(
-                label="MeanPower_cpu_big",
-                unit=U.watts,
-                values=[2.0],
-                doc="ODPM power usage sampled for rail cpu_big, mean",
-            ),
-            TestCaseResult(
-                label="MaxPower_cpu_big",
-                unit=U.watts,
-                values=[3.0],
-                doc="ODPM power usage sampled for rail cpu_big, maximum",
+                values=[1.0, 3.0],
+                doc="ODPM power usage samples for rail cpu_big",
             ),
         ]
         self.assertEqual(results, expected)
@@ -269,47 +245,27 @@ class OdpmPowerMetricsTest(unittest.TestCase):
     def test_process_metrics_all_rails(self) -> None:
         """Verifies all_rails=True reports metrics for all available rails in sorted order."""
         model = self.construct_trace_model()
-        processor = odpm_power.OdpmPowerMetricsProcessor(
-            all_rails=True, aggregates_only=False
-        )
+        processor = odpm_power.OdpmPowerMetricsProcessor(all_rails=True)
         results = processor.process_metrics(model)
 
         expected = [
             TestCaseResult(
-                label="Power_cpu_big",
+                label="Power_rail_cpu_big",
                 unit=U.watts,
                 values=[1.0, 3.0],
                 doc="ODPM power usage samples for rail cpu_big",
             ),
             TestCaseResult(
-                label="Power_gpu",
+                label="Power_rail_gpu",
                 unit=U.watts,
                 values=[0.5, 1.5],
                 doc="ODPM power usage samples for rail gpu",
             ),
             TestCaseResult(
-                label="Power_wlan_bt",
+                label="Power_rail_wlan_bt",
                 unit=U.watts,
                 values=[0.25, 0.75],
                 doc="ODPM power usage samples for rail wlan_bt",
-            ),
-        ]
-        self.assertEqual(results, expected)
-
-    def test_process_metrics_raw_samples(self) -> None:
-        """Verifies raw time-series sample output when aggregates_only=False."""
-        model = self.construct_trace_model()
-        processor = odpm_power.OdpmPowerMetricsProcessor(
-            rails=["cpu_big"], aggregates_only=False
-        )
-        results = processor.process_metrics(model)
-
-        expected = [
-            TestCaseResult(
-                label="Power_cpu_big",
-                unit=U.watts,
-                values=[1.0, 3.0],
-                doc="ODPM power usage samples for rail cpu_big",
             ),
         ]
         self.assertEqual(results, expected)
@@ -342,7 +298,7 @@ class OdpmPowerMetricsTest(unittest.TestCase):
             )
 
         processor = odpm_power.OdpmPowerMetricsProcessor(
-            sum_rails={"compute": ["cpu_big", "gpu"]}, aggregates_only=False
+            sum_rails={"compute": ["cpu_big", "gpu"]}
         )
         results = processor.process_metrics(model)
         self.assertEqual(
@@ -384,22 +340,10 @@ class OdpmPowerMetricsTest(unittest.TestCase):
         # cpu_big (1.0, 3.0) + gpu (0.5, 1.5) = (1.5, 4.5)
         expected = [
             TestCaseResult(
-                label="MinPower_compute",
+                label="Power_compute",
                 unit=U.watts,
-                values=[1.5],
-                doc="ODPM power usage sampled for rails cpu_big, gpu, minimum",
-            ),
-            TestCaseResult(
-                label="MeanPower_compute",
-                unit=U.watts,
-                values=[3.0],
-                doc="ODPM power usage sampled for rails cpu_big, gpu, mean",
-            ),
-            TestCaseResult(
-                label="MaxPower_compute",
-                unit=U.watts,
-                values=[4.5],
-                doc="ODPM power usage sampled for rails cpu_big, gpu, maximum",
+                values=[1.5, 4.5],
+                doc="ODPM power usage samples for rails cpu_big, gpu",
             ),
         ]
         self.assertEqual(results, expected)

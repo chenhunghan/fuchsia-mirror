@@ -43,15 +43,17 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let rpc_ident = format_ident!("{}Rpc", server_ident);
     let client_ident = format_ident!("{}Client", server_ident);
 
-    let (impl_generics, ty_generics, where_clause) = item_impl.generics.split_for_impl();
-    let where_predicates = where_clause.map(|w| &w.predicates);
+    let (impl_generics, _, where_clause) = item_impl.generics.split_for_impl();
+    let generics = rpc_generics(&item_impl);
+    let (rpc_impl_generics, rpc_ty_generics, rpc_where_clause) = generics.split_for_impl();
+    let where_predicates = rpc_where_clause.map(|w| &w.predicates);
 
     let mut lifetime_defs = Vec::new();
     let mut lifetime_names = Vec::new();
     let mut type_const_defs = Vec::new();
     let mut type_const_names = Vec::new();
 
-    for p in &item_impl.generics.params {
+    for p in &generics.params {
         match p {
             syn::GenericParam::Lifetime(l) => {
                 lifetime_defs.push(quote! { #l });
@@ -71,8 +73,7 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    let phantom_types: Vec<_> = item_impl
-        .generics
+    let phantom_types: Vec<_> = generics
         .params
         .iter()
         .filter_map(|p| match p {
@@ -239,13 +240,14 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let route_method: syn::ImplItem = if methods.is_empty() {
         syn::parse_quote! {
-            async fn route_request<Cfg, C>(
+            /// Calls the method matching `request` and sends its result through the responder.
+            pub async fn route_request<Cfg, C>(
                 #route_self_arg,
-                request: #request_ident #ty_generics,
-                _responder: ::sapphire_async::rpc::Responder<#rpc_ident #ty_generics, Cfg, C>,
+                request: #request_ident #rpc_ty_generics,
+                _responder: ::sapphire_async::rpc::Responder<#rpc_ident #rpc_ty_generics, Cfg, C>,
             ) where
                 Cfg: ::sapphire_async::rpc::RpcCfg,
-                C: ::core::ops::Deref<Target = ::sapphire_async::rpc::RpcChannel<#rpc_ident #ty_generics, Cfg>>,
+                C: ::core::ops::Deref<Target = ::sapphire_async::rpc::RpcChannel<#rpc_ident #rpc_ty_generics, Cfg>>,
             {
                 match request {
                     _ => ::core::unreachable!("No RPC endpoints defined"),
@@ -254,13 +256,14 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         syn::parse_quote! {
-            async fn route_request<Cfg, C>(
+            /// Calls the method matching `request` and sends its result through `responder`.
+            pub async fn route_request<Cfg, C>(
                 #route_self_arg,
-                request: #request_ident #ty_generics,
-                responder: ::sapphire_async::rpc::Responder<#rpc_ident #ty_generics, Cfg, C>,
+                request: #request_ident #rpc_ty_generics,
+                responder: ::sapphire_async::rpc::Responder<#rpc_ident #rpc_ty_generics, Cfg, C>,
             ) where
                 Cfg: ::sapphire_async::rpc::RpcCfg,
-                C: ::core::ops::Deref<Target = ::sapphire_async::rpc::RpcChannel<#rpc_ident #ty_generics, Cfg>>,
+                C: ::core::ops::Deref<Target = ::sapphire_async::rpc::RpcChannel<#rpc_ident #rpc_ty_generics, Cfg>>,
             {
                 match request {
                     #(#route_arms)*
@@ -274,50 +277,50 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let output = quote! {
         #[allow(non_camel_case_types, non_snake_case, dead_code)]
-        pub enum #request_ident #impl_generics #where_clause {
+        pub enum #request_ident #rpc_impl_generics #rpc_where_clause {
             #(#req_variants,)*
             #req_phantom
         }
 
         #[allow(non_camel_case_types, non_snake_case, dead_code)]
-        pub enum #response_ident #impl_generics #where_clause {
+        pub enum #response_ident #rpc_impl_generics #rpc_where_clause {
             #(#res_variants,)*
             #res_phantom
         }
 
         #[derive(::core::fmt::Debug, ::core::clone::Clone, ::core::marker::Copy)]
-        pub struct #rpc_ident #impl_generics #rpc_tuple_field #where_clause;
+        pub struct #rpc_ident #rpc_impl_generics #rpc_tuple_field #rpc_where_clause;
 
-        impl #impl_generics ::sapphire_async::rpc::Rpc for #rpc_ident #ty_generics #where_clause {
-            type Request = #request_ident #ty_generics;
-            type Response = #response_ident #ty_generics;
+        impl #rpc_impl_generics ::sapphire_async::rpc::Rpc for #rpc_ident #rpc_ty_generics #rpc_where_clause {
+            type Request = #request_ident #rpc_ty_generics;
+            type Response = #response_ident #rpc_ty_generics;
         }
 
         #[derive(::core::fmt::Debug)]
-        pub struct #client_ident<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> #where_clause {
+        pub struct #client_ident<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> #rpc_where_clause {
             client: ::sapphire_async::rpc::Client<C>,
             #client_phantom_field
         }
 
-        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #where_clause {
+        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #rpc_where_clause {
             pub const fn new(client: ::sapphire_async::rpc::Client<C>) -> Self {
                 Self { client, #client_phantom_init }
             }
         }
 
-        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> ::core::convert::From<::sapphire_async::rpc::Client<C>> for #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #where_clause {
+        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> ::core::convert::From<::sapphire_async::rpc::Client<C>> for #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #rpc_where_clause {
             fn from(client: ::sapphire_async::rpc::Client<C>) -> Self {
                 Self::new(client)
             }
         }
 
-        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles + ::core::clone::Clone, #(#type_const_defs),*> ::core::clone::Clone for #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #where_clause {
+        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles + ::core::clone::Clone, #(#type_const_defs),*> ::core::clone::Clone for #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #rpc_where_clause {
             fn clone(&self) -> Self {
                 Self { client: self.client.clone(), #client_phantom_init }
             }
         }
 
-        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> ::core::ops::Deref for #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #where_clause {
+        impl<#(#lifetime_defs,)* C: ::sapphire_async::rpc::RpcHandles, #(#type_const_defs),*> ::core::ops::Deref for #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*> #rpc_where_clause {
             type Target = ::sapphire_async::rpc::Client<C>;
             fn deref(&self) -> &Self::Target {
                 &self.client
@@ -326,7 +329,7 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         impl<#(#lifetime_defs,)* C, Cfg, #(#type_const_defs),*> #client_ident<#(#lifetime_names,)* C, #(#type_const_names),*>
         where
-            C: ::sapphire_async::rpc::RpcHandles + ::core::ops::Deref<Target = ::sapphire_async::rpc::RpcChannel<#rpc_ident #ty_generics, Cfg>>,
+            C: ::sapphire_async::rpc::RpcHandles + ::core::ops::Deref<Target = ::sapphire_async::rpc::RpcChannel<#rpc_ident #rpc_ty_generics, Cfg>>,
             Cfg: ::sapphire_async::rpc::RpcCfg,
             #where_predicates
         {
@@ -341,4 +344,81 @@ pub fn rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     output.into()
+}
+
+/// Returns the impl generics without the lifetimes that no endpoint signature, type or const
+/// parameter, or where clause mentions.
+///
+/// Such lifetimes (e.g. a borrow held only by the server) are left out of the generated request,
+/// response, RPC and client types, so clients never have to name them.
+fn rpc_generics(item_impl: &ItemImpl) -> syn::Generics {
+    let mut used = proc_macro2::TokenStream::new();
+    for item in &item_impl.items {
+        if let syn::ImplItem::Fn(method) = item {
+            if let Some(FnArg::Receiver(_)) = method.sig.inputs.first() {
+                let inputs = method.sig.inputs.iter().skip(1);
+                let output = &method.sig.output;
+                used.extend(quote! { #(#inputs)* #output });
+            }
+        }
+    }
+    for param in &item_impl.generics.params {
+        match param {
+            syn::GenericParam::Type(t) => {
+                let (bounds, default) = (&t.bounds, &t.default);
+                used.extend(quote! { #bounds #default });
+            }
+            syn::GenericParam::Const(c) => {
+                let ty = &c.ty;
+                used.extend(quote! { #ty });
+            }
+            syn::GenericParam::Lifetime(_) => {}
+        }
+    }
+    let where_clause = &item_impl.generics.where_clause;
+    used.extend(quote! { #where_clause });
+
+    let is_used = |lifetime: &syn::Lifetime| mentions_lifetime(used.clone(), lifetime);
+    let mut generics = item_impl.generics.clone();
+    generics.params = generics
+        .params
+        .into_iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Lifetime(mut l) => {
+                if !is_used(&l.lifetime) {
+                    return None;
+                }
+                l.bounds = l.bounds.into_iter().filter(|b| is_used(b)).collect();
+                if l.bounds.is_empty() {
+                    l.colon_token = None;
+                }
+                Some(syn::GenericParam::Lifetime(l))
+            }
+            other => Some(other),
+        })
+        .collect();
+    generics
+}
+
+/// Returns whether `tokens` contain the lifetime `lifetime`.
+fn mentions_lifetime(tokens: proc_macro2::TokenStream, lifetime: &syn::Lifetime) -> bool {
+    let mut tokens = tokens.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        match token {
+            proc_macro2::TokenTree::Group(group) => {
+                if mentions_lifetime(group.stream(), lifetime) {
+                    return true;
+                }
+            }
+            proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '\'' => {
+                if let Some(proc_macro2::TokenTree::Ident(ident)) = tokens.peek() {
+                    if *ident == lifetime.ident {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }

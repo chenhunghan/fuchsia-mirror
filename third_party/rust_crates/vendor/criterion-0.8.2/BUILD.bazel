@@ -76,6 +76,7 @@ rust_library(
     target_compatible_with = select({
         "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [],
         "//conditions:default": ["@platforms//:incompatible"],
@@ -87,7 +88,7 @@ rust_library(
         "//third_party/rust_crates/forks/anes-0.1.6:anes",
         "//third_party/rust_crates/vendor/cast-0.3.0:cast",
         "//third_party/rust_crates/vendor/ciborium-0.2.2:ciborium",
-        "//third_party/rust_crates/vendor/clap-4.6.1:clap",
+        "//third_party/rust_crates/vendor/clap-4.6.7:clap",
         "//third_party/rust_crates/vendor/criterion-plot-0.8.2:criterion_plot",
         "//third_party/rust_crates/vendor/itertools-0.13.0:itertools",
         "//third_party/rust_crates/vendor/num-traits-0.2.19:num_traits",
@@ -102,6 +103,9 @@ rust_library(
             "//third_party/rust_crates/vendor/alloca-0.4.0:alloca",  # cfg(any(windows, unix))
         ],
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
+            "//third_party/rust_crates/vendor/alloca-0.4.0:alloca",  # cfg(any(windows, unix))
+        ],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
             "//third_party/rust_crates/vendor/alloca-0.4.0:alloca",  # cfg(any(windows, unix))
         ],
         "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [

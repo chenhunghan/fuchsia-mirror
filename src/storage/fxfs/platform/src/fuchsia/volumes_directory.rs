@@ -796,8 +796,10 @@ impl VolumesDirectory {
         create_options: CreateOptions,
     ) -> Result<(), Error> {
         let mut guard = self.lock().await;
-        let crypt =
-            mount_options.crypt.map(|crypt| Arc::new(RemoteCrypt::new(crypt)) as Arc<dyn Crypt>);
+        let device = self.root_volume.volume_directory().store().filesystem().device();
+        let crypt = mount_options
+            .crypt
+            .map(|crypt| Arc::new(RemoteCrypt::new_with_device(crypt, device)) as Arc<dyn Crypt>);
         let as_blob = mount_options.as_blob.unwrap_or(false);
         let guid = create_options.guid;
         let low_32_bit_object_ids = create_options.restrict_inode_ids_to_32_bit.unwrap_or(false);
@@ -973,7 +975,7 @@ impl VolumesDirectory {
     ) -> Result<(), Error> {
         let fs = self.root_volume.volume_directory().store().filesystem();
         let crypt = if let Some(crypt) = options.crypt {
-            Some(Arc::new(RemoteCrypt::new(crypt)) as Arc<dyn Crypt>)
+            Some(Arc::new(RemoteCrypt::new_with_device(crypt, fs.device())) as Arc<dyn Crypt>)
         } else {
             None
         };
@@ -985,6 +987,9 @@ impl VolumesDirectory {
 
     async fn handle_set_limit(self: &Arc<Self>, store_id: u64, bytes: u64) -> Result<(), Error> {
         let store = self.root_volume.volume_directory().store();
+        if store.filesystem().allocator().get_owner_bytes_limit(store_id) == Some(bytes) {
+            return Ok(());
+        }
         let mut transaction = store.new_transaction(lock_keys![], Options::default()).await?;
         store.filesystem().allocator().set_bytes_limit(&mut transaction, store_id, bytes)?;
         transaction.commit().await?;
@@ -1011,7 +1016,10 @@ impl VolumesDirectory {
         options: MountOptions,
     ) -> Result<(), Error> {
         info!(name:%, store_id:%, options:?; "Received mount request");
-        let crypt = options.crypt.map(|crypt| Arc::new(RemoteCrypt::new(crypt)) as Arc<dyn Crypt>);
+        let device = self.root_volume.volume_directory().store().filesystem().device();
+        let crypt = options
+            .crypt
+            .map(|crypt| Arc::new(RemoteCrypt::new_with_device(crypt, device)) as Arc<dyn Crypt>);
         let as_blob = options.as_blob.unwrap_or(false);
         let mut guard = self.lock().await;
         let volume = guard
@@ -3297,14 +3305,14 @@ mod tests {
                                 Ok(Some(CryptRequest::CreateKeyWithId {
                                         wrapping_key_id, responder, .. })) => {
                                     let key = WrappedKey::Fxfs(FxfsKey {
-                                        wrapping_key_id,
-                                        wrapped_key: [0u8; 48],
-                                    });
-                                    responder.send(Ok((&key, &[0; 32]))).unwrap();
-                                }
-                                Ok(Some(CryptRequest::UnwrapKey { responder, .. })) => {
-                                    responder.send(Ok(&vec![0; 32])).unwrap();
-                                }
+                                         wrapping_key_id,
+                                         wrapped_key: [0u8; 48],
+                                     });
+                                     responder.send(Ok((&key, &[0; 32], None))).unwrap();
+                                 }
+                                 Ok(Some(CryptRequest::UnwrapKey { responder, .. })) => {
+                                     responder.send(Ok((&vec![0; 32], None))).unwrap();
+                                 }
                                 _ => return,
                             }
                         }

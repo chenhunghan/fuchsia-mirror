@@ -85,9 +85,9 @@ impl ScrutinyArtifacts {
         &self,
         scheme: String,
         moniker: String,
-        protocol: String,
+        resolver: String,
     ) -> Result<ComponentResolverResponse> {
-        let request = ComponentResolverRequest { scheme, moniker, protocol };
+        let request = ComponentResolverRequest { scheme, moniker, resolver };
         ComponentResolversController::get_monikers(self.model.clone(), request)
     }
 

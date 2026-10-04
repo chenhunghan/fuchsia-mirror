@@ -13,6 +13,7 @@
 #include <lib/zx/time.h>
 #include <zircon/processargs.h>
 
+#include <algorithm>
 #include <optional>
 
 #include "src/developer/forensics/feedback/config.h"
@@ -61,14 +62,17 @@ int main() {
   std::unique_ptr<sys::ComponentContext> context =
       sys::ComponentContext::CreateAndServeOutgoingDirectory();
 
+  const size_t max_num_files = std::max<size_t>(
+      1, feedback_config->persisted_logs_total_size / feedback::kPersistedLogsFileSize);
+
   SystemLogRecorder recorder(
       main_loop.dispatcher(), write_loop.dispatcher(), context->svc(),
       SystemLogRecorder::WriteParameters{
           .period = kWritePeriod,
           .max_write_size = kMaxWriteSize,
           .logs_dir = feedback::kCurrentLogsDir,
-          .max_num_files = feedback::kPersistedLogsNumFiles,
-          .total_log_size = feedback::kPersistedLogsTotalSize,
+          .max_num_files = max_num_files,
+          .total_log_size = feedback_config->persisted_logs_total_size,
           .metadata_path = feedback::kCurrentDiskBackedLogsMetadataPath,
           .fallback_buffer_size = feedback_data::kFallbackLogBufferSize,
       },

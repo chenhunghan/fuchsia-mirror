@@ -20,7 +20,7 @@ rustc_library("ffl") {
     "src/tests.rs",
     "src/utility.rs",
   ]
-  with_unit_tests = true
+  with_unit_tests = "both"
   deps = []
 }
 

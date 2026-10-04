@@ -64,6 +64,7 @@ config_setting(
         "//build/tools:__subpackages__",
         "//tools:__subpackages__",
         "//sdk/ctf/plasa:__subpackages__",
+        "//src/sys/pkg/tests/pkg-resolver/template:__pkg__",
         "//src/tests/benchmarks/fidl/benchmark_suite/gen:__pkg__",
     ],
 )

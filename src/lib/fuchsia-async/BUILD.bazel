@@ -77,7 +77,6 @@ rustc_library(
         "@platforms//os:fuchsia": [
             "//sdk/lib/fdio",
             "//sdk/rust/zx",
-            "//sdk/rust/zx-status-ext",
             "//third_party/rust_crates/vendor:crossbeam",
             "//third_party/rust_crates/vendor:libc",
             "//third_party/rust_crates/vendor:rustc-hash",

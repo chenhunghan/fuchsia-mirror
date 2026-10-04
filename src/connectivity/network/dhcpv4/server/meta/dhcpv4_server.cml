@@ -10,6 +10,7 @@
     capabilities: [
         {
             protocol: [ "fuchsia.net.dhcp.Server" ],
+            delivery: "on_readable",
         },
     ],
     use: [

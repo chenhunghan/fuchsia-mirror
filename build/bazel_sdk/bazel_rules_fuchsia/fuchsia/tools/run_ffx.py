@@ -6,10 +6,11 @@
 import argparse
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 
-def run(*command) -> None:
+def run(*command: str | Path) -> None:
     try:
         # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
         # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE
@@ -28,13 +29,13 @@ def run(*command) -> None:
         raise e
 
 
-def parse_args() -> None:
+def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parses arguments."""
     parser = argparse.ArgumentParser(add_help=False)
 
-    def path_arg(type="file"):
-        def arg(path):
-            path = Path(path)
+    def path_arg(type: str = "file") -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             if (
                 type == "file"
                 and not path.is_file()
@@ -61,7 +62,7 @@ def parse_args() -> None:
     return parser.parse_known_args()
 
 
-def main():
+def main() -> None:
     # Parse arguments.
     args, unknown = parse_args()
 

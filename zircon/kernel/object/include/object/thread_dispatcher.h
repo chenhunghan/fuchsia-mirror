@@ -441,6 +441,7 @@ ThreadDispatcher::Blocked cpp_thread_dispatcher_set_blocked_reason(
     ThreadDispatcher::Blocked reason);
 zx_status_t cpp_thread_dispatcher_get_exception_report(
     const ThreadDispatcher* thread, ffi::Uninitialized<zx_exception_report_t>* out_report);
+ChannelDispatcher::MessageWaiter* cpp_thread_dispatcher_get_current_message_waiter();
 }
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_THREAD_DISPATCHER_H_

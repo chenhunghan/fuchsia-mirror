@@ -49,6 +49,7 @@ constexpr KTraceCategory kGroupCategories[] = {
     {"kernel:power", KTRACE_GRP_POWER,
      "Counters and events related to power (DVFS, idle, hotplug, etc...)."},
     {"kernel:oom", KTRACE_GRP_OOM, "Memory pressure and OOM events"},
+    {"kernel:sched-demand", KTRACE_GRP_SCHEDULER_DEMAND, "CPU bandwidth demand counters"},
 };
 
 // Meta category to retain current contents of ktrace buffer.

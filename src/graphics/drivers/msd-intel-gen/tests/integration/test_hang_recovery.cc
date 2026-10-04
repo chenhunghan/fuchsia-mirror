@@ -41,7 +41,7 @@ class TestConnection : public magma::TestDeviceBase {
       extra_page_count_ = 0;
     }
 
-    magma_connection_create_context(connection_, &context_id_);
+    magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM, &context_id_);
   }
 
   ~TestConnection() {

@@ -6,7 +6,6 @@ use crate::info_iterator::{CompositeInfoIterator, DeviceInfoIterator, DriverHost
 use driver_manager_core::DriverRunner;
 use driver_manager_node::Node;
 use driver_manager_shutdown::RemovalSet;
-use driver_manager_types::to_deprecated_property;
 use fdd::ManagerRequest::*;
 use fidl::endpoints::{DiscoverableProtocolMarker, Responder, ServerEnd};
 use fidl_fuchsia_component_decl as fdecl;
@@ -223,7 +222,7 @@ impl DriverDevelopmentService {
 
         let add_args = fdf::NodeAddArgs {
             name: Some(name.clone()),
-            properties: args.properties,
+            properties2: args.properties,
             ..Default::default()
         };
 
@@ -599,13 +598,7 @@ async fn create_device_info(node: &Rc<Node>) -> Result<fdd::NodeInfo, zx::Status
     let node_property_list = if node.is_composite() {
         None
     } else {
-        node.get_node_properties(None).and_then(|properties| {
-            if properties.is_empty() {
-                None
-            } else {
-                Some(properties.iter().map(to_deprecated_property).collect())
-            }
-        })
+        node.get_node_properties(None).filter(|properties| !properties.is_empty())
     };
 
     Ok(fdd::NodeInfo {

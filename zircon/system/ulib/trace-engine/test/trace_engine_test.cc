@@ -9,6 +9,8 @@
 #include <lib/trace-engine/handler.h>
 #include <lib/trace-engine/instrumentation.h>
 
+#include <thread>
+
 #include <gtest/gtest.h>
 
 #include "../context_impl.h"
@@ -438,6 +440,76 @@ TEST(TraceEngineTest, OversizedEventDropped) {
   ASSERT_EQ(raw_context->num_records_dropped(), initial_dropped + 1);
 
   trace_release_context(context);
+
+  trace_engine_stop(ZX_OK);
+  trace_engine_terminate();
+  loop.RunUntilIdle();
+}
+
+TEST(TraceEngineTest, RegisterStringAcrossThreadsDeduplicates) {
+  async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
+  // With a 4096-byte buffer in CIRCULAR mode, the durable buffer is 240 bytes.
+  // Without cross-thread deduplication, 32 threads registering the same string literals would
+  // overflow the durable buffer and fall back to inline string references.
+  alignas(uint64_t) char buffer[4096];
+  trace_handler_t handler{&ops};
+  zx_status_t init = trace_engine_initialize(loop.dispatcher(), &handler,
+                                             TRACE_BUFFERING_MODE_CIRCULAR, buffer, sizeof(buffer));
+  ASSERT_EQ(init, ZX_OK);
+  loop.RunUntilIdle();
+
+  zx_status_t start = trace_engine_start(TRACE_START_CLEAR_ENTIRE_BUFFER);
+  ASSERT_EQ(start, ZX_OK);
+  loop.RunUntilIdle();
+
+  trace_context_t* main_ctx = trace_acquire_context();
+  ASSERT_TRUE(main_ctx);
+  trace_string_ref_t expected_str_ref;
+  trace_context_register_string_literal(main_ctx, str_enabled, &expected_str_ref);
+  trace_string_ref_t expected_bytes_ref;
+  trace_context_register_bytestring(main_ctx, bytes_enabled, sizeof(bytes_enabled),
+                                    &expected_bytes_ref);
+  ASSERT_TRUE(trace_is_indexed_string_ref(&expected_str_ref));
+  ASSERT_TRUE(trace_is_indexed_string_ref(&expected_bytes_ref));
+  trace_release_context(main_ctx);
+
+  constexpr size_t kNumThreads = 32;
+  for (size_t i = 0; i < kNumThreads; ++i) {
+    std::thread t([&]() {
+      trace_context_t* ctx = trace_acquire_context();
+      ASSERT_TRUE(ctx);
+      trace_string_ref_t str_ref;
+      trace_context_register_string_literal(ctx, str_enabled, &str_ref);
+      trace_string_ref_t bytes_ref;
+      trace_context_register_bytestring(ctx, bytes_enabled, sizeof(bytes_enabled), &bytes_ref);
+      EXPECT_EQ(str_ref.encoded_value, expected_str_ref.encoded_value);
+      EXPECT_EQ(bytes_ref.encoded_value, expected_bytes_ref.encoded_value);
+      trace_release_context(ctx);
+    });
+    t.join();
+  }
+
+  trace_engine_stop(ZX_OK);
+  loop.RunUntilIdle();
+
+  // Restarting with TRACE_START_CLEAR_ENTIRE_BUFFER resets the durable buffer and string table
+  // and increments the context generation so existing thread-local caches are invalidated.
+  start = trace_engine_start(TRACE_START_CLEAR_ENTIRE_BUFFER);
+  ASSERT_EQ(start, ZX_OK);
+  loop.RunUntilIdle();
+
+  main_ctx = trace_acquire_context();
+  ASSERT_TRUE(main_ctx);
+  // Register in reverse order on the same main thread to verify the thread-local cache was
+  // invalidated when the buffer and process-wide string table were cleared.
+  trace_string_ref_t restarted_bytes_ref;
+  trace_context_register_bytestring(main_ctx, bytes_enabled, sizeof(bytes_enabled),
+                                    &restarted_bytes_ref);
+  trace_string_ref_t restarted_str_ref;
+  trace_context_register_string_literal(main_ctx, str_enabled, &restarted_str_ref);
+  EXPECT_EQ(restarted_bytes_ref.encoded_value, expected_str_ref.encoded_value);
+  EXPECT_EQ(restarted_str_ref.encoded_value, expected_bytes_ref.encoded_value);
+  trace_release_context(main_ctx);
 
   trace_engine_stop(ZX_OK);
   trace_engine_terminate();

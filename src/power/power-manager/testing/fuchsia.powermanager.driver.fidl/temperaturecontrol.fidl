@@ -12,6 +12,6 @@ closed protocol Device {
     strict SetTemperatureCelsius(struct {
         temperature float32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

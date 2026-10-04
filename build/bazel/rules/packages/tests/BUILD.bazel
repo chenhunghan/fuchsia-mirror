@@ -1,0 +1,261 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tests for the platform Bazel package and device test rules."""
+
+load(
+    "@fuchsia_build_info//:environments.bzl",
+    "aemu_env",
+    "basic_envs",
+    "nuc11_env",
+    "qemu_1cpu_env",
+)
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load(
+    "//build/bazel/rules/testing:defs.bzl",
+    "verify_fx_test_environments",
+    "verify_fx_test_realms",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "example_test_bin",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    tags = ["manual"],
+)
+
+fx_packaged_binary(
+    name = "example_test_packaged_bin",
+    testonly = True,
+    binary = ":example_test_bin",
+    binary_name = "example_test",
+)
+
+fx_component_manifest(
+    name = "example_test_manifest",
+    testonly = True,
+    component_name = "example_test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard.cml",
+
+        # `cmc` resolves includes transitively, so the shards that
+        # client.shard.cml itself includes must be declared as inputs too.
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/example_test.cml",
+)
+
+fx_test_component(
+    name = "example_test_component",
+    compiled_manifest = ":example_test_manifest",
+    component_name = "example_test",
+    deps = [
+        ":example_test_packaged_bin",
+    ],
+)
+
+fx_component_manifest(
+    name = "example_helper_manifest",
+    component_name = "example_helper",
+    manifest = "meta/example_helper.cml",
+)
+
+fx_component(
+    name = "example_helper_component",
+    compiled_manifest = ":example_helper_manifest",
+    component_name = "example_helper",
+)
+
+fx_package(
+    name = "example_test_package",
+    package_name = "fx-test-package-example",
+    components = [
+        ":example_helper_component",
+    ],
+    test_components = [
+        ":example_test_component",
+    ],
+)
+
+# Tests `fx_test()` and `fx_package(test_components = ...)`. This is a real
+# test that can be run with `fx test fx-test-package-example`, provided it is
+# exported to the GN build with a `bazel_test_suite()` target.
+fx_test(
+    name = "example_test",
+    package = ":example_test_package",
+)
+
+# Each `verify_fx_test_environments()` target below is an analysis-time
+# assertion on the `FuchsiaTestInfo` provider of the `fx_test()` it points at:
+# building it fails if the test's `environments` or `build_only` don't match
+# the expected values. They have no outputs and only need to be built (via
+# `build_only_tests`) to take effect. This guards `fx_test()`'s JSON
+# encode/decode round trip of `environments`; it does not check what the
+# tests.json cquery extracts from the provider, which is covered by
+# `FuchsiaTestInfoCqueryTest` in //build/bazel/scripts/bazel_tests_utils_test.py.
+verify_fx_test_environments(
+    name = "verify_example_test_default_environments",
+    testonly = True,
+    expected_environments = [],
+    test = ":example_test",
+)
+
+fx_test(
+    name = "example_test_with_environments",
+    environments = [
+        aemu_env,
+        nuc11_env,
+        qemu_1cpu_env,
+    ],
+    package = ":example_test_package",
+)
+
+verify_fx_test_environments(
+    name = "verify_example_test_with_environments",
+    testonly = True,
+    expected_environments = [
+        aemu_env,
+        nuc11_env,
+        qemu_1cpu_env,
+    ],
+    test = ":example_test_with_environments",
+)
+
+fx_test(
+    name = "example_test_with_basic_envs",
+    environments = basic_envs,
+    package = ":example_test_package",
+)
+
+verify_fx_test_environments(
+    name = "verify_example_test_with_basic_envs",
+    testonly = True,
+    expected_environments = basic_envs,
+    test = ":example_test_with_basic_envs",
+)
+
+fx_test(
+    name = "example_build_only_test",
+    build_only = True,
+    package = ":example_test_package",
+)
+
+verify_fx_test_environments(
+    name = "verify_example_build_only_test",
+    testonly = True,
+    expected_build_only = True,
+    expected_environments = [],
+    test = ":example_build_only_test",
+)
+
+verify_fx_test_realms(
+    name = "verify_example_test_default_realm",
+    testonly = True,
+    expected_realms = {"example_test": ""},
+    test = ":example_test",
+)
+
+fx_test(
+    name = "example_test_with_test_type",
+    package = ":example_test_package",
+    test_type = "system",
+)
+
+verify_fx_test_realms(
+    name = "verify_example_test_with_test_type",
+    testonly = True,
+    expected_realms = {"example_test": "/core/testing/system-tests"},
+    test = ":example_test_with_test_type",
+)
+
+fx_component_manifest(
+    name = "example_starnix_test_manifest",
+    testonly = True,
+    component_name = "example_starnix_test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/example_test.cml",
+)
+
+fx_test_component(
+    name = "example_starnix_test_component",
+    compiled_manifest = ":example_starnix_test_manifest",
+    component_name = "example_starnix_test",
+    test_type = "starnix",
+    deps = [
+        ":example_test_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "example_multi_component_test_package",
+    package_name = "fx-test-multi-component-example",
+    test_components = [
+        ":example_test_component",
+        ":example_starnix_test_component",
+    ],
+)
+
+fx_test(
+    name = "example_multi_component_test",
+    package = ":example_multi_component_test_package",
+)
+
+verify_fx_test_realms(
+    name = "verify_example_multi_component_test_realms",
+    testonly = True,
+    expected_realms = {
+        "example_test": "",
+        "example_starnix_test": "/core/testing/starnix-tests",
+    },
+    test = ":example_multi_component_test",
+)
+
+filegroup(
+    name = "build_only_tests",
+    testonly = True,
+    srcs = [
+        ":example_build_only_test",
+        ":example_test",
+        ":example_test_with_basic_envs",
+        ":example_test_with_environments",
+        ":verify_example_build_only_test",
+        ":verify_example_test_default_environments",
+        ":verify_example_test_with_basic_envs",
+        ":verify_example_test_with_environments",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Builds targets for which building successfully is the test.
+filegroup(
+    name = "quick_build_only_tests",
+    testonly = True,
+    srcs = [
+        ":example_multi_component_test",
+        ":example_test",
+        ":example_test_with_test_type",
+        ":verify_example_multi_component_test_realms",
+        ":verify_example_test_default_realm",
+        ":verify_example_test_with_test_type",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

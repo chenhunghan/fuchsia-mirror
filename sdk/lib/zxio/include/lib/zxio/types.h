@@ -312,7 +312,10 @@ typedef struct zxio_node_attr {
   // standard, the value will be ZXIO_OBJECT_TYPE_NONE.
   zxio_object_type_t object_type;
   // fscrypt attribute.
-  uint8_t wrapping_key_id[ZXIO_WRAPPING_KEY_ID_LENGTH];
+  struct zxio_fscrypt_policy_t {
+    uint8_t key_identifier[ZXIO_WRAPPING_KEY_ID_LENGTH];
+    uint8_t flags;
+  } encryption_policy;
 
   // Presence indicator for these fields.
   //
@@ -340,7 +343,7 @@ typedef struct zxio_node_attr {
     bool fsverity_enabled;
     bool object_type;
     bool casefold;
-    bool wrapping_key_id;
+    bool encryption_policy;
     bool selinux_context;
     bool pending_access_time_update;
   } has;

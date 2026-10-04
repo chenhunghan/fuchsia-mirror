@@ -27,6 +27,14 @@ impl VmCompression {
     pub fn as_raw(&self) -> *mut bindings::VmCompression {
         self.raw.get()
     }
+
+    /// Retrieve a reference to a VmCompressor, wrapped in the RAII CompressorGuard. Once the
+    /// compressor is finished with it can be destroyed, which will release it for re-use.
+    /// This method may block until a compressor becomes available and callers should be prepared for
+    /// extended wait times.
+    pub fn acquire_compressor<'a>(&'a self) -> impl PinInit<CompressorGuard<'a>> {
+        pin_init_ffi!(bindings::cpp_vmcompression_acquire_compressor, self.as_raw())
+    }
 }
 
 /// An RAII wrapper around holding a locked reference to a `VmCompressor`.
@@ -51,12 +59,6 @@ zr::unsafe_pinned_drop_ffi!(
 );
 
 impl<'a> CompressorGuard<'a> {
-    /// Retrieves a compressor from `compression`, wrapped in an RAII guard. Once the compressor is
-    /// finished with it can be dropped, which will release it for reuse.
-    pub fn new(compression: &'a VmCompression) -> impl PinInit<Self> {
-        pin_init_ffi!(bindings::cpp_vmcompression_acquire_compressor, compression.as_raw())
-    }
-
     /// Returns a reference to the guarded `VmCompressor`.
     pub fn get(self: Pin<&mut Self>) -> &VmCompressor {
         // SAFETY: Nothing is moved out of the returned reference; it is only used to read

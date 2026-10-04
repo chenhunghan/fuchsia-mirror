@@ -5,7 +5,7 @@
 
 import itertools
 import logging
-from typing import Dict, MutableSequence, Tuple
+from collections.abc import MutableSequence
 
 from reporting import metrics
 from trace_processing import trace_metrics, trace_model, trace_time, trace_utils
@@ -304,7 +304,7 @@ class SuspendMetricsProcessor(trace_metrics.MetricsProcessor):
         ]
 
         # only count complete spans
-        metrics_list: Dict[str, Tuple[float, float]] = dict()
+        metrics_list: dict[str, tuple[float, float]] = dict()
         for s in [s for s in sysfs_list if s.is_complete()]:
             add_to_metrics(
                 metrics_list,
@@ -389,7 +389,7 @@ def get_cpu_idle_time(
     model: trace_model.Model,
     start: trace_time.TimePoint,
     end: trace_time.TimePoint,
-) -> Tuple[trace_time.TimePoint, trace_time.TimePoint] | None:
+) -> tuple[trace_time.TimePoint, trace_time.TimePoint] | None:
     """Calculates the longest common CPU idle time across all CPUs in the model
     within a specified time window.
 
@@ -438,7 +438,7 @@ def get_per_cpu_idle_times(
     records: list[trace_model.SchedulingRecord],
     start: trace_time.TimePoint,
     end: trace_time.TimePoint,
-) -> list[Tuple[trace_time.TimePoint, trace_time.TimePoint]]:
+) -> list[tuple[trace_time.TimePoint, trace_time.TimePoint]]:
     """Calculates the idle time intervals for a single CPU within a specified
     time window, based on scheduling records.
 
@@ -473,11 +473,11 @@ def get_per_cpu_idle_times(
 
 def find_common_idle_times(
     idle_times_list: list[
-        list[Tuple[trace_time.TimePoint, trace_time.TimePoint]]
+        list[tuple[trace_time.TimePoint, trace_time.TimePoint]]
     ],
     boundry_start: trace_time.TimePoint,
     boundry_end: trace_time.TimePoint,
-) -> list[Tuple[trace_time.TimePoint, trace_time.TimePoint]]:
+) -> list[tuple[trace_time.TimePoint, trace_time.TimePoint]]:
     """Finds the common idle time intervals across multiple lists of
     idle time intervals, within a specified time window.
 
@@ -521,7 +521,7 @@ def find_common_idle_times(
 
 
 def add_to_metrics(
-    metrics: Dict[str, Tuple[float, float]],
+    metrics: dict[str, tuple[float, float]],
     label: str,
     value: trace_time.TimeDelta | None,
 ) -> None:

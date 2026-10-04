@@ -6,7 +6,7 @@
 
 import logging
 import statistics
-from typing import MutableSequence, Tuple
+from collections.abc import MutableSequence
 
 from reporting import metrics
 from trace_processing import trace_metrics, trace_model, trace_time, trace_utils
@@ -138,7 +138,7 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
         cpu_render_mean: float = statistics.mean(cpu_render_times)
         _LOGGER.info(f"Average CPU render time: {cpu_render_mean} ms")
 
-        metrics_list: list[Tuple[str, list[float]]] = [
+        metrics_list: list[tuple[str, list[float]]] = [
             ("RenderCpu", cpu_render_times),
         ]
 

@@ -1,0 +1,264 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.usb.descriptor;
+
+/// USB Audio subclass codes.
+type AudioSubclass = flexible enum : uint8 {
+    CONTROL = 1;
+    STREAMING = 2;
+    MIDI_STREAMING = 3;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class AC interface descriptor subtypes.
+type AudioAcDescriptorSubtype = flexible enum : uint8 {
+    HEADER = 0x01;
+    INPUT_TERMINAL = 0x02;
+    OUTPUT_TERMINAL = 0x03;
+    MIXER_UNIT = 0x04;
+    SELECTOR_UNIT = 0x05;
+    FEATURE_UNIT = 0x06;
+    PROCESSING_UNIT = 0x07;
+    EXTENSION_UNIT = 0x08;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class processing unit process types.
+type AudioProcessType = flexible enum : uint16 {
+    UP_DOWN_MIX = 0x01;
+    DOLBY_PROLOGIC = 0x02;
+    STEREO_EXTENDER_3D = 0x03;
+    REVERBERATION = 0x04;
+    CHORUS = 0x05;
+    DYN_RANGE_COMP = 0x06;
+    @unknown
+    UNDEFINED = 0xeeee;
+};
+
+/// USB Audio Class endpoint descriptor subtypes.
+type AudioEpDescriptorSubtype = flexible enum : uint8 {
+    GENERAL = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class setup request codes.
+type AudioRequest = flexible enum : uint8 {
+    SET_CUR = 0x01;
+    SET_MIN = 0x02;
+    SET_MAX = 0x03;
+    SET_RES = 0x04;
+    SET_MEM = 0x05;
+    GET_CUR = 0x81;
+    GET_MIN = 0x82;
+    GET_MAX = 0x83;
+    GET_RES = 0x84;
+    GET_MEM = 0x85;
+    GET_STAT = 0xff;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class terminal control selectors.
+type AudioTerminalControlSelector = flexible enum : uint8 {
+    COPY_PROTECT_CONTROL = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class feature unit control selectors.
+type AudioFeatureUnitControlSelector = flexible enum : uint8 {
+    MUTE = 0x01;
+    VOLUME = 0x02;
+    BASS = 0x03;
+    MID = 0x04;
+    TREBLE = 0x05;
+    GRAPHIC_EQUALIZER = 0x06;
+    AUTOMATIC_GAIN = 0x07;
+    DELAY = 0x08;
+    BASS_BOOST = 0x09;
+    LOUDNESS = 0x0a;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class feature unit control support bitmasks (`bmaControls`).
+const AUDIO_FU_BMA_MUTE uint16 = 0x0001;
+const AUDIO_FU_BMA_VOLUME uint16 = 0x0002;
+const AUDIO_FU_BMA_BASS uint16 = 0x0004;
+const AUDIO_FU_BMA_MID uint16 = 0x0008;
+const AUDIO_FU_BMA_TREBLE uint16 = 0x0010;
+const AUDIO_FU_BMA_GRAPHIC_EQUALIZER uint16 = 0x0020;
+const AUDIO_FU_BMA_AUTOMATIC_GAIN uint16 = 0x0040;
+const AUDIO_FU_BMA_DELAY uint16 = 0x0080;
+const AUDIO_FU_BMA_BASS_BOOST uint16 = 0x0100;
+const AUDIO_FU_BMA_LOUDNESS uint16 = 0x0200;
+
+/// USB Audio Class processing and extension unit control selectors.
+const AUDIO_UD_ENABLE_CONTROL uint8 = 0x01;
+const AUDIO_UD_MODE_SELECT_CONTROL uint8 = 0x02;
+const AUDIO_DP_ENABLE_CONTROL uint8 = 0x01;
+const AUDIO_DP_MODE_SELECT_CONTROL uint8 = 0x02;
+const AUDIO_3D_ENABLE_CONTROL uint8 = 0x01;
+const AUDIO_SPACIOUSNESS_CONTROL uint8 = 0x03;
+const AUDIO_RV_ENABLE_CONTROL uint8 = 0x01;
+const AUDIO_REVERB_LEVEL_CONTROL uint8 = 0x02;
+const AUDIO_REVERB_TIME_CONTROL uint8 = 0x03;
+const AUDIO_REVERB_FEEDBACK_CONTROL uint8 = 0x04;
+const AUDIO_CH_ENABLE_CONTROL uint8 = 0x01;
+const AUDIO_CHORUS_LEVEL_CONTROL uint8 = 0x02;
+const AUDIO_CHORUS_RATE_CONTROL uint8 = 0x03;
+const AUDIO_CHORUS_DEPTH_CONTROL uint8 = 0x04;
+const AUDIO_DR_ENABLE_CONTROL uint8 = 0x01;
+const AUDIO_COMPRESSION_RATE_CONTROL uint8 = 0x02;
+const AUDIO_MAXAMPL_CONTROL uint8 = 0x03;
+const AUDIO_THRESHOLD_CONTROL uint8 = 0x04;
+const AUDIO_ATTACK_TIME uint8 = 0x05;
+const AUDIO_RELEASE_TIME uint8 = 0x06;
+const AUDIO_XU_ENABLE_CONTROL uint8 = 0x01;
+
+/// USB Audio Class endpoint control selectors.
+type AudioEndpointControlSelector = flexible enum : uint8 {
+    SAMPLING_FREQ = 0x01;
+    PITCH = 0x02;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Class terminal types.
+type AudioTerminalType = flexible enum : uint16 {
+    USB_UNDEFINED = 0x0100;
+    USB_STREAMING = 0x0101;
+    USB_VENDOR = 0x01ff;
+    INPUT_UNDEFINED = 0x0200;
+    MICROPHONE = 0x0201;
+    DESKTOP_MICROPHONE = 0x0202;
+    PERSONAL_MICROPHONE = 0x0203;
+    OMNI_DIRECTIONAL_MICROPHONE = 0x0204;
+    MICROPHONE_ARRAY = 0x0205;
+    PROCESSING_MICROPHONE_ARRAY = 0x0206;
+    OUTPUT_UNDEFINED = 0x0300;
+    SPEAKER = 0x0301;
+    HEADPHONES = 0x0302;
+    HEAD_MOUNTED_DISPLAY_AUDIO = 0x0303;
+    DESKTOP_SPEAKER = 0x0304;
+    ROOM_SPEAKER = 0x0305;
+    COMMUNICATION_SPEAKER = 0x0306;
+    LOW_FREQ_EFFECTS_SPEAKER = 0x0307;
+    BIDIRECTIONAL_UNDEFINED = 0x0400;
+    HANDSET = 0x0401;
+    HEADSET = 0x0402;
+    SPEAKERPHONE = 0x0403;
+    ECHO_SUPPRESSING_SPEAKERPHONE = 0x0404;
+    ECHO_CANCELING_SPEAKERPHONE = 0x0405;
+    TELEPHONY_UNDEFINED = 0x0500;
+    PHONE_LINE = 0x0501;
+    TELEPHONE = 0x0502;
+    DOWN_LINE_PHONE = 0x0503;
+    EXTERNAL_UNDEFINED = 0x0600;
+    ANALOG_CONNECTOR = 0x0601;
+    DIGITAL_AUDIO_INTERFACE = 0x0602;
+    LINE_CONNECTOR = 0x0603;
+    LEGACY_AUDIO_CONNECTOR = 0x0604;
+    SPDIF_INTERFACE = 0x0605;
+    DA_STREAM_1394 = 0x0606;
+    DV_STREAM_SOUNDTRACK_1394 = 0x0607;
+    EMBEDDED_UNDEFINED = 0x0700;
+    LEVEL_CALIBRATION_NOISE_SOURCE = 0x0701;
+    EQUALIZATION_NOISE = 0x0702;
+    CD_PLAYER = 0x0703;
+    DAT = 0x0704;
+    DCC = 0x0705;
+    MINI_DISK = 0x0706;
+    ANALOG_TAPE = 0x0707;
+    PHONOGRAPH = 0x0708;
+    VCR_AUDIO = 0x0709;
+    VIDEO_DISK_AUDIO = 0x070a;
+    DVD_AUDIO = 0x070b;
+    TV_TUNER_AUDIO = 0x070c;
+    SATELLITE_RECEIVER_AUDIO = 0x070d;
+    CABLE_TUNER_AUDIO = 0x070e;
+    DSS_AUDIO = 0x070f;
+    RADIO_RECEIVER = 0x0710;
+    RADIO_TRANSMITTER = 0x0711;
+    MULTI_TRACK_RECORDER = 0x0712;
+    SYNTHESIZER = 0x0713;
+    @unknown
+    UNDEFINED = 0xeeee;
+};
+
+/// USB Audio Streaming class-specific AS interface descriptor subtypes.
+type AudioAsDescriptorSubtype = flexible enum : uint8 {
+    GENERAL = 0x01;
+    FORMAT_TYPE = 0x02;
+    FORMAT_SPECIFIC = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Audio Streaming `wFormatTag` values (USB Audio Data Formats Section A.1).
+type AudioFormatTag = flexible enum : uint16 {
+    TYPE_I_UNDEFINED = 0x0000;
+    PCM = 0x0001;
+    PCM8 = 0x0002;
+    IEEE_FLOAT = 0x0003;
+    ALAW = 0x0004;
+    MULAW = 0x0005;
+    TYPE_II_UNDEFINED = 0x1000;
+    MPEG = 0x1001;
+    AC3 = 0x1002;
+    TYPE_III_UNDEFINED = 0x2000;
+    IEC1937_AC3 = 0x2001;
+    IEC1937_MPEG1_L1 = 0x2002;
+    IEC1937_MPEG1_L23 = 0x2003;
+    IEC1937_MPEG2_EXT = 0x2004;
+    IEC1937_MPEG2_L1_LS = 0x2005;
+    IEC1937_MPEG2_L23_LS = 0x2006;
+    @unknown
+    UNDEFINED = 0xeeee;
+};
+
+/// USB Audio Streaming format type codes.
+type AudioFormatType = flexible enum : uint8 {
+    FORMAT_TYPE_UNDEFINED = 0x00;
+    TYPE_I = 0x01;
+    TYPE_II = 0x02;
+    TYPE_III = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB MIDI Streaming class-specific MS interface descriptor subtypes.
+type MidiMsDescriptorSubtype = flexible enum : uint8 {
+    HEADER = 0x01;
+    IN_JACK = 0x02;
+    OUT_JACK = 0x03;
+    ELEMENT = 0x04;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB MIDI Streaming class-specific MS endpoint descriptor subtypes.
+type MidiEpDescriptorSubtype = flexible enum : uint8 {
+    GENERAL = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB MIDI IN and OUT jack types.
+type MidiJackType = flexible enum : uint8 {
+    EMBEDDED = 0x01;
+    INTERNAL = 0x02;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB MIDI endpoint control selectors.
+type MidiEndpointControlSelector = flexible enum : uint8 {
+    ASSOCIATION_CONTROL = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};

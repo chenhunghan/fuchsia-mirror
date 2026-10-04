@@ -4,14 +4,16 @@
 
 import("//build/components.gni")
 import("//build/drivers.gni")
+import("//build/rust/rustc_test.gni")
 import("//build/test.gni")
 
-# The output of the test code below is made up of several binaries
-# pci-unit-test: A binary to run the unit tests defiend in test/
-# pci-driver-test: A binary to run the driver tests
-# pci_fake.so: A fake bus driver loaded by pci-driver-test to provide a bind
-#              point for pci_test.so
-# pci_test.so: A zxtest driver to test the PCI protocol
+# The test suite consists of:
+# pci-unit-test: C++ unit tests (in unit/) testing allocation, bus, config,
+#                device, fake pciroot, and MSI-X against mock DDK and fakes.
+# pci-driver-test: Rust integration test (driver/driver_tests.rs) running in
+#                  DriverTestRealm to test all PCI protocol operations.
+# fake-bus-pci (target: pci_fake): A fake bus driver loaded in DriverTestRealm
+# to configure a fake device and serve fuchsia.hardware.pci.Service.
 
 test("pci-unit") {
   output_name = "pci-unit-test"
@@ -47,18 +49,22 @@ test("pci-unit") {
   configs += [ "//build/config:Wno-conversion" ]
 }
 
-test("pci-driver") {
-  output_name = "pci-driver-test"
-
-  sources = [ "driver/driver_tests.cc" ]
+rustc_test("pci-driver") {
+  edition = "2024"
+  output_name = "pci_driver_test"
+  testonly = true
+  source_root = "driver/driver_tests.rs"
+  sources = [ "driver/driver_tests.rs" ]
   deps = [
-    "//sdk/fidl/fuchsia.device.test:fuchsia.device.test_cpp",
-    "//sdk/lib/fdio-caller",
-    "//src/devices/testing/driver-integration-test-shim",
-    "//src/lib/ddk",
-    "//src/lib/ddktl",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/zxtest",
+    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+    "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_rust",
+    "//sdk/lib/driver_test_realm/realm_builder/rust",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-component-test",
+    "//src/lib/fuchsia-runtime",
   ]
 }
 
@@ -66,7 +72,7 @@ test("pci-driver") {
 # drivers in test/ breaks ddkltl integration tests.
 fuchsia_cc_driver("pci_fake-driver") {
   legacy = true
-  output_name = "pci_fake"
+  output_name = "fake-bus-pci"
   configs += [
     "//build/config:all_source",
     "//build/config/fuchsia:enable_zircon_asserts",
@@ -89,38 +95,10 @@ fuchsia_cc_driver("pci_fake-driver") {
 
 fuchsia_driver_component("pci_fake") {
   testonly = true
-  component_name = "pci_fake"
+  component_name = "fake-bus-pci"
   deps = [ ":pci_fake-driver" ]
   info = "meta/pci_fake-info.json"
   manifest = "meta/pci_fake.cml"
-}
-
-fuchsia_cc_driver("pci_protocol_test_driver-driver") {
-  legacy = true
-  output_name = "pci_protocol_test_driver"
-  configs += [
-    "//build/config:all_source",
-    "//build/config/fuchsia:enable_zircon_asserts",
-  ]
-
-  sources = [ "driver/protocol_test_driver.cc" ]
-  deps = [
-    "..:user_pci",
-    "driver:pci_protocol_test_driver_bind",
-    "//sdk/fidl/fuchsia.device.test:fuchsia.device.test_cpp",
-    "//src/devices/lib/driver",
-    "//src/devices/pci/lib/device-protocol-pci",
-    "//src/lib/ddk",
-    "//src/lib/ddktl",
-    "//zircon/system/ulib/zxtest",
-  ]
-}
-
-fuchsia_driver_component("pci_protocol_test_driver") {
-  component_name = "pci_protocol_test_driver"
-  deps = [ ":pci_protocol_test_driver-driver" ]
-  info = "meta/pci_protocol_test_driver-info.json"
-  manifest = "meta/pci_protocol_test_driver.cml"
 }
 
 fuchsia_unittest_package("pci-unit-test") {
@@ -132,13 +110,14 @@ fuchsia_unittest_package("pci-unit-test") {
   }
 }
 
-fuchsia_unittest_package("pci-driver-test") {
+fuchsia_unittest_package("pci_driver_test") {
+  package_name = "pci-driver-test"
+  manifest = "meta/pci-driver-test.cml"
+  test_type = "system"
   deps = [
     ":pci-driver",
     ":pci_fake",
-    ":pci_protocol_test_driver",
     "..",
-    "//src/devices/board/drivers/integration-test",
     "//src/devices/bus/drivers/platform",
   ]
   test_specs = {

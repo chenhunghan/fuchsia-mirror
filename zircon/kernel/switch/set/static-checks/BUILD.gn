@@ -25,7 +25,6 @@ kernel_switchset("static-checks") {
   # The code won't actually be used, so there's no point in enabling extra
   # compile-time variation that doesn't affect any static checks.
   exclude_variant_tags = [
-    "gcc",
     "instrumented",
     "lto",
   ]

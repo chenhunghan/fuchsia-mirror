@@ -13,6 +13,8 @@
 #include "usb-audio-device.h"
 #include "usb-audio-units.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace audio {
 namespace usb {
 
@@ -55,8 +57,10 @@ zx_status_t UsbAudioControlInterface::Initialize(DescriptorListMemory::Iterator*
 
   // These should already have been checked before Initialize was called.
   ZX_DEBUG_ASSERT(interface_hdr_ != nullptr);
-  ZX_DEBUG_ASSERT(interface_hdr_->b_interface_class == USB_CLASS_AUDIO);
-  ZX_DEBUG_ASSERT(interface_hdr_->b_interface_sub_class == USB_SUBCLASS_AUDIO_CONTROL);
+  ZX_DEBUG_ASSERT(interface_hdr_->b_interface_class ==
+                  fidl::ToUnderlying(fdescriptor::UsbClass::kAudio));
+  ZX_DEBUG_ASSERT(interface_hdr_->b_interface_sub_class ==
+                  fidl::ToUnderlying(fdescriptor::AudioSubclass::kControl));
 
   // Parse all of the descriptors which belong to this audio control
   // interface.  As soon as we find something which does not belong to the
@@ -66,7 +70,7 @@ zx_status_t UsbAudioControlInterface::Initialize(DescriptorListMemory::Iterator*
   while (iter->Next()) {
     {
       auto hdr = iter->hdr();
-      if (!hdr || (hdr->b_descriptor_type != USB_AUDIO_CS_INTERFACE)) {
+      if (!hdr || (hdr->b_descriptor_type != fdescriptor::DescriptorType::kCsInterface)) {
         break;
       }
     }
@@ -77,7 +81,8 @@ zx_status_t UsbAudioControlInterface::Initialize(DescriptorListMemory::Iterator*
       continue;
     }
 
-    if (hdr->bDescriptorSubtype == USB_AUDIO_AC_HEADER) {
+    if (hdr->bDescriptorSubtype ==
+        static_cast<uint8_t>(fdescriptor::AudioAcDescriptorSubtype::kHeader)) {
       if (class_hdr_ == nullptr) {
         class_hdr_ = iter->hdr_as<usb_audio_ac_header_desc>();
         if (class_hdr_ == nullptr) {

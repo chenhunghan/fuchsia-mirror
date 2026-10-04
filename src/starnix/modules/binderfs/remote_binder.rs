@@ -584,53 +584,57 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                 files,
                 responder,
             } => {
-                fuchsia_trace::duration!(
-                    CATEGORY_STARNIX_BINDER,
-                    NAME_REMOTE_BINDER_IOCTL_SEND_WORK,
-                    "request" => request
-                );
-                fuchsia_trace::flow_begin!(
-                    CATEGORY_STARNIX_BINDER,
-                    NAME_REMOTE_BINDER_IOCTL,
-                    tid.into(),
-                    "request" => request
-                );
-
-                let (responder, waiter) = Self::make_synchronous_responder::<
-                    Vec<fbinder::IoctlReadWrite>,
-                    _,
-                    _,
-                >(responder, move |responder, e| {
+                let waiter = {
                     fuchsia_trace::duration!(
                         CATEGORY_STARNIX_BINDER,
-                        NAME_REMOTE_BINDER_IOCTL_FIDL_REPLY
+                        NAME_REMOTE_BINDER_IOCTL_SEND_WORK,
+                        "request" => request
                     );
-                    fuchsia_trace::flow_end!(
+                    fuchsia_trace::flow_begin!(
                         CATEGORY_STARNIX_BINDER,
                         NAME_REMOTE_BINDER_IOCTL,
-                        tid.into()
+                        tid.into(),
+                        "request" => request
                     );
 
-                    match e {
-                        Ok(user_writes) => responder.send(Ok(user_writes.as_slice())),
-                        Err(e) => responder
-                            .send(Err(fposix::Errno::from_primitive(e.code.error_code() as i32)
-                                .unwrap_or(fposix::Errno::Einval))),
-                    }
-                });
-                self.enqueue_task_request(BoundTaskRequest {
-                    koid: tid,
-                    request: TaskRequest::Ioctl {
-                        remote_binder_connection: remote_binder_connection.clone(),
-                        request,
-                        arg,
+                    let (responder, waiter) =
+                        Self::make_synchronous_responder::<Vec<fbinder::IoctlReadWrite>, _, _>(
+                            responder,
+                            move |responder, e| {
+                                fuchsia_trace::duration!(
+                                    CATEGORY_STARNIX_BINDER,
+                                    NAME_REMOTE_BINDER_IOCTL_FIDL_REPLY
+                                );
+                                fuchsia_trace::flow_end!(
+                                    CATEGORY_STARNIX_BINDER,
+                                    NAME_REMOTE_BINDER_IOCTL,
+                                    tid.into()
+                                );
+
+                                match e {
+                                    Ok(user_writes) => responder.send(Ok(user_writes.as_slice())),
+                                    Err(e) => responder.send(Err(fposix::Errno::from_primitive(
+                                        e.code.error_code() as i32,
+                                    )
+                                    .unwrap_or(fposix::Errno::Einval))),
+                                }
+                            },
+                        );
+                    self.enqueue_task_request(BoundTaskRequest {
                         koid: tid,
-                        vmo,
-                        ioctl_reads,
-                        files,
-                        responder,
-                    },
-                });
+                        request: TaskRequest::Ioctl {
+                            remote_binder_connection: remote_binder_connection.clone(),
+                            request,
+                            arg,
+                            koid: tid,
+                            vmo,
+                            ioctl_reads,
+                            files,
+                            responder,
+                        },
+                    });
+                    waiter
+                };
                 waiter.await;
             }
             fbinder::BinderRequest::_UnknownMethod { ordinal, .. } => {

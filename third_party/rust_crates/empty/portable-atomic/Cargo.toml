@@ -4,7 +4,7 @@
 
 [package]
 name = "portable-atomic"
-version = "1.0.0"
+version = "1.14.0"
 authors = ["The Fuchsia Authors <rust-fuchsia@fuchsia.com>"]
 
 [features]

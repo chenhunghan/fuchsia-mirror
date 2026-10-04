@@ -68,6 +68,8 @@ source "${devshell_lib_dir}/fx-optional-features.sh"
 source "${devshell_lib_dir}/generate-ssh-config.sh"
 # shellcheck source=/dev/null
 source "${devshell_lib_dir}/is_invoked_by_agent.sh"
+# shellcheck source=/dev/null
+[[ ! -f "${devshell_lib_dir}/credentials.sh" ]] || source "${devshell_lib_dir}/credentials.sh"
 unset devshell_lib_dir
 
 # Subcommands can use this directory to cache artifacts and state that should
@@ -115,16 +117,6 @@ if [[ -f "$fx_build_profile_config" ]]; then
   source "$fx_build_profile_config"
   # This sets BUILD_PROFILE_ENABLED to 0 or 1.
 fi
-
-# Always create a ninja build trace file.
-# This path is relative to the the ninja -C dir ($FUCHSIA_BUILD_DIR).
-readonly NINJA_BUILD_TRACE_FILE="ninja_build_trace.json.gz"
-
-# Output action metrics to this JSON file.
-readonly NINJA_ACTION_METRICS_FILE="ninja_action_metrics.json"
-
-# Record the set if inputs that triggered some build actions.
-readonly NINJA_DIRTY_SOURCES_FILE="ninja_dirty_sources.log"
 
 # Unified standalone build script that can enable RBE, profiling, ResultStore...
 readonly main_build_script="${FUCHSIA_DIR}/build/scripts/main_build.py"
@@ -421,8 +413,20 @@ function fx-fail-if-main-pb-is-not-set {
 }
 
 function fx-regenerator {
+  local -a wrapper=(fx-wait-ignoring-signals "fx-regenerator")
+  local arg
+  for arg in "$@"; do
+    if [[ "${arg}" == "--update-args" ]]; then
+      # --update-args is interactive with the user (launching an editor via
+      # `gn args`) and does not use nested wrappers that require signal-managed
+      # cancellation. Running it under fx-wait-ignoring-signals backgrounds the
+      # child (redirecting stdin to /dev/null) and traps SIGINT.
+      wrapper=()
+      break
+    fi
+  done
   PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX}" \
-  fx-wait-ignoring-signals "fx-regenerator" \
+    "${wrapper[@]}" \
     "${FUCHSIA_DIR}/build/regenerator" \
     --fuchsia-dir="${FUCHSIA_DIR}" \
     --fuchsia-build-dir="${FUCHSIA_BUILD_DIR}" \

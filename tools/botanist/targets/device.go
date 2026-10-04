@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/botanist"
+	botanistconstants "go.fuchsia.dev/fuchsia/tools/botanist/constants"
 	"go.fuchsia.dev/fuchsia/tools/lib/iomisc"
 	"go.fuchsia.dev/fuchsia/tools/lib/logger"
 	"go.fuchsia.dev/fuchsia/tools/lib/retry"
@@ -294,17 +295,19 @@ func (t *Device) Start(ctx context.Context, args []string, pbPath string, isBoot
 		for attempt := 1; attempt <= maxAllowedAttempts; attempt++ {
 			logger.Debugf(ctx, "Starting flash attempt %d/%d", attempt, maxAllowedAttempts)
 			bootTimeout := 10 * time.Minute
-			// TODO(https://fxbug.dev/493277370): Sorrels can take longer to flash
-			// when USB hubs are busy.
-			if os.Getenv("FUCHSIA_DEVICE_TYPE") == "Sorrel" {
+			// TODO(https://fxbug.dev/493277370): Sorrel and Iris can take longer
+			// to flash when USB hubs are busy.
+			devType := os.Getenv(botanistconstants.DeviceTypeEnvKey)
+			switch devType {
+			case "Sorrel":
 				bootTimeout = 20 * time.Minute
-			} else if os.Getenv("FUCHSIA_DEVICE_TYPE") == "Iris" {
-				bootTimeout = 20 * time.Minute
+			case "Iris":
+				bootTimeout = 30 * time.Minute
 			}
 			bootCtx, cancel := context.WithTimeout(ctx, bootTimeout)
 			defer cancel()
-			// ffx target bootloader boot doesn't work for Sorrel.
-			if t.opts.Netboot && os.Getenv("FUCHSIA_DEVICE_TYPE") != "Sorrel" && os.Getenv("FUCHSIA_DEVICE_TYPE") != "Iris" {
+			// ffx target bootloader boot doesn't work for Sorrel or Iris.
+			if t.opts.Netboot && devType != "Sorrel" && devType != "Iris" {
 				if err = t.ffx.BootloaderBoot(bootCtx, target, pbPath, tcpFlash); err == nil {
 					// If successful, early exit.
 					break

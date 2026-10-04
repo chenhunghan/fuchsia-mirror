@@ -40,7 +40,7 @@ Attributes mapping table for `go_binary` targets:
 | `deps`       | `deps`                      | Direct deps only. Do NOT over-declare deps of embedded libraries. |
 | `embed`      | `embed`                     | Embeds internal library target (e.g. `[":main"]` or `[":lib"]`).  |
 
-1. Refer to [`target_compatible_with.md`](../../../../references/target_compatible_with.md) to identify if the target is a tool in the IDK.
+1. Identify if the target is a tool in the IDK (in `BUILD.gn`, the target is associated with an `sdk_host_tool()` target).
    **For tools not in the IDK:**
    - Add `load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")` to `BUILD.bazel`.
    - Migrate GN `go_binary` to `go_binary_host_tool()`.
@@ -63,7 +63,7 @@ Attributes mapping table for `go_binary` targets:
 
 
 ### Step 3: Migrate `go_test` Target to `host_go_test`
-1. Add `load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")` and `load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")` to `BUILD.bazel`.
+1. Add `load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")` to `BUILD.bazel`.
 
 2. Migrate the `go_test` target to `host_go_test`:
    - Set `srcs` to test Go source files (e.g. `["*_test.go"]` or specific test files).

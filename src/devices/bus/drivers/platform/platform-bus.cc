@@ -566,11 +566,10 @@ void PlatformBus::GetFirmware(GetFirmwareRequestView request, fdf::Arena& arena,
     return;
   }
   fidl::VectorView<fhpb::wire::FirmwareBlob> ret(arena, result->size());
-  for (size_t i = 0; i < result->size(); i++) {
-    auto& [vmo, length] = result.value()[i];
+  for (auto const& [i, item] : std::views::enumerate(result.value())) {
     ret[i] = fhpb::wire::FirmwareBlob{
-        .vmo = std::move(vmo),
-        .length = length,
+        .vmo = std::move(item.vmo),
+        .length = item.length,
     };
   }
   completer.buffer(arena).ReplySuccess(ret);
@@ -749,6 +748,9 @@ zx::result<> PlatformBus::Start(fdf::DriverContext context) {
   zx::result zbi_board_info = GetBoardInfo();
   if (zbi_board_info.is_ok()) {
     board_info_.board_revision() = zbi_board_info->revision;
+    fdf::info("PlatformBus loaded board_revision: 0x{:08x}", zbi_board_info->revision);
+  } else if (zbi_board_info.status_value() != ZX_ERR_NOT_FOUND) {
+    fdf::warn("PlatformBus GetBoardInfo failed: {}", zbi_board_info);
   }
 
   // Then we attach the platform-bus device below it.
@@ -863,7 +865,7 @@ zx::result<zbi_board_info_t> PlatformBus::GetBoardInfo() {
     fdf::info("Boot Item ZBI_TYPE_DRV_BOARD_INFO not found");
     return result.take_error();
   }
-  auto& [vmo, length] = result.value()[0];
+  auto& [vmo, length] = result.value().back();
   if (length != sizeof(zbi_board_info_t)) {
     return zx::error(ZX_ERR_INTERNAL);
   }

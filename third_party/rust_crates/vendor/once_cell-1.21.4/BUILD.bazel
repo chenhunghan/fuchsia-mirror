@@ -57,7 +57,21 @@ rust_library(
         "default",
         "race",
         "std",
-    ],
+    ] + select({
+        "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
+            "critical-section",  # aarch64-unknown-fuchsia
+            "portable-atomic",  # aarch64-unknown-fuchsia
+        ],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
+            "critical-section",  # riscv64gc-unknown-fuchsia
+            "portable-atomic",  # riscv64gc-unknown-fuchsia
+        ],
+        "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [
+            "critical-section",  # x86_64-unknown-fuchsia
+            "portable-atomic",  # x86_64-unknown-fuchsia
+        ],
+        "//conditions:default": [],
+    }),
     crate_root = "src/lib.rs",
     edition = "2021",
     rustc_flags = [
@@ -73,9 +87,25 @@ rust_library(
     target_compatible_with = select({
         "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     version = "1.21.4",
+    deps = select({
+        "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
+            "//third_party/rust_crates/empty/critical-section:critical_section",  # aarch64-unknown-fuchsia
+            "//third_party/rust_crates/empty/portable-atomic:portable_atomic",  # aarch64-unknown-fuchsia
+        ],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
+            "//third_party/rust_crates/empty/critical-section:critical_section",  # riscv64gc-unknown-fuchsia
+            "//third_party/rust_crates/empty/portable-atomic:portable_atomic",  # riscv64gc-unknown-fuchsia
+        ],
+        "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [
+            "//third_party/rust_crates/empty/critical-section:critical_section",  # x86_64-unknown-fuchsia
+            "//third_party/rust_crates/empty/portable-atomic:portable_atomic",  # x86_64-unknown-fuchsia
+        ],
+        "//conditions:default": [],
+    }),
 )

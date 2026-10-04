@@ -167,14 +167,14 @@ class ArchVmAspaceInterface {
 
   // For HarvestAccessed Terminal and non-terminal get processed based on the following two
   // controls.
-  enum class NonTerminalAction : bool {
+  enum class NonTerminalAction : uint8_t {
     // If a non-terminal entry has no accessed information, unmap and free it. If it has accessed
     // information, just remove the flag.
     FreeUnaccessed,
     // Retain both the non-terminal mappings and any accessed information.
     Retain,
   };
-  enum class TerminalAction : bool {
+  enum class TerminalAction : uint8_t {
     // If the page is accessed update its age in the page queues, and remove the accessed flag.
     UpdateAgeAndHarvest,
     // If the page is accessed update its age in the page queues, but do not clear the flag.

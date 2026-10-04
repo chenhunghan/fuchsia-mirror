@@ -177,3 +177,8 @@ cc_library(
     deps = [":fxl"],
     alwayslink = True,
 )
+
+alias(
+    name = "fxl_cli",
+    actual = ":cli",
+)

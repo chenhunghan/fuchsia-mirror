@@ -16,34 +16,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use zx::Status;
 
-// USB Standard Constants
-const USB_DESC_TYPE_INTERFACE: u8 = 0x04;
-const USB_DESC_TYPE_ENDPOINT: u8 = 0x05;
-const USB_CLASS_VENDOR: u8 = 0xff;
-
-// USB Setup Request Types
-const USB_TYPE_MASK: u8 = 0x60;
-const USB_TYPE_STANDARD: u8 = 0x00;
-const USB_TYPE_VENDOR: u8 = 0x40;
-
 const USB_INTERFACE_DESC_SIZE: u8 = 9;
 const USB_ENDPOINT_DESC_SIZE: u8 = 7;
-const USB_ENDPOINT_NUM_MASK: u8 = 0x7f;
-const USB_ENDPOINT_DIR_MASK: u8 = 0x80;
 
 const DEFAULT_VMO_SIZE: u64 = 4096;
-
-const USB_RECIP_MASK: u8 = 0x1f;
-const USB_RECIP_DEVICE: u8 = 0x00;
-const USB_RECIP_INTERFACE: u8 = 0x01;
-const USB_RECIP_ENDPOINT: u8 = 0x02;
-const USB_FEATURE_ENDPOINT_HALT: u16 = 0x0000;
-
-const USB_SETUP_REQ_GET_STATUS: u8 = 0x00;
-const USB_SETUP_REQ_CLEAR_FEATURE: u8 = 0x01;
-const USB_SETUP_REQ_SET_FEATURE: u8 = 0x03;
-const USB_SETUP_REQ_GET_INTERFACE: u8 = 0x0a;
-const USB_SETUP_REQ_SET_INTERFACE: u8 = 0x0b;
 
 const USB_MAX_PACKET_SIZE_FULL_SPEED: u16 = 64;
 const USB_MAX_PACKET_SIZE_HIGH_SPEED: u16 = 512;
@@ -82,14 +58,18 @@ enum VendorRequest {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ControlRequest {
     Vendor(VendorRequest),
-    Standard(u8),
+    Standard(fusb_descriptor::StandardRequest),
 }
 
 impl ControlRequest {
     fn parse(bm_request_type: u8, b_request: u8) -> Result<Self, Status> {
-        match bm_request_type & USB_TYPE_MASK {
-            USB_TYPE_STANDARD => Ok(ControlRequest::Standard(b_request)),
-            USB_TYPE_VENDOR => {
+        match fusb_descriptor::RequestType::from_primitive_allow_unknown(
+            bm_request_type & fusb_descriptor::REQUEST_TYPE_MASK,
+        ) {
+            fusb_descriptor::RequestType::Standard => Ok(ControlRequest::Standard(
+                fusb_descriptor::StandardRequest::from_primitive_allow_unknown(b_request),
+            )),
+            fusb_descriptor::RequestType::Vendor => {
                 VendorRequest::n(b_request).map(ControlRequest::Vendor).ok_or(Status::NOT_SUPPORTED)
             }
             _ => Err(Status::NOT_SUPPORTED),
@@ -228,7 +208,9 @@ impl Driver for UsbZeroFunction {
         };
         let interface_str_idx = string_indices.first().copied().unwrap_or(0);
 
-        if (ep_in_addr & USB_ENDPOINT_DIR_MASK) == 0 || (ep_out_addr & USB_ENDPOINT_DIR_MASK) != 0 {
+        if (ep_in_addr & fusb_descriptor::ENDPOINT_DIRECTION_MASK) == 0
+            || (ep_out_addr & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0
+        {
             error!("Invalid endpoint direction bits assigned");
             return Err(Status::NO_RESOURCES.into());
         }
@@ -237,27 +219,27 @@ impl Driver for UsbZeroFunction {
         let desc = vec![
             // Interface Descriptor (AltSetting 0)
             USB_INTERFACE_DESC_SIZE, // bLength
-            USB_DESC_TYPE_INTERFACE, // bDescriptorType (Interface)
-            interface_num,           // bInterfaceNumber
-            0x00,                    // bAlternateSetting
-            USB_ZERO_NUM_ENDPOINTS,  // bNumEndpoints
-            USB_CLASS_VENDOR,        // bInterfaceClass (Vendor Specific)
-            0,                       // bInterfaceSubClass
-            protocol as u8,          // bInterfaceProtocol
-            interface_str_idx,       // iInterface
+            fusb_descriptor::DescriptorType::Interface.into_primitive(), // bDescriptorType (Interface)
+            interface_num,                                               // bInterfaceNumber
+            0x00,                                                        // bAlternateSetting
+            USB_ZERO_NUM_ENDPOINTS,                                      // bNumEndpoints
+            fusb_descriptor::UsbClass::Vendor.into_primitive(), // bInterfaceClass (Vendor Specific)
+            0,                                                  // bInterfaceSubClass
+            protocol as u8,                                     // bInterfaceProtocol
+            interface_str_idx,                                  // iInterface
             // Endpoint Descriptor (IN)
-            USB_ENDPOINT_DESC_SIZE,                               // bLength
-            USB_DESC_TYPE_ENDPOINT,                               // bDescriptorType (Endpoint)
-            ep_in_addr,                                           // bEndpointAddress
-            fusb_descriptor::EndpointType::Bulk.into_primitive(), // bmAttributes (Bulk)
+            USB_ENDPOINT_DESC_SIZE, // bLength
+            fusb_descriptor::DescriptorType::Endpoint.into_primitive(), // bDescriptorType (Endpoint)
+            ep_in_addr,                                                 // bEndpointAddress
+            fusb_descriptor::EndpointType::Bulk.into_primitive(),       // bmAttributes (Bulk)
             default_max_packet_size_bytes[0],
             default_max_packet_size_bytes[1], // wMaxPacketSize (little endian)
             0,                                // bInterval
             // Endpoint Descriptor (OUT)
-            USB_ENDPOINT_DESC_SIZE,                               // bLength
-            USB_DESC_TYPE_ENDPOINT,                               // bDescriptorType (Endpoint)
-            ep_out_addr,                                          // bEndpointAddress
-            fusb_descriptor::EndpointType::Bulk.into_primitive(), // bmAttributes (Bulk)
+            USB_ENDPOINT_DESC_SIZE, // bLength
+            fusb_descriptor::DescriptorType::Endpoint.into_primitive(), // bDescriptorType (Endpoint)
+            ep_out_addr,                                                // bEndpointAddress
+            fusb_descriptor::EndpointType::Bulk.into_primitive(),       // bmAttributes (Bulk)
             default_max_packet_size_bytes[0],
             default_max_packet_size_bytes[1], // wMaxPacketSize (little endian)
             0,                                // bInterval
@@ -304,7 +286,10 @@ fn validate_vendor_out_request(
     setup: &fusb_descriptor::UsbSetup,
     write: &[u8],
 ) -> Result<u8, Status> {
-    if (setup.bm_request_type & 0x80) != 0 || setup.w_length != 0 || !write.is_empty() {
+    if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0
+        || setup.w_length != 0
+        || !write.is_empty()
+    {
         return Err(Status::INVALID_ARGS);
     }
     u8::try_from(setup.w_value).map_err(|_| Status::INVALID_ARGS)
@@ -396,7 +381,7 @@ impl UsbZeroFunctionDevice {
     async fn set_endpoint_stall(&mut self, ep_addr: u8) -> Result<(), Status> {
         // EP0 (Control Endpoint) stall management is handled by hardware / driver stack
         // and cannot be stalled via this vendor request. Return INVALID_ARGS for EP0.
-        if (ep_addr & USB_ENDPOINT_NUM_MASK) == 0 {
+        if (ep_addr & fusb_descriptor::ENDPOINT_NUMBER_MASK) == 0 {
             return Err(Status::INVALID_ARGS);
         }
         self.function_client
@@ -415,7 +400,7 @@ impl UsbZeroFunctionDevice {
 
     async fn clear_endpoint_stall(&mut self, ep_addr: u8) -> Result<(), Status> {
         // Clearing stall on EP0 is a no-op because EP0 stall status automatically resets upon the next setup packet.
-        if (ep_addr & USB_ENDPOINT_NUM_MASK) == 0 {
+        if (ep_addr & fusb_descriptor::ENDPOINT_NUMBER_MASK) == 0 {
             return Ok(());
         }
         self.function_client
@@ -519,8 +504,10 @@ impl UsbZeroFunctionDevice {
         setup: &fusb_descriptor::UsbSetup,
         write: &[u8],
     ) -> Result<Vec<u8>, Status> {
-        // Vendor control requests must have Vendor type (0x40 in bm_request_type)
-        if (setup.bm_request_type & 0x60) != 0x40 {
+        // Vendor control requests must have Vendor type in bm_request_type
+        if (setup.bm_request_type & fusb_descriptor::REQUEST_TYPE_MASK)
+            != fusb_descriptor::RequestType::Vendor.into_primitive()
+        {
             return Err(Status::INVALID_ARGS);
         }
         match vendor_req {
@@ -578,7 +565,10 @@ impl UsbZeroFunctionDevice {
                 Ok(Vec::new())
             }
             VendorRequest::Deconfigure => {
-                if (setup.bm_request_type & 0x80) != 0 || setup.w_length != 0 || !write.is_empty() {
+                if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0
+                    || setup.w_length != 0
+                    || !write.is_empty()
+                {
                     return Err(Status::INVALID_ARGS);
                 }
                 self.endpoint_tasks = None;
@@ -595,7 +585,7 @@ impl UsbZeroFunctionDevice {
                 Ok(Vec::new())
             }
             VendorRequest::WritePayload => {
-                if (setup.bm_request_type & 0x80) != 0
+                if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0
                     || setup.w_length as usize != write.len()
                     || write != USB_ZERO_WRITE_PAYLOAD
                 {
@@ -604,7 +594,7 @@ impl UsbZeroFunctionDevice {
                 Ok(Vec::new())
             }
             VendorRequest::ReadPayload => {
-                if (setup.bm_request_type & 0x80) == 0
+                if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) == 0
                     || (setup.w_length as usize) < USB_ZERO_READ_PAYLOAD.len()
                     || !write.is_empty()
                 {
@@ -617,7 +607,7 @@ impl UsbZeroFunctionDevice {
                 Err(Status::NOT_SUPPORTED)
             }
             VendorRequest::GetTestMode => {
-                if (setup.bm_request_type & 0x80) == 0
+                if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) == 0
                     || setup.w_value != 0
                     || setup.w_length != 1
                     || !write.is_empty()
@@ -627,14 +617,18 @@ impl UsbZeroFunctionDevice {
                 Ok(vec![self.mode as u8])
             }
             VendorRequest::ControlLoopbackOut => {
-                if (setup.bm_request_type & 0x80) != 0 || setup.w_length != write.len() as u16 {
+                if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0
+                    || setup.w_length != write.len() as u16
+                {
                     return Err(Status::INVALID_ARGS);
                 }
                 self.control_loopback_buf = write.to_vec();
                 Ok(Vec::new())
             }
             VendorRequest::ControlLoopbackIn => {
-                if (setup.bm_request_type & 0x80) == 0 || !write.is_empty() {
+                if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) == 0
+                    || !write.is_empty()
+                {
                     return Err(Status::INVALID_ARGS);
                 }
                 let len = std::cmp::min(setup.w_length as usize, self.control_loopback_buf.len());
@@ -648,9 +642,11 @@ impl UsbZeroFunctionDevice {
         setup: &fusb_descriptor::UsbSetup,
         write: &[u8],
     ) -> Result<u8, Status> {
-        if (setup.bm_request_type & 0x80) != 0
-            || (setup.bm_request_type & USB_RECIP_MASK) != USB_RECIP_ENDPOINT
-            || setup.w_value != USB_FEATURE_ENDPOINT_HALT
+        if (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0
+            || (setup.bm_request_type & fusb_descriptor::REQUEST_RECIPIENT_MASK)
+                != fusb_descriptor::RequestRecipient::Endpoint.into_primitive()
+            || setup.w_value
+                != fusb_descriptor::FeatureSelector::EndpointHalt.into_primitive() as u16
             || setup.w_length != 0
             || setup.w_index > 0xff
             || !write.is_empty()
@@ -669,21 +665,23 @@ impl UsbZeroFunctionDevice {
         setup: &fusb_descriptor::UsbSetup,
         write: &[u8],
     ) -> Result<Vec<u8>, Status> {
-        let recipient = setup.bm_request_type & USB_RECIP_MASK;
-        let is_in = (setup.bm_request_type & 0x80) != 0;
+        let recipient = setup.bm_request_type & fusb_descriptor::REQUEST_RECIPIENT_MASK;
+        let is_in = (setup.bm_request_type & fusb_descriptor::ENDPOINT_DIRECTION_MASK) != 0;
         match ControlRequest::parse(setup.bm_request_type, setup.b_request)? {
             ControlRequest::Vendor(vendor_req) => {
                 self.handle_vendor_request(vendor_req, setup, write).await
             }
             ControlRequest::Standard(req) => match req {
-                USB_SETUP_REQ_GET_STATUS => {
+                fusb_descriptor::StandardRequest::GetStatus => {
                     if !is_in || setup.w_value != 0 || setup.w_length != 2 || !write.is_empty() {
                         return Err(Status::NOT_SUPPORTED);
                     }
-                    if recipient == USB_RECIP_ENDPOINT && setup.w_index <= 0xff {
+                    if recipient == fusb_descriptor::RequestRecipient::Endpoint.into_primitive()
+                        && setup.w_index <= 0xff
+                    {
                         let ep_addr = (setup.w_index & 0xff) as u8;
                         if [self.ep_in_addr, self.ep_out_addr].contains(&ep_addr)
-                            || (ep_addr & USB_ENDPOINT_NUM_MASK) == 0
+                            || (ep_addr & fusb_descriptor::ENDPOINT_NUMBER_MASK) == 0
                         {
                             let is_stalled = self.stalled_endpoints.contains(&ep_addr);
                             let status_word = u16::from(is_stalled);
@@ -691,8 +689,11 @@ impl UsbZeroFunctionDevice {
                         } else {
                             Err(Status::NOT_SUPPORTED)
                         }
-                    } else if (recipient == USB_RECIP_DEVICE && setup.w_index == 0)
-                        || (recipient == USB_RECIP_INTERFACE
+                    } else if (recipient
+                        == fusb_descriptor::RequestRecipient::Device.into_primitive()
+                        && setup.w_index == 0)
+                        || (recipient
+                            == fusb_descriptor::RequestRecipient::Interface.into_primitive()
                             && setup.w_index == u16::from(self.interface_num))
                     {
                         Ok(vec![0x00, 0x00])
@@ -700,19 +701,20 @@ impl UsbZeroFunctionDevice {
                         Err(Status::NOT_SUPPORTED)
                     }
                 }
-                USB_SETUP_REQ_CLEAR_FEATURE => {
+                fusb_descriptor::StandardRequest::ClearFeature => {
                     let ep_addr = self.validate_endpoint_feature_request(setup, write)?;
                     self.clear_endpoint_stall(ep_addr).await?;
                     Ok(Vec::new())
                 }
-                USB_SETUP_REQ_SET_FEATURE => {
+                fusb_descriptor::StandardRequest::SetFeature => {
                     let ep_addr = self.validate_endpoint_feature_request(setup, write)?;
                     self.set_endpoint_stall(ep_addr).await?;
                     Ok(Vec::new())
                 }
-                USB_SETUP_REQ_GET_INTERFACE => {
+                fusb_descriptor::StandardRequest::GetInterface => {
                     if is_in
-                        && recipient == USB_RECIP_INTERFACE
+                        && recipient
+                            == fusb_descriptor::RequestRecipient::Interface.into_primitive()
                         && setup.w_value == 0
                         && setup.w_index == u16::from(self.interface_num)
                         && setup.w_length == 1
@@ -723,9 +725,10 @@ impl UsbZeroFunctionDevice {
                         Err(Status::NOT_SUPPORTED)
                     }
                 }
-                USB_SETUP_REQ_SET_INTERFACE => {
+                fusb_descriptor::StandardRequest::SetInterface => {
                     if !is_in
-                        && recipient == USB_RECIP_INTERFACE
+                        && recipient
+                            == fusb_descriptor::RequestRecipient::Interface.into_primitive()
                         && setup.w_length == 0
                         && write.is_empty()
                     {

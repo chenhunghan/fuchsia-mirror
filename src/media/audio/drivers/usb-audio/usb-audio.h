@@ -18,10 +18,10 @@ namespace usb {
 // clang-format off
 enum class Direction { Unknown, Input, Output };
 enum class EndpointSyncType : uint8_t {
-    None     = USB_ENDPOINT_NO_SYNCHRONIZATION,
-    Async    = USB_ENDPOINT_ASYNCHRONOUS,
-    Adaptive = USB_ENDPOINT_ADAPTIVE,
-    Sync     = USB_ENDPOINT_SYNCHRONOUS,
+    None     = fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::SynchronizationType::kNoSynchronization),
+    Async    = fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::SynchronizationType::kAsynchronous),
+    Adaptive = fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::SynchronizationType::kAdaptive),
+    Sync     = fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::SynchronizationType::kSynchronous),
 };
 // clang-format on
 

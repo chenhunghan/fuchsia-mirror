@@ -104,6 +104,7 @@ pub(crate) struct NetdeviceWorker {
     task: netdevice_client::Task,
     inner: Inner,
     watch_rx_leases: bool,
+    tcp_gro_enabled: bool,
 }
 
 #[derive(Error, Debug)]
@@ -173,8 +174,10 @@ impl NetdeviceWorker {
             multi_vmo,
             sampled_stats_enabled: _,
             max_rolling_capture_buffer_size: _,
+            tcp_gro_enabled,
         } = &ctx.bindings_ctx().config;
         let watch_rx_leases = *suspend_enabled;
+        let tcp_gro_enabled = *tcp_gro_enabled;
         let (session, task) = device
             .new_session_with_derivable_config(
                 "netstack3",
@@ -192,6 +195,7 @@ impl NetdeviceWorker {
             inner: Inner { device, session, state: Default::default() },
             task,
             watch_rx_leases,
+            tcp_gro_enabled,
         })
     }
 
@@ -200,8 +204,13 @@ impl NetdeviceWorker {
     }
 
     pub(crate) async fn run(self) -> Result<!, Error> {
-        let Self { mut ctx, inner: Inner { device: _, session, state }, task, watch_rx_leases } =
-            self;
+        let Self {
+            mut ctx,
+            inner: Inner { device: _, session, state },
+            task,
+            watch_rx_leases,
+            tcp_gro_enabled,
+        } = self;
         // Allow buffer shuttling to happen in other threads.
         let mut task = fasync::Scope::current().compute(task).fuse();
 
@@ -250,7 +259,7 @@ impl NetdeviceWorker {
             // significant problem since ports are seldom added or removed.
             let state = state.lock().await;
             let mut rx_buffers = ShortCircuit::new(rx_buffers.map(build_gro_input));
-            let mut gro = gro_storage.coalesce(&mut rx_buffers, false);
+            let mut gro = gro_storage.coalesce(&mut rx_buffers, tcp_gro_enabled);
             while let Some(item) = gro.next() {
                 let GroOutputItem {
                     target: GroPortTarget { port, frame_type },

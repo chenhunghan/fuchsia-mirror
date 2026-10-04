@@ -7,6 +7,7 @@ use futures::{FutureExt, ready};
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -65,7 +66,6 @@ impl<T: ?Sized> StrictMutex<T> {
 }
 
 // SAFETY: This object implements a mutex which should make these operations safe.
-unsafe impl<T: ?Sized + Send> Send for StrictMutex<T> {}
 unsafe impl<T: ?Sized + Send> Sync for StrictMutex<T> {}
 
 /// Future which polls the lock attempting to acquire it.
@@ -81,13 +81,15 @@ impl<'l, T: ?Sized + 'l> Future for StrictMutexLockFuture<'l, T> {
         ready!(self.receiver.poll_unpin(ctx))
             .expect("Reciever drop while we referenced the lock. Polled after acquisition?");
 
-        Poll::Ready(StrictMutexLockGuard { lock: self.lock })
+        Poll::Ready(StrictMutexLockGuard { lock: self.lock, _marker: PhantomData })
     }
 }
 
 /// Lock guard. Represents possession of the lock.
 pub struct StrictMutexLockGuard<'l, T: ?Sized> {
     lock: &'l StrictMutex<T>,
+    // Sharing a guard exposes &T, so Sync must require T: Sync.
+    _marker: PhantomData<&'l mut T>,
 }
 
 impl<'l, T: ?Sized> Deref for StrictMutexLockGuard<'l, T> {

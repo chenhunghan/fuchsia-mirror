@@ -63,9 +63,4 @@ type CollaborativeRebootReason = strict enum {
     /// A new system update has been downloaded. A reboot is required to apply
     /// the update.
     SYSTEM_UPDATE = 1;
-    /// The configured netstack version on the system has changed. A reboot is
-    /// required to start the new Netstack.
-    // TODO(https://fxbug.dev/42081574): Remove this reason once Netstack2 is
-    // fully migrated to Netstack3.
-    NETSTACK_MIGRATION = 2;
 };

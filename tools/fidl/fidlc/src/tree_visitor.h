@@ -128,6 +128,8 @@ class TreeVisitor {
   virtual void OnProtocolMethod(const std::unique_ptr<RawProtocolMethod>& element) {
     element->Accept(this);
   }
+  virtual void OnProtocolMethodErrorEnter() {}
+  virtual void OnProtocolMethodErrorExit() {}
   virtual void OnProtocolCompose(const std::unique_ptr<RawProtocolCompose>& element) {
     element->Accept(this);
   }

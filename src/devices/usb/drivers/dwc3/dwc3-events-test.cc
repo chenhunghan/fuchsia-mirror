@@ -8,6 +8,7 @@
 #include <atomic>
 
 #include <gtest/gtest.h>
+#include <src/lib/testing/predicates/status.h>
 
 #include "src/devices/usb/drivers/dwc3/dwc3-regs.h"
 #include "src/devices/usb/drivers/dwc3/dwc3-test-fixture.h"
@@ -287,6 +288,112 @@ TEST_F(Dwc3EventsTest, DISABLED_VerifySetConnectedIsNotCalledOnHandleResetEvent)
     binding->Unbind();
     dut_.runtime().RunUntilIdle();
   }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(Dwc3EventsTest, ResetHwMasksEventInterrupts) {
+  SetUpAndPowerOnDriver();
+
+  auto evntintrptmask = std::make_shared<std::atomic<uint32_t>>(0);
+  auto cleanup_callbacks = fit::defer([&]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[GEVNTSIZ::Get(0).addr()].SetWriteCallback([](uint64_t) {});
+    });
+  });
+
+  dut_.RunInEnvironmentTypeContext([evntintrptmask](Environment& env) {
+    auto& gevntsiz = env.reg_region()[GEVNTSIZ::Get(0).addr()];
+    gevntsiz.SetWriteCallback([evntintrptmask](uint64_t val) {
+      evntintrptmask->store(
+          GEVNTSIZ::Get(0).FromValue(static_cast<uint32_t>(val)).EVNTINTRPTMASK());
+    });
+  });
+
+  dut_.RunInDriverContext([&](Dwc3& drv) { ASSERT_OK(Dwc3TestHelper::ResetHw(drv, false)); });
+
+  EXPECT_EQ(evntintrptmask->load(), 1u);
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(Dwc3EventsTest, HandleIrqWhilePoweredOffDoesNotTouchMmio) {
+  SetUpAndPowerOnDriver();
+
+  auto mmio_touched = std::make_shared<std::atomic<bool>>(false);
+
+  auto cleanup_callbacks = fit::defer([&]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[GEVNTSIZ::Get(0).addr()].SetWriteCallback([](uint64_t) {});
+      env.reg_region()[GEVNTCOUNT::Get(0).addr()].SetReadCallback([]() -> uint32_t { return 0; });
+    });
+  });
+
+  dut_.RunInEnvironmentTypeContext([mmio_touched](Environment& env) {
+    auto& gevntsiz = env.reg_region()[GEVNTSIZ::Get(0).addr()];
+    gevntsiz.SetWriteCallback([mmio_touched](uint64_t) { mmio_touched->store(true); });
+
+    auto& gevntcount_reg = env.reg_region()[GEVNTCOUNT::Get(0).addr()];
+    gevntcount_reg.SetReadCallback([mmio_touched]() -> uint32_t {
+      mmio_touched->store(true);
+      return 0;
+    });
+  });
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    // When powered off, accessing MMIO can cause external aborts on platforms
+    // where clocks/power domains are gated. HandleIrq must not touch MMIO.
+    Dwc3TestHelper::SetPowerOn(drv, false);
+    Dwc3TestHelper::SetControllerStarted(drv, false);
+
+    Dwc3TestHelper::HandleIrq(drv);
+  });
+
+  // Verify that MMIO was not accessed when power_on_ is false.
+  EXPECT_FALSE(mmio_touched->load());
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(Dwc3EventsTest, HandleIrqWhileStoppedMasksEventInterrupts) {
+  SetUpAndPowerOnDriver();
+
+  auto evntintrptmask = std::make_shared<std::atomic<uint32_t>>(0);
+  auto gevntcount_reads = std::make_shared<std::atomic<uint32_t>>(0);
+
+  auto cleanup_callbacks = fit::defer([&]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[GEVNTSIZ::Get(0).addr()].SetWriteCallback([](uint64_t) {});
+      env.reg_region()[GEVNTCOUNT::Get(0).addr()].SetReadCallback([]() -> uint32_t { return 0; });
+    });
+  });
+
+  dut_.RunInEnvironmentTypeContext([evntintrptmask, gevntcount_reads](Environment& env) {
+    auto& gevntsiz = env.reg_region()[GEVNTSIZ::Get(0).addr()];
+    gevntsiz.SetWriteCallback([evntintrptmask](uint64_t val) {
+      evntintrptmask->store(
+          GEVNTSIZ::Get(0).FromValue(static_cast<uint32_t>(val)).EVNTINTRPTMASK());
+    });
+
+    auto& gevntcount_reg = env.reg_region()[GEVNTCOUNT::Get(0).addr()];
+    gevntcount_reg.SetReadCallback([gevntcount_reads]() -> uint32_t {
+      gevntcount_reads->fetch_add(1);
+      return 0;
+    });
+  });
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    // Controller is stopped but core is still powered on (e.g. after StopController()).
+    Dwc3TestHelper::SetPowerOn(drv, true);
+    Dwc3TestHelper::SetControllerStarted(drv, false);
+
+    Dwc3TestHelper::HandleIrq(drv);
+  });
+
+  // Verify that GEVNTSIZ interrupt mask was set to 1.
+  EXPECT_EQ(evntintrptmask->load(), 1u);
+  // Verify that GEVNTCOUNT was not read.
+  EXPECT_EQ(gevntcount_reads->load(), 0u);
 
   TearDownAndPowerOffDriver();
 }

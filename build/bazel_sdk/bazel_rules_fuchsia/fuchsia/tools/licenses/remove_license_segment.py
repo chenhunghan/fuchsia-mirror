@@ -7,10 +7,9 @@
 import argparse
 import json
 import re
-import sys
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
@@ -91,4 +90,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

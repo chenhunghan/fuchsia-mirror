@@ -6,23 +6,30 @@
 
 #include <fidl/fuchsia.driver.compat/cpp/test_base.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.usb.dci/cpp/wire.h>
 #include <lib/ddk/metadata.h>
 #include <lib/driver/compat/cpp/compat.h>
 #include <lib/driver/fake-mmio-reg/cpp/fake-mmio-reg.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/fdf/dispatcher.h>
+#include <lib/fit/defer.h>
+#include <lib/fit/function.h>
 #include <lib/fit/result.h>
+#include <lib/sync/cpp/completion.h>
 #include <lib/zx/eventpair.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
 
+#include <atomic>
 #include <mutex>
 
 #include <gtest/gtest.h>
 
 #include "src/devices/usb/drivers/dwc2/dwc2_config.h"
 #include "src/devices/usb/drivers/dwc2/usb_dwc_regs.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace dwc2 {
 
@@ -179,6 +186,23 @@ class Dwc2Test : public testing::Test {
     driver.QueueNextRequest(ep);
   }
 
+  void SetConnectedState(Dwc2& driver, bool connected) { driver.connected_.store(connected); }
+
+  bool IsConnected(const Dwc2& driver) const { return driver.connected_.load(); }
+
+  // Inspects whether Dwc2.lock_ is locked.
+  // This check is sound here because the driver dispatcher thread is synchronously blocked
+  // awaiting the SetConnected FIDL response from FakeUsbDciInterface.
+  bool IsDriverLocked(Dwc2& driver) const __TA_NO_THREAD_SAFETY_ANALYSIS {
+    if (driver.lock_.try_lock()) {
+      driver.lock_.unlock();
+      return false;
+    }
+    return true;
+  }
+
+  void HandleEp0TimeoutRecovery(Dwc2& driver) { driver.HandleEp0TimeoutRecovery(); }
+
   fdf_testing::BackgroundDriverTest<Config> dut_;
 };
 
@@ -207,10 +231,10 @@ TEST_F(Dwc2Test, GetHardwareInfo) {
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->size(), 2u);
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->at(0).max_packet_size_limit(), 4096u);
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->at(0).endpoint_type(),
-            fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+            fdescriptor::EndpointType::kBulk);
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->at(1).max_packet_size_limit(), 4096u);
   EXPECT_EQ(info.endpoints()->at(0).supported_types()->at(1).endpoint_type(),
-            fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt);
+            fdescriptor::EndpointType::kInterrupt);
 
   // EP1 OUT (after 5 IN endpoints):
   EXPECT_EQ(info.endpoints()->at(5).ep_address(), 0x01);
@@ -220,10 +244,10 @@ TEST_F(Dwc2Test, GetHardwareInfo) {
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->size(), 2u);
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->at(0).max_packet_size_limit(), 1024u);
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->at(0).endpoint_type(),
-            fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+            fdescriptor::EndpointType::kBulk);
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->at(1).max_packet_size_limit(), 1024u);
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->at(1).endpoint_type(),
-            fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt);
+            fdescriptor::EndpointType::kInterrupt);
 }
 
 TEST_F(Dwc2Test, PendingZlp_SetOnInShortTransfer) {
@@ -317,6 +341,116 @@ TEST_F(Dwc2Test, PendingZlp_ClearedOnCancelAll) {
     // CancelAll() acquires lock.
     ep->CancelAll();
     EXPECT_FALSE(ep->pending_zlp);
+  });
+}
+
+namespace {
+
+class FakeUsbDciInterface : public fidl::WireServer<fuchsia_hardware_usb_dci::UsbDciInterface> {
+ public:
+  using SetConnectedCallback = fit::function<void(bool connected)>;
+
+  void set_connected_callback(SetConnectedCallback cb) { set_connected_cb_ = std::move(cb); }
+
+  void SetConnected(SetConnectedRequestView request,
+                    SetConnectedCompleter::Sync& completer) override {
+    if (set_connected_cb_) {
+      set_connected_cb_(request->is_connected);
+    }
+    completer.Reply(zx::ok());
+  }
+
+  void SetSpeed(SetSpeedRequestView request, SetSpeedCompleter::Sync& completer) override {
+    completer.Reply(zx::ok());
+  }
+
+  void Control(ControlRequestView request, ControlCompleter::Sync& completer) override {
+    completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
+  }
+
+  void handle_unknown_method(
+      fidl::UnknownMethodMetadata<fuchsia_hardware_usb_dci::UsbDciInterface> metadata,
+      fidl::UnknownMethodCompleter::Sync& completer) override {}
+
+ private:
+  SetConnectedCallback set_connected_cb_;
+};
+
+}  // namespace
+
+TEST_F(Dwc2Test, Ep0TimeoutRecovery_DoesNotDeadlockWithCancelAll) {
+  FakeUsbDciInterface fake_dci;
+  fdf::UnownedSynchronizedDispatcher dci_dispatcher = dut_.runtime().StartBackgroundDispatcher();
+
+  auto cleanup_dispatcher = fit::defer([&] {
+    libsync::Completion shutdown_complete;
+    dut_.runtime().ShutdownBackgroundDispatcher(dci_dispatcher->get(),
+                                                [&] { shutdown_complete.Signal(); });
+    shutdown_complete.Wait();
+  });
+
+  auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_dci::UsbDciInterface>();
+  ASSERT_TRUE(endpoints.is_ok());
+
+  auto binding =
+      fidl::BindServer(dci_dispatcher->async_dispatcher(), std::move(endpoints->server), &fake_dci);
+
+  zx::result dci_client_end = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+  ASSERT_TRUE(dci_client_end.is_ok());
+  fidl::SyncClient dci_client(std::move(*dci_client_end));
+
+  auto set_intf_result = dci_client->SetInterface({std::move(endpoints->client)});
+  ASSERT_TRUE(set_intf_result.is_ok()) << set_intf_result.error_value().FormatDescription();
+
+  dut_.RunInDriverContext([&](Dwc2& driver) {
+    uint8_t ep_num = DWC_ADDR_TO_INDEX(0x81);  // EP 1 IN
+    auto* ep = GetEndpoint(driver, ep_num);
+    ASSERT_NE(nullptr, ep);
+
+    {
+      std::lock_guard<std::mutex> lock(ep->lock);
+      ep->max_packet_size = 64;
+      ep->enabled = true;
+
+      usb::FidlRequest fidl_req(usb::EndpointType::BULK);
+      fidl_req->short_(true);
+      fidl_req.add_data(std::vector<uint8_t>(64, 0), 64, 0);
+
+      ep->queued_reqs.push(std::move(fidl_req));
+      QueueNextRequest(driver, ep);
+      ASSERT_TRUE(ep->pending_zlp);
+    }
+
+    SetConnectedState(driver, true);
+
+    std::atomic<bool> driver_was_locked = true;
+    std::atomic<bool> cancel_completed = false;
+    fake_dci.set_connected_callback(
+        [&driver, ep, &driver_was_locked, &cancel_completed, this](bool connected) {
+          if (!connected) {
+            // Verify that driver.lock_ is NOT held during SetConnected(false).
+            // The lock hierarchy in dwc2.h specifies that endpoint locks must be acquired
+            // before Dwc2.lock_, so Dwc2.lock_ must never be held when notifying the DCI
+            // interface of a disconnect.
+            driver_was_locked = IsDriverLocked(driver);
+            if (!driver_was_locked) {
+              // Simulate usb-cdc-function cancelling endpoints upon receiving disconnect from
+              // usb-peripheral. In the buggy code, CancelAll() attempts to acquire driver.lock_
+              // while holding ep->lock, deadlocking with HandleEp0TimeoutRecovery() which held
+              // driver.lock_ and tried to acquire ep->lock.
+              ep->CancelAll();
+              cancel_completed = true;
+            }
+          }
+        });
+
+    // Trigger EP0 timeout recovery.
+    HandleEp0TimeoutRecovery(driver);
+
+    EXPECT_FALSE(driver_was_locked);
+    EXPECT_TRUE(cancel_completed);
+    EXPECT_FALSE(ep->pending_zlp);
+    EXPECT_FALSE(IsConnected(driver));
   });
 }
 

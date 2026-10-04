@@ -63,6 +63,15 @@ impl Container for FxfsContainer {
                     );
                 }
                 Err(error) => {
+                    if crypt_policy::is_key_service_unavailable(&error) {
+                        // Panic to force a reboot rather than falling through to format_data() and
+                        // wiping data. Returning `Err` here would only be logged by
+                        // `device_handler` without terminating fshost.
+                        panic!(
+                            "unlock_data_volume failed because key service is unavailable: {:?}",
+                            error
+                        );
+                    }
                     launcher.report_corruption("fxfs", &error);
                     log::error!(
                         error:?;

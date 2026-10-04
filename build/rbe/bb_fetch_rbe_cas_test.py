@@ -17,7 +17,7 @@ import reproxy_logs
 
 
 class MainArgParserTests(unittest.TestCase):
-    def test_with_bbid(self):
+    def test_with_bbid(self) -> None:
         args = bb_fetch_rbe_cas._MAIN_ARG_PARSER.parse_args(
             ["--bbid", "1234", "--path", "obj/hello.o"]
         )
@@ -27,7 +27,7 @@ class MainArgParserTests(unittest.TestCase):
         self.assertFalse(args.verbose)
         self.assertIsNone(args.reproxy_log)
 
-    def test_with_reproxy_log(self):
+    def test_with_reproxy_log(self) -> None:
         args = bb_fetch_rbe_cas._MAIN_ARG_PARSER.parse_args(
             ["--reproxy_log", "x.rrpl", "--path", "obj/hello.o", "--verbose"]
         )
@@ -46,10 +46,10 @@ _reproxy_cfg = {
 
 class DownloadArtifactTests(unittest.TestCase):
     @property
-    def downloader(self):
+    def downloader(self) -> remotetool.RemoteTool:
         return remotetool.RemoteTool(reproxy_cfg=_reproxy_cfg)
 
-    def test_success(self):
+    def test_success(self) -> None:
         with mock.patch.object(
             remotetool.RemoteTool,
             "download_blob",
@@ -60,7 +60,7 @@ class DownloadArtifactTests(unittest.TestCase):
             )
             self.assertEqual(exit_code, 0)
 
-    def test_failure(self):
+    def test_failure(self) -> None:
         with mock.patch.object(
             remotetool.RemoteTool,
             "download_blob",
@@ -74,10 +74,10 @@ class DownloadArtifactTests(unittest.TestCase):
 
 class FetchArtifactFromReproxyLogTests(unittest.TestCase):
     @property
-    def downloader(self):
+    def downloader(self) -> remotetool.RemoteTool:
         return remotetool.RemoteTool(reproxy_cfg=_reproxy_cfg)
 
-    def test_digest_found(self):
+    def test_digest_found(self) -> None:
         reproxy_log = Path("cached.rrpl")
         artifact_path = Path("obj/hello.cc.o")
         cfg = Path("reproxy.cfg")
@@ -106,7 +106,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
         mock_downloader.assert_called_once_with(cfg)
         mock_download.assert_called_once_with(self.downloader, digest, output)
 
-    def test_digest_not_found(self):
+    def test_digest_not_found(self) -> None:
         reproxy_log = Path("cached.rrpl")
         artifact_path = Path("obj/hello.cc.o")
         with mock.patch.object(
@@ -123,7 +123,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
             )
         mock_lookup.assert_called_once_with(log=reproxy_log, path=artifact_path)
 
-    def test_download_failed(self):
+    def test_download_failed(self) -> None:
         reproxy_log = Path("smashed.rrpl")
         artifact_path = Path("obj/h3llo.cc.o")
         cfg = Path("reproxy_2.cfg")
@@ -154,7 +154,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_e2e_using_bbid_success(self):
+    def test_e2e_using_bbid_success(self) -> None:
         bb = bbtool._BB_TOOL
         bbid = "b4356254"
         artifact_path = Path("foo/bar/baz.rlib")
@@ -185,7 +185,7 @@ class MainTests(unittest.TestCase):
             verbose=False,
         )
 
-    def test_e2e_bbid_to_log_only(self):
+    def test_e2e_bbid_to_log_only(self) -> None:
         bb = bbtool._BB_TOOL
         bbid = "b991918261"
         reproxy_log_path = Path("/path/to/cache/foobar.rrpl")
@@ -204,7 +204,7 @@ class MainTests(unittest.TestCase):
             bbpath=bb, bbid=bbid.lstrip("b"), verbose=False
         )
 
-    def test_e2e_using_reproxy_log_success(self):
+    def test_e2e_using_reproxy_log_success(self) -> None:
         artifact_path = Path("foo/bar/baz.rlib")
         cfg = bb_fetch_rbe_cas._REPROXY_CFG
         reproxy_log_path = Path("use/me.rrpl")
@@ -231,7 +231,7 @@ class MainTests(unittest.TestCase):
             verbose=False,
         )
 
-    def test_e2e_reproxy_log_failed(self):
+    def test_e2e_reproxy_log_failed(self) -> None:
         bb = bbtool._BB_TOOL
         bbid = "b4356254"
         with mock.patch.object(
@@ -247,7 +247,7 @@ class MainTests(unittest.TestCase):
             bbpath=bb, bbid=bbid.lstrip("b"), verbose=False
         )
 
-    def test_e2e_bb_error(self):
+    def test_e2e_bb_error(self) -> None:
         bbid = "b99669966"
         with mock.patch.object(
             bbtool.BuildBucketTool,
@@ -264,7 +264,7 @@ class MainTests(unittest.TestCase):
             bbid.lstrip("b"), verbose=False
         )
 
-    def test_e2e_download_artifact_error(self):
+    def test_e2e_download_artifact_error(self) -> None:
         bb = bbtool._BB_TOOL
         bbid = "b881231281"
         reproxy_log_path = Path("/some/where/in/temp/foo.rrpl")

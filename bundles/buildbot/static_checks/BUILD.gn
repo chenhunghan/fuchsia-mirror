@@ -9,7 +9,7 @@ group("static_checks") {
   deps = [
     "//build/tools/formatjson5",
     "//tools/check-licenses",
-    "//tools/cmc:cmc.actual",
+    "//tools/cmc",
     "//tools/doc_checker:doc_checker_bin.actual",
     "//tools/fidl/fidlc:fidl-format",
     "//tools/fidl/fidlc:fidl-lint",

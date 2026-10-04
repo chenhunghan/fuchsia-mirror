@@ -19,9 +19,11 @@
 #include "src/developer/debug/zxdb/client/system.h"
 #include "src/developer/debug/zxdb/client/system_observer.h"
 #include "src/developer/debug/zxdb/client/thread.h"
+#include "src/developer/debug/zxdb/debug_adapter/handlers/request_async_backtrace.h"
 #include "src/developer/debug/zxdb/debug_adapter/handlers/request_attach.h"
 #include "src/developer/debug/zxdb/debug_adapter/handlers/request_breakpoint.h"
 #include "src/developer/debug/zxdb/debug_adapter/handlers/request_continue.h"
+#include "src/developer/debug/zxdb/debug_adapter/handlers/request_data_breakpoint.h"
 #include "src/developer/debug/zxdb/debug_adapter/handlers/request_evaluate.h"
 #include "src/developer/debug/zxdb/debug_adapter/handlers/request_function_breakpoint.h"
 #include "src/developer/debug/zxdb/debug_adapter/handlers/request_launch.h"
@@ -135,6 +137,7 @@ void DebugAdapterContext::DidResolveConnection(const Err& err) {
   }
   dap::InitializeResponse response;
   response.supportsFunctionBreakpoints = true;
+  response.supportsDataBreakpoints = true;
   response.supportsConditionalBreakpoints = true;
   response.supportsConfigurationDoneRequest = true;
   response.supportsEvaluateForHovers = false;
@@ -165,6 +168,18 @@ void DebugAdapterContext::Init() {
   dap_->registerHandler([this](const dap::SetFunctionBreakpointsRequest& req) {
     DEBUG_LOG(DebugAdapter) << "SetFunctionBreakpointsRequest received";
     return OnRequestFunctionBreakpoint(this, req);
+  });
+
+  dap_->registerHandler(
+      [this](const dap::DataBreakpointInfoRequest& req,
+             std::function<void(dap::ResponseOrError<dap::DataBreakpointInfoResponse>)> callback) {
+        DEBUG_LOG(DebugAdapter) << "DataBreakpointInfoRequest received";
+        OnRequestDataBreakpointInfo(this, req, std::move(callback));
+      });
+
+  dap_->registerHandler([this](const dap::SetDataBreakpointsRequest& req) {
+    DEBUG_LOG(DebugAdapter) << "SetDataBreakpointsRequest received";
+    return OnRequestSetDataBreakpoints(this, req);
   });
 
   dap_->registerHandler([](const dap::ConfigurationDoneRequest& req) {
@@ -272,6 +287,13 @@ void DebugAdapterContext::Init() {
     DEBUG_LOG(DebugAdapter) << "ZxdbProcessRequest received";
     return OnRequestZxdbProcess(this, req);
   });
+
+  dap_->registerHandler(
+      [this](const dap::ZxdbAsyncBacktraceRequest& req,
+             std::function<void(dap::ResponseOrError<dap::ZxdbAsyncBacktraceResponse>)> callback) {
+        DEBUG_LOG(DebugAdapter) << "ZxdbAsyncBacktraceRequest received";
+        OnRequestZxdbAsyncBacktrace(this, req, std::move(callback));
+      });
 
   dap_->registerHandler([this](const dap::DisconnectRequest& req) {
     DEBUG_LOG(DebugAdapter) << "DisconnectRequest received";
@@ -417,6 +439,10 @@ void DebugAdapterContext::OnThreadStopped(Thread* thread, const StopInfo& info) 
       event.reason = "breakpoint";
       event.description = "Breakpoint hit";
       break;
+    case debug_ipc::ExceptionType::kWatchpoint:
+      event.reason = "data breakpoint";
+      event.description = "Data breakpoint hit";
+      break;
     case debug_ipc::ExceptionType::kSingleStep:
       event.reason = "step";
       break;
@@ -533,6 +559,22 @@ void DebugAdapterContext::OnBreakpointMatched(Breakpoint* breakpoint, bool user_
   dap::BreakpointEvent breakpoint_event;
   breakpoint_event.reason = "changed";
   breakpoint_event.breakpoint = bp;
+  dap_->send(breakpoint_event);
+}
+
+void DebugAdapterContext::OnBreakpointUpdateFailure(Breakpoint* breakpoint, const Err& err) {
+  if (!breakpoint || breakpoint->IsInternal()) {
+    return;
+  }
+
+  dap::Breakpoint bp;
+  bp.verified = false;
+  bp.id = IdForBreakpoint(breakpoint);
+  bp.message = err.msg();
+
+  dap::BreakpointEvent breakpoint_event;
+  breakpoint_event.reason = "changed";
+  breakpoint_event.breakpoint = std::move(bp);
   dap_->send(breakpoint_event);
 }
 
@@ -764,8 +806,24 @@ void DebugAdapterContext::DeleteAllFunctionBreakpoints() {
   function_bps_.clear();
 }
 
+void DebugAdapterContext::StoreDataBreakpoint(Breakpoint* bp) {
+  FX_DCHECK(bp);
+  data_bps_.push_back(bp->GetWeakPtr());
+}
+
+void DebugAdapterContext::DeleteAllDataBreakpoints() {
+  for (auto& bp : data_bps_) {
+    if (bp) {
+      breakpoint_to_id_.erase(bp.get());
+      session()->system().DeleteBreakpoint(bp.get());
+    }
+  }
+  data_bps_.clear();
+}
+
 void DebugAdapterContext::DeleteAllBreakpoints() {
   DeleteAllFunctionBreakpoints();
+  DeleteAllDataBreakpoints();
 
   for (auto& it : source_to_bp_) {
     for (auto& bp : it.second) {

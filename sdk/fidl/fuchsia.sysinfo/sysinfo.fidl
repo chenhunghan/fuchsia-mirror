@@ -28,25 +28,25 @@ type InterruptControllerInfo = struct {
 closed protocol SysInfo {
     /// Return the board name for the platform we are running on.
     strict GetBoardName() -> (struct {
-        status zx.Status;
+        status zx.Result;
         name string:<BOARD_NAME_LEN, optional>;
     });
 
     /// Return the board revision for the board we are running on.
     strict GetBoardRevision() -> (struct {
-        status zx.Status;
+        status zx.Result;
         revision uint32;
     });
 
     /// Return the bootloader vendor for the platform we are running on.
     strict GetBootloaderVendor() -> (struct {
-        status zx.Status;
+        status zx.Result;
         vendor string:<BOOTLOADER_VENDOR_LEN, optional>;
     });
 
     /// Return interrupt controller information.
     strict GetInterruptControllerInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         info box<InterruptControllerInfo>;
     });
 

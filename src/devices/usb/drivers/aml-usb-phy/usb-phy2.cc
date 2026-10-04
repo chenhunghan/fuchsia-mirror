@@ -139,7 +139,7 @@ void UsbPhy2::SetModeInternal(fuchsia_hardware_usb_phy::Mode mode, fdf::MmioBuff
        mode != fuchsia_hardware_usb_phy::Mode::kHost) ||
       (dr_mode() == fuchsia_hardware_usb_phy::Mode::kPeripheral &&
        mode != fuchsia_hardware_usb_phy::Mode::kPeripheral)) {
-    fdf::error("If dr_mode_ is not USB_MODE_OTG, dr_mode_ must match requested mode.");
+    fdf::error("If dr_mode_ is not Mode::kOtg, dr_mode_ must match requested mode.");
     return;
   }
 

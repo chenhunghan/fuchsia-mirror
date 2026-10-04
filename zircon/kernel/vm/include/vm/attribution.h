@@ -29,6 +29,7 @@ namespace vm {
 struct FractionalBytes {
   using Fraction = ffl::Fixed<uint64_t, 63>;
   constexpr static Fraction kOneByte = Fraction(1);
+  constexpr static uint64_t kOneByteValue = kOneByte.raw_value();
   FractionalBytes() = default;
 
   constexpr explicit FractionalBytes(uint64_t whole_bytes) : integral(whole_bytes) {}

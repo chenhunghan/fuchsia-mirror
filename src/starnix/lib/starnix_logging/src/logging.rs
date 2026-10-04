@@ -229,13 +229,20 @@ impl SyscallLogFilter {
 
     pub fn matches(&self, command: &TaskCommand) -> bool {
         let matcher = self.match_string.as_bytes();
-        command.as_bytes().windows(matcher.len()).any(|w| w == matcher)
+        matcher.is_empty() || command.as_bytes().windows(matcher.len()).any(|w| w == matcher)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_syscall_log_filter_matches_all_commands() {
+        let filter = SyscallLogFilter::new(String::new());
+        assert!(filter.matches(&TaskCommand::new(b"command")));
+        assert!(filter.matches(&TaskCommand::default()));
+    }
 
     unsafe extern "C" {
         fn zx_thread_self() -> zx::sys::zx_handle_t;

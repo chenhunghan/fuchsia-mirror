@@ -69,6 +69,7 @@ pub fn round_down<
 
 pub struct TestFixtureBuilder {
     no_fuchsia_boot: bool,
+    no_keymint: bool,
     disk: Option<Disk>,
     extra_disks: Vec<Disk>,
     fshost: fshost_testing::FshostBuilder,
@@ -83,6 +84,7 @@ impl TestFixtureBuilder {
     pub fn new(fshost_component_name: &'static str) -> Self {
         Self {
             no_fuchsia_boot: false,
+            no_keymint: false,
             disk: None,
             extra_disks: Vec::new(),
             fshost: fshost_testing::FshostBuilder::new(fshost_component_name),
@@ -159,6 +161,11 @@ impl TestFixtureBuilder {
 
     pub fn no_fuchsia_boot(mut self) -> Self {
         self.no_fuchsia_boot = true;
+        self
+    }
+
+    pub fn no_keymint(mut self) -> Self {
+        self.no_keymint = true;
         self
     }
 
@@ -242,14 +249,24 @@ impl TestFixtureBuilder {
                 Route::new()
                     .capability(Capability::protocol::<ffeedback::CrashReporterMarker>())
                     .capability(Capability::protocol::<ffxfsprovisioner::FxfsProvisionerMarker>())
-                    .capability(Capability::protocol::<fkeymint::SealingKeysMarker>())
-                    .capability(Capability::protocol::<fkeymint::AdminMarker>())
                     .capability(Capability::protocol::<ftoken::NodeBusTopologyMarker>())
                     .from(&mocks)
                     .to(&fshost),
             )
             .await
             .unwrap();
+        if !self.no_keymint {
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::protocol::<fkeymint::SealingKeysMarker>())
+                        .capability(Capability::protocol::<fkeymint::AdminMarker>())
+                        .from(&mocks)
+                        .to(&fshost),
+                )
+                .await
+                .unwrap();
+        }
         builder
             .add_route(
                 Route::new()

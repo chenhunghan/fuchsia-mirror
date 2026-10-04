@@ -47,14 +47,14 @@ pub trait BufferAllocator: Send + Sync + std::fmt::Debug + 'static {
 
 pub(super) fn round_down<T>(value: T, granularity: T) -> T
 where
-    T: num::Num + Copy,
+    T: num_traits::Num + Copy,
 {
     value - value % granularity
 }
 
 pub(super) fn round_up<T>(value: T, granularity: T) -> T
 where
-    T: num::Num + Copy,
+    T: num_traits::Num + Copy,
 {
     round_down(value + granularity - T::one(), granularity)
 }

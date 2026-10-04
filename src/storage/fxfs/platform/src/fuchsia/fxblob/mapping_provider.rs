@@ -105,17 +105,16 @@ impl BlobMappingSession {
         let extents = node.get_mapping_extents().await?;
         let size = node.as_ref().byte_size();
         let stored_size = node.as_ref().stored_size().await?;
-        let extent_count = extents.data.len() as u32;
-        let metadata_count = extents.merkle.len() as u32;
+        let data_extents = Extents::try_new(&extents.data, 0)?;
+        let merkle_extents = Extents::try_new(&extents.merkle, 0)?;
+        let extent_count = data_extents.len() as u32;
+        let metadata_count = merkle_extents.len() as u32;
 
         let allocation_size = (extent_count + metadata_count) as usize * std::mem::size_of::<u64>();
 
         if allocation_size > 0 {
             let mut payload = self.sender.reserve_payload(allocation_size).await?;
             let offset_in_vmo = payload.offset();
-
-            let data_extents = Extents::try_new(&extents.data, 0)?;
-            let merkle_extents = Extents::try_new(&extents.merkle, 0)?;
 
             for (mut chunk, val_res) in payload.data().chunks_mut(std::mem::size_of::<u64>()).zip(
                 Extents::encode_extents(&data_extents)
@@ -204,14 +203,18 @@ impl BlobMappingSession {
 mod tests {
     use super::*;
     use crate::fuchsia::fxblob::testing::{BlobFixture, new_blob_fixture, open_blob_fixture};
+    use crate::fuchsia::node::FxNode;
     use crate::fuchsia::testing::TestFixture;
     use blob_writer::BlobWriter;
     use delivery_blob::{CompressionMode, Type1Blob};
     use fidl_fuchsia_io::UnlinkOptions;
     use fuchsia_async as fasync;
     use futures::channel::oneshot;
+    use fxfs::lsm_tree::types::Item;
     use fxfs::object_handle::ObjectHandle;
-    use fxfs::object_store::{HandleOptions, ObjectStore};
+    use fxfs::object_store::{
+        AttributeId, ExtentValue, HandleOptions, ObjectKey, ObjectStore, ObjectValue,
+    };
     use storage_device::Device;
     use storage_device::buffer::OwnedBuffer;
     use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
@@ -811,6 +814,114 @@ mod tests {
         rand::fill(&mut compressed_data[..]);
         let hash2 = write_blob_chunked(&fixture, &compressed_data, CompressionMode::Always).await;
         run_blob_mapping_test_with_hash(&fixture, hash2, &compressed_data, 2, 0).await;
+
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_blob_mapping_provider_large_extent() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![42; 8192];
+        let hash = fixture.write_blob(&data, CompressionMode::Never).await;
+
+        let blob_dir = fixture
+            .volume()
+            .root()
+            .clone()
+            .as_node()
+            .into_any()
+            .downcast::<BlobDirectory>()
+            .expect("Failed to downcast root directory to BlobDirectory");
+
+        let node = blob_dir
+            .open_blob(&hash.into())
+            .await
+            .expect("Failed to open blob in Fxfs")
+            .expect("open_blob returned None instead of node");
+        let object_id = node.object_id();
+        let original_extents =
+            node.get_mapping_extents().await.expect("Failed to retrieve extents");
+        assert_eq!(original_extents.data.len(), 1);
+        let start_dev = original_extents.data[0].device_offset().unwrap();
+        drop(node);
+
+        // Replace the blob's single 8 KiB data extent in the in-memory LSM tree with a single
+        // extent larger than MAX_REGULAR_EXTENT_BLOCKS (0x3fff_ffff blocks) so Extents::try_new
+        // splits it into 2 encoded entries.
+        let large_len = (0x3fff_ffffu64 + 5) * mapping::BLOCK_SIZE;
+        let key = ObjectKey::extent(object_id, AttributeId::DATA, 0..large_len);
+        let lower_bound = key.key_for_merge_into();
+        fixture.volume().volume().store().tree().merge_into(
+            Item::new(key, ObjectValue::Extent(ExtentValue::new_raw(start_dev, 0))),
+            &lower_bound,
+        );
+
+        let vmo = zx::Vmo::create(MAPPING_VMO_SIZE).unwrap();
+        let client_mapping = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let sender =
+            AsyncSender::<RawMappingCommand>::new(vmo, 8, PENDING_COMMANDS_CAPACITY).unwrap();
+        let mut session = BlobMappingSession::new(blob_dir, sender);
+
+        let merkle_extents = original_extents.merkle;
+        let receiver_task = fasync::unblock(move || {
+            let mut receiver = Receiver::<RawMappingCommand>::new(client_mapping, 256)
+                .expect("Failed to create the Receiver wrapper");
+
+            let cmd1_raw = receiver.peek().expect("peek failed");
+            let cmd1 = MappingCommand::try_from(*cmd1_raw).expect("try_from failed");
+
+            let (cmd1_offset, cmd1_extent_count, cmd1_metadata_count) = match cmd1 {
+                MappingCommand::Mappings {
+                    key,
+                    offset,
+                    stored_size: _,
+                    device_offset: _,
+                    metadata_count,
+                    extent_count,
+                    encrypted,
+                } => {
+                    assert_eq!(key, 1);
+                    assert_eq!(extent_count, 2);
+                    assert_eq!(metadata_count, merkle_extents.len() as u32);
+                    assert!(!encrypted);
+                    (offset, extent_count, metadata_count)
+                }
+                _ => panic!("Expected Mappings command"),
+            };
+
+            let total_extents = cmd1_extent_count + cmd1_metadata_count;
+            let buffer = cmd1_raw.payload_slice(cmd1_offset, total_extents * 8).to_vec();
+
+            let expected_data_extents =
+                Extents::try_new([mapping::Extent::new(0..large_len, Some(start_dev))], 0).unwrap();
+            let expected_merkle_extents = Extents::try_new(&merkle_extents, 0).unwrap();
+            let mut expected_payload = Vec::new();
+            for val in Extents::encode_extents(&expected_data_extents)
+                .chain(Extents::encode_extents(&expected_merkle_extents))
+            {
+                expected_payload.extend_from_slice(&val.to_le_bytes());
+            }
+            assert_eq!(buffer, expected_payload);
+            cmd1_raw.pop().expect("Failed pop_commit");
+
+            let cmd2_raw = receiver.peek().expect("peek failed");
+            let cmd2 = MappingCommand::try_from(*cmd2_raw).expect("try_from failed");
+            match cmd2 {
+                MappingCommand::CloseBlob { key } => assert_eq!(key, 1),
+                _ => panic!("Expected CloseBlob command"),
+            };
+            cmd2_raw.pop().expect("Failed pop_commit");
+        });
+
+        let server_task = async move {
+            let key = 1;
+            let size = session.open_blob(key, hash).await.expect("open_blob failed");
+            assert_eq!(size, data.len() as u64);
+            session.close_blob(key).await.expect("close_blob failed");
+            std::mem::drop(session);
+        };
+
+        futures::join!(receiver_task, server_task);
 
         fixture.close().await;
     }

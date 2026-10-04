@@ -651,6 +651,10 @@ pub mod tests {
     }
 }
 
+/// Temperatures at or below absolute zero (-273.15°C), such as Linux/TMU
+/// `THERMAL_TEMP_INVALID` (-274.0°C), indicate that the sensor's power domain is off.
+pub const ABSOLUTE_ZERO_C: Celsius = Celsius(-273.15);
+
 /// Contains both the raw and filtered temperature values returned from the TemperatureFilter
 /// `get_temperature` function.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -695,7 +699,8 @@ impl TemperatureFilter {
     }
 
     /// Reads a new temperature sample and returns a Temperature instance containing both the raw
-    /// and filtered temperature values.
+    /// and filtered temperature values. Readings at or below `ABSOLUTE_ZERO_C` (or `NaN`) indicate
+    /// an unpowered/invalid sensor and reset the filter state, returning unfiltered.
     pub async fn get_temperature(
         &self,
         timestamp: Nanoseconds,
@@ -703,6 +708,11 @@ impl TemperatureFilter {
         fuchsia_trace::duration!("power_manager", "TemperatureFilter::get_temperature");
 
         let raw_temperature = self.read_temperature().await?;
+        if raw_temperature <= ABSOLUTE_ZERO_C || raw_temperature.0.is_nan() {
+            self.prev_temperature.set(None);
+            return Ok(TemperatureReadings { raw: raw_temperature, filtered: raw_temperature });
+        }
+
         let filtered_temperature = match self.prev_temperature.get() {
             Some(prev_temperature) => Self::low_pass_filter(
                 raw_temperature,
@@ -812,6 +822,64 @@ mod temperature_filter_tests {
         assert_eq!(
             filter.get_temperature(Seconds(1.0).into()).await.unwrap(),
             TemperatureReadings { raw: Celsius(80.0), filtered: Celsius(56.0) }
+        );
+    }
+
+    /// Tests that when a temperature sensor reports an unpowered/invalid sentinel reading
+    /// (<= -273.15°C, such as `THERMAL_TEMP_INVALID` = -274.0°C, or `NaN`), `TemperatureFilter`
+    /// resets `prev_temperature` to `None` so the first valid reading after wake-up is not dragged
+    /// down by cold-soak lag or poisoned by `NaN`.
+    #[fuchsia::test]
+    async fn test_temperature_filter_resets_on_invalid_sentinel() {
+        let mut mock_maker = MockNodeMaker::new();
+        let temperature_node = mock_maker.make(
+            "Temperature",
+            vec![
+                (msg_eq!(ReadTemperature), msg_ok_return!(ReadTemperature(Celsius(50.0)))),
+                (msg_eq!(ReadTemperature), msg_ok_return!(ReadTemperature(Celsius(-274.0)))),
+                (msg_eq!(ReadTemperature), msg_ok_return!(ReadTemperature(Celsius(80.0)))),
+                (msg_eq!(ReadTemperature), msg_ok_return!(ReadTemperature(Celsius(90.0)))),
+                (msg_eq!(ReadTemperature), msg_ok_return!(ReadTemperature(Celsius(f64::NAN)))),
+                (msg_eq!(ReadTemperature), msg_ok_return!(ReadTemperature(Celsius(70.0)))),
+            ],
+        );
+
+        let filter = TemperatureFilter::new(temperature_node, Seconds(5.0));
+
+        // Poll 1 (t = 0s): active reading of 50.0°C initializes filter to 50.0°C.
+        assert_eq!(
+            filter.get_temperature(Nanoseconds(0)).await.unwrap(),
+            TemperatureReadings { raw: Celsius(50.0), filtered: Celsius(50.0) }
+        );
+
+        // Poll 2 (t = 1s): sensor power domain is off and reports -274.0°C; filter resets state.
+        assert_eq!(
+            filter.get_temperature(Seconds(1.0).into()).await.unwrap(),
+            TemperatureReadings { raw: Celsius(-274.0), filtered: Celsius(-274.0) }
+        );
+
+        // Poll 3 (t = 2s): sensor wakes up at 80.0°C; filtered temperature immediately adopts
+        // 80.0°C with zero lag from -274.0°C or stale 50.0°C.
+        assert_eq!(
+            filter.get_temperature(Seconds(2.0).into()).await.unwrap(),
+            TemperatureReadings { raw: Celsius(80.0), filtered: Celsius(80.0) }
+        );
+
+        // Poll 4 (t = 3s): normal low-pass filtering resumes from 80.0°C -> 82.0°C.
+        assert_eq!(
+            filter.get_temperature(Seconds(3.0).into()).await.unwrap(),
+            TemperatureReadings { raw: Celsius(90.0), filtered: Celsius(82.0) }
+        );
+
+        // Poll 5 (t = 4s): NaN reading also resets filter state rather than poisoning it.
+        let nan_reading = filter.get_temperature(Seconds(4.0).into()).await.unwrap();
+        assert!(nan_reading.raw.0.is_nan());
+        assert!(nan_reading.filtered.0.is_nan());
+
+        // Poll 6 (t = 5s): next valid reading immediately adopts 70.0°C cleanly.
+        assert_eq!(
+            filter.get_temperature(Seconds(5.0).into()).await.unwrap(),
+            TemperatureReadings { raw: Celsius(70.0), filtered: Celsius(70.0) }
         );
     }
 }

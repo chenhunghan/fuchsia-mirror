@@ -435,6 +435,7 @@ pub fn init(
     }
 
     log::info!("ffx logging initialized. ffx version info: {:?}", ffx_build_version::build_info());
+    log::info!("ffx config: {}", ctx.sanitized_config());
 
     Ok(())
 }

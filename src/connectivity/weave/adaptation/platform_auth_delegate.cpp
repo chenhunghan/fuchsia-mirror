@@ -6,6 +6,8 @@
 
 #include <fuchsia/weave/cpp/fidl.h>
 #include <lib/fit/defer.h>
+#include <lib/zx/clock.h>
+#include <zircon/utc.h>
 
 #include <Weave/Profiles/security/WeaveSig.h>
 #include <sdk/lib/syslog/cpp/macros.h>
@@ -37,19 +39,35 @@ WEAVE_ERROR GetEffectiveTime(uint32_t& effective_time) {
   // peer's certificate.
   uint64_t now_ms;
   WEAVE_ERROR err = System::Layer::GetClock_RealTimeMS(now_ms);
+
+  // If GetClock_RealTimeMS succeeded, also check if the Fuchsia UTC clock has
+  // actually started. If not, treat the clock as not synchronized.
   if (err == WEAVE_NO_ERROR) {
-    // TODO(https://fxbug.dev/42129131): The default implementation of GetClock_RealTimeMS only returns
-    // not-synced if the value is before Jan 1, 2000. Use the UTC fidl instead
-    // to confirm whether the clock source is from some external source.
+    zx_signals_t pending;
+    zx_status_t status = zx::unowned_clock(zx_utc_reference_get())
+                             ->wait_one(ZX_CLOCK_STARTED, zx::time(0), &pending);
+    if (status != ZX_OK || !(pending & ZX_CLOCK_STARTED)) {
+      err = WEAVE_SYSTEM_ERROR_REAL_TIME_NOT_SYNCED;
+    }
+  }
+
+  if (err == WEAVE_NO_ERROR) {
+    // TODO(https://fxbug.dev/42129131): The default implementation of GetClock_RealTimeMS only
+    // returns not-synced if the value is before Jan 1, 2000. Use the UTC fidl instead to confirm
+    // whether the clock source is from some external source.
     effective_time =
         Security::SecondsSinceEpochToPackedCertTime(static_cast<uint32_t>(now_ms / 1000));
   } else if (err == WEAVE_SYSTEM_ERROR_REAL_TIME_NOT_SYNCED) {
-    // TODO(https://fxbug.dev/42129131): Acquire the firmware build time, for now we set it to May 26, 2023
-    // as reasonable default time.
+    // TODO(https://fxbug.dev/42129131): Acquire the firmware build time, for now we set it to May
+    // 26, 2023 as reasonable default time.
     effective_time = Security::SecondsSinceEpochToPackedCertTime(1685059200U);
     FX_LOGS(WARNING) << "Real time clock not synchronized, using default time for cert validation.";
   }
   return err;
+}
+
+bool IsValidTrustAnchor(const WeaveCertificateData* trust_anchor) {
+  return (trust_anchor != nullptr && trust_anchor->CertType == nl::Weave::kCertType_AccessToken);
 }
 
 }  // namespace
@@ -249,26 +267,24 @@ WEAVE_ERROR PlatformAuthDelegate::HandleCertValidationResult(WeaveKeyExport* key
                                                              ValidationContext& valid_ctx,
                                                              WeaveCertificateSet& cert_set,
                                                              uint32_t requested_key_id) {
-  WeaveCertificateData* peer_cert;
-  WEAVE_ERROR err = WEAVE_NO_ERROR;
-
   if (key_export->IsInitiator()) {
     FX_LOGS(ERROR) << "Invalid initiator state for key export.";
     return WEAVE_ERROR_INVALID_ARGUMENT;
   }
 
-  // Only permit key export for a trusted, self-signed certificate.
-  peer_cert = valid_ctx.SigningCert;
-  if ((requested_key_id == WeaveKeyId::kClientRootKey) &&
-      (peer_cert->CertFlags & Profiles::Security::kCertFlag_IsTrusted) &&
-      peer_cert->IssuerDN.IsEqual(peer_cert->SubjectDN) &&
-      (peer_cert->SubjectDN.AttrOID == ASN1::kOID_AttributeType_CommonName)) {
-    err = WEAVE_NO_ERROR;
-  } else {
-    err = WEAVE_ERROR_UNAUTHORIZED_KEY_EXPORT_RESPONSE;
+  // Only permit key export if the trust anchor is an access token certificate,
+  // and the peer certificate is a device certificate matching the message sender's node ID.
+  const WeaveCertificateData* peer_cert = valid_ctx.SigningCert;
+  const nl::Weave::WeaveMessageInfo* msg_info = key_export->MessageInfo();
+
+  if (requested_key_id == WeaveKeyId::kClientRootKey && IsValidTrustAnchor(valid_ctx.TrustAnchor) &&
+      peer_cert != nullptr && peer_cert->CertType == nl::Weave::kCertType_Device &&
+      peer_cert->SubjectDN.AttrOID == ASN1::kOID_AttributeType_WeaveDeviceId &&
+      msg_info != nullptr && peer_cert->SubjectDN.AttrValue.WeaveId == msg_info->SourceNodeId) {
+    return WEAVE_NO_ERROR;
   }
 
-  return err;
+  return WEAVE_ERROR_UNAUTHORIZED_KEY_EXPORT_RESPONSE;
 }
 
 WEAVE_ERROR PlatformAuthDelegate::EndCertValidation(WeaveKeyExport* key_export,

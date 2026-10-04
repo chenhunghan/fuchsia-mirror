@@ -514,17 +514,17 @@ TEST_F(ManagedTestFixture, TestInspectMetrics) {
       << "Failed to connect to UsbDciService: " << dci_service.status_string();
   fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
 
-  fuchsia_hardware_usb_descriptor::wire::UsbEndpointDescriptor ep_desc{
-      .b_length = sizeof(fuchsia_hardware_usb_descriptor::wire::UsbEndpointDescriptor),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+  fdescriptor::wire::UsbEndpointDescriptor ep_desc{
+      .b_length = sizeof(fdescriptor::wire::UsbEndpointDescriptor),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = 0x02,  // EP 2 OUT
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = 1024,
       .b_interval = 0,
   };
-  fuchsia_hardware_usb_descriptor::wire::UsbSsEpCompDescriptor ss_comp_desc{
-      .b_length = sizeof(fuchsia_hardware_usb_descriptor::wire::UsbSsEpCompDescriptor),
-      .b_descriptor_type = USB_DT_SS_EP_COMPANION,
+  fdescriptor::wire::UsbSsEpCompDescriptor ss_comp_desc{
+      .b_length = sizeof(fdescriptor::wire::UsbSsEpCompDescriptor),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kSsEpCompanion),
       .b_max_burst = 0,
       .bm_attributes = 0,
       .w_bytes_per_interval = 0,
@@ -668,7 +668,8 @@ TEST_F(ManagedTestFixture, TestInspectMetrics) {
 
   const auto* type = ep2_out->node().get_property<inspect::UintPropertyValue>("type");
   ASSERT_NE(type, nullptr) << "Endpoint 'type' property was not found!";
-  EXPECT_EQ(type->value(), static_cast<uint64_t>(fdescriptor::EndpointType::kBulk));
+  EXPECT_EQ(type->value(),
+            static_cast<uint64_t>(fidl::ToUnderlying(fdescriptor::EndpointType::kBulk)));
 
   const auto* enabled = ep2_out->node().get_property<inspect::BoolPropertyValue>("enabled");
   ASSERT_NE(enabled, nullptr) << "Endpoint 'enabled' property was not found!";
@@ -775,7 +776,7 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_FifoTooSmall) {
   // Configure EP1 IN (0x81) with max packet size 512 (which is > 128)
   fdescriptor::wire::UsbEndpointDescriptor ep_desc;
   ep_desc.b_endpoint_address = 0x81;
-  ep_desc.bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk);
+  ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
   ep_desc.w_max_packet_size = 512;
   ep_desc.b_interval = 0;
 
@@ -810,7 +811,7 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_FifoSufficient) {
   // Configure EP1 IN (0x81) with max packet size 512 (which is == 512)
   fdescriptor::wire::UsbEndpointDescriptor ep_desc;
   ep_desc.b_endpoint_address = 0x81;
-  ep_desc.bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk);
+  ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
   ep_desc.w_max_packet_size = 512;
   ep_desc.b_interval = 0;
 
@@ -841,7 +842,7 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_FifoIndexOob) {
   // Since DWC_USB31_NUM_IN_EPS is 4, fifo_num 5 is OOB.
   fdescriptor::wire::UsbEndpointDescriptor ep_desc;
   ep_desc.b_endpoint_address = 0x8A;
-  ep_desc.bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk);
+  ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
   ep_desc.w_max_packet_size = 512;
   ep_desc.b_interval = 0;
 
@@ -876,7 +877,7 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_RxFifoTooSmall) {
   // Configure EP1 OUT (0x01) with max packet size 512 (which is > 128)
   fdescriptor::wire::UsbEndpointDescriptor ep_desc;
   ep_desc.b_endpoint_address = 0x01;
-  ep_desc.bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk);
+  ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
   ep_desc.w_max_packet_size = 512;
   ep_desc.b_interval = 0;
 
@@ -911,7 +912,7 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_RxFifoSufficient) {
   // Configure EP1 OUT (0x01) with max packet size 512 (which is == 512)
   fdescriptor::wire::UsbEndpointDescriptor ep_desc;
   ep_desc.b_endpoint_address = 0x01;
-  ep_desc.bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk);
+  ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
   ep_desc.w_max_packet_size = 512;
   ep_desc.b_interval = 0;
 
@@ -1606,6 +1607,117 @@ TEST_F(UnmanagedTestFixture, IrisExtensionDynamicSpeedBandwidthVotes) {
       [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
 
   EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+class UnmanagedWakeLeaseTestFixture : public UnmanagedTestFixture {
+ protected:
+  void VerifyDisconnectHoldsWakeLease(bool bypass_platform_extension, bool serve_platform_mocks) {
+    dut_.RunInEnvironmentTypeContext([serve_platform_mocks](Environment& env) {
+      env.set_serve_platform_mocks(serve_platform_mocks);
+    });
+
+    zx::result start = dut_.StartDriverWithCustomStartArgs(
+        [bypass_platform_extension](fdf::DriverStartArgs& args) {
+          dwc3_config::Config cfg;
+          cfg.enable_suspend() = false;
+          cfg.bypass_platform_extension() = bypass_platform_extension;
+          args.config(cfg.ToVmo());
+        });
+    ASSERT_OK(start);
+    dut_.runtime().RunUntilIdle();
+    ASSERT_OK(WaitForPhy());
+
+    dut_.RunInDriverContext([this, bypass_platform_extension, serve_platform_mocks](Dwc3& drv) {
+      PlatformExtension* ext = this->GetPlatformExtension(drv);
+      if (bypass_platform_extension) {
+        EXPECT_EQ(ext, nullptr);
+      } else {
+        ASSERT_NE(ext, nullptr);
+        EXPECT_EQ(ext->PowersDownCoreOnDisconnect(), serve_platform_mocks);
+      }
+    });
+
+    FakeUsbDciInterface fake_dci;
+    fake_dci.SetDeferSetConnectedFalse(true);
+    libsync::Completion set_connected_false_received;
+    fake_dci.SetSetConnectedCallback([&](bool connected) {
+      if (!connected) {
+        set_connected_false_received.Signal();
+      }
+    });
+    auto binding = BindDciInterface(&fake_dci);
+
+    // Connect and supply a wake lease via the PHY connection watcher.
+    zx::eventpair lease_client, lease_peer;
+    ASSERT_OK(zx::eventpair::create(0, &lease_client, &lease_peer));
+
+    dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+    dut_.RunInEnvironmentTypeContext(
+        [&](Environment& env) { env.usb_phy().TriggerConnection(true, std::move(lease_client)); });
+    dut_.runtime().RunUntilIdle();
+    ASSERT_OK(WaitForPhy());
+
+    dut_.RunInDriverContext(
+        [](Dwc3& drv) { EXPECT_TRUE(Dwc3TestHelper::HasConnectionLease(drv)); });
+    zx_signals_t observed = 0;
+    EXPECT_EQ(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &observed),
+              ZX_ERR_TIMED_OUT);
+
+    // Trigger disconnect while fake_dci holds the SetConnected(false) completer.
+    dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+    dut_.RunInEnvironmentTypeContext(
+        [](Environment& env) { env.usb_phy().TriggerConnection(false); });
+    dut_.runtime().RunUntilIdle();
+    ASSERT_OK(WaitForPhy());
+    set_connected_false_received.Wait();
+
+    ASSERT_TRUE(fake_dci.has_deferred_set_connected());
+
+    if (!bypass_platform_extension) {
+      dut_.RunInEnvironmentTypeContext([serve_platform_mocks](Environment& env) {
+        if (serve_platform_mocks) {
+          EXPECT_FALSE(env.vreg().enabled());
+          EXPECT_FALSE(env.clock_core().enabled());
+        } else {
+          EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u);
+        }
+      });
+    }
+
+    // While SetConnected(false) is still in flight, the connection wake lease must remain held so
+    // the system does not suspend before usb-peripheral and bound functions finish unconfiguring.
+    dut_.RunInDriverContext(
+        [](Dwc3& drv) { EXPECT_TRUE(Dwc3TestHelper::HasConnectionLease(drv)); });
+    observed = 0;
+    EXPECT_EQ(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &observed),
+              ZX_ERR_TIMED_OUT);
+
+    // Once SetConnected(false) completes, the connection wake lease must be released.
+    dut_.RunInDriverContext([&](Dwc3& drv) { fake_dci.CompleteDeferredSetConnected(ZX_OK); });
+    observed = 0;
+    EXPECT_OK(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite(), &observed));
+    EXPECT_NE(observed & ZX_EVENTPAIR_PEER_CLOSED, 0u);
+
+    dut_.RunInDriverContext(
+        [](Dwc3& drv) { EXPECT_FALSE(Dwc3TestHelper::HasConnectionLease(drv)); });
+
+    EXPECT_OK(dut_.StopDriver().status_value());
+  }
+};
+
+TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseNoPlatformExtension) {
+  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/true,
+                                 /*serve_platform_mocks=*/true);
+}
+
+TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseQualcommPlatformExtension) {
+  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/false,
+                                 /*serve_platform_mocks=*/true);
+}
+
+TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseIrisPlatformExtension) {
+  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/false,
+                                 /*serve_platform_mocks=*/false);
 }
 
 }  // namespace dwc3

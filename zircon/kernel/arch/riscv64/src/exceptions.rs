@@ -11,9 +11,8 @@ use super::arch::{
 };
 use super::restricted::Iframe;
 use super::thread::GeneralRegsSource;
-use super::user_copy::{
-    RISCV_CAPTURE_USER_COPY_FAULTS_BIT, arch_copy_from_user, is_user_accessible,
-};
+use super::user_copy::{RISCV_CAPTURE_USER_COPY_FAULTS_BIT, arch_copy_from_user};
+use super::vm::is_user_accessible;
 use crate::counters;
 use core::fmt::Write;
 use debug::ltrace::KernelConsoleWriter;

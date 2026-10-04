@@ -1199,7 +1199,7 @@ impl Task {
     ///   - `ESRCH`: the task is dead and its live resources have been dropped.
     #[track_caller]
     pub fn fs(&self) -> Result<Arc<FsContext>, Errno> {
-        Ok(self.running_state()?.fs())
+        self.running_state()?.fs()
     }
 
     /// Returns the memory manager of the task, if it exists.

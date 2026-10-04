@@ -18,11 +18,11 @@
 // Extracts the handles that would be consumed on syscalls with handle_release semantics
 // from |offset| to  |offset + chunk_size| from |user_handles| and returns them
 // in |handles| which must be at of at least size |chunk_size|.
-zx_status_t get_user_handles_to_consume(user_in_ptr<const zx_handle_t> user_handles, size_t offset,
-                                        size_t chunk_size, zx_handle_t* handles);
-
-zx_status_t get_user_handles_to_consume(user_inout_ptr<zx_handle_disposition_t> user_handles,
-                                        size_t offset, size_t chunk_size, zx_handle_t* handles);
+inline zx_status_t get_user_handles_to_consume(user_in_ptr<const zx_handle_t> user_handles,
+                                               size_t offset, size_t chunk_size,
+                                               zx_handle_t* handles) {
+  return user_handles.copy_array_from_user(handles, chunk_size, offset);
+}
 
 // Removes the handles pointed by |user_handles| from |process|. Returns ZX_OK if all handles
 // have been removed, error otherwise. It only stops early if get_user_handles() fails.
@@ -52,17 +52,5 @@ zx_status_t RemoveUserHandles(T user_handles, size_t num_handles, ProcessDispatc
   }
   return status;
 }
-
-// Returns a handle that should be sent over |channel|. In case
-// of error, the return value should be reflected back to the user.
-zx::result<HandleOwner> get_handle_for_message_locked(ProcessDispatcher* process,
-                                                      const Dispatcher* channel,
-                                                      zx_handle_t handle_val)
-    TA_REQ(process->handle_table().get_lock());
-
-zx::result<HandleOwner> get_handle_for_message_locked(ProcessDispatcher* process,
-                                                      const Dispatcher* channel,
-                                                      zx_handle_disposition_t& handle_disposition)
-    TA_REQ(process->handle_table().get_lock());
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_USER_HANDLES_H_

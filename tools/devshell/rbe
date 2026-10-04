@@ -199,10 +199,24 @@ function get_loas_cert_type_for_bazel() {
   echo "$loas_cert_type"
 }
 
+# Sets up isolated gcloud Application Default Credentials (ADC).
+# It invokes 'fx-setup-isolated-adc' to safely isolate and rewrite the developer's
+# local user default credentials under the output directory with the quota project
+# overridden to 'rbe-fuchsia-prod'.
+# This isolates workstation billing/quota to prevent developer personal projects
+# from being accidentally charged during build orchestration.
+function setup_isolated_adc() {
+  local -r local_adc="$(fx-setup-isolated-adc)"
+  if [[ -n "$local_adc" ]]; then
+    export GOOGLE_APPLICATION_CREDENTIALS="$local_adc"
+  fi
+}
+
 function ensure_adc_file_exists() {
   # If this file doesn't already exist, generate it one time using gcloud auth.
   local -r adc_file="$HOME/.config/gcloud/application_default_credentials.json"
   [[ -f "$adc_file" ]] || gcloud_auth
+  setup_isolated_adc
 }
 
 function test_bazel_rbe() {

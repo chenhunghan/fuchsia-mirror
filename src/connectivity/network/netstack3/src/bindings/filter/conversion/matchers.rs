@@ -67,6 +67,7 @@ impl TryConvertToCoreState for Matchers {
             dst_address,
             transport_protocol,
             external_matcher,
+            mark_matcher: None,
         }))
     }
 }

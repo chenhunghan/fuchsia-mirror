@@ -51,11 +51,12 @@ class FlatlandPresenter {
   // This function should be called from Flatland instance worker threads. Final clean-up is posted
   // back on the main thread, so state may still exist after this method returns.
   //
-  // `release_fence` provides the caller with a way to know that the effects of removing the session
-  // have (roughly) "appeared on screen", so that it is safe to e.g. release any client images that
-  // are now known not be be in use by Vulkan or the display controller.
+  // `release_fences` and `release_counters` provide the caller with a way to know that the effects
+  // of removing the session have (roughly) "appeared on screen", so that it is safe to e.g. release
+  // any client images that are now known not to be in use, or deliver held release fences.
   virtual void RemoveSession(scheduling::SessionId session_id,
-                             std::optional<zx::event> release_fence) = 0;
+                             std::vector<zx::event> release_fences,
+                             std::vector<zx::counter> release_counters) = 0;
 };
 
 }  // namespace flatland

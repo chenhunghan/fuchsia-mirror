@@ -66,7 +66,7 @@ class DefaultBuildFlagsTest(unittest.TestCase):
         build_config_dir.mkdir(parents=True)
 
         build_bazel_content = """
-build_flags(
+compiler_build_flags(
     name = "compiler",
     cflags = ["-O2"],
 )

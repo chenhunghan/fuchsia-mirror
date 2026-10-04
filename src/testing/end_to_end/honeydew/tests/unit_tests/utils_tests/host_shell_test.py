@@ -213,6 +213,45 @@ class HostShellTests(unittest.TestCase):
 
         mock_subprocess_run.assert_called_once()
 
+    @parameterized.expand(
+        [
+            param(
+                label="file_not_found",
+                err=FileNotFoundError("ls not found"),
+                expected_msg="Could not execute",
+            ),
+            param(
+                label="permission_denied",
+                err=PermissionError("permission denied"),
+                expected_msg="Could not execute",
+            ),
+            param(
+                label="subprocess_error",
+                err=subprocess.SubprocessError("unexpected failure"),
+                expected_msg="Unknown error occurred",
+            ),
+        ],
+        name_func=_custom_test_name_func,
+    )
+    @mock.patch.object(subprocess, "run", autospec=True)
+    def test_run_raises_host_cmd_error_when_cmd_cannot_run(
+        self,
+        mock_subprocess_run: mock.Mock,
+        label: str,  # pylint: disable=unused-argument
+        err: Exception,
+        expected_msg: str,
+    ) -> None:
+        """Test case for host_shell.run() wrapping launch failures in HostCmdError"""
+        mock_subprocess_run.side_effect = err
+
+        with self.assertRaisesRegex(
+            errors.HostCmdError, expected_msg
+        ) as context:
+            host_shell.run(cmd=["ls"])
+
+        self.assertIs(context.exception.__cause__, err)
+        mock_subprocess_run.assert_called_once()
+
     @mock.patch.object(
         subprocess,
         "Popen",

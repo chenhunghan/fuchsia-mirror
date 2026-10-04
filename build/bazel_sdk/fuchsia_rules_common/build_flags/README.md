@@ -381,7 +381,7 @@ There is *no direct way* to support this in Bazel, the alternatives are:
 
   ```py
   # From //third_party/tink-cc/BUILD.bazel
-  load("@rules_fuchsia_common//build_flags:build_flags.bzl")
+  load("@fuchsia_rules_common//build_flags:build_flags.bzl")
 
   # These build flags are required to use the public Tink library headers
   # to silence annoying compiler warnings.
@@ -578,7 +578,7 @@ cc_binary(
 The list of default `build_flags()` labels to use for C++ artifacts is
 determined using the following scheme:
 
-- A Bazel toolchain type (`@rules_fuchsia_common//build_flags:toolchain_type`)
+- A Bazel toolchain type (`@fuchsia_rules_common//build_flags:toolchain_type`)
   is defined to expose lists of default flags for different target types
   (i.e. "common", "executable" and "shared_library" artifacts).
 

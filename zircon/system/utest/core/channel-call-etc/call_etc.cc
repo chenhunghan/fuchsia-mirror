@@ -530,8 +530,8 @@ TEST(ChannelCallEtcTest, WithoutWriteRightReturnsAccessDenied) {
 }
 
 TEST(ChannelCallEtcTest, FromWrongObjectTypeReturnsWrongType) {
-  zx::event event;
-  ASSERT_OK(zx::event::create(0, &event));
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(0, 0, &vmo));
 
   char req[4] = {0};
   char rep[4] = {0};
@@ -547,7 +547,7 @@ TEST(ChannelCallEtcTest, FromWrongObjectTypeReturnsWrongType) {
   };
   uint32_t actual_bytes = 0;
   uint32_t actual_handles = 0;
-  EXPECT_EQ(zx_channel_call_etc(event.get(), 0, zx::time::infinite().get(), &args, &actual_bytes,
+  EXPECT_EQ(zx_channel_call_etc(vmo.get(), 0, zx::time::infinite().get(), &args, &actual_bytes,
                                 &actual_handles),
             ZX_ERR_WRONG_TYPE);
 }

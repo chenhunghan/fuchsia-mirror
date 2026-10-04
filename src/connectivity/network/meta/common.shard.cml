@@ -101,7 +101,6 @@
             protocol: [
                 "fuchsia.net.filter.Control",
                 "fuchsia.net.interfaces.admin.Installer",
-                "fuchsia.net.name.DnsServerWatcher",
                 "fuchsia.net.ndp.RouterAdvertisementOptionWatcherProvider",
                 "fuchsia.net.routes.admin.RouteTableV4",
                 "fuchsia.net.routes.admin.RouteTableV6",

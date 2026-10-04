@@ -37,6 +37,10 @@ class LocationFCTests(unittest.IsolatedAsyncioTestCase):
             spec=affordances_capable.RebootCapableDevice,
             autospec=True,
         )
+        self.suspend_resume_affordance_obj = mock.MagicMock(
+            spec=affordances_capable.SuspendResumeCapableDevice,
+            autospec=True,
+        )
         self.fc_transport_obj = mock.MagicMock(
             spec=fc_transport.FuchsiaController,
             autospec=True,
@@ -55,6 +59,7 @@ class LocationFCTests(unittest.IsolatedAsyncioTestCase):
             ffx=self.ffx_transport_obj,
             fuchsia_controller=self.fc_transport_obj,
             reboot_affordance=self.reboot_affordance_obj,
+            suspend_resume_affordance=self.suspend_resume_affordance_obj,
         )
 
     def test_verify_supported(self) -> None:
@@ -67,11 +72,18 @@ class LocationFCTests(unittest.IsolatedAsyncioTestCase):
                 ffx=self.ffx_transport_obj,
                 fuchsia_controller=self.fc_transport_obj,
                 reboot_affordance=self.reboot_affordance_obj,
+                suspend_resume_affordance=self.suspend_resume_affordance_obj,
             )
 
     def test_init_register_for_on_device_boot(self) -> None:
         """Test if Location registers on_device_boot."""
         self.reboot_affordance_obj.register_for_on_device_boot.assert_called_once_with(
+            self.location_obj._connect_proxy
+        )
+
+    def test_init_register_for_on_device_resume(self) -> None:
+        """Test if Location registers on_device_resume."""
+        self.suspend_resume_affordance_obj.register_on_device_resume_fn.assert_called_once_with(
             self.location_obj._connect_proxy
         )
 

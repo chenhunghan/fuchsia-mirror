@@ -5,4 +5,5 @@
 import unittest  # noqa
 
 from test_build_dir import *  # noqa
+from test_metrics import *  # noqa
 from test_pool import *  # noqa

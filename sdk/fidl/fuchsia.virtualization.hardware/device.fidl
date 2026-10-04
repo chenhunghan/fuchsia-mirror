@@ -84,7 +84,7 @@ closed protocol VirtioBalloon {
 
     /// Get memory statistics from the balloon device.
     strict GetMemStats() -> (struct {
-        status zx.Status;
+        status zx.Result;
         mem_stats vector<fuchsia.virtualization.MemStat>:optional;
     });
 };

@@ -43,11 +43,11 @@ use starnix_uapi::{
     CLONE_FS, CLONE_NEWNS, CLONE_NEWUTS, CLONE_SETTLS, CLONE_VFORK, NGROUPS_MAX, PR_CAP_AMBIENT,
     PR_CAP_AMBIENT_CLEAR_ALL, PR_CAP_AMBIENT_IS_SET, PR_CAP_AMBIENT_LOWER, PR_CAP_AMBIENT_RAISE,
     PR_CAPBSET_DROP, PR_CAPBSET_READ, PR_GET_CHILD_SUBREAPER, PR_GET_DUMPABLE, PR_GET_KEEPCAPS,
-    PR_GET_NAME, PR_GET_NO_NEW_PRIVS, PR_GET_SECCOMP, PR_GET_SECUREBITS, PR_GET_TIMERSLACK,
-    PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE, PR_SET_KEEPCAPS, PR_SET_NAME, PR_SET_NO_NEW_PRIVS,
-    PR_SET_PDEATHSIG, PR_SET_PTRACER, PR_SET_SECCOMP, PR_SET_SECUREBITS, PR_SET_TIMERSLACK,
-    PR_SET_VMA, PR_SET_VMA_ANON_NAME, PRIO_PROCESS, PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_TRACEME,
-    RUSAGE_CHILDREN, SCHED_RESET_ON_FORK, SECCOMP_FILTER_FLAG_LOG,
+    PR_GET_NAME, PR_GET_NO_NEW_PRIVS, PR_GET_PDEATHSIG, PR_GET_SECCOMP, PR_GET_SECUREBITS,
+    PR_GET_TIMERSLACK, PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE, PR_SET_KEEPCAPS, PR_SET_NAME,
+    PR_SET_NO_NEW_PRIVS, PR_SET_PDEATHSIG, PR_SET_PTRACER, PR_SET_SECCOMP, PR_SET_SECUREBITS,
+    PR_SET_TIMERSLACK, PR_SET_VMA, PR_SET_VMA_ANON_NAME, PRIO_PROCESS, PTRACE_ATTACH, PTRACE_SEIZE,
+    PTRACE_TRACEME, RUSAGE_CHILDREN, SCHED_RESET_ON_FORK, SECCOMP_FILTER_FLAG_LOG,
     SECCOMP_FILTER_FLAG_NEW_LISTENER, SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_TSYNC,
     SECCOMP_FILTER_FLAG_TSYNC_ESRCH, SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES,
     SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT, SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT,
@@ -951,7 +951,25 @@ pub fn sys_prctl(
             })
         }
         PR_SET_PDEATHSIG => {
-            track_stub!(TODO("https://fxbug.dev/322874397"), "PR_SET_PDEATHSIG");
+            // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+            //
+            //   Set the parent-death signal of the calling process to sig (either a
+            //   signal value in the range [1, NSIG - 1], or 0 to clear).  This is the
+            //   signal that the calling process will get when its parent dies.
+            let signal =
+                if arg2 == 0 { None } else { Some(Signal::try_from(UncheckedSignal::new(arg2))?) };
+            current_task.thread_group().write().set_parent_death_signal(signal);
+            Ok(().into())
+        }
+        PR_GET_PDEATHSIG => {
+            // From <https://man7.org/linux/man-pages/man2/PR_GET_PDEATHSIG.2const.html>:
+            //
+            //   Return the parent-death signal number of the calling process, in the
+            //   location pointed to by sig.
+            let signal_ptr = UserRef::<i32>::new(UserAddress::from(arg2));
+            let parent_death_signal = current_task.thread_group().read().parent_death_signal();
+            let signal_number = parent_death_signal.map_or(0, |signal| signal.number() as i32);
+            current_task.write_object(signal_ptr, &signal_number)?;
             Ok(().into())
         }
         PR_SET_NAME => {
@@ -1826,8 +1844,8 @@ pub fn sys_kcmp(
             Ok(encode_ordering(obfuscate_value(files1.raw()).cmp(&obfuscate_value(files2.raw()))))
         }
         KcmpResource::FS => {
-            let fs1 = task1.running_state()?.fs();
-            let fs2 = task2.running_state()?.fs();
+            let fs1 = task1.fs()?;
+            let fs2 = task2.fs()?;
             Ok(encode_ordering(obfuscate_arc(&fs1).cmp(&obfuscate_arc(&fs2))))
         }
         KcmpResource::SIGHAND => Ok(encode_ordering(

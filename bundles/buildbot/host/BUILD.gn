@@ -16,6 +16,7 @@ group("host") {
     # because that would create dep cycles.
     "//build/images/updates/tests:fx_publish_tests($host_toolchain)",
     "//src/developer/ffx:host_tests($host_toolchain)",
+    "//src/developer/fuchsia-controller:host_tests($host_toolchain)",
     "//tools:host_tests($host_toolchain)",
   ]
 }

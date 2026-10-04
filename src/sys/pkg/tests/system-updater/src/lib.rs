@@ -12,6 +12,7 @@ use assert_matches::assert_matches;
 use blobfs_ramdisk::BlobfsRamdisk;
 use cobalt_sw_delivery_registry as metrics;
 use fidl::endpoints::{DiscoverableProtocolMarker as _, ServerEnd};
+use fidl_fuchsia_feedback as ffeedback;
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_hardware_power_statecontrol::{ShutdownAction, ShutdownOptions, ShutdownReason};
 use fidl_fuchsia_io as fio;
@@ -35,6 +36,7 @@ use fuchsia_sync::Mutex;
 use fuchsia_url::fuchsia_pkg::AbsoluteComponentUrl;
 use futures::channel::oneshot;
 use futures::prelude::*;
+use mock_crash_reporter::MockCrashReporterService;
 use mock_metrics::MockMetricEventLoggerFactory;
 use mock_paver::{MockPaverService, MockPaverServiceBuilder, PaverEvent, hooks as mphooks};
 use mock_reboot::MockRebootService;
@@ -174,12 +176,14 @@ enum Protocol {
     RetainedBlobs,
     OtaDownloader,
     HttpLoader,
+    CrashReporter,
 }
 
 type SystemUpdaterInteractions = Arc<Mutex<Vec<SystemUpdaterInteraction>>>;
 
 struct TestEnvBuilder {
     paver_service_builder: MockPaverServiceBuilder,
+    crash_reporter: Option<MockCrashReporterService>,
     blocked_protocols: HashSet<Protocol>,
     mount_data: bool,
     history: Option<serde_json::Value>,
@@ -187,6 +191,7 @@ struct TestEnvBuilder {
     ota_manifest: Option<Vec<u8>>,
     blobs: HashMap<Hash, Vec<u8>>,
     verify_existing_blobs: bool,
+    excessive_update_duration_seconds: Option<u32>,
     blob_reader_mock:
         Option<Box<dyn FnMut(ffxfs::BlobReaderRequestStream) + Send + Sync + 'static>>,
     blob_implementation: Option<blobfs_ramdisk::Implementation>,
@@ -196,6 +201,7 @@ impl TestEnvBuilder {
     fn new() -> Self {
         TestEnvBuilder {
             paver_service_builder: MockPaverServiceBuilder::new(),
+            crash_reporter: None,
             blocked_protocols: HashSet::new(),
             mount_data: true,
             history: None,
@@ -203,6 +209,7 @@ impl TestEnvBuilder {
             ota_manifest: None,
             blobs: HashMap::new(),
             verify_existing_blobs: false,
+            excessive_update_duration_seconds: None,
             blob_reader_mock: None,
             blob_implementation: None,
         }
@@ -213,6 +220,11 @@ impl TestEnvBuilder {
         F: FnOnce(MockPaverServiceBuilder) -> MockPaverServiceBuilder,
     {
         self.paver_service_builder = f(self.paver_service_builder);
+        self
+    }
+
+    fn crash_reporter(mut self, crash_reporter: MockCrashReporterService) -> Self {
+        self.crash_reporter = Some(crash_reporter);
         self
     }
 
@@ -255,6 +267,11 @@ impl TestEnvBuilder {
         self
     }
 
+    fn excessive_update_duration_seconds(mut self, excessive_update_duration_seconds: u32) -> Self {
+        self.excessive_update_duration_seconds = Some(excessive_update_duration_seconds);
+        self
+    }
+
     fn mock_blob_reader(
         mut self,
         mock: impl FnMut(ffxfs::BlobReaderRequestStream) + Send + Sync + 'static,
@@ -272,6 +289,7 @@ impl TestEnvBuilder {
     async fn build(self) -> TestEnv {
         let Self {
             paver_service_builder,
+            crash_reporter,
             blocked_protocols,
             mount_data,
             history,
@@ -279,6 +297,7 @@ impl TestEnvBuilder {
             ota_manifest,
             blobs,
             verify_existing_blobs,
+            excessive_update_duration_seconds,
             blob_reader_mock,
             blob_implementation,
         } = self;
@@ -388,6 +407,9 @@ impl TestEnvBuilder {
             Arc::clone(&blobfs),
         ));
         let http_loader_service = Arc::new(MockHttpLoaderService::new(ota_manifest));
+        let crash_reporter = Arc::new(crash_reporter.unwrap_or_else(|| {
+            MockCrashReporterService::new(|_| Ok(ffeedback::FileReportResults::default()))
+        }));
 
         // Register the mock services with the test environment service provider.
         {
@@ -401,6 +423,7 @@ impl TestEnvBuilder {
             let retained_blobs_service = Arc::clone(&retained_blobs_service);
             let ota_downloader_service = Arc::clone(&ota_downloader_service);
             let http_loader_service = Arc::clone(&http_loader_service);
+            let crash_reporter = Arc::clone(&crash_reporter);
 
             let should_register = |protocol: Protocol| !blocked_protocols.contains(&protocol);
 
@@ -510,6 +533,14 @@ impl TestEnvBuilder {
                     .detach()
                 });
             }
+            if should_register(Protocol::CrashReporter) {
+                fs.dir("svc").add_fidl_service(move |stream| {
+                    fasync::Task::spawn(
+                        Arc::clone(&crash_reporter).run_crash_reporter_service(stream),
+                    )
+                    .detach()
+                });
+            }
         }
 
         let fs_holder = Mutex::new(Some(fs));
@@ -563,6 +594,7 @@ impl TestEnvBuilder {
         builder
             .add_route(
                 Route::new()
+                    .capability(Capability::protocol::<ffeedback::CrashReporterMarker>())
                     .capability(Capability::protocol::<
                         fidl_fuchsia_metrics::MetricEventLoggerFactoryMarker,
                     >())
@@ -668,6 +700,38 @@ impl TestEnvBuilder {
             )
             .await
             .unwrap();
+        if let Some(excessive_update_duration_seconds) = excessive_update_duration_seconds {
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.system-updater.ExcessiveUpdateDurationSeconds".parse().unwrap(),
+                    value: excessive_update_duration_seconds.into(),
+                }))
+                .await
+                .unwrap();
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::configuration(
+                            "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+                        ))
+                        .from(Ref::self_())
+                        .to(&system_updater),
+                )
+                .await
+                .unwrap();
+        } else {
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::configuration(
+                            "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+                        ))
+                        .from(Ref::void())
+                        .to(&system_updater),
+                )
+                .await
+                .unwrap();
+        }
 
         let realm_instance = builder.build().await.unwrap();
 
@@ -866,15 +930,20 @@ impl TestEnv {
 
 struct MockCacheService {
     sync_response: Mutex<Option<Result<(), Status>>>,
+    sync_delay: Mutex<Option<std::time::Duration>>,
     interactions: SystemUpdaterInteractions,
 }
 impl MockCacheService {
     fn new(interactions: SystemUpdaterInteractions) -> Self {
-        Self { sync_response: Mutex::new(None), interactions }
+        Self { sync_response: Mutex::new(None), sync_delay: Mutex::new(None), interactions }
     }
 
     fn set_sync_response(&self, response: Result<(), Status>) {
         self.sync_response.lock().replace(response);
+    }
+
+    fn set_sync_delay(&self, delay: std::time::Duration) {
+        self.sync_delay.lock().replace(delay);
     }
 
     async fn run_cache_service(
@@ -885,6 +954,10 @@ impl MockCacheService {
             match event {
                 fidl_fuchsia_pkg::PackageCacheRequest::Sync { responder } => {
                     self.interactions.lock().push(BlobfsSync);
+                    let delay = *self.sync_delay.lock();
+                    if let Some(delay) = delay {
+                        fasync::Timer::new(delay).await;
+                    }
                     responder.send(
                         self.sync_response.lock().unwrap_or(Ok(())).map_err(|s| s.into_raw()),
                     )?;
@@ -1088,13 +1161,23 @@ type ResumeHandle = oneshot::Sender<()>;
 
 struct MockHttpLoaderService {
     manifest: Option<Vec<u8>>,
+    responses: Mutex<std::collections::VecDeque<fhttp::Response>>,
     blocker: Mutex<Option<oneshot::Sender<ResumeHandle>>>,
     received_headers: Mutex<Vec<Vec<fhttp::Header>>>,
 }
 
 impl MockHttpLoaderService {
     fn new(manifest: Option<Vec<u8>>) -> Self {
-        Self { manifest, blocker: Mutex::new(None), received_headers: Mutex::new(Vec::new()) }
+        Self {
+            manifest,
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            blocker: Mutex::new(None),
+            received_headers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn push_response(&self, response: fhttp::Response) {
+        self.responses.lock().push_back(response);
     }
 
     fn received_headers(&self) -> Vec<Vec<fhttp::Header>> {
@@ -1125,6 +1208,11 @@ impl MockHttpLoaderService {
 
                     if let Some(headers) = &request.headers {
                         self.received_headers.lock().push(headers.clone());
+                    }
+
+                    if let Some(response) = self.responses.lock().pop_front() {
+                        let _ = responder.send(response);
+                        continue;
                     }
 
                     let url = request.url.unwrap();

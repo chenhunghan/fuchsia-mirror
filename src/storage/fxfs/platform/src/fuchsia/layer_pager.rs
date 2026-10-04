@@ -218,7 +218,7 @@ impl LayerPagerImpl {
             mapping_extents.push(Extent::try_new(current_offset..aligned_size, None)?);
         }
         let data_extents = Extents::try_new(&mapping_extents, 0)?;
-        let extent_count = mapping_extents.len() as u32;
+        let extent_count = data_extents.len() as u32;
         let encrypted = raw_key.is_some();
         let key_bytes_len = if encrypted { 32 } else { 0 };
         let allocation_size = (extent_count as usize * 8) + key_bytes_len;
@@ -297,6 +297,8 @@ impl LayerPager for LayerPagerImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
+    use vmo_fifo::Receiver;
 
     #[fuchsia::test]
     fn test_mapped_vmo_io_error_signal() {
@@ -310,5 +312,88 @@ mod tests {
 
         vmo_dup.signal(zx::Signals::empty(), zx::Signals::USER_0).unwrap();
         assert!(mapped.has_io_error());
+    }
+
+    #[fuchsia::test]
+    async fn test_register_layer_large_extent() {
+        let (mapper_proxy, mut mapper_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
+
+        let large_len = (0x3fff_ffffu64 + 5) * mapping::BLOCK_SIZE;
+        let start_dev = 10 * mapping::BLOCK_SIZE;
+
+        let client_task = async move {
+            let layer_pager = LayerPagerImpl::new(&mapper_proxy).await.expect("new failed");
+            let file_extents = [FileExtent::new(0, start_dev..(start_dev + large_len)).unwrap()];
+            let (key, _vmo) = layer_pager
+                .register_layer(large_len, &file_extents, None)
+                .await
+                .expect("register_layer failed");
+            assert_eq!(key, 1);
+        };
+
+        let server_task = async move {
+            let Some(Ok(fblock::MapperRequest::OpenSession {
+                session,
+                mapping_vmo,
+                responder,
+                ..
+            })) = mapper_stream.next().await
+            else {
+                panic!("Expected OpenSession");
+            };
+            responder.send(Ok(())).unwrap();
+
+            let mut session_stream = session.into_stream();
+            let Some(Ok(fblock::MapperSessionRequest::CreateVmo { responder, .. })) =
+                session_stream.next().await
+            else {
+                panic!("Expected CreateVmo");
+            };
+            let vmo = zx::Vmo::create(4096).unwrap();
+            responder.send(Ok(vmo)).unwrap();
+
+            fasync::unblock(move || {
+                let mut receiver =
+                    Receiver::<RawMappingCommand>::new(mapping_vmo, PENDING_COMMANDS_CAPACITY)
+                        .unwrap();
+                let cmd_raw = receiver.peek().expect("peek failed");
+                let cmd = MappingCommand::try_from(*cmd_raw).expect("try_from failed");
+
+                let (offset, extent_count) = match cmd {
+                    MappingCommand::Mappings {
+                        key,
+                        offset,
+                        stored_size,
+                        device_offset,
+                        metadata_count,
+                        extent_count,
+                        encrypted,
+                    } => {
+                        assert_eq!(key, 1);
+                        assert_eq!(stored_size, large_len);
+                        assert_eq!(device_offset, 0);
+                        assert_eq!(metadata_count, 0);
+                        assert_eq!(extent_count, 2);
+                        assert!(!encrypted);
+                        (offset, extent_count)
+                    }
+                    _ => panic!("Expected Mappings command"),
+                };
+
+                let buffer = cmd_raw.payload_slice(offset, extent_count * 8).to_vec();
+                let expected_extents =
+                    Extents::try_new([Extent::new(0..large_len, Some(start_dev))], 0).unwrap();
+                let mut expected_payload = Vec::new();
+                for val in Extents::encode_extents(&expected_extents) {
+                    expected_payload.extend_from_slice(&val.to_le_bytes());
+                }
+                assert_eq!(buffer, expected_payload);
+                cmd_raw.pop().expect("pop failed");
+            })
+            .await;
+        };
+
+        futures::join!(client_task, server_task);
     }
 }

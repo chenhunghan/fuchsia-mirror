@@ -9,25 +9,25 @@ from lib import Fib
 
 
 class TestLib(unittest.TestCase):
-    def test_Fib0(self):
+    def test_Fib0(self) -> None:
         self.assertEqual(Fib(0), 0)
 
-    def test_Fib1(self):
+    def test_Fib1(self) -> None:
         self.assertEqual(Fib(1), 1)
 
-    def test_Fib2(self):
+    def test_Fib2(self) -> None:
         self.assertEqual(Fib(2), 1)
 
-    def test_Fib3(self):
+    def test_Fib3(self) -> None:
         self.assertEqual(Fib(3), 2)
 
-    def test_Fib4(self):
+    def test_Fib4(self) -> None:
         self.assertEqual(Fib(4), 3)
 
-    def test_Fib5(self):
+    def test_Fib5(self) -> None:
         self.assertEqual(Fib(5), 5)
 
-    def test_Fib6(self):
+    def test_Fib6(self) -> None:
         self.assertEqual(Fib(6), 8)
 
 

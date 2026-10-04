@@ -59,7 +59,7 @@ extern "C" int64_t TestStart() {
   if (executable_module.init.size() != 2) {
     return 1;
   }
-  executable_module.init.CallInit(executable_module.link_map.addr);
+  executable_module.init.callable_init(executable_module.link_map.addr)();
   if (a != 2) {
     return 2;
   }
@@ -67,7 +67,7 @@ extern "C" int64_t TestStart() {
   if (executable_module.fini.size() != 2) {
     return 3;
   }
-  executable_module.fini.CallFini(executable_module.link_map.addr);
+  executable_module.fini.callable_fini(executable_module.link_map.addr)();
   if (a != 4) {
     return 4;
   }

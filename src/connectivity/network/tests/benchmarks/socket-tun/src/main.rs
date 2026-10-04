@@ -353,9 +353,14 @@ async fn bench_udp<'a, I: IpExt>(
 
         let transfer_size = message_size * message_count;
 
-        // Set receive buffer to the total size of the write to ensure the
-        // entire write can complete before reading.
-        server_sock.set_recv_buffer_size(transfer_size).expect("set receive buffer size");
+        // Set receive buffer large enough to hold the entire write so it can
+        // complete before reading. Netstacks charge a per-message bookkeeping
+        // overhead against the receive buffer in addition to the payload, so
+        // leave room for it on top of the payload bytes.
+        const PER_MESSAGE_RCVBUF_OVERHEAD: usize = 256;
+        server_sock
+            .set_recv_buffer_size((message_size + PER_MESSAGE_RCVBUF_OVERHEAD) * message_count)
+            .expect("set receive buffer size");
 
         // Also set the send buffer size to the transfer value.
         //

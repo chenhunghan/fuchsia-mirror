@@ -100,7 +100,7 @@ int main() {
     MoveFile(/*from=*/kCurrentSystemTimePath, /*to=*/kPreviousSystemTimePath);
     MoveFile(/*from=*/kCurrentDiskBackedLogsMetadataPath,
              /*to=*/kPreviousDiskBackedLogsMetadataPath);
-    CreatePreviousLogsFile(cobalt.get(), kPersistedLogsTotalSize);
+    CreatePreviousLogsFile(cobalt.get(), feedback_config->persisted_logs_total_size);
     MoveAndRecordBootId(uuid::Generate());
     if (std::string build_version; files::ReadFileToString(kBuildVersionPath, &build_version)) {
       MoveAndRecordBuildVersion(build_version, kPreviousBuildVersionPath, kCurrentBuildVersionPath);

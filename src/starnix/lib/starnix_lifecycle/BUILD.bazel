@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_lifecycle",
+    srcs = [
+        "atomic_counter.rs",
+        "delayed_releaser.rs",
+        "drop_notifier.rs",
+        "lib.rs",
+    ],
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/lib:__pkg__",
+        "//src/starnix/modules:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-async",
+        "//src/starnix/lib/starnix_types",
+    ],
+)

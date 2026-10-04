@@ -1,0 +1,90 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.usb.descriptor;
+
+/// USB Communications Device Class setup request codes.
+type CdcRequest = flexible enum : uint8 {
+    SEND_ENCAPSULATED_COMMAND = 0x00;
+    GET_ENCAPSULATED_RESPONSE = 0x01;
+    SET_LINE_CODING = 0x20;
+    GET_LINE_CODING = 0x21;
+    SET_CONTROL_LINE_STATE = 0x22;
+    SEND_BREAK = 0x23;
+    SET_ETHERNET_MULTICAST_FILTERS = 0x40;
+    SET_ETHERNET_PM_PATTERN_FILTER = 0x41;
+    GET_ETHERNET_PM_PATTERN_FILTER = 0x42;
+    SET_ETHERNET_PACKET_FILTER = 0x43;
+    GET_ETHERNET_STATISTIC = 0x44;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Communications Device Class notification codes.
+type CdcNotification = flexible enum : uint8 {
+    NETWORK_CONNECTION = 0x00;
+    RESPONSE_AVAILABLE = 0x01;
+    SERIAL_STATE = 0x20;
+    CONNECTION_SPEED_CHANGE = 0x2a;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB CDC Ethernet packet filter mode bits.
+const CDC_PACKET_TYPE_PROMISCUOUS uint16 = 0x01;
+const CDC_PACKET_TYPE_ALL_MULTICAST uint16 = 0x02;
+const CDC_PACKET_TYPE_DIRECTED uint16 = 0x04;
+const CDC_PACKET_TYPE_BROADCAST uint16 = 0x08;
+const CDC_PACKET_TYPE_MULTICAST uint16 = 0x10;
+
+/// CDC subclasses for the Communications Interface Class.
+type CdcSubclass = flexible enum : uint8 {
+    DIRECT_LINE = 0x01;
+    ABSTRACT = 0x02;
+    TELEPHONE = 0x03;
+    MULTI_CHANNEL = 0x04;
+    CAPI = 0x05;
+    ETHERNET = 0x06;
+    ATM = 0x07;
+    WIRELESS_HANDSET = 0x08;
+    DEVICE_MGMT = 0x09;
+    MOBILE_DIRECT = 0x0a;
+    OBEX = 0x0b;
+    ETHERNET_EMU = 0x0c;
+    NETWORK_CTRL = 0x0d;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// CDC class-specific descriptor subtypes.
+type CdcDescriptorSubtype = flexible enum : uint8 {
+    HEADER = 0x00;
+    CALL_MGMT = 0x01;
+    ABSTRACT_CTRL_MGMT = 0x02;
+    DIRECT_LINE_MGMT = 0x03;
+    TELEPHONE_RINGER = 0x04;
+    TELEPHONE_CALL_REPORTING = 0x05;
+    UNION = 0x06;
+    COUNTRY_SELECTION = 0x07;
+    TELEPHONE_OP_MODES = 0x08;
+    USB_TERMINAL = 0x09;
+    NETWORK_CHANNEL = 0x0a;
+    PROTOCOL_UNIT = 0x0b;
+    EXTENSION_UNIT = 0x0c;
+    MULTI_CHANNEL_MGMT = 0x0d;
+    CAPI_CTRL_MGMT = 0x0e;
+    ETHERNET = 0x0f;
+    ATM_NETWORKING = 0x10;
+    WIRELESS_HANDSET_CTRL = 0x11;
+    MOBILE_DIRECT_LINE = 0x12;
+    MDLM_DETAIL = 0x13;
+    DEVICE_MGMT = 0x14;
+    OBEX = 0x15;
+    COMMAND_SET = 0x16;
+    COMMAND_SET_DETAIL = 0x17;
+    TELEPHONE_CTRL = 0x18;
+    OBEX_SERVICE_ID = 0x19;
+    NCM = 0x1a;
+    @unknown
+    UNDEFINED = 0xee;
+};

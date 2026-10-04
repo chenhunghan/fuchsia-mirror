@@ -2758,16 +2758,16 @@ TEST(ChannelTest, ReadZeroByteZeroHandleMessageSucceeds) {
 }
 
 TEST(ChannelTest, ReadFromWrongObjectTypeReturnsWrongType) {
-  zx::event event;
-  ASSERT_OK(zx::event::create(0, &event));
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(0, 0, &vmo));
 
   char byte = 0;
   uint32_t actual_bytes = 0;
   uint32_t actual_handles = 0;
-  EXPECT_EQ(zx_channel_read(event.get(), 0, &byte, nullptr, 1, 0, &actual_bytes, &actual_handles),
+  EXPECT_EQ(zx_channel_read(vmo.get(), 0, &byte, nullptr, 1, 0, &actual_bytes, &actual_handles),
             ZX_ERR_WRONG_TYPE);
   zx_handle_info_t info = {};
-  EXPECT_EQ(zx_channel_read_etc(event.get(), 0, &byte, &info, 1, 1, &actual_bytes, &actual_handles),
+  EXPECT_EQ(zx_channel_read_etc(vmo.get(), 0, &byte, &info, 1, 1, &actual_bytes, &actual_handles),
             ZX_ERR_WRONG_TYPE);
 }
 
@@ -3027,8 +3027,8 @@ TEST(ChannelTest, CallWithoutWriteRightReturnsAccessDenied) {
 }
 
 TEST(ChannelTest, CallFromWrongObjectTypeReturnsWrongType) {
-  zx::event event;
-  ASSERT_OK(zx::event::create(0, &event));
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(0, 0, &vmo));
 
   char wr_buf[4] = {0};
   char rd_buf[4] = {0};
@@ -3045,7 +3045,7 @@ TEST(ChannelTest, CallFromWrongObjectTypeReturnsWrongType) {
 
   uint32_t actual_bytes = 0;
   uint32_t actual_handles = 0;
-  EXPECT_EQ(zx_channel_call(event.get(), 0, zx::time::infinite().get(), &args, &actual_bytes,
+  EXPECT_EQ(zx_channel_call(vmo.get(), 0, zx::time::infinite().get(), &args, &actual_bytes,
                             &actual_handles),
             ZX_ERR_WRONG_TYPE);
 }

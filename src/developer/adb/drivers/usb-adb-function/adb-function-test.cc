@@ -23,6 +23,8 @@
 
 #include "src/devices/usb/lib/usb-endpoint/testing/fake-usb-endpoint-server.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_adb_function {
 
 class UsbAdbTestHelper {
@@ -494,7 +496,7 @@ class UsbAdbTest : public testing::Test {
     ASSERT_TRUE(iface_client_.is_valid());
     fidl::Result result = iface_client_->SetConfigured({{
         .configured = true,
-        .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+        .speed = fdescriptor::UsbSpeed::kFull,
     }});
     EXPECT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
 
@@ -1230,6 +1232,99 @@ TEST_F(UsbAdbTest, InspectStateTransitions) {
   EXPECT_TRUE(online_prop->value());
 
   ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+TEST_F(UsbAdbTest, InspectLifecycleEvents) {
+  auto has_event = [&](const char* endpoint_name, const std::string& expected_event) {
+    const auto* event_history =
+        this->hierarchy().GetByPath({"usb-adb-function", endpoint_name, "event_history"});
+    if (event_history == nullptr) {
+      return false;
+    }
+    for (const auto& child : event_history->children()) {
+      const auto* time_prop = child.node().get_property<inspect::UintPropertyValue>("@time");
+      const auto* event_prop = child.node().get_property<inspect::StringPropertyValue>("event");
+      if (time_prop != nullptr && event_prop != nullptr && event_prop->value() == expected_event) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto expect_lifecycle_event = [&](const std::string& expected_event) {
+    inspect::Inspector inspector;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { inspector = UsbAdbTestHelper::GetInspector(dev); });
+    ASSERT_NO_FATAL_FAILURE(ReadInspect(inspector));
+    EXPECT_TRUE(has_event("bulk_in", expected_event))
+        << "Missing event '" << expected_event << "' in bulk_in/event_history";
+    EXPECT_TRUE(has_event("bulk_out", expected_event))
+        << "Missing event '" << expected_event << "' in bulk_out/event_history";
+  };
+
+  // 1. StartAdb logs "adb_client_connected".
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_connected"));
+
+  // 2. SetConfigured(false) while kOnline logs "usb_bus_disconnected: SetConfigured(false)".
+  auto deconfig_result = iface_client_->SetConfigured({{
+      .configured = false,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+  }});
+  ASSERT_TRUE(deconfig_result.is_ok());
+  WaitForState(State::kAwaitingUsbConnection);
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("usb_bus_disconnected: SetConfigured(false)"));
+
+  // 3. StopAdb logs "adb_client_disconnected: StopAdb".
+  usb_impl = {};
+  iface_client_ = {};
+  usb_impl = NormalStartAdb();
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  auto stop_res = client_->StopAdb();
+  ASSERT_TRUE(stop_res.ok());
+  EXPECT_TRUE(stop_res->is_ok());
+  WaitForState(State::kAwaitingUsbConnection);
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_disconnected: StopAdb"));
+
+  // 4. Closing the UsbAdbImpl client channel logs "adb_client_disconnected: unbind".
+  usb_impl = {};
+  iface_client_ = {};
+  usb_impl = NormalStartAdb();
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  usb_impl = {};
+  WaitForState(State::kAwaitingUsbConnection);
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_disconnected: unbind"));
+
+  // 5. Closing the UsbFunctionInterface client channel logs "usb_function_disconnected: unbind".
+  iface_client_ = {};
+  WaitConfigured();
+  iface_client_ = {};
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        inspect::Inspector inspector;
+        driver_test_.RunInDriverContext(
+            [&](UsbAdbDevice& dev) { inspector = UsbAdbTestHelper::GetInspector(dev); });
+        ReadInspect(inspector);
+        return has_event("bulk_in", "usb_function_disconnected: unbind") &&
+               has_event("bulk_out", "usb_function_disconnected: unbind");
+      },
+      zx::sec(5)));
+
+  // 6. Stopping the driver logs "driver_stopped".
+  inspect::Inspector inspector;
+  driver_test_.RunInDriverContext(
+      [&](UsbAdbDevice& dev) { inspector = UsbAdbTestHelper::GetInspector(dev); });
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+  ASSERT_NO_FATAL_FAILURE(ReadInspect(inspector));
+  EXPECT_TRUE(has_event("bulk_in", "driver_stopped"));
+  EXPECT_TRUE(has_event("bulk_out", "driver_stopped"));
 }
 
 TEST_F(UsbAdbTest, StartAdbFailsWhileStopping) {

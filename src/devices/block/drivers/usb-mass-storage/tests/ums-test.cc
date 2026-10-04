@@ -6,6 +6,7 @@
 #include <endian.h>
 #include <errno.h>
 #include <fidl/fuchsia.hardware.block.volume/cpp/wire.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.virtual.bus/cpp/wire.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
@@ -36,6 +37,8 @@
 #include <zxtest/zxtest.h>
 
 #include "src/storage/lib/block_client/cpp/remote_block_device.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_virtual_bus {
 namespace {
@@ -112,9 +115,9 @@ class UmsTest : public zxtest::Test {
     using ConfigurationDescriptor =
         ::fidl::VectorView<fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor>;
     usb_peripheral::wire::FunctionDescriptor ums_function_desc = {
-        .interface_class = USB_CLASS_MSC,
-        .interface_subclass = USB_SUBCLASS_MSC_SCSI,
-        .interface_protocol = USB_PROTOCOL_MSC_BULK_ONLY,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kMsc),
+        .interface_subclass = fidl::ToUnderlying(fdescriptor::MscSubclass::kScsi),
+        .interface_protocol = fidl::ToUnderlying(fdescriptor::MscProtocol::kBulkOnly),
     };
 
     std::vector<usb_peripheral::wire::FunctionDescriptor> function_descs;

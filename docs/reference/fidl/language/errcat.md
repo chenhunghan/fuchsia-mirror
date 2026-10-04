@@ -444,4 +444,10 @@ This document lists all errors emitted by the [FIDL compiler][docs-fidlc],
 
 <<error-catalog/_fi-0223.md>>
 
+<<error-catalog/_fi-0224.md>>
+
+<<error-catalog/_fi-0225.md>>
+
+<<error-catalog/_fi-0226.md>>
+
 [docs-fidlc]: ../language/fidlc.md

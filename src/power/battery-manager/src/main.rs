@@ -9,13 +9,14 @@ mod config;
 mod polisher;
 
 use crate::battery_info_recorders::RecorderConfig;
-use crate::battery_manager::{BatteryManager, BatterySimulationStateObserver};
+use crate::battery_manager::{BatteryManager, BatterySimulationStateObserver, DriverUpdate};
 use crate::battery_simulator::SimulatedBatteryInfoSource;
 pub(crate) use crate::config::BatteryManagerConfig;
 use crate::config::read_battery_manager_config;
 use anyhow::Error;
 use battery_manager_config::Config;
 use fidl_fuchsia_hardware_power_battery as fbattery;
+use fidl_fuchsia_hardware_power_charger as fcharger;
 use fidl_fuchsia_power_battery as fpower;
 use fidl_fuchsia_power_battery_test as spower;
 use fidl_fuchsia_power_system as fsystem;
@@ -23,6 +24,7 @@ use fuchsia_async as fasync;
 use fuchsia_component::client as fclient;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_inspect::{self as inspect};
+use futures::channel::mpsc;
 use futures::prelude::*;
 use inspect_runtime::PublishOptions;
 use log::{error, info, warn};
@@ -142,6 +144,67 @@ fn load_battery_manager_config() -> Result<BatteryManagerConfig, Error> {
     }
 }
 
+async fn start_watching_battery_service(
+    battery_manager: Arc<BatteryManager>,
+    sag: Option<fsystem::ActivityGovernorProxy>,
+    updates: mpsc::UnboundedSender<DriverUpdate>,
+) {
+    let source = match get_battery_info_source().await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Error getting battery info source: {e:?}");
+            return;
+        }
+    };
+
+    if let Err(e) = battery_manager.start_watching_battery_info(source, sag, updates).await {
+        error!("Error when watching battery info: {e:?}");
+    }
+}
+
+async fn start_watching_charger_service(
+    battery_manager: Arc<BatteryManager>,
+    sag: Option<fsystem::ActivityGovernorProxy>,
+    updates: mpsc::UnboundedSender<DriverUpdate>,
+) {
+    info!("Looking for charger service...");
+    let service = match fclient::Service::open(fcharger::ServiceMarker) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to open charger service: {:?}", e);
+            return;
+        }
+    };
+    let stream = match service.watch().await {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("Failed to watch charger service: {:?}", e);
+            return;
+        }
+    };
+
+    let mut stream = stream.fuse();
+    while let Some(instance_res) = stream.next().await {
+        match instance_res {
+            Ok(instance) => match instance.connect_to_charger() {
+                Ok(proxy) => {
+                    info!("Connected to fuchsia.hardware.power.charger service");
+                    if let Err(e) = battery_manager
+                        .start_watching_charger_info(proxy, sag.clone(), updates.clone())
+                        .await
+                    {
+                        // Not retried here: charger telemetry stays stale until the service
+                        // publishes a new instance.
+                        warn!("Charger watcher stream ended, telemetry stopped: {:?}", e);
+                    }
+                }
+                Err(e) => warn!("Failed to connect to charger instance: {:?}", e),
+            },
+            Err(e) => warn!("Charger service watch error: {:?}", e),
+        }
+    }
+}
+
 #[fuchsia::main(logging_tags = ["battery_manager"])]
 async fn main() -> Result<(), Error> {
     info!("starting up");
@@ -168,30 +231,35 @@ async fn main() -> Result<(), Error> {
         recorder_config,
         battery_manager_config,
     ));
-    let battery_manager_clone = battery_manager.clone();
 
-    fasync::Task::local(async move {
-        let source = match get_battery_info_source().await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Error getting battery info source: {e:?}");
-                return; // Exit the task on error
-            }
-        };
+    let sag = if config.suspend_enabled {
+        Some(
+            fuchsia_component::client::connect_to_protocol::<fsystem::ActivityGovernorMarker>()
+                .expect("should connect to system activity governor"),
+        )
+    } else {
+        None
+    };
 
-        let sag = if config.suspend_enabled {
-            Some(
-                fuchsia_component::client::connect_to_protocol::<fsystem::ActivityGovernorMarker>()
-                    .expect("should connect to system activity governor"),
-            )
-        } else {
-            None
-        };
-        if let Err(e) = battery_manager_clone.start_watching_battery_info(source, sag).await {
-            error!("Error when watching battery info: {e:?}");
-        }
-    })
-    .detach();
+    // Driver watch loops run as independent tasks but share the manager's cached state, so
+    // they publish events here and a single consumer applies them in order.
+    let (update_tx, update_rx) = mpsc::unbounded();
+
+    let battery_manager_for_updates = battery_manager.clone();
+    let sag_updates = sag.clone();
+    let _update_task = fasync::Task::local(async move {
+        battery_manager_for_updates.run_update_consumer(update_rx, sag_updates).await;
+    });
+    let _battery_task = fasync::Task::local(start_watching_battery_service(
+        battery_manager.clone(),
+        sag.clone(),
+        update_tx.clone(),
+    ));
+    let _charger_task = fasync::Task::local(start_watching_charger_service(
+        battery_manager.clone(),
+        sag,
+        update_tx,
+    ));
 
     let battery_simulator = Arc::new(SimulatedBatteryInfoSource::new(
         battery_manager.get_battery_info_copy(),

@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_library(
+    name = "block",
+    hdrs = ["block.h"],
+    visibility = [
+        "//src/devices/block/drivers/ramdisk/test:__pkg__",
+        "//src/storage/lib/block_client/cpp:__pkg__",
+        "//src/storage/lib/block_server:__pkg__",
+        "//src/zircon/bin/hwstress:__pkg__",
+    ],
+    deps = ["//src/storage/lib/block_protocol:block_fifo"],
+    alwayslink = True,
+)

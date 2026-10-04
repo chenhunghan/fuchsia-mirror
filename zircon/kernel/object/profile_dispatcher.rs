@@ -10,10 +10,10 @@ use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_OBJ_TYPE_PROFILE, ZX_PRIORITY_DEFAULT, ZX_PRIORITY_HIGH, ZX_PROFILE_INFO_FLAG_CPU_MASK,
-    ZX_PROFILE_INFO_FLAG_DEADLINE, ZX_PROFILE_INFO_FLAG_MEMORY_PRIORITY,
-    ZX_PROFILE_INFO_FLAG_PRIORITY, ZX_RIGHT_APPLY_PROFILE, ZX_RIGHT_DUPLICATE, ZX_RIGHT_TRANSFER,
-    zx_cpu_set_t, zx_profile_info_t, zx_rights_t,
+    ZX_DEFAULT_PROFILE_RIGHTS, ZX_OBJ_TYPE_PROFILE, ZX_PRIORITY_DEFAULT, ZX_PRIORITY_HIGH,
+    ZX_PROFILE_INFO_FLAG_CPU_MASK, ZX_PROFILE_INFO_FLAG_DEADLINE,
+    ZX_PROFILE_INFO_FLAG_MEMORY_PRIORITY, ZX_PROFILE_INFO_FLAG_PRIORITY, zx_cpu_set_t,
+    zx_profile_info_t, zx_rights_t,
 };
 
 use super::KernelHandle;
@@ -27,10 +27,6 @@ use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
 use crate::kernel::types::cpu_mask_t;
 
 use object_constants_rs as object_constants;
-
-/// Default rights for a ProfileDispatcher handle.
-pub const DEFAULT_RIGHTS: zx_rights_t =
-    ZX_RIGHT_TRANSFER | ZX_RIGHT_DUPLICATE | ZX_RIGHT_APPLY_PROFILE;
 
 zr::static_assert_size_and_align!(
     ProfileDispatcherState,
@@ -168,7 +164,7 @@ super::dispatcher::impl_dispatcher_facade_with_state!(
 
 impl ProfileDispatcher {
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_PROFILE_RIGHTS
     }
 
     pub fn create(info: &zx_profile_info_t) -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
@@ -177,7 +173,7 @@ impl ProfileDispatcher {
         let handle = unsafe {
             KernelHandle::create(|out| cpp_profile_dispatcher_create(info as *const _, out))
         }?;
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_PROFILE_RIGHTS))
     }
 
     pub fn apply_profile_to_thread(&self, thread: &ThreadDispatcher) -> Result<(), Status> {

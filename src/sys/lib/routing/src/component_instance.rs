@@ -8,11 +8,9 @@ use crate::policy::GlobalPolicyChecker;
 use crate::resolving::{ComponentAddress, ComponentResolutionContext, ResolverError};
 use async_trait::async_trait;
 use capability_source::{BuiltinCapabilities, NamespaceCapabilities};
-use cm_rust::offer::{OfferDecl, OfferSource};
-use cm_rust::{CapabilityDecl, CollectionDecl, ExposeDecl, UseDecl};
-use cm_types::{Name, Url};
+use cm_types::Url;
 use derivative::Derivative;
-use moniker::{BorrowedChildName, ChildName, ExtendedMoniker, Moniker};
+use moniker::{BorrowedChildName, ExtendedMoniker, Moniker};
 use runtime_capabilities::{WeakInstanceToken, WeakInstanceTokenAny};
 use std::clone::Clone;
 use std::sync::{Arc, Weak};
@@ -51,23 +49,29 @@ pub trait ComponentInstanceInterface: Sized + Send + Sync {
     /// Gets the parent, if it still exists, or returns an `InstanceNotFound` error.
     fn try_get_parent(&self) -> Result<ExtendedInstanceInterface<Self>, ComponentInstanceError>;
 
-    /// Locks and returns a lazily-resolved and populated
-    /// `ResolvedInstanceInterface`.  Returns an `InstanceNotFound` error if the
-    /// instance is destroyed. The instance will remain locked until the result
-    /// is dropped.
-    ///
-    /// NOTE: The `Box<dyn>` in the return type is necessary, because the type
-    /// of the result depends on the lifetime of the `self` reference. The
-    /// proposed "generic associated types" feature would let us define this
-    /// statically.
-    async fn lock_resolved_state<'a>(
-        self: &'a Arc<Self>,
-    ) -> Result<Box<dyn ResolvedInstanceInterface<Component = Self> + 'a>, ComponentInstanceError>;
-
     /// Returns a clone of this component's sandbox. This may resolve the component if necessary.
     async fn component_sandbox(
         self: &Arc<Self>,
     ) -> Result<ComponentSandbox, ComponentInstanceError>;
+
+    /// Returns a live child of this instance. This may resolve the component if necessary.
+    async fn get_child_maybe_resolve(
+        self: &Arc<Self>,
+        moniker: &BorrowedChildName,
+    ) -> Result<Option<Arc<Self>>, ComponentInstanceError>;
+
+    /// Returns the resolver-ready location of the component, which is either
+    /// an absolute component URL or a relative path URL with context. This may
+    /// resolve the component if necessary.
+    async fn address_maybe_resolve(self: &Arc<Self>) -> Result<ComponentAddress, ResolverError>;
+
+    /// Returns the context to be used to resolve a component from a path
+    /// relative to this component (for example, a component in a subpackage).
+    /// If `None`, the resolver cannot resolve relative path component URLs.
+    /// This may resolve the component if necessary.
+    async fn context_to_resolve_children(
+        self: &Arc<Self>,
+    ) -> Result<Option<ComponentResolutionContext>, ComponentInstanceError>;
 
     /// Attempts to walk the component tree (up and/or down) from the current component to find the
     /// extended instance represented by the given extended moniker. Intermediate components will
@@ -110,7 +114,7 @@ pub trait ComponentInstanceInterface: Sized + Send + Sync {
                 "previous loop will only exit when current.moniker() is a prefix of target_moniker",
             );
             for moniker_part in remaining_path.path() {
-                let child = current.lock_resolved_state().await?.get_child(moniker_part).ok_or(
+                let child = current.get_child_maybe_resolve(moniker_part).await?.ok_or(
                     ComponentInstanceError::InstanceNotFound {
                         moniker: current.moniker().child(moniker_part.into()),
                     },
@@ -131,139 +135,6 @@ pub trait ComponentInstanceInterface: Sized + Send + Sync {
                 ExtendedInstanceInterface::Component(parent) => current = parent,
             }
         }
-    }
-}
-
-/// A trait providing a representation of a resolved component instance.
-#[async_trait]
-pub trait ResolvedInstanceInterface: Send + Sync {
-    /// Type representing a (unlocked and potentially unresolved) component instance.
-    type Component;
-
-    /// Current view of this component's `uses` declarations. Implementers are
-    /// not required to retain their component declaration and in that case
-    /// should return `None`.
-    fn try_uses(&self) -> Option<Box<[UseDecl]>>;
-
-    /// Current view of this component's `exposes` declarations. Implementers
-    /// are not required to retain their component declaration and in that case
-    /// should return `None`.
-    fn try_exposes(&self) -> Option<Box<[ExposeDecl]>>;
-
-    /// Current view of this component's `offers` declarations. Does not include
-    /// any dynamic offers between children of this component. Implementers are
-    /// not required to retain their component declaration and in that case
-    /// should return `None`.
-    fn try_offers(&self) -> Option<Box<[OfferDecl]>>;
-
-    /// Current view of this component's `capabilities` declarations.
-    /// Implementers are not required to retain their component declaration and
-    /// in that case should return `None`.
-    fn try_capabilities(&self) -> Option<Box<[CapabilityDecl]>>;
-
-    /// Current view of this component's `collections` declarations.
-    /// Implementers are not required to retain their component declaration and
-    /// in that case should return `None`.
-    fn try_collections(&self) -> Option<Box<[CollectionDecl]>>;
-
-    /// Returns a live child of this instance.
-    fn get_child(&self, moniker: &BorrowedChildName) -> Option<Arc<Self::Component>>;
-
-    /// Returns a vector of the live children in `collection`.
-    fn children_in_collection(&self, collection: &Name) -> Vec<(ChildName, Arc<Self::Component>)>;
-
-    /// Returns the resolver-ready location of the component, which is either
-    /// an absolute component URL or a relative path URL with context.
-    async fn address(&self) -> Result<ComponentAddress, ResolverError>;
-
-    /// Returns the context to be used to resolve a component from a path
-    /// relative to this component (for example, a component in a subpackage).
-    /// If `None`, the resolver cannot resolve relative path component URLs.
-    fn context_to_resolve_children(&self) -> Option<ComponentResolutionContext>;
-}
-
-/// An extension trait providing functionality for any model of a resolved
-/// component.
-pub trait ResolvedInstanceInterfaceExt: ResolvedInstanceInterface {
-    /// Returns true if the given offer source refers to a valid entity, e.g., a
-    /// child that exists, a declared collection, etc. However, implementers are
-    /// not required to retain their component decl, in which case they should
-    /// return `None` if they lack sufficient information to determine if the
-    /// offer source is a valid entity.
-    fn try_offer_source_exists(&self, source: &OfferSource) -> Option<bool> {
-        match source {
-            OfferSource::Framework
-            | OfferSource::Self_
-            | OfferSource::Parent
-            | OfferSource::Void => Some(true),
-            OfferSource::Child(cm_rust::ChildRef { name, collection }) => {
-                let child_moniker = match ChildName::try_new(
-                    name.as_str(),
-                    collection.as_ref().map(|c| c.as_str()),
-                ) {
-                    Ok(m) => m,
-                    Err(_) => return Some(false),
-                };
-                Some(self.get_child(&child_moniker).is_some())
-            }
-            OfferSource::Collection(collection_name) => self
-                .try_collections()
-                .map(|c| c.iter().any(|collection| collection.name == *collection_name)),
-            OfferSource::Capability(capability_name) => self
-                .try_capabilities()
-                .map(|c| c.iter().any(|capability| capability.name() == capability_name)),
-        }
-    }
-}
-
-impl<T: ResolvedInstanceInterface> ResolvedInstanceInterfaceExt for T {}
-
-// Elsewhere we need to implement `ResolvedInstanceInterface` for `&T` and
-// `MappedMutexGuard<_, _, T>`, where `T : ResolvedComponentInstance`. We can't
-// implement the latter outside of this crate because of the "orphan rule". So
-// here we implement it for all `Deref`s.
-#[async_trait]
-impl<T> ResolvedInstanceInterface for T
-where
-    T: std::ops::Deref + Send + Sync,
-    T::Target: ResolvedInstanceInterface,
-{
-    type Component = <T::Target as ResolvedInstanceInterface>::Component;
-
-    fn try_uses(&self) -> Option<Box<[UseDecl]>> {
-        T::Target::try_uses(&*self)
-    }
-
-    fn try_exposes(&self) -> Option<Box<[ExposeDecl]>> {
-        T::Target::try_exposes(&*self)
-    }
-
-    fn try_offers(&self) -> Option<Box<[cm_rust::offer::OfferDecl]>> {
-        T::Target::try_offers(&*self)
-    }
-
-    fn try_capabilities(&self) -> Option<Box<[cm_rust::CapabilityDecl]>> {
-        T::Target::try_capabilities(&*self)
-    }
-
-    fn try_collections(&self) -> Option<Box<[cm_rust::CollectionDecl]>> {
-        T::Target::try_collections(&*self)
-    }
-
-    fn get_child(&self, moniker: &BorrowedChildName) -> Option<Arc<Self::Component>> {
-        T::Target::get_child(&*self, moniker)
-    }
-
-    fn children_in_collection(&self, collection: &Name) -> Vec<(ChildName, Arc<Self::Component>)> {
-        T::Target::children_in_collection(&*self, collection)
-    }
-
-    async fn address(&self) -> Result<ComponentAddress, ResolverError> {
-        T::Target::address(&*self).await
-    }
-
-    fn context_to_resolve_children(&self) -> Option<ComponentResolutionContext> {
-        T::Target::context_to_resolve_children(&*self)
     }
 }
 
@@ -467,16 +338,28 @@ pub mod tests {
             todo!()
         }
 
-        async fn lock_resolved_state<'a>(
-            self: &'a Arc<Self>,
-        ) -> Result<Box<dyn ResolvedInstanceInterface<Component = Self> + 'a>, ComponentInstanceError>
-        {
-            todo!()
-        }
-
         async fn component_sandbox(
             self: &Arc<Self>,
         ) -> Result<ComponentSandbox, ComponentInstanceError> {
+            todo!()
+        }
+
+        async fn get_child_maybe_resolve(
+            self: &Arc<Self>,
+            _moniker: &BorrowedChildName,
+        ) -> Result<Option<Arc<Self>>, ComponentInstanceError> {
+            todo!()
+        }
+
+        async fn address_maybe_resolve(
+            self: &Arc<Self>,
+        ) -> Result<ComponentAddress, ResolverError> {
+            todo!()
+        }
+
+        async fn context_to_resolve_children(
+            self: &Arc<Self>,
+        ) -> Result<Option<ComponentResolutionContext>, ComponentInstanceError> {
             todo!()
         }
     }

@@ -159,6 +159,22 @@ class Node {
     entry_valid_secs_ = secs;
   }
 
+  void SetAttrValidDuration(uint64_t secs) {
+    std::lock_guard guard(mtx_);
+    attr_valid_secs_ = secs;
+  }
+
+  void IncrementNlink() {
+    std::lock_guard guard(mtx_);
+    nlink_++;
+  }
+
+  void DecrementNlink() {
+    std::lock_guard guard(mtx_);
+    EXPECT_GT(nlink_, 0u);
+    nlink_--;
+  }
+
   uint64_t UpdateNodeid(uint64_t id) {
     std::lock_guard guard(mtx_);
     std::swap(id, id_);
@@ -175,12 +191,16 @@ class Node {
         .ino = id_,
         .size = size_,
         .mode = type_ | perms_,
+        .nlink = nlink_,
     };
   }
 
-  void PopulateAttr(fuse_attr& attr) {
+  void PopulateAttr(fuse_attr_out& attr_out) {
     std::lock_guard guard(mtx_);
-    PopulateAttrLocked(attr);
+    attr_out = {
+        .attr_valid = attr_valid_secs_,
+    };
+    PopulateAttrLocked(attr_out.attr);
   }
 
   void PopulateEntry(fuse_entry_out& entry_out) {
@@ -189,6 +209,7 @@ class Node {
         .nodeid = id_,
         .generation = generation_,
         .entry_valid = entry_valid_secs_,
+        .attr_valid = attr_valid_secs_,
     };
     PopulateAttrLocked(entry_out.attr);
   }
@@ -203,8 +224,10 @@ class Node {
   uint64_t id_ __TA_GUARDED(mtx_) = 0;
   uint64_t generation_ __TA_GUARDED(mtx_) = 1;
   uint64_t entry_valid_secs_ __TA_GUARDED(mtx_) = 0;
+  uint64_t attr_valid_secs_ __TA_GUARDED(mtx_) = 0;
   uint32_t perms_ __TA_GUARDED(mtx_) = S_IRWXU | S_IRWXG | S_IRWXO;
   uint64_t size_ __TA_GUARDED(mtx_) = 0;
+  uint32_t nlink_ __TA_GUARDED(mtx_) = 1;
 };
 
 class Directory : public Node {
@@ -525,9 +548,13 @@ class FuseServer {
         OK_OR_RETURN(HandleRead(node, in_header, &read_in));
         break;
       }
-      case FUSE_WRITE:
-        OK_OR_RETURN(WriteDataFreeResponse(in_header, -ENOTSUP));
+      case FUSE_WRITE: {
+        struct fuse_write_in write_in = {};
+        memcpy(&write_in, in_payload, sizeof(write_in));
+        OK_OR_RETURN(HandleWrite(node, in_header, &write_in,
+                                 reinterpret_cast<const char*>(in_payload) + sizeof(write_in)));
         break;
+      }
       case FUSE_RELEASEDIR:
       case FUSE_RELEASE: {
         struct fuse_release_in release_in = {};
@@ -540,9 +567,25 @@ class FuseServer {
         break;
       }
       case FUSE_BATCH_FORGET:
-      case FUSE_FORGET:
         // no-op; these don't expect a response.
         break;
+      case FUSE_FORGET: {
+        struct fuse_forget_in forget_in = {};
+        memcpy(&forget_in, in_payload, sizeof(forget_in));
+        OK_OR_RETURN(HandleForget(in_header, &forget_in));
+        break;
+      }
+      case FUSE_LINK: {
+        struct fuse_link_in link_in = {};
+        memcpy(&link_in, in_payload, sizeof(link_in));
+        OK_OR_RETURN(HandleLink(node, in_header, &link_in,
+                                reinterpret_cast<const char*>(in_payload) + sizeof(link_in)));
+        break;
+      }
+      case FUSE_UNLINK: {
+        OK_OR_RETURN(HandleUnlink(node, in_header, reinterpret_cast<const char*>(in_payload)));
+        break;
+      }
       case FUSE_RENAME2: {
         struct fuse_rename2_in rename_in = {};
         memcpy(&rename_in, in_payload, sizeof(rename_in));
@@ -584,7 +627,7 @@ class FuseServer {
                                                  const struct fuse_in_header& in_header,
                                                  const struct fuse_getattr_in* getattr_in) {
     fuse_attr_out attr_out = {};
-    node->PopulateAttr(attr_out.attr);
+    node->PopulateAttr(attr_out);
     return WriteStructResponse(in_header, attr_out);
   }
 
@@ -699,6 +742,49 @@ class FuseServer {
       return WriteDataFreeResponse(in_header, -ENOTDIR);
 
     if (dir->RemoveChild(name)) {
+      return WriteAckResponse(in_header);
+    } else {
+      return WriteDataFreeResponse(in_header, -ENOENT);
+    }
+  }
+
+  virtual testing::AssertionResult HandleForget(const struct fuse_in_header& in_header,
+                                                const struct fuse_forget_in* forget_in) {
+    return testing::AssertionSuccess();
+  }
+
+  virtual testing::AssertionResult HandleLink(const std::shared_ptr<Node>& dir_node,
+                                              const struct fuse_in_header& in_header,
+                                              const struct fuse_link_in* link_in,
+                                              const char* name) {
+    const std::shared_ptr dir = std::dynamic_pointer_cast<Directory>(dir_node);
+    if (!dir) {
+      return WriteDataFreeResponse(in_header, -ENOTDIR);
+    }
+
+    auto target_node = fs_.Lookup(link_in->oldnodeid);
+    if (!target_node) {
+      return WriteDataFreeResponse(in_header, -ENOENT);
+    }
+
+    target_node->IncrementNlink();
+    dir->AddChild(name, target_node);
+
+    fuse_entry_out entry_out = {};
+    target_node->PopulateEntry(entry_out);
+    return WriteStructResponse(in_header, entry_out);
+  }
+
+  virtual testing::AssertionResult HandleUnlink(const std::shared_ptr<Node>& dir_node,
+                                                const struct fuse_in_header& in_header,
+                                                const char* name) {
+    const std::shared_ptr dir = std::dynamic_pointer_cast<Directory>(dir_node);
+    if (!dir) {
+      return WriteDataFreeResponse(in_header, -ENOTDIR);
+    }
+
+    if (auto child = dir->RemoveChild(name)) {
+      child->DecrementNlink();
       return WriteAckResponse(in_header);
     } else {
       return WriteDataFreeResponse(in_header, -ENOENT);
@@ -820,6 +906,13 @@ class FuseServer {
   virtual testing::AssertionResult HandleRead(std::shared_ptr<Node> node,
                                               const struct fuse_in_header& in_header,
                                               const struct fuse_read_in* read_in) {
+    return WriteDataFreeResponse(in_header, -ENOTSUP);
+  }
+
+  virtual testing::AssertionResult HandleWrite(std::shared_ptr<Node> node,
+                                               const struct fuse_in_header& in_header,
+                                               const struct fuse_write_in* write_in,
+                                               const void* buffer) {
     return WriteDataFreeResponse(in_header, -ENOTSUP);
   }
 };
@@ -1445,9 +1538,7 @@ TEST_P(FuseServerPermissionCheck, PermissionCheck) {
 
   std::string path = GetMountDir() + "/node";
   ASSERT_NO_FATAL_FAILURE(test_case.fn(path));
-  // TODO(https://fxbug.dev/331965426): Don't perform an extra lookup.
-  const uint64_t lookup_count_offset = test_helper::IsStarnix() ? 1 : 0;
-  EXPECT_EQ(server->LookupCount(), test_case.expected_lookup_count + lookup_count_offset);
+  EXPECT_EQ(server->LookupCount(), test_case.expected_lookup_count);
   EXPECT_EQ(server->AccessCount(), test_case.expected_access_count);
   EXPECT_EQ(server->NonRootGetAttrCount(), test_case.expected_non_root_getattr_count);
 }
@@ -1773,10 +1864,9 @@ TEST_P(FuseServerCacheAttributesTest, CacheAttributes) {
       if (in_header.nodeid != FUSE_ROOT_ID) {
         calls_to_non_root_getattr_.fetch_add(1, std::memory_order_relaxed);
       }
-      fuse_attr_out attr_out = {
-          .attr_valid = getattr_attr_valid_,
-      };
-      node->PopulateAttr(attr_out.attr);
+      fuse_attr_out attr_out = {};
+      node->PopulateAttr(attr_out);
+      attr_out.attr_valid = getattr_attr_valid_;
       return WriteStructResponse(in_header, attr_out);
     }
 
@@ -1866,17 +1956,9 @@ TEST_P(FusePathWalkRefreshDirEntryTest, PathWalkRefreshDirEntry) {
   EXPECT_EQ(server->LookupCount(), 0u);
 
   constexpr uint64_t kNumberOfNodesInPath = 3;
-  // TODO(https://fxbug.dev/331965426): Don't perform an extra set of lookups each
-  // time we create a new DirEntry in starnix. Note that refreshing a DirEntry
-  // does not result in extra lookups, only the initial lookup to populate a new
-  // DirEntry does.
-  const uint64_t extra_initial_lookups_per_node =
-      (!test_case.entry_valid_forever && test_helper::IsStarnix()) ? 1 : 0;
   const uint64_t extra_subsequent_lookups_per_node =
       test_case.entry_valid_forever ? 0 : kNumberOfNodesInPath;
-  const uint64_t lookup_offset = extra_initial_lookups_per_node * kNumberOfNodesInPath;
-  const uint64_t expected_initial_lookup_count = kNumberOfNodesInPath + lookup_offset;
-  const uint64_t expected_post_update_lookup_extra_offset = extra_initial_lookups_per_node;
+  const uint64_t expected_initial_lookup_count = kNumberOfNodesInPath;
   std::string filename = GetMountDir() + "/dir1/dir2/file";
 
   auto check_open = [&]() {
@@ -1905,9 +1987,9 @@ TEST_P(FusePathWalkRefreshDirEntryTest, PathWalkRefreshDirEntry) {
     dir2->IncrementGeneration();
   }
   ASSERT_NO_FATAL_FAILURE(check_open());
-  EXPECT_EQ(server->LookupCount(),
-            expected_initial_lookup_count + (2 * extra_subsequent_lookups_per_node) +
-                test_case.expected_extra_lookups * (1 + expected_post_update_lookup_extra_offset));
+  EXPECT_EQ(server->LookupCount(), expected_initial_lookup_count +
+                                       (2 * extra_subsequent_lookups_per_node) +
+                                       test_case.expected_extra_lookups);
 }
 
 INSTANTIATE_TEST_SUITE_P(FusePathWalkRefreshDirEntryTest, FusePathWalkRefreshDirEntryTest,
@@ -2313,4 +2395,200 @@ TEST_F(FuseServerTest, PassthroughMmap) {
   void* non_pt_addr = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, non_pt_fd.get(), 0);
   EXPECT_EQ(non_pt_addr, MAP_FAILED);
   EXPECT_EQ(errno, ENODEV);
+}
+
+TEST_F(FuseServerTest, LookupUpdatesExistingNodeAttributes) {
+  auto server = std::make_shared<CountingFuseServer>(0, 0);
+  FileSystem& fs = server->fs();
+  fs.RootDir()->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  fs.RootDir()->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+  std::shared_ptr<File> file = fs.AddFileAtRoot("file1");
+  fs.RootDir()->AddChild("file2", file);
+  file->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  file->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+
+  ASSERT_TRUE(Mount(server));
+
+  std::string file1_path = GetMountDir() + "/file1";
+  std::string file2_path = GetMountDir() + "/file2";
+
+  fbl::unique_fd fd1(open(file1_path.c_str(), O_RDONLY));
+  ASSERT_TRUE(fd1.is_valid()) << strerror(errno);
+
+  struct stat st = {};
+  ASSERT_EQ(fstat(fd1.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_nlink, 1u);
+  EXPECT_EQ(server->NonRootGetAttrCount(), 0u);
+
+  // Simulate an external link count change returned when looking up a second
+  // hard link to the already-cached node.
+  file->IncrementNlink();
+  fbl::unique_fd fd2(open(file2_path.c_str(), O_RDONLY));
+  ASSERT_TRUE(fd2.is_valid()) << strerror(errno);
+
+  ASSERT_EQ(fstat(fd1.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_nlink, 2u);
+  EXPECT_EQ(server->NonRootGetAttrCount(), 0u);
+}
+
+TEST_F(FuseServerTest, LinkUpdatesEntry) {
+  class LinkTestServer : public CountingFuseServer {
+   public:
+    LinkTestServer() : CountingFuseServer(0, 0) {}
+
+    uint64_t WaitForForget() {
+      std::unique_lock guard(forget_mtx_);
+      forget_cv_.wait(guard, [&]() { return forget_nlookup_.has_value(); });
+      return *forget_nlookup_;
+    }
+
+   protected:
+    testing::AssertionResult HandleForget(const struct fuse_in_header& in_header,
+                                          const struct fuse_forget_in* forget_in) override {
+      std::lock_guard guard(forget_mtx_);
+      forget_nlookup_ = forget_in->nlookup;
+      forget_cv_.notify_all();
+      return testing::AssertionSuccess();
+    }
+
+   private:
+    std::mutex forget_mtx_;
+    std::condition_variable forget_cv_;
+    std::optional<uint64_t> forget_nlookup_;
+  };
+
+  auto server = std::make_shared<LinkTestServer>();
+  FileSystem& fs = server->fs();
+  fs.RootDir()->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  fs.RootDir()->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+  std::shared_ptr<File> file = fs.AddFileAtRoot("file");
+  file->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  file->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+
+  ASSERT_TRUE(Mount(server));
+
+  std::string file_path = GetMountDir() + "/file";
+  std::string link_path = GetMountDir() + "/link";
+
+  fbl::unique_fd fd(open(file_path.c_str(), O_RDONLY));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  struct stat st = {};
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_nlink, 1u);
+  EXPECT_EQ(server->NonRootGetAttrCount(), 0u);
+
+  ASSERT_EQ(link(file_path.c_str(), link_path.c_str()), 0) << strerror(errno);
+
+  // Verify that the node attributes cached from FUSE_LINK's fuse_entry_out
+  // reflect the updated link count without requiring a separate FUSE_GETATTR.
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_nlink, 2u);
+  if (test_helper::IsStarnix()) {
+    EXPECT_EQ(server->NonRootGetAttrCount(), 0u);
+  }
+
+  fd.reset();
+  ASSERT_EQ(unlink(file_path.c_str()), 0) << strerror(errno);
+  ASSERT_EQ(unlink(link_path.c_str()), 0) << strerror(errno);
+
+  // Both the initial lookup of "file" and the FUSE_LINK for "link" increment
+  // the lookup count, so FUSE_FORGET should report nlookup == 2.
+  EXPECT_EQ(server->WaitForForget(), 2u);
+}
+
+TEST_F(FuseServerTest, CreateWriteAndReadWithValidEntry) {
+  class ReadWriteServer : public CountingFuseServer {
+   public:
+    ReadWriteServer() : CountingFuseServer(0, 0) {}
+
+   protected:
+    testing::AssertionResult HandleCreate(const std::shared_ptr<Node>& dir_node,
+                                          const struct fuse_in_header& in_header,
+                                          const struct fuse_create_in* create_in,
+                                          const char* name) override {
+      const std::shared_ptr dir = std::dynamic_pointer_cast<Directory>(dir_node);
+      if (!dir) {
+        return WriteDataFreeResponse(in_header, -ENOTDIR);
+      }
+
+      std::shared_ptr<File> node = fs().AddFileAt(dir, std::string(name));
+      node->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+      node->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+
+      struct {
+        fuse_entry_out entry_out;
+        fuse_open_out open_out;
+      } response = {};
+      node->PopulateEntry(response.entry_out);
+      response.open_out.fh = GetNextFileHandle();
+      return WriteStructResponse(in_header, response);
+    }
+
+    testing::AssertionResult HandleWrite(std::shared_ptr<Node> node,
+                                         const struct fuse_in_header& in_header,
+                                         const struct fuse_write_in* write_in,
+                                         const void* buffer) override {
+      std::lock_guard guard(data_mtx_);
+      size_t end = static_cast<size_t>(write_in->offset) + write_in->size;
+      if (content_.size() < end) {
+        content_.resize(end);
+      }
+      memcpy(content_.data() + write_in->offset, buffer, write_in->size);
+      node->SetSize(content_.size());
+
+      fuse_write_out write_out = {
+          .size = write_in->size,
+      };
+      return WriteStructResponse(in_header, write_out);
+    }
+
+    testing::AssertionResult HandleRead(std::shared_ptr<Node> node,
+                                        const struct fuse_in_header& in_header,
+                                        const struct fuse_read_in* read_in) override {
+      std::lock_guard guard(data_mtx_);
+      if (read_in->offset >= content_.size()) {
+        return WriteDataResponse(in_header, nullptr, 0);
+      }
+      size_t available = content_.size() - static_cast<size_t>(read_in->offset);
+      size_t to_read = std::min<size_t>(read_in->size, available);
+      return WriteDataResponse(in_header, content_.data() + read_in->offset, to_read);
+    }
+
+   private:
+    std::mutex data_mtx_;
+    std::string content_;
+  };
+
+  auto server = std::make_shared<ReadWriteServer>();
+  server->fs().RootDir()->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  server->fs().RootDir()->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+  ASSERT_TRUE(Mount(server));
+
+  std::string file_path = GetMountDir() + "/hellosdcardtest";
+  constexpr std::string_view kTestData = "Hello sdcard test\n";
+
+  {
+    fbl::unique_fd fd(open(file_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+    ASSERT_EQ(write(fd.get(), kTestData.data(), kTestData.size()),
+              static_cast<ssize_t>(kTestData.size()))
+        << strerror(errno);
+  }
+
+  uint64_t lookups_after_create = server->LookupCount();
+
+  {
+    fbl::unique_fd fd(open(file_path.c_str(), O_RDONLY));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+    char buf[64] = {};
+    ssize_t bytes_read = read(fd.get(), buf, sizeof(buf));
+    ASSERT_EQ(bytes_read, static_cast<ssize_t>(kTestData.size())) << strerror(errno);
+    EXPECT_EQ(std::string_view(buf, static_cast<size_t>(bytes_read)), kTestData);
+  }
+
+  EXPECT_EQ(server->LookupCount(), lookups_after_create);
+  if (test_helper::IsStarnix()) {
+    EXPECT_EQ(server->NonRootGetAttrCount(), 1u);
+  }
 }

@@ -510,9 +510,8 @@ TEST_P(FutexWakeRaceTest, ReportedWakeIsNotLost) {
       // joined on every path out of this lambda. Reporting failures by returning rather than with
       // ASSERT_* is what keeps a still-joinable thread from tripping std::terminate.
       const bool keep_going = [&]() {
-        if (!test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-              return state.find(" S ") != std::string_view::npos;
-            })) {
+        if (!test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                           [](std::string_view state) { return state == "S"; })) {
           ADD_FAILURE() << "waiter never blocked at iteration " << i;
           return false;
         }
@@ -612,9 +611,8 @@ TEST(FutexTest, LockPiHandoffIsNotLostWhenRacingWithSignal) {
       }
 
       const bool keep_going = [&]() {
-        if (!test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-              return state.find(" S ") != std::string_view::npos;
-            })) {
+        if (!test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                           [](std::string_view state) { return state == "S"; })) {
           ADD_FAILURE() << "waiter never blocked at iteration " << i;
           return false;
         }
@@ -934,9 +932,8 @@ TEST(FutexTest, UntimedFutexWaitRestartsOnSignalWithSaRestart) {
     }
 
     // Wait until the waiter is sleeping in FUTEX_WAIT.
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     // Send SIGUSR1 to interrupt the futex wait.
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
@@ -952,7 +949,7 @@ TEST(FutexTest, UntimedFutexWaitRestartsOnSignalWithSaRestart) {
       if (wait_returned.load()) {
         return false;
       }
-      return state.find(" S ") != std::string_view::npos;
+      return state == "S";
     }));
     EXPECT_FALSE(wait_returned.load());
 
@@ -1004,9 +1001,8 @@ TEST(FutexTest, UntimedFutexWaitPrivateRestartsOnSignalWithSaRestart) {
     }
 
     // Wait until the waiter is sleeping in FUTEX_WAIT_PRIVATE.
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     // Send SIGUSR1 to interrupt the futex wait.
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
@@ -1022,7 +1018,7 @@ TEST(FutexTest, UntimedFutexWaitPrivateRestartsOnSignalWithSaRestart) {
       if (wait_returned.load()) {
         return false;
       }
-      return state.find(" S ") != std::string_view::npos;
+      return state == "S";
     }));
     EXPECT_FALSE(wait_returned.load());
 
@@ -1074,9 +1070,8 @@ TEST(FutexTest, UntimedFutexWaitFailsWithEintrWithoutSaRestart) {
       sched_yield();
     }
 
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
 
@@ -1124,9 +1119,8 @@ TEST(FutexTest, TimedFutexWaitFailsWithEintrEvenWithSaRestart) {
       sched_yield();
     }
 
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
 
@@ -1177,9 +1171,8 @@ TEST(FutexTest, TimedFutexWaitBitsetFailsWithEintrEvenWithSaRestart) {
       sched_yield();
     }
 
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
 
@@ -1227,9 +1220,8 @@ TEST(FutexTest, UntimedFutexWaitBitsetRestartsOnSignalWithSaRestart) {
       sched_yield();
     }
 
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
 
@@ -1241,7 +1233,7 @@ TEST(FutexTest, UntimedFutexWaitBitsetRestartsOnSignalWithSaRestart) {
       if (wait_returned.load()) {
         return false;
       }
-      return state.find(" S ") != std::string_view::npos;
+      return state == "S";
     }));
     EXPECT_FALSE(wait_returned.load());
 
@@ -1292,9 +1284,8 @@ TEST(FutexTest, UntimedFutexWaitRestartsAcrossMultipleSignalsWithSaRestart) {
       sched_yield();
     }
 
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     for (int i = 1; i <= 3; ++i) {
       SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
@@ -1306,7 +1297,7 @@ TEST(FutexTest, UntimedFutexWaitRestartsAcrossMultipleSignalsWithSaRestart) {
             if (wait_returned.load()) {
               return false;
             }
-            return state.find(" S ") != std::string_view::npos;
+            return state == "S";
           }));
       EXPECT_FALSE(wait_returned.load());
     }
@@ -1361,9 +1352,8 @@ TEST(FutexTest, UntimedFutexWaitReturnsEagainIfValueChangedDuringSignalHandler) 
       sched_yield();
     }
 
-    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
-      return state.find(" S ") != std::string_view::npos;
-    }));
+    ASSERT_TRUE(test_helper::WaitForTaskState(pid, waiter_tid.load(),
+                                              [](std::string_view state) { return state == "S"; }));
 
     // Send SIGUSR1. The signal handler will modify futex_word to 1.
     SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));

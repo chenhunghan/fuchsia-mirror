@@ -29,7 +29,6 @@ common_deps = [
   "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
   "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers_rust",
   "//sdk/fidl/fuchsia.net.multicast.admin:fuchsia.net.multicast.admin_rust",
-  "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
   "//sdk/fidl/fuchsia.net.ndp:fuchsia.net.ndp_rust",
   "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust",
   "//sdk/fidl/fuchsia.net.power:fuchsia.net.power_rust",
@@ -151,7 +150,6 @@ common_sources = [
   "src/bindings/interfaces_watcher.rs",
   "src/bindings/matchers.rs",
   "src/bindings/multicast_admin.rs",
-  "src/bindings/name_worker.rs",
   "src/bindings/ndp_watcher.rs",
   "src/bindings/neighbor_worker.rs",
   "src/bindings/netdevice_worker.rs",
@@ -189,11 +187,11 @@ common_sources = [
   "src/bindings/time.rs",
   "src/bindings/timers.rs",
   "src/bindings/util.rs",
-  "src/bindings/util/data_available.rs",
   "src/bindings/util/rcu.rs",
   "src/bindings/util/result_ext.rs",
   "src/bindings/util/scope_ext.rs",
   "src/bindings/waker.rs",
+  "src/bindings/waker/state.rs",
   "src/main.rs",
 ]
 

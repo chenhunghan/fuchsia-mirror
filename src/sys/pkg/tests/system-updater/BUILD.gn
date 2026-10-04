@@ -10,6 +10,7 @@ rustc_test("driver") {
   edition = "2024"
 
   deps = [
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
     "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
@@ -40,6 +41,7 @@ rustc_test("driver") {
     "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
     "//src/sys/pkg/lib/update-package",
     "//src/sys/pkg/testing/blobfs-ramdisk",
+    "//src/sys/pkg/testing/mock-crash-reporter:lib",
     "//src/sys/pkg/testing/mock-metrics",
     "//src/sys/pkg/testing/mock-paver",
     "//src/sys/pkg/testing/mock-reboot",

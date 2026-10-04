@@ -2701,6 +2701,7 @@ mod tests {
 
     use super::*;
     use crate::internal::base::{IpDeviceEgressStateContext, RouterAdvertisementEvent};
+    use crate::internal::gso::MaybeSegmentableTransportSerializer;
     use crate::internal::socket::testutil::{FakeDeviceConfig, FakeIpSocketCtx};
     use crate::internal::socket::{
         IpSock, IpSockCreationError, IpSockSendError, IpSocketHandler, SendOptions,
@@ -3092,7 +3093,7 @@ mod tests {
             tx_meta: FakeTxMetadata,
         ) -> Result<(), IpSockSendError>
         where
-            S: TransportPacketSerializer<I>,
+            S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
             S::Buffer: BufferMut,
             O: SendOptions<I> + RouteResolutionOptions<I>,
         {

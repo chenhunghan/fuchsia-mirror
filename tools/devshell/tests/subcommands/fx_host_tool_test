@@ -103,12 +103,29 @@ EOF
   btf::expect-mock-args "${ffx}.mock_state.1" "--flag2" "arg2"
 }
 
+TEST_build_if_not_found_in_agent() {
+  # tool does not exist, but is known to the build, so build should be called
+  mv "${ffx}" "${ffx}_backup"
+
+  # recreate the tool when 'fx build' is called
+  cat >"${BT_TEMP_DIR}/tools/devshell/build.mock_side_effects" <<EOF
+    mv "${ffx}_backup" "${ffx}"
+EOF
+
+  # Even when stderr is not a tty, host-tool should build if invoked by an agent.
+  BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" ANTIGRAVITY_AGENT=1 ${fx} host-tool "ffx" "--flag2" "arg2" 2>/dev/null
+
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/tools/devshell/build.mock_state"
+  btf::expect-mock-args "${ffx}.mock_state.1" "--flag2" "arg2"
+}
+
 TEST_no_build() {
   # tool does not exist, is known to the build, but --no-build is specified
   mv "${ffx}" "${ffx}_backup"
 
   # should fail because tool cannot be found
   BT_EXPECT_FAIL ${fx} host-tool "--no-build" "ffx" "--flag1" "arg1" 2> /dev/null
+  BT_EXPECT_FAIL _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" ANTIGRAVITY_AGENT=1 ${fx} host-tool "--no-build" "ffx" "--flag1" "arg1" 2> /dev/null
 
   # ensure that build was not called
   BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/tools/devshell/build.mock_state"

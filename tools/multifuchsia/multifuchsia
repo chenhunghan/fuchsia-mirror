@@ -420,9 +420,6 @@ function cmd_update_helper() {
   local expected_system_image_merkle
   expected_system_image_merkle=$(cat "${fuchsia_build_dir}"/obj/build/images/fuchsia/fuchsia/base/package_manifest.json | scripts/fx jq -r '.blobs[] | select(.path == "meta/") | .merkle' )
 
-  local -r socket_dir="$WORKDIR/.update-ffx-daemon"
-  mkdir -p "$socket_dir"
-  mount --bind "$socket_dir" "$fuchsia_build_dir/.ffx-daemon"
   ./scripts/fx --dir=out/default shell update check-now --monitor || true
   ./scripts/fx --dir=out/default wait
   ./scripts/fx --dir=out/default shell update wait-for-commit

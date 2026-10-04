@@ -12,11 +12,11 @@ sys.path.insert(0, os.path.dirname(__file__) + "/../python/modules/elf")
 import elfinfo
 
 
-def try_link(binary: str, build_id_dir: Path) -> Path:
+def try_link(binary: str, build_id_dir: Path) -> Path | None:
     info = elfinfo.get_elf_info(binary)
     build_id = info.build_id
     if not build_id or len(build_id) <= 2:
-        return
+        return None
     dest_dir = build_id_dir / build_id[:2]
     dest_dir.mkdir(exist_ok=True)
 

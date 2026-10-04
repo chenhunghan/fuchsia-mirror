@@ -21,7 +21,7 @@ closed protocol Usb {
         @buffer
         write vector<uint8>:MAX;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     // Initiates a control transfer with the device in the IN direction.
@@ -32,7 +32,7 @@ closed protocol Usb {
         index uint16;
         timeout zx.Time;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         @buffer
         read vector<uint8>:MAX;
     });
@@ -55,7 +55,7 @@ closed protocol Usb {
         interface_number uint8;
         alt_setting uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Returns the currently selected configuration for the device.
@@ -67,7 +67,7 @@ closed protocol Usb {
     strict SetConfiguration(struct {
         configuration uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Enables a USB endpoint, configuring it as specified by the provided descriptors.
@@ -76,7 +76,7 @@ closed protocol Usb {
         ss_com_desc fuchsia.hardware.usb.descriptor.UsbSsEpCompDescriptor;
         enable bool;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Resets an endpoint that is in a halted or error state.
@@ -86,13 +86,13 @@ closed protocol Usb {
     strict ResetEndpoint(struct {
         ep_address uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Resets the device and restores the prior configuration.
     /// Returns ZX_ERR_BAD_STATE if the device is already being reset.
     strict ResetDevice() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Returns the maximum amount of data that can be transferred on an endpoint in a single
@@ -118,7 +118,7 @@ closed protocol Usb {
     strict GetConfigurationDescriptorLength(struct {
         configuration uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         length uint64;
     });
 
@@ -126,7 +126,7 @@ closed protocol Usb {
     strict GetConfigurationDescriptor(struct {
         configuration uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         @buffer
         desc vector<uint8>:MAX;
     });
@@ -157,7 +157,7 @@ closed protocol Usb {
         desc_id uint8;
         lang_id uint16;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         lang_id uint16;
         @buffer
         string vector<uint8>:MAX;
@@ -166,7 +166,7 @@ closed protocol Usb {
     strict CancelAll(struct {
         ep_address uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Returns the current frame (in milliseconds), used for isochronous transfers.

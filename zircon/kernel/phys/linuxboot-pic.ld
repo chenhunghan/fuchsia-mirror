@@ -29,4 +29,4 @@ HIDDEN(PHYS_LOAD_ADDRESS = 0);
  * assembly code to embed this value, which cannot be calculated directly by a
  * single relocation record without triggering non-pure-PIC bug checks.
  */
-HIDDEN(LINUXBOOT_SIZE = _end - PHYS_LOAD_ADDRESS);
+HIDDEN(LINUXBOOT_SIZE = ABSOLUTE(_end - PHYS_LOAD_ADDRESS));

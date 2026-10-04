@@ -132,7 +132,7 @@ pub fn new_pidfd(
         }
         Some(ProcessEntryRef::Zombie) => None,
         None => {
-            if pid.get_task().is_ok() {
+            if pid.get_task().is_ok_and(|task| !task.is_leader()) {
                 return error!(EINVAL);
             }
             return error!(ESRCH);

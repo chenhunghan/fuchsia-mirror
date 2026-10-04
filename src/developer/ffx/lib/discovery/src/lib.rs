@@ -11,6 +11,7 @@ pub use crate::events::{
 use crate::fastboot_file_watcher::FastbootWatcher;
 use crate::gce_watcher::GceWatcher;
 use crate::query::TargetInfoQuery;
+use crate::uart_watcher::UartWatcher;
 use crate::usb_vsock_watcher::UsbVsockWatcher;
 use bitflags::bitflags;
 use ffx_config::EnvironmentContext;
@@ -43,6 +44,7 @@ pub mod gce_watcher;
 pub mod instance_watcher;
 mod merge;
 pub mod query;
+mod uart_watcher;
 mod usb_vsock_watcher;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -70,6 +72,9 @@ pub struct TargetStream {
 
     /// Watches for GCE instance events
     gce_watcher: Option<GceWatcher>,
+
+    /// Watches for UART events
+    uart_watcher: Option<UartWatcher>,
 
     /// This is where results from the various watchers are published.
     queue: UnboundedReceiver<TargetEvent>,
@@ -101,6 +106,9 @@ where
 
     /// GCE watcher.
     pub gce_watcher: Option<GceWatcher>,
+
+    /// Watches for UART events
+    pub uart_watcher: Option<UartWatcher>,
 }
 
 impl<Mdns, Fusb, Man> TargetStreamConfig<Mdns, Fusb, Man>
@@ -119,6 +127,7 @@ where
             usb_vsock_watcher: None,
             fastboot_file_watcher: None,
             gce_watcher: None,
+            uart_watcher: None,
         }
     }
 
@@ -149,6 +158,11 @@ where
     pub fn set_gce_watcher(&mut self, g: GceWatcher) {
         self.gce_watcher = Some(g);
     }
+
+    /// Configures an active [`UartWatcher`] to observe UART target connections.
+    pub fn set_uart_watcher(&mut self, watcher: UartWatcher) {
+        self.uart_watcher = Some(watcher);
+    }
 }
 
 impl TargetStream {
@@ -174,6 +188,7 @@ impl TargetStream {
             usb_vsock_watcher: config.usb_vsock_watcher,
             fastboot_file_watcher: config.fastboot_file_watcher,
             gce_watcher: config.gce_watcher,
+            uart_watcher: config.uart_watcher,
             queue,
         }
     }
@@ -184,6 +199,7 @@ pub struct DiscoveryBuilder {
     fastboot_devices_file_path: Option<PathBuf>,
     usb_vsock_driver_socket_path: Option<PathBuf>,
     gce_instance_root: Option<PathBuf>,
+    uart_driver_socket_dir: Option<PathBuf>,
     sources: DiscoverySources,
     timeout: Option<Duration>,
     state_filter: TargetStateFilter,
@@ -240,6 +256,17 @@ impl DiscoveryBuilder {
         self
     }
 
+    /// Configures the directory containing UART driver metadata files and daemon sockets.
+    ///
+    /// If `uart_driver_socket_dir` is `Some`, automatically enables [`DiscoverySources::UART`].
+    pub fn with_uart_driver_socket_dir(mut self, uart_driver_socket_dir: Option<PathBuf>) -> Self {
+        if uart_driver_socket_dir.is_some() {
+            self.uart_driver_socket_dir = uart_driver_socket_dir;
+            self.sources.insert(DiscoverySources::UART);
+        }
+        self
+    }
+
     /// Specify the timeout in milliseconds. (Specified as u64 instead of
     /// Duration because the value will normally come from config, so we'll do
     /// the conversion here rather then having every caller do it.)
@@ -267,6 +294,7 @@ impl DiscoveryBuilder {
             fastboot_devices_file_path: self.fastboot_devices_file_path,
             usb_vsock_driver_socket_path: self.usb_vsock_driver_socket_path,
             gce_instance_root: self.gce_instance_root,
+            uart_driver_socket_dir: self.uart_driver_socket_dir,
             sources: self.sources,
             timeout: self.timeout,
             state_filter: self.state_filter,
@@ -306,6 +334,7 @@ impl Default for DiscoveryBuilder {
             fastboot_devices_file_path: None,
             usb_vsock_driver_socket_path: None,
             gce_instance_root: None,
+            uart_driver_socket_dir: None,
             sources: DiscoverySources::default(),
             timeout: Some(DEFAULT_TIMEOUT),
             state_filter: TargetStateFilter::default(),
@@ -346,6 +375,7 @@ pub struct Discovery {
     fastboot_devices_file_path: Option<PathBuf>,
     usb_vsock_driver_socket_path: Option<PathBuf>,
     gce_instance_root: Option<PathBuf>,
+    uart_driver_socket_dir: Option<PathBuf>,
     sources: DiscoverySources,
     timeout: Option<Duration>,
     state_filter: TargetStateFilter,
@@ -382,6 +412,7 @@ impl Discovery {
             self.fastboot_devices_file_path.clone(),
             self.usb_vsock_driver_socket_path.clone(),
             self.gce_instance_root.clone(),
+            self.uart_driver_socket_dir.clone(),
             self.sources,
         )?;
         if let Some(timeout) = self.timeout {
@@ -486,6 +517,7 @@ fn wait_for_devices(
     fastboot_devices_file_path: Option<PathBuf>,
     usb_vsock_driver_socket_path: Option<PathBuf>,
     gce_instance_root: Option<PathBuf>,
+    uart_driver_socket_dir: Option<PathBuf>,
     sources: DiscoverySources,
 ) -> Result<TargetStream> {
     let mut config = TargetStreamConfig::new();
@@ -547,8 +579,15 @@ fn wait_for_devices(
 
     if sources.contains(DiscoverySources::GCE) {
         if let Some(instance_root) = gce_instance_root {
-            config.set_gce_watcher(GceWatcher::new(instance_root, sender)?)
+            config.set_gce_watcher(GceWatcher::new(instance_root, sender.clone())?)
         }
+    }
+
+    // UART watcher
+    if let Some(socket_dir) = uart_driver_socket_dir
+        && sources.contains(DiscoverySources::UART)
+    {
+        config.set_uart_watcher(UartWatcher::new(socket_dir, sender)?);
     }
 
     Ok(TargetStream::new(context, config, queue))
@@ -664,6 +703,7 @@ pub mod test {
             emulator_watcher: None,
             fastboot_file_watcher: None,
             gce_watcher: None,
+            uart_watcher: None,
             queue,
         };
 
@@ -897,15 +937,6 @@ pub mod test {
         Ok(config_file)
     }
 
-    // This test has a race condition, which I (slgrady) have spent hours trying to find.
-    // Apparently the notify crate in emulator_instance is for some reason not producing
-    // the Create event for the new emulator file. The event is created in a separate
-    // thread, so it's not an async issue. The watcher is not being dropped at that point.
-    // The file is in fact created and placed on the filesystem; the watcher thread
-    // is running at the point we are waiting for the event.  Giving up, since I believe
-    // the race-condition only comes up in the artificial environment of a test case.
-    // Normally, emulators are extended events, not just a fast creation of a single file.
-    #[ignore]
     #[fuchsia::test]
     async fn test_target_stream_produces_emulator() {
         use tempfile::tempdir;
@@ -920,8 +951,7 @@ pub mod test {
         let config_file = build_instance_file(&instance_dir, "emu-data-instance").unwrap();
 
         // Before waiting on devices, let's make sure we're actually getting the
-        // emulator. (This shouldn't be necessary, but I've seen this test flake
-        // by timing out, so this is a validity check.)
+        // emulator.
         let existing = emulator_instance::get_all_targets(&emu_instances).unwrap();
         assert_eq!(existing.len(), 1);
 
@@ -929,6 +959,7 @@ pub mod test {
         let mut stream = wait_for_devices(
             &env.context,
             Some(instance_dir.clone()),
+            None,
             None,
             None,
             None,
@@ -956,9 +987,6 @@ pub mod test {
 
         // Add a new (different) emulator
         let config_file2 = build_instance_file(&instance_dir, "emu-data-instance2").unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        // let existing = emulator_instance::get_all_targets().await?;
-        // assert_eq!(existing.len(), 2);
 
         // Assert that the newly-created emulator is discovered
         let next =
@@ -980,23 +1008,18 @@ pub mod test {
 
         drop(config_file);
         drop(config_file2);
-        std::fs::remove_dir_all(&instance_dir).unwrap();
-        // TODO(325325761) -- re-enable when emulator Remove events are generated
-        // correctly.
-        // let next = stream
-        //     .next()
-        //     .await
-        //     .unwrap();
-        // let next = next.expect("Getting emulator event failed");
-        // assert_eq!(
-        //     next,
-        //     // The node_name and the state both have to match the contents of the emu_config above.
-        //     TargetEvent::Removed(TargetHandle {
-        //         // Name must correspond to "runtime:name" value in config
-        //         node_name: Some("fuchsia-emulator".to_string()),
-        //         // Addr must correspond to "host:port_map:sh:host" value in config
-        //         state: TargetState::Product(TargetAddr::from_str("127.0.0.1:33881")?),
-        //     })
-        // );
+        std::fs::remove_dir_all(instance_dir.join("emu-data-instance2")).unwrap();
+        let next = stream.next().await.expect("No event was waiting after removing emulator");
+        assert_eq!(
+            next,
+            TargetEvent::Removed(TargetHandle {
+                node_name: Some("emu-data-instance2".to_string()),
+                state: TargetState::Product {
+                    addrs: vec![TargetAddr::from_str("127.0.0.1:3322").unwrap()],
+                    serial: None,
+                },
+                manual: false,
+            })
+        );
     }
 }

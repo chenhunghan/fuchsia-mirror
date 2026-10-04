@@ -54,7 +54,7 @@ extern "C" int64_t TestStart() {
   }
 
   // The bias argument doesn't matter since there is no unrelocated legacy.
-  elfldltl::InitFiniInfo<elfldltl::Elf<>>{preinit}.CallInit(0);
+  elfldltl::InitFiniInfo<elfldltl::Elf<>>{preinit}.callable_init_no_legacy()();
   if (call_state != 2) {
     return 5;
   }

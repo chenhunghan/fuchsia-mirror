@@ -150,9 +150,7 @@ using HostControllerCallback = fit::function<zx::result<>(NotifyEvent, uint64_t 
 //
 // This class is the parent class for both UfsPci and UfsPdev drivers, which bind the UFS
 // controller via PCI and PDev respectively.
-class Ufs : public fdf::DriverBase2,
-            public scsi::Controller,
-            public fidl::WireServer<fuchsia_hardware_inlineencryption::Device> {
+class Ufs : public fdf::DriverBase2, public scsi::Controller {
  public:
   static constexpr char kDriverName[] = "ufs";
   static constexpr char kHardwarePowerElementName[] = "ufs-hardware";
@@ -183,13 +181,9 @@ class Ufs : public fdf::DriverBase2,
   void ExecuteCommandsAsync(uint8_t target, uint16_t lun,
                             std::span<scsi::ScsiRequest> batch) override;
   bool SupportsInlineEncryption() const override { return crypto_supported_; }
-  void ServeInlineEncryption(
-      fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) override;
-
-  // fidl::WireServer<fuchsia_hardware_inlineencryption::Device>
-  void ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync &completer) override;
-  void DeriveRawSecret(DeriveRawSecretRequestView request,
-                       DeriveRawSecretCompleter::Sync &completer) override;
+  zx::result<uint8_t> ProgramKeySlot(fidl::VectorView<uint8_t> wrapped_key,
+                                     uint32_t data_unit_size) override;
+  zx::result<std::vector<uint8_t>> DeriveRawSecret(fidl::VectorView<uint8_t> wrapped_key) override;
 
   const fdf::MmioBuffer &GetMmio() const {
     ZX_ASSERT(mmio_.has_value());
@@ -420,8 +414,7 @@ class Ufs : public fdf::DriverBase2,
   fuchsia_power_broker::LeaseToken hardware_power_lease_control_token_;
 
   bool crypto_supported_ = false;
-  fidl::WireSyncClient<fuchsia_hardware_inlineencryption::Device> inline_encryption_client_;
-  fidl::ServerBindingGroup<fuchsia_hardware_inlineencryption::Device> inline_encryption_bindings_;
+  fidl::WireSyncClient<fuchsia_hardware_inlineencryption::Controller> inline_encryption_client_;
 };
 
 }  // namespace ufs

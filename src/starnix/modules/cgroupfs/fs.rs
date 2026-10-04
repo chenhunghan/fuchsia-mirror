@@ -13,6 +13,7 @@ use starnix_sync::{CgroupDirectoryNodesLock, LockDepMutex};
 use starnix_types::vfs::default_statfs;
 use starnix_uapi::auth::FsCred;
 use starnix_uapi::errors::Errno;
+use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::{CGROUP_SUPER_MAGIC, CGROUP2_SUPER_MAGIC, errno, error, mode, statfs};
 
 use std::collections::{BTreeSet, HashMap};
@@ -21,17 +22,16 @@ use std::sync::{Arc, Weak};
 use crate::directory::{CgroupDirectory, CgroupDirectoryHandle};
 
 pub struct CgroupV1Fs {
-    pub root: Arc<CgroupRoot>,
+    /// Root cgroup of this hierarchy, held to keep the hierarchy alive while mounted.
+    _root: Arc<CgroupRoot>,
 
-    /// All directory nodes of the filesystem.
-    pub dir_nodes: Arc<DirectoryNodes>,
+    /// All directory nodes of the filesystem. Held to keep the [`DirectoryNodes`] allocation
+    /// alive while [`CgroupDirectory`] nodes hold `Weak` references to it.
+    _dir_nodes: Arc<DirectoryNodes>,
 
-    /// The name of this filesystem, which is also the name of the cgroup v1 hierarchy.
+    /// Name of this filesystem, which is also the name of the cgroup v1 hierarchy.
     /// E.g., "cgroup" or "cpuset".
-    pub name: &'static FsStr,
-
-    /// The key identifying this hierarchy in the global cgroup v1 state.
-    pub hierarchy_key: CgroupV1Key,
+    name: &'static FsStr,
 }
 
 impl CgroupV1Fs {
@@ -109,22 +109,21 @@ impl CgroupV1Fs {
         let hierarchy_key = CgroupV1Key { controllers, name };
 
         let dir_nodes =
-            DirectoryNodes::new(Arc::downgrade(&root), CgroupVersion::V1(hierarchy_key.clone()));
+            DirectoryNodes::new(Arc::downgrade(&root), CgroupVersion::V1(hierarchy_key));
         let root_dir = dir_nodes.root.clone();
         let fs = FileSystem::new(
             kernel,
             CacheMode::Uncached,
-            CgroupV1Fs {
-                dir_nodes: dir_nodes.clone(),
-                root: root.clone(),
-                name: fs_name,
-                hierarchy_key,
-            },
+            CgroupV1Fs { _dir_nodes: dir_nodes.clone(), _root: root.clone(), name: fs_name },
             options,
         )?;
         root_dir.create_root_interface_files(&fs);
         let root_ino = fs.allocate_ino();
-        fs.create_root(root_ino, root_dir);
+        fs.create_root_with_info(
+            root_ino,
+            root_dir,
+            FsNodeInfo::new(mode!(IFDIR, 0o555), FsCred::root()),
+        );
 
         // Populate existing child cgroups if any (e.g. on remount).
         dir_nodes.populate_from_root(&fs, &root, FsCred::root())?;
@@ -142,8 +141,9 @@ impl FileSystemOps for CgroupV1Fs {
 }
 
 pub struct CgroupV2Fs {
-    /// All directory nodes of the filesystem.
-    pub dir_nodes: Arc<DirectoryNodes>,
+    /// All directory nodes of the filesystem. Held to keep the [`DirectoryNodes`] allocation
+    /// alive while [`CgroupDirectory`] nodes hold `Weak` references to it.
+    _dir_nodes: Arc<DirectoryNodes>,
 }
 
 struct CgroupV2FsHandle(FileSystemHandle);
@@ -168,10 +168,19 @@ impl CgroupV2Fs {
         let dir_nodes =
             DirectoryNodes::new(Arc::downgrade(&kernel.cgroups.cgroup2), CgroupVersion::V2);
         let root = dir_nodes.root.clone();
-        let fs = FileSystem::new(kernel, CacheMode::Uncached, CgroupV2Fs { dir_nodes }, options)?;
+        let fs = FileSystem::new(
+            kernel,
+            CacheMode::Uncached,
+            CgroupV2Fs { _dir_nodes: dir_nodes },
+            options,
+        )?;
         root.create_root_interface_files(&fs);
         let root_ino = fs.allocate_ino();
-        fs.create_root(root_ino, root);
+        fs.create_root_with_info(
+            root_ino,
+            root,
+            FsNodeInfo::new(mode!(IFDIR, 0o555), FsCred::root()),
+        );
         Ok(fs)
     }
 }
@@ -185,28 +194,32 @@ impl FileSystemOps for CgroupV2Fs {
     }
 }
 
-/// Represents all directory nodes of a cgroup hierarchy.
+/// Version of a cgroup hierarchy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CgroupVersion {
+pub(crate) enum CgroupVersion {
     V1(CgroupV1Key),
     V2,
 }
 
-pub struct DirectoryNodes {
-    /// `CgroupRoot`'s directory handle. The `FileSystem` owns the `FsNode` of the root, and so we
-    /// do not have a `FsNodeHandle` of the root.
+/// All directory nodes of a cgroup hierarchy.
+pub(crate) struct DirectoryNodes {
+    /// [`CgroupRoot`]'s directory handle. The [`FileSystem`] owns the `FsNode` of the root, and so
+    /// we do not have an [`FsNodeHandle`] of the root.
     root: CgroupDirectoryHandle,
 
     /// All non-root cgroup directories, keyed by cgroup's ID. Every non-root cgroup has a
     /// corresponding node.
     nodes: LockDepMutex<HashMap<u64, FsNodeHandle>, CgroupDirectoryNodesLock>,
 
-    /// The version of cgroup for this hierarchy (v1 or v2).
-    pub version: CgroupVersion,
+    /// Version of cgroup for this hierarchy (v1 or v2).
+    pub(crate) version: CgroupVersion,
 }
 
 impl DirectoryNodes {
-    pub fn new(root_cgroup: Weak<CgroupRoot>, version: CgroupVersion) -> Arc<DirectoryNodes> {
+    pub(crate) fn new(
+        root_cgroup: Weak<CgroupRoot>,
+        version: CgroupVersion,
+    ) -> Arc<DirectoryNodes> {
         Arc::new_cyclic(|weak_self| Self {
             root: CgroupDirectory::new_root(root_cgroup, weak_self.clone()),
             nodes: Default::default(),
@@ -215,43 +228,50 @@ impl DirectoryNodes {
     }
 
     /// Looks for the corresponding node in the filesystem, errors if not found.
-    pub fn get_node(&self, cgroup: &Arc<Cgroup>) -> Result<FsNodeHandle, Errno> {
+    pub(crate) fn get_node(&self, cgroup: &Arc<Cgroup>) -> Result<FsNodeHandle, Errno> {
         let nodes = self.nodes.lock();
         nodes.get(&cgroup.id()).cloned().ok_or_else(|| errno!(ENOENT))
     }
 
     /// Returns the corresponding nodes for a set of cgroups.
-    pub fn get_nodes(&self, cgroups: &Vec<Arc<Cgroup>>) -> Vec<Option<FsNodeHandle>> {
+    pub(crate) fn get_nodes(&self, cgroups: &Vec<Arc<Cgroup>>) -> Vec<Option<FsNodeHandle>> {
         let nodes = self.nodes.lock();
         cgroups.iter().map(|cgroup| nodes.get(&cgroup.id()).cloned()).collect()
     }
 
-    /// Creates a new `FsNode` for `directory` and stores it in `nodes`.
-    pub fn add_node(
-        &self,
+    /// Creates a [`CgroupDirectory`] and [`FsNodeHandle`] for `cgroup` with `mode` ([`FileMode`])
+    /// and `owner`, and stores the node in [`Self::nodes`].
+    pub(crate) fn add_node(
+        self: &Arc<Self>,
         cgroup: &Arc<Cgroup>,
-        directory: CgroupDirectoryHandle,
         fs: &FileSystemHandle,
+        mode: FileMode,
         owner: FsCred,
     ) -> FsNodeHandle {
-        let id = cgroup.id();
+        let directory = CgroupDirectory::new(
+            Arc::downgrade(cgroup) as Weak<dyn CgroupOps>,
+            fs,
+            self,
+            owner.clone(),
+        );
+        // Per `mkdir(2)`: "The argument mode specifies the file mode bits to be
+        // applied when a new directory is created."
         let node = fs.create_node_and_allocate_node_id(
             directory,
-            FsNodeInfo::new(mode!(IFDIR, 0o755), owner),
+            FsNodeInfo::new(mode.with_type(FileMode::IFDIR), owner),
         );
-        let mut nodes = self.nodes.lock();
-        nodes.insert(id, node.clone());
+        self.nodes.lock().insert(cgroup.id(), node.clone());
         node
     }
 
-    /// Removes an entry from `nodes`, errors if not found.
-    pub fn remove_node(&self, cgroup: &Arc<Cgroup>) -> Result<FsNodeHandle, Errno> {
+    /// Removes an entry from [`Self::nodes`], errors if not found.
+    pub(crate) fn remove_node(&self, cgroup: &Arc<Cgroup>) -> Result<FsNodeHandle, Errno> {
         let id = cgroup.id();
         let mut nodes = self.nodes.lock();
         nodes.remove(&id).ok_or_else(|| errno!(ENOENT))
     }
 
-    pub fn populate_from_root(
+    fn populate_from_root(
         self: &Arc<Self>,
         fs: &FileSystemHandle,
         root: &Arc<CgroupRoot>,
@@ -270,13 +290,7 @@ impl DirectoryNodes {
         cgroup: &Arc<Cgroup>,
         owner: FsCred,
     ) -> Result<(), Errno> {
-        let directory = CgroupDirectory::new(
-            Arc::downgrade(cgroup) as Weak<dyn CgroupOps>,
-            fs,
-            self,
-            owner.clone(),
-        );
-        self.add_node(cgroup, directory, fs, owner.clone());
+        self.add_node(cgroup, fs, mode!(IFDIR, 0o755), owner.clone());
 
         let children = cgroup.get_children()?;
         for child in children {
@@ -308,7 +322,7 @@ mod test {
                 .expect("create_filesystem");
 
             let cgroupfs = fs.downcast_ops::<CgroupV2Fs>().expect("downcast_ops");
-            let dir_nodes = cgroupfs.dir_nodes.clone();
+            let dir_nodes = cgroupfs._dir_nodes.clone();
             assert!(dir_nodes.nodes.lock().is_empty(), "new filesystem does not contain nodes");
 
             let root_dir = dir_nodes.root.clone();
@@ -333,7 +347,7 @@ mod test {
                     .create_filesystem(b"cgroup".into(), options.clone())
                     .expect("create_filesystem");
                 let cgroupfs1 = fs1.downcast_ops::<CgroupV1Fs>().expect("downcast_ops");
-                let dir_nodes1 = cgroupfs1.dir_nodes.clone();
+                let dir_nodes1 = cgroupfs1._dir_nodes.clone();
                 let root_dir1 = dir_nodes1.root.clone();
                 let root_node1 = fs1.root();
 
@@ -356,7 +370,7 @@ mod test {
                 .create_filesystem(b"cgroup".into(), options)
                 .expect("create_filesystem");
             let cgroupfs2 = fs2.downcast_ops::<CgroupV1Fs>().expect("downcast_ops");
-            let dir_nodes2 = cgroupfs2.dir_nodes.clone();
+            let dir_nodes2 = cgroupfs2._dir_nodes.clone();
             let root_dir2 = dir_nodes2.root.clone();
             let root_node2 = fs2.root();
 

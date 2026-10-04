@@ -64,17 +64,7 @@ if (toolchain_environment == "kernel") {
       ":memset_stosq",
     ]
   }
-} else if (is_kernel) {  # The phys environments
-  # TODO(mcgrathr): Make the assembly compatible with phys.
-  # For now, just use the C.
-  source_set("x86") {
-    sources = [
-      "//zircon/kernel/lib/libc/string/memcpy.c",
-      "//zircon/kernel/lib/libc/string/memset.c",
-    ]
-    deps = [ "//zircon/kernel/lib/libc:headers" ]
-  }
-} else {
+} else if (!is_kernel) {
   fuchsia_unittest_package("tests") {
     component_name = "x86-cstring-tests"
     package_name = component_name

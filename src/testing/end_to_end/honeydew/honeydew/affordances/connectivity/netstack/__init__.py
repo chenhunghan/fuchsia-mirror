@@ -60,6 +60,7 @@ class Netstack:
         ffx: ffx_transport.FFX,
         fuchsia_controller: fc_transport.FuchsiaController,
         reboot_affordance: affordances_capable.RebootCapableDevice,
+        suspend_resume_affordance: affordances_capable.SuspendResumeCapableDevice,
     ) -> None:
         """Create a Netstack Fuchsia Controller affordance.
 
@@ -68,11 +69,14 @@ class Netstack:
             ffx: FFX transport.
             fuchsia_controller: Fuchsia Controller transport.
             reboot_affordance: Object that implements RebootCapableDevice.
+            suspend_resume_affordance: Object that implements
+                SuspendResumeCapableDevice.
         """
         super().__init__()
 
         self._fc_transport = fuchsia_controller
         self._reboot_affordance = reboot_affordance
+        self._suspend_resume_affordance = suspend_resume_affordance
         self.device = device_name
         self.ffx = ffx
 
@@ -80,6 +84,9 @@ class Netstack:
 
         self._connect_proxy()
         self._reboot_affordance.register_for_on_device_boot(self._connect_proxy)
+        self._suspend_resume_affordance.register_on_device_resume_fn(
+            self._connect_proxy
+        )
 
     def verify_supported(self) -> None:
         """Check if Netstack is supported on the DUT.

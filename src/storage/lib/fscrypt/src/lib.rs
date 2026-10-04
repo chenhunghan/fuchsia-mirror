@@ -87,11 +87,45 @@ pub fn to_directory_keys(main_key: &[u8], uuid: &[u8], nonce: &[u8]) -> Director
     }
 }
 
+pub struct DirectoryKeysLblk64 {
+    cts_key: [u8; 32],
+    dir_hash_key: [u8; 16],
+}
+
+impl DirectoryKeysLblk64 {
+    /// Returns the keys in concatenated form (32-byte `cts_key` + 16-byte `dir_hash_key`).
+    pub fn to_unwrapped_key(&self) -> Vec<u8> {
+        let mut keys = Vec::with_capacity(48);
+        keys.extend_from_slice(&self.cts_key);
+        keys.extend_from_slice(&self.dir_hash_key);
+        keys
+    }
+}
+
+/// Returns fscrypt directory keys for the `IV_INO_LBLK_64` algorithm
+/// (`HKDF_CONTEXT_IV_INO_LBLK_64_KEY = 4`).
+pub fn to_directory_keys_lblk64(main_key: &[u8], uuid: &[u8], nonce: &[u8]) -> DirectoryKeysLblk64 {
+    let mut hkdf_info = [0; 17];
+    hkdf_info[0] = ENCRYPTION_MODE_AES_256_CTS;
+    hkdf_info[1..17].copy_from_slice(uuid);
+    DirectoryKeysLblk64 {
+        cts_key: hkdf::fscrypt_hkdf(main_key, &hkdf_info, hkdf::HKDF_CONTEXT_IV_INO_LBLK_64_KEY),
+        dir_hash_key: hkdf::fscrypt_hkdf(main_key, nonce, hkdf::HKDF_CONTEXT_DIRHASH_KEY),
+    }
+}
+
 pub fn to_xts_key(main_key: &[u8], uuid: [u8; 16]) -> [u8; 64] {
     let mut hdkf_info = [0; 17];
     hdkf_info[0] = ENCRYPTION_MODE_AES_256_XTS;
     hdkf_info[1..17].copy_from_slice(&uuid);
     hkdf::fscrypt_hkdf(&main_key, &hdkf_info, hkdf::HKDF_CONTEXT_IV_INO_LBLK_32_KEY)
+}
+
+pub fn to_xts_key_lblk64(main_key: &[u8], uuid: [u8; 16]) -> [u8; 64] {
+    let mut hkdf_info = [0; 17];
+    hkdf_info[0] = ENCRYPTION_MODE_AES_256_XTS;
+    hkdf_info[1..17].copy_from_slice(&uuid);
+    hkdf::fscrypt_hkdf(main_key, &hkdf_info, hkdf::HKDF_CONTEXT_IV_INO_LBLK_64_KEY)
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ rustc_test("diagnostics_persistence_integration_test") {
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
     "//sdk/fidl/fuchsia.diagnostics.persistence:fuchsia.diagnostics.persistence_rust",
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
     "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",

@@ -19,15 +19,19 @@ namespace usb_xhci {
 inline uint8_t XhciEndpointIndex(uint8_t ep_address) {
   if (ep_address == 0)
     return 0;
-  uint8_t index = static_cast<uint8_t>(2 * (ep_address & ~USB_ENDPOINT_DIR_MASK));
-  if ((ep_address & USB_ENDPOINT_DIR_MASK) == USB_ENDPOINT_OUT)
+  uint8_t index = static_cast<uint8_t>(
+      2 * (ep_address & ~fuchsia_hardware_usb_descriptor::kEndpointDirectionMask));
+  if ((ep_address & fuchsia_hardware_usb_descriptor::kEndpointDirectionMask) ==
+      fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kOut))
     index--;
   return index;
 }
 
 // Inverse of XhciEndpointIndex. In particular takes an XhciEndpointIndex and returns ep_address.
 inline uint8_t XhciEndpointIndexInverse(uint8_t idx) {
-  return ((idx + 1) / 2) | ((idx % 2) ? USB_ENDPOINT_OUT : USB_ENDPOINT_IN);
+  return ((idx + 1) / 2) |
+         ((idx % 2) ? fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kOut)
+                    : fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kIn));
 }
 
 class UsbXhci;

@@ -16,14 +16,15 @@
 #include <variant>
 
 #include <fbl/ref_ptr.h>
-#include <src/storage/lib/vfs/cpp/lazy_dir.h>
-#include <src/storage/lib/vfs/cpp/pseudo_dir.h>
-#include <src/storage/lib/vfs/cpp/pseudo_file.h>
-#include <src/storage/lib/vfs/cpp/remote_dir.h>
-#include <src/storage/lib/vfs/cpp/service.h>
-#include <src/storage/lib/vfs/cpp/synchronous_vfs.h>
-#include <src/storage/lib/vfs/cpp/vmo_file.h>
-#include <src/storage/lib/vfs/cpp/vnode.h>
+
+#include "src/storage/lib/vfs/cpp/lazy_dir.h"
+#include "src/storage/lib/vfs/cpp/pseudo_dir.h"
+#include "src/storage/lib/vfs/cpp/pseudo_file.h"
+#include "src/storage/lib/vfs/cpp/remote_dir.h"
+#include "src/storage/lib/vfs/cpp/service.h"
+#include "src/storage/lib/vfs/cpp/synchronous_vfs.h"
+#include "src/storage/lib/vfs/cpp/vmo_file.h"
+#include "src/storage/lib/vfs/cpp/vnode.h"
 
 // NOLINTBEGIN(modernize-use-using): This library exposes a C interface.
 

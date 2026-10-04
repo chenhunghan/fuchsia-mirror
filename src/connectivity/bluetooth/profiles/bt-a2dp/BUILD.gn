@@ -110,30 +110,8 @@ fuchsia_structured_config_rust_lib("a2dp_profile_config") {
   cm_label = ":manifest"
 }
 
-fuchsia_structured_config_values("default_config_values") {
-  cm_label = ":manifest"
-  values_source = "config/default.json5"
-}
-
-# A configuration for bt-a2dp which disables sink.
-fuchsia_structured_config_values("source_only_config") {
-  cm_label = ":manifest"
-  values_source = "config/source_only.json5"
-}
-
 fuchsia_package("bt-a2dp") {
-  deps = [
-    ":component",
-    ":default_config_values",
-  ]
-}
-
-fuchsia_package("source-only") {
-  package_name = "bt-a2dp"
-  deps = [
-    ":component",
-    ":source_only_config",
-  ]
+  deps = [ ":component" ]
 }
 
 fuchsia_package("without-config") {

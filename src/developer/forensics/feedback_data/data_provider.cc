@@ -42,6 +42,27 @@ using fuchsia::feedback::Snapshot;
 // 30s seems reasonable to collect everything.
 const zx::duration kDefaultDataTimeout = zx::sec(30);
 
+std::map<std::string, std::string> IntoSnapshotFiles(
+    Metadata& metadata, const feedback::Annotations& annotations, feedback::Attachments attachments,
+    const std::string& uuid, const bool is_missing_non_platform_annotations) {
+  std::map<std::string, std::string> snapshot_files;
+
+  // Add the annotations to |snapshot_files|
+  snapshot_files[kAttachmentAnnotations] = feedback::Encode<std::string>(annotations);
+
+  snapshot_files[kAttachmentMetadata] =
+      metadata.MakeMetadata(annotations, attachments, uuid, is_missing_non_platform_annotations);
+
+  // Add the attachments to |snapshot_files|
+  for (auto& [key, value] : attachments) {
+    if (value.HasValue()) {
+      snapshot_files[key] = std::move(value).ReleaseValue();
+    }
+  }
+
+  return snapshot_files;
+}
+
 }  // namespace
 
 DataProvider::DataProvider(async_dispatcher_t* dispatcher,
@@ -157,23 +178,11 @@ void DataProvider::GetSnapshotInternal(
         FX_CHECK(std::get<0>(results).is_ok()) << "Impossible annotation collection failure";
         FX_CHECK(std::get<1>(results).is_ok()) << "Impossible attachment collection failure";
 
-        const feedback::Annotations& annotations = std::get<0>(results).value();
-        const feedback::Attachments& attachments = std::get<1>(results).value();
-        std::map<std::string, std::string> snapshot_files;
-
-        // Add the annotations to |snapshot_files|
-        std::string file = feedback::Encode<std::string>(annotations);
-        snapshot_files[kAttachmentAnnotations] = std::move(file);
-
-        // Add the attachments to |snapshot_files|
-        for (const auto& [key, value] : attachments) {
-          if (value.HasValue()) {
-            snapshot_files[key] = value.Value();
-          }
-        }
-
-        snapshot_files[kAttachmentMetadata] = metadata_.MakeMetadata(
-            annotations, attachments, uuid, annotation_manager_->IsMissingNonPlatformAnnotations());
+        feedback::Annotations annotations = std::get<0>(results).take_value();
+        feedback::Attachments attachments = std::get<1>(results).take_value();
+        const std::map<std::string, std::string> snapshot_files =
+            IntoSnapshotFiles(metadata_, annotations, std::move(attachments), uuid,
+                              annotation_manager_->IsMissingNonPlatformAnnotations());
 
         fsl::SizedVmo archive;
 
@@ -187,7 +196,7 @@ void DataProvider::GetSnapshotInternal(
           cobalt_->LogElapsedTime(cobalt::SnapshotGenerationFlow::kFailure, timer_id);
           archive.vmo().reset();
         }
-        callback(annotations, std::move(archive));
+        callback(std::move(annotations), std::move(archive));
         return ::fpromise::ok();
       });
 

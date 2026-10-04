@@ -19,6 +19,15 @@ namespace boot_shim {
 class RebootReasonItem
     : public boot_shim::SingleOptionalItem<zbi_hw_reboot_reason_t, ZBI_TYPE_HW_REBOOT_REASON> {
  public:
+  void Init(auto& shim, FILE* log = stdout)
+    requires requires(decltype(shim) s) {
+      { s.legacy_boot_properties() } -> std::convertible_to<BootProperties>;
+      { s.shim_name() } -> std::convertible_to<const char*>;
+    }
+  {
+    Init(shim.legacy_boot_properties(), shim.shim_name(), log);
+  }
+
   void Init(const BootProperties& properties, const char* shim_name, FILE* log = stdout);
 };
 

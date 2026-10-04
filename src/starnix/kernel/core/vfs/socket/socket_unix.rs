@@ -760,41 +760,38 @@ impl SocketOps for UnixSocket {
         Ok(events)
     }
 
-    /// Shuts down this socket according to how, preventing any future reads and/or writes.
+    /// Shuts down reception and/or transmission on this socket according to `how`
+    /// ([`SocketShutdownFlags`]), notifying waiters with the resulting [`FdEvents`].
     ///
-    /// Used by the shutdown syscalls.
+    /// Used by the `shutdown(2)` syscall.
     fn shutdown(&self, socket: &Socket, how: SocketShutdownFlags) -> Result<(), Errno> {
-        let mut self_notify_events = FdEvents::empty();
-        let mut peer_notify_events = FdEvents::empty();
-        let peer = {
+        // Acquire and release `self.lock()` before locking `peer` below to avoid ABBA deadlocks
+        // when both endpoints call `shutdown(2)` concurrently.
+        let (peer, self_notify_events) = {
             let mut inner = self.lock();
-            if how.contains(SocketShutdownFlags::READ) {
-                inner.is_read_shutdown = true;
-                self_notify_events |= FdEvents::POLLIN | FdEvents::POLLRDHUP;
-            }
-            if how.contains(SocketShutdownFlags::WRITE) {
-                inner.is_write_shutdown = true;
-                self_notify_events |= FdEvents::POLLOUT;
-            }
-            if inner.is_read_shutdown && inner.is_write_shutdown {
-                self_notify_events |= FdEvents::POLLHUP;
-            }
-            inner.peer().cloned()
+            let events = inner.shutdown(how);
+            (inner.peer().cloned(), events)
         };
+        let mut peer_notify_events = FdEvents::empty();
         if let Some(peer) = &peer {
             if socket.socket_type.is_connection_oriented() {
-                let unix_socket = downcast_socket_to_unix(peer);
-                let mut peer_inner = unix_socket.lock();
+                // For a connected `AF_UNIX` pair `(self, peer)`, the two unidirectional
+                // channels are:
+                //   - `self -> peer`: controlled by `(self.is_write_shutdown, peer.is_read_shutdown)`
+                //   - `peer -> self`: controlled by `(peer.is_write_shutdown, self.is_read_shutdown)`
+                //
+                // Transposing `READ` <-> `WRITE` on `peer` ensures that `SHUT_WR` on `self` shuts
+                // down reads on `peer` (`peer_inner.is_read_shutdown`) and `SHUT_RD` on `self`
+                // shuts down writes on `peer` (`peer_inner.is_write_shutdown`).
+                let mut peer_how = SocketShutdownFlags::empty();
                 if how.contains(SocketShutdownFlags::WRITE) {
-                    peer_inner.is_read_shutdown = true;
-                    peer_notify_events |= FdEvents::POLLIN | FdEvents::POLLRDHUP;
+                    peer_how |= SocketShutdownFlags::READ;
                 }
                 if how.contains(SocketShutdownFlags::READ) {
-                    peer_notify_events |= FdEvents::POLLOUT;
+                    peer_how |= SocketShutdownFlags::WRITE;
                 }
-                if peer_inner.is_read_shutdown && peer_inner.is_write_shutdown {
-                    peer_notify_events |= FdEvents::POLLHUP;
-                }
+                let peer_socket = downcast_socket_to_unix(peer);
+                peer_notify_events = peer_socket.lock().shutdown(peer_how);
             }
         }
         if !self_notify_events.is_empty() {
@@ -802,8 +799,8 @@ impl SocketOps for UnixSocket {
         }
         if !peer_notify_events.is_empty() {
             if let Some(peer) = &peer {
-                let unix_socket = downcast_socket_to_unix(peer);
-                unix_socket.waiters.notify_fd_events(peer_notify_events);
+                let peer_socket = downcast_socket_to_unix(peer);
+                peer_socket.waiters.notify_fd_events(peer_notify_events);
             }
         }
         Ok(())
@@ -1005,6 +1002,38 @@ impl UnixSocketInner {
         }
         self.address = Some(socket_address);
         Ok(())
+    }
+
+    /// Shuts down the local endpoint directions specified by `how` ([`SocketShutdownFlags`])
+    /// and returns the [`FdEvents`] to notify on this endpoint's wait queue.
+    ///
+    /// Per `shutdown(2)`:
+    /// > "The `shutdown()` call causes all or part of a full-duplex connection on
+    /// > the socket associated with `sockfd` to be shut down. If `how` is `SHUT_RD`,
+    /// > further receptions will be disallowed. If `how` is `SHUT_WR`, further
+    /// > transmissions will be disallowed. If `how` is `SHUT_RDWR`, further
+    /// > receptions and transmissions will be disallowed."
+    ///
+    /// Per `poll(2)`:
+    /// > "`POLLHUP`: Hang up (only returned in `revents`; ignored in `events`).
+    /// > Note that when reading from a channel such as a pipe or a stream socket,
+    /// > this event merely indicates that the peer closed its end of the channel."
+    /// > "`POLLRDHUP` (since Linux 2.6.17): Stream socket peer closed connection,
+    /// > or shut down writing half of connection."
+    fn shutdown(&mut self, how: SocketShutdownFlags) -> FdEvents {
+        let mut notify_events = FdEvents::empty();
+        if how.contains(SocketShutdownFlags::READ) {
+            self.is_read_shutdown = true;
+            notify_events |= FdEvents::POLLIN | FdEvents::POLLRDHUP;
+        }
+        if how.contains(SocketShutdownFlags::WRITE) {
+            self.is_write_shutdown = true;
+            notify_events |= FdEvents::POLLOUT;
+        }
+        if self.is_read_shutdown && self.is_write_shutdown {
+            notify_events |= FdEvents::POLLHUP;
+        }
+        notify_events
     }
 
     fn set_capacity(&mut self, requested_capacity: usize) {

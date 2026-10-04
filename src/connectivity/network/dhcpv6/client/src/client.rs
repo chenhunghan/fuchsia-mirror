@@ -846,17 +846,15 @@ mod tests {
     use std::pin::pin;
     use std::task::Poll;
 
-    use fidl::endpoints::{
-        ClientEnd, create_proxy, create_proxy_and_stream, create_request_stream,
-    };
-    use fidl_fuchsia_net_dhcpv6::{self as fnet_dhcpv6, ClientProxy, DEFAULT_CLIENT_PORT};
+    use fidl::endpoints::{ClientEnd, create_proxy_and_stream, create_request_stream};
+    use fidl_fuchsia_net_dhcpv6::{self as fnet_dhcpv6, ClientProxy};
     use fuchsia_async as fasync;
-    use futures::{TryFutureExt as _, join, poll};
+    use futures::{join, poll};
 
     use assert_matches::assert_matches;
     use net_declare::{
-        fidl_ip_v6, fidl_ip_v6_with_prefix, fidl_mac, fidl_socket_addr, fidl_socket_addr_v6,
-        net_ip_v6, net_subnet_v6, std_socket_addr,
+        fidl_ip_v6, fidl_ip_v6_with_prefix, fidl_mac, fidl_socket_addr, net_ip_v6, net_subnet_v6,
+        std_socket_addr,
     };
     use net_types::ip::IpAddress as _;
     use packet::serialize::InnerPacketBuilder;
@@ -982,91 +980,6 @@ mod tests {
         prefix_delegation_config: None,
     };
 
-    #[fuchsia::test]
-    async fn test_client_stops_on_channel_close() {
-        let (client_proxy, server_end) = create_proxy::<ClientMarker>();
-
-        let ((), client_res) = join!(
-            async { drop(client_proxy) },
-            serve_client(
-                NewClientParams {
-                    interface_id: 1,
-                    address: fidl_socket_addr_v6!("[::1]:546"),
-                    config: STATELESS_CLIENT_CONFIG,
-                    duid: None,
-                },
-                server_end,
-            ),
-        );
-        client_res.expect("client future should return with Ok");
-    }
-
-    fn client_proxy_watch_servers(
-        client_proxy: &fnet_dhcpv6::ClientProxy,
-    ) -> impl Future<Output = Result<(), fidl::Error>> {
-        client_proxy.watch_servers().map_ok(|_: Vec<fidl_fuchsia_net_name::DnsServer_>| ())
-    }
-
-    fn client_proxy_watch_address(
-        client_proxy: &fnet_dhcpv6::ClientProxy,
-    ) -> impl Future<Output = Result<(), fidl::Error>> {
-        client_proxy.watch_address().map_ok(
-            |_: (
-                fnet::Subnet,
-                fidl_fuchsia_net_interfaces_admin::AddressParameters,
-                fidl::endpoints::ServerEnd<
-                    fidl_fuchsia_net_interfaces_admin::AddressStateProviderMarker,
-                >,
-            )| (),
-        )
-    }
-
-    fn client_proxy_watch_prefixes(
-        client_proxy: &fnet_dhcpv6::ClientProxy,
-    ) -> impl Future<Output = Result<(), fidl::Error>> {
-        client_proxy.watch_prefixes().map_ok(|_: Vec<fnet_dhcpv6::Prefix>| ())
-    }
-
-    #[test_case(client_proxy_watch_servers; "watch_servers")]
-    #[test_case(client_proxy_watch_address; "watch_address")]
-    #[test_case(client_proxy_watch_prefixes; "watch_prefixes")]
-    #[fuchsia::test]
-    async fn test_client_should_return_error_on_double_watch<F>(watch: F)
-    where
-        F: AsyncFn(&fnet_dhcpv6::ClientProxy) -> Result<(), fidl::Error>,
-    {
-        let (client_proxy, server_end) = create_proxy::<ClientMarker>();
-
-        let (caller1_res, caller2_res, client_res) = join!(
-            watch(&client_proxy),
-            watch(&client_proxy),
-            serve_client(
-                NewClientParams {
-                    interface_id: 1,
-                    address: fidl_socket_addr_v6!("[::1]:546"),
-                    config: STATELESS_CLIENT_CONFIG,
-                    duid: None,
-                },
-                server_end,
-            )
-        );
-
-        assert_matches!(
-            caller1_res,
-            Err(fidl::Error::ClientChannelClosed { epitaph: fidl::Epitaph::PeerClosed, .. })
-        );
-        assert_matches!(
-            caller2_res,
-            Err(fidl::Error::ClientChannelClosed { epitaph: fidl::Epitaph::PeerClosed, .. })
-        );
-        assert!(
-            client_res
-                .expect_err("client should fail with double watch error")
-                .to_string()
-                .contains("got watch request while the previous one is pending")
-        );
-    }
-
     const VALID_INFORMATION_CONFIGS: [InformationConfig; 2] =
         [InformationConfig { dns_servers: false }, InformationConfig { dns_servers: true }];
 
@@ -1092,54 +1005,6 @@ mod tests {
                 preferred_addresses: Some(vec![fidl_ip_v6!("a::2")]),
             },
         ]
-    }
-
-    #[fuchsia::test]
-    fn test_client_starts_with_valid_args() {
-        for information_config in VALID_INFORMATION_CONFIGS {
-            for non_temporary_address_config in get_valid_non_temporary_address_configs() {
-                for prefix_delegation_config in VALID_DELEGATED_PREFIX_CONFIGS {
-                    let mut exec = fasync::TestExecutor::new();
-
-                    let (client_proxy, server_end) = create_proxy::<ClientMarker>();
-
-                    let test_fut = async {
-                        join!(
-                            client_proxy.watch_servers(),
-                            serve_client(
-                                NewClientParams {
-                                    interface_id: 1,
-                                    address: fidl_socket_addr_v6!("[::1]:546"),
-                                    config: ClientConfig {
-                                        information_config: information_config.clone(),
-                                        non_temporary_address_config: non_temporary_address_config
-                                            .clone(),
-                                        prefix_delegation_config: prefix_delegation_config.clone(),
-                                    },
-                                    duid: (non_temporary_address_config.address_count != 0
-                                        || prefix_delegation_config.is_some())
-                                    .then(|| fnet_dhcpv6::Duid::LinkLayerAddress(
-                                        fnet_dhcpv6::LinkLayerAddress::Ethernet(fidl_mac!(
-                                            "00:11:22:33:44:55"
-                                        ))
-                                    )),
-                                },
-                                server_end
-                            )
-                        )
-                    };
-                    let mut test_fut = pin!(test_fut);
-                    assert_matches!(
-                        exec.run_until_stalled(&mut test_fut),
-                        Poll::Pending,
-                        "information_config={:?}, non_temporary_address_config={:?}, prefix_delegation_config={:?}",
-                        information_config,
-                        non_temporary_address_config,
-                        prefix_delegation_config
-                    );
-                }
-            }
-        }
     }
 
     const CLIENT_ID: [u8; 18] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
@@ -1195,70 +1060,6 @@ mod tests {
                         assert_received_message(&server_socket, client_addr, want_msg_type).await;
                 }
             }
-        }
-    }
-
-    // TODO(https://fxbug.dev/335656784): Replace this with a netemul test that isn't
-    // sensitive to implementation details.
-    #[fuchsia::test]
-    async fn test_client_fails_to_start_with_invalid_args() {
-        for params in vec![
-            // Interface ID and zone index mismatch on link-local address.
-            NewClientParams {
-                interface_id: 2,
-                address: fnet::Ipv6SocketAddress {
-                    address: fidl_ip_v6!("fe80::1"),
-                    port: DEFAULT_CLIENT_PORT,
-                    zone_index: 1,
-                },
-                config: STATELESS_CLIENT_CONFIG,
-                duid: None,
-            },
-            // Multicast address is invalid.
-            NewClientParams {
-                interface_id: 1,
-                address: fnet::Ipv6SocketAddress {
-                    address: fidl_ip_v6!("ff01::1"),
-                    port: DEFAULT_CLIENT_PORT,
-                    zone_index: 1,
-                },
-                config: STATELESS_CLIENT_CONFIG,
-                duid: None,
-            },
-            // Stateless with DUID.
-            NewClientParams {
-                interface_id: 1,
-                address: fidl_socket_addr_v6!("[2001:db8::1]:12345"),
-                config: STATELESS_CLIENT_CONFIG,
-                duid: Some(fnet_dhcpv6::Duid::LinkLayerAddress(
-                    fnet_dhcpv6::LinkLayerAddress::Ethernet(fidl_mac!("00:11:22:33:44:55")),
-                )),
-            },
-            // Stateful missing DUID.
-            NewClientParams {
-                interface_id: 1,
-                address: fidl_socket_addr_v6!("[2001:db8::1]:12345"),
-                config: ClientConfig {
-                    information_config: InformationConfig { dns_servers: true },
-                    non_temporary_address_config: AddressConfig {
-                        address_count: 1,
-                        preferred_addresses: None,
-                    },
-                    prefix_delegation_config: None,
-                },
-                duid: None,
-            },
-        ] {
-            let (client_proxy, server_end) = create_proxy::<ClientMarker>();
-            let () =
-                serve_client(params, server_end).await.expect("start server failed unexpectedly");
-            // Calling any function on the client proxy should fail due to channel closed with
-            // `INVALID_ARGS`.
-            assert_matches!(
-                client_proxy.watch_servers().await,
-                Err(fidl::Error::ClientChannelClosed { epitaph, .. })
-                    if epitaph == zx::Status::INVALID_ARGS
-            );
         }
     }
 

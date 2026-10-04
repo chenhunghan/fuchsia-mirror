@@ -195,7 +195,7 @@ The plugin executes 6 diagnostic queries in prioritized order:
    switch / wakeup counts preventing deep sleep (VddMin).
 2. **Per-Core Utilization & Processing Rate**: Analyzes core duty cycles
    (% active non-idle time) and CPU frequency scaling via Fuchsia kernel
-   `Processing Rate:CPU:N` counters.
+   `Rate:CPU:N` counters.
 3. **Top CPU Consumers (Usual Suspects)**: Ranks threads by total accumulated
    CPU runtime.
 4. **Fuchsia Async Executor Overhead**: Measures runtime and slice counts for

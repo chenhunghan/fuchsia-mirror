@@ -33,7 +33,6 @@ source_set("syscalls") {
 source_set("impl") {
   visibility = [ ":*" ]
   sources = [
-    "channel.cc",
     "driver.cc",
     "exceptions.cc",
     "futex.cc",
@@ -120,6 +119,7 @@ kernel_rust_mod("syscalls-rs") {
   source_root = "mod.rs"
   sources = [
     "bti.rs",
+    "channel.rs",
     "clock.rs",
     "counter.rs",
     "cprng.rs",
@@ -127,6 +127,7 @@ kernel_rust_mod("syscalls-rs") {
     "debuglog.rs",
     "event.rs",
     "fifo.rs",
+    "guest.rs",
     "iob.rs",
     "iommu.rs",
     "job.rs",

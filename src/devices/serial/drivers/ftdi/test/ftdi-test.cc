@@ -6,6 +6,7 @@
 #include <endian.h>
 #include <fcntl.h>
 #include <fidl/fuchsia.hardware.serial/cpp/wire.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.virtual.bus/cpp/wire.h>
 #include <fidl/fuchsia.io/cpp/wire.h>
@@ -25,6 +26,8 @@
 #include <fbl/string.h>
 #include <usb/usb.h>
 #include <zxtest/zxtest.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_virtual_bus {
 namespace {
@@ -81,9 +84,9 @@ class FtdiTest : public zxtest::Test {
     device_desc.id_product = htole16(0x6014);
 
     usb_peripheral::wire::FunctionDescriptor ftdi_function_desc = {
-        .interface_class = USB_CLASS_VENDOR,
-        .interface_subclass = USB_SUBCLASS_VENDOR,
-        .interface_protocol = USB_PROTOCOL_TEST_FTDI,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
+        .interface_subclass = fidl::ToUnderlying(fdescriptor::VendorSubclass::kVendor),
+        .interface_protocol = fidl::ToUnderlying(fdescriptor::TestVendorProtocol::kTestFtdi),
     };
 
     std::vector<usb_peripheral::wire::FunctionDescriptor> function_descs;

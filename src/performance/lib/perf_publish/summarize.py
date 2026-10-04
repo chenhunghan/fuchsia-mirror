@@ -9,7 +9,8 @@ a concise and human-readable format.
 import json
 import os
 import statistics
-from typing import Any, Iterable, TextIO
+from collections.abc import Collection, Set
+from typing import Any, TextIO
 
 
 def write_fuchsiaperf_json(
@@ -36,12 +37,14 @@ def mean_excluding_warm_up(values: list[int | float]) -> float:
 
 
 def summarize_perf_files(
-    json_files: Iterable[str | os.PathLike[str]],
+    json_files: Collection[str | os.PathLike[str]],
+    no_summarize_metrics: Set[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """
     This function takes a set of "raw data" fuchsiaperf files as input
     and produces the contents of a "summary" fuchsiaperf file as output.
-    The output contains just the average values for each test case.
+    The output contains just the average values for each test case, except
+    for metrics in `no_summarize_metrics`, whose raw values are preserved.
 
     See `//docs/development/performance/metric_name_expectations.md` for a
     description of how the summarization is done and what benefits it provides.
@@ -55,6 +58,7 @@ def summarize_perf_files(
             raise ValueError("Top level fuchsiaperf node must be a list")
         for entry in json_data:
             full_name = (entry["test_suite"], entry["label"])
+            metric_name = f'{entry["test_suite"]}: {entry["label"]}'
             output_entry = output_by_name.get(full_name)
             if output_entry is None:
                 output_entry = {
@@ -71,9 +75,14 @@ def summarize_perf_files(
                     f'"{entry["unit"]}" and {output_entry["unit"]}'
                     f'for test "{entry["test_suite"]}", "{entry["label"]}"'
                 )
-            output_entry["values"].append(
-                mean_excluding_warm_up(entry["values"])
-            )
+            if metric_name in no_summarize_metrics:
+                output_entry["values"].extend(entry["values"])
+            else:
+                output_entry["values"].append(
+                    mean_excluding_warm_up(entry["values"])
+                )
     for entry in result:
-        entry["values"] = [statistics.mean(entry["values"])]
+        metric_name = f'{entry["test_suite"]}: {entry["label"]}'
+        if metric_name not in no_summarize_metrics:
+            entry["values"] = [statistics.mean(entry["values"])]
     return result

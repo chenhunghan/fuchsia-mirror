@@ -29,6 +29,7 @@ standalone_libraries = [
   "inheritance_with_recursive_decl.test.fidl",
   "inheritance.test.fidl",
   "new_type.test.fidl",
+  "nonzero.test.fidl",
   "nullable.test.fidl",
   "overlay.test.fidl",
   "padding.test.fidl",

@@ -14,6 +14,7 @@ impl Filter {
         let signature_has_mutable_self =
             if let Some(syn::FnArg::Receiver(argument)) = function.sig.inputs.first() {
                 argument.mutability.is_some()
+                    || matches!(argument.kind, syn::ReceiverKind::Reference(_, _, Some(_)))
             } else {
                 false
             };

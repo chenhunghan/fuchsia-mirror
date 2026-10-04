@@ -12,7 +12,7 @@ import zipfile
 _DEFAULT_COMPRESSION_LEVEL = 0
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output_file", help="Output file path.")
     parser.add_argument(
@@ -39,7 +39,7 @@ def main():
             )
 
     # Get source files list.
-    source_files = []
+    source_files: list[str] = []
     for root, dirs, files in os.walk(args.source_dir):
         source_files.extend(
             os.path.join(root, f)

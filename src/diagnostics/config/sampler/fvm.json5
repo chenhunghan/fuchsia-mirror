@@ -7,7 +7,7 @@
                     event_codes: [
                         0,
                     ],
-                    metric_id: 3001,
+                    metric_name: "fvm_slice_allocations_migrated",
                     metric_type: "Occurrence",
                     selector: [
                         "bootstrap/*-drivers\\:*:[name=fvm]root/fvm/partitions/blobfs:total_slices_reserved",
@@ -18,7 +18,7 @@
                     event_codes: [
                         1,
                     ],
-                    metric_id: 3001,
+                    metric_name: "fvm_slice_allocations_migrated",
                     metric_type: "Occurrence",
                     selector: [
                         "bootstrap/*-drivers\\:*:[name=fvm]root/fvm/partitions/data:total_slices_reserved",
@@ -31,7 +31,7 @@
                     event_codes: [
                         1,
                     ],
-                    metric_id: 61,
+                    metric_name: "version_migrated",
                     metric_type: "String",
                     selector: [
                         "bootstrap/*-drivers\\:*:[name=fvm]root/fvm/mount_time:version_combo",

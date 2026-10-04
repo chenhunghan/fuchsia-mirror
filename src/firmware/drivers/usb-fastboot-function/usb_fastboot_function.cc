@@ -400,7 +400,7 @@ zx_status_t UsbFastbootFunction::ConfigureEndpoints() {
 void UsbFastbootFunction::SetConfigured(SetConfiguredRequest& request,
                                         SetConfiguredCompleter::Sync& completer) {
   bool configured = request.configured();
-  fuchsia_hardware_usb_descriptor::UsbSpeed speed = request.speed();
+  fdescriptor::UsbSpeed speed = request.speed();
   fdf::info("configured? - {}  speed - {}.", configured, static_cast<uint32_t>(speed));
 
   if (stopping_ || set_configured_completer_.has_value()) {

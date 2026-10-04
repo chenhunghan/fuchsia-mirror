@@ -8,8 +8,9 @@ use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties};
 use crate::object_store::object_record::{
-    BytesAndNodes, ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, ObjectAttributes,
-    ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
+    BytesAndNodes, ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, FscryptDirInfo,
+    ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue,
+    Timestamp,
 };
 use crate::object_store::transaction::{
     LockKey, LockKeys, Mutation, Options, Transaction, lock_keys,
@@ -156,6 +157,10 @@ impl<S: HandleOwner> Directory<S> {
         self.dir_type.lock().wrapping_key_id()
     }
 
+    pub fn fscrypt_info(&self) -> Option<FscryptDirInfo> {
+        self.dir_type.lock().fscrypt_info()
+    }
+
     /// Retrieves keys from the key manager or unwraps the wrapped keys in the directory's key
     /// record.  Returns None if the key is currently unavailable due to the wrapping key being
     /// unavailable.
@@ -231,7 +236,7 @@ impl<S: HandleOwner> Directory<S> {
         wrapping_key_id: Option<WrappingKeyId>,
     ) -> Result<Directory<S>, Error> {
         let dir_type = match wrapping_key_id {
-            Some(id) => DirType::Encrypted(id),
+            Some(id) => DirType::Encrypted(id.into()),
             None => DirType::Normal,
         };
         Self::create_with_options(transaction, owner, dir_type).await
@@ -266,10 +271,15 @@ impl<S: HandleOwner> Directory<S> {
                 },
             ),
         );
-        if let Some(wrapping_key_id) = dir_type.wrapping_key_id() {
+        if let Some(info) = dir_type.fscrypt_info() {
             if let Some(crypt) = store.crypt() {
                 let (key, unwrapped_key) = crypt
-                    .create_key_with_id(object_id, wrapping_key_id, ObjectType::Directory)
+                    .create_key_with_id(
+                        object_id,
+                        info.wrapping_key_id,
+                        ObjectType::Directory,
+                        info.flags.into(),
+                    )
                     .await?;
                 let cipher = key_to_cipher(&key, &unwrapped_key)?;
                 transaction.add(
@@ -305,13 +315,20 @@ impl<S: HandleOwner> Directory<S> {
     pub async fn set_wrapping_key(
         &self,
         transaction: &mut Transaction<'_>,
-        id: WrappingKeyId,
+        info: impl Into<FscryptDirInfo>,
     ) -> Result<Arc<dyn Cipher>, Error> {
+        let info = info.into();
         let object_id = self.object_id();
         let store = self.store();
         if let Some(crypt) = store.crypt() {
-            let (key, unwrapped_key) =
-                crypt.create_key_with_id(object_id, id, ObjectType::Directory).await?;
+            let (key, unwrapped_key) = crypt
+                .create_key_with_id(
+                    object_id,
+                    info.wrapping_key_id,
+                    ObjectType::Directory,
+                    info.flags.into(),
+                )
+                .await?;
             let mut mutation = store.txn_get_object_mutation(transaction, object_id).await?;
             if let ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. } =
                 &mut mutation.item.value
@@ -322,7 +339,7 @@ impl<S: HandleOwner> Directory<S> {
                 if self.has_children().await? {
                     return Err(FxfsError::NotEmpty.into());
                 }
-                *dir_type = dir_type.with_encryption(id);
+                *dir_type = dir_type.with_encryption(info);
             } else {
                 match mutation.item.value {
                     ObjectValue::None => bail!(FxfsError::NotFound),
@@ -841,9 +858,9 @@ impl<S: HandleOwner> Directory<S> {
         options: HandleOptions,
     ) -> Result<DataObjectHandle<S>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
-        let wrapping_key_id = self.wrapping_key_id();
+        let fscrypt_info = self.fscrypt_info();
         let handle =
-            ObjectStore::create_object(self.owner(), transaction, options, wrapping_key_id).await?;
+            ObjectStore::create_object(self.owner(), transaction, options, fscrypt_info).await?;
         self.add_child_file(transaction, name, &handle).await?;
         self.copy_project_id_to_object_in_txn(transaction, handle.object_id())?;
         Ok(handle)
@@ -854,12 +871,12 @@ impl<S: HandleOwner> Directory<S> {
         transaction: &mut Transaction<'a>,
     ) -> Result<DataObjectHandle<S>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
-        let wrapping_key_id = self.wrapping_key_id();
+        let fscrypt_info = self.fscrypt_info();
         let handle = ObjectStore::create_object(
             self.owner(),
             transaction,
             HandleOptions::default(),
-            wrapping_key_id,
+            fscrypt_info,
         )
         .await?;
 
@@ -922,10 +939,15 @@ impl<S: HandleOwner> Directory<S> {
         let mut link = link.to_vec();
 
         match self.dir_type() {
-            DirType::Encrypted(wrapping_key_id) | DirType::EncryptedCasefold(wrapping_key_id) => {
+            DirType::Encrypted(info) | DirType::EncryptedCasefold(info) => {
                 if let Some(crypt) = self.store().crypt() {
                     let (key, unwrapped_key) = crypt
-                        .create_key_with_id(symlink_id, wrapping_key_id, ObjectType::Symlink)
+                        .create_key_with_id(
+                            symlink_id,
+                            info.wrapping_key_id,
+                            ObjectType::Symlink,
+                            info.flags.into(),
+                        )
                         .await?;
 
                     // Note that it's possible that this entry gets inserted into the key manager but
@@ -1142,10 +1164,11 @@ impl<S: HandleOwner> Directory<S> {
         }
 
         let wrapping_key =
-            if let Some(fio::MutableNodeAttributes { wrapping_key_id: Some(id), .. }) =
+            if let Some(fio::MutableNodeAttributes { encryption_policy: Some(policy), .. }) =
                 node_attributes
             {
-                Some((*id, self.set_wrapping_key(&mut transaction, *id).await?))
+                let info = FscryptDirInfo::from(*policy);
+                Some((info, self.set_wrapping_key(&mut transaction, info).await?))
             } else {
                 None
             };
@@ -1156,14 +1179,10 @@ impl<S: HandleOwner> Directory<S> {
         }
         transaction
             .commit_with_callback(|_| {
-                if let Some((wrapping_key_id, cipher)) = wrapping_key {
+                if let Some((info, cipher)) = wrapping_key {
                     {
                         let mut dir_type = self.dir_type.lock();
-                        *dir_type = match *dir_type {
-                            DirType::Normal => DirType::Encrypted(wrapping_key_id),
-                            DirType::Casefold => DirType::EncryptedCasefold(wrapping_key_id),
-                            _ => *dir_type,
-                        };
+                        *dir_type = dir_type.with_encryption(info);
                     }
                     self.store().key_manager.merge(self.object_id(), |existing| match existing {
                         Some(existing) => {
@@ -2424,7 +2443,10 @@ mod tests {
             .update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -2509,7 +2531,10 @@ mod tests {
                 .update_attributes(
                     transaction,
                     Some(&fio::MutableNodeAttributes {
-                        wrapping_key_id: Some(WRAPPING_KEY_ID),
+                        encryption_policy: Some(fio::FscryptPolicy {
+                            key_identifier: WRAPPING_KEY_ID,
+                            flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                        }),
                         ..Default::default()
                     }),
                     0,
@@ -2650,7 +2675,10 @@ mod tests {
             .update_attributes(
                 &mut transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 None,

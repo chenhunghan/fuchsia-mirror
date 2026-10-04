@@ -80,7 +80,7 @@ impl Debug for SshConnector {
         f.debug_struct("SshConnector")
             .field("target", &self.target)
             .field("overnet_cmd", &self.overnet_cmd)
-            .field("fdomain_cmd", &self.overnet_cmd)
+            .field("fdomain_cmd", &self.fdomain_cmd)
             .finish()
     }
 }

@@ -79,7 +79,6 @@ fuchsia_component("stop_with_delivery_on_readable_request") {
   testonly = true
   manifest = "meta/stop_with_delivery_on_readable_request.cml"
   deps = [ ":stop_with_delivery_on_readable_request_bin" ]
-  restricted_features = [ "delivery_type" ]
 }
 
 rustc_binary("stop_with_dynamic_dictionary_bin") {
@@ -108,10 +107,7 @@ fuchsia_component("stop_with_dynamic_dictionary") {
   testonly = true
   manifest = "meta/stop_with_dynamic_dictionary.cml"
   deps = [ ":stop_with_dynamic_dictionary_bin" ]
-  restricted_features = [
-    "delivery_type",
-    "dynamic_dictionaries",
-  ]
+  restricted_features = [ "dynamic_dictionaries" ]
 }
 
 rustc_binary("stop_with_escrowed_dictionary_bin") {
@@ -139,7 +135,6 @@ fuchsia_component("stop_with_escrowed_dictionary") {
   testonly = true
   manifest = "meta/stop_with_escrowed_dictionary.cml"
   deps = [ ":stop_with_escrowed_dictionary_bin" ]
-  restricted_features = [ "delivery_type" ]
 }
 
 fuchsia_component("test_root") {

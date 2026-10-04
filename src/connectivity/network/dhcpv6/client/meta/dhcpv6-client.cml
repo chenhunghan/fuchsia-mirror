@@ -8,7 +8,10 @@
         binary: "bin/dhcpv6_client",
     },
     capabilities: [
-        { protocol: "fuchsia.net.dhcpv6.ClientProvider" },
+        {
+            protocol: "fuchsia.net.dhcpv6.ClientProvider",
+            delivery: "on_readable",
+        },
     ],
     use: [
         { protocol: "fuchsia.posix.socket.Provider" },

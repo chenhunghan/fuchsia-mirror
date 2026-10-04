@@ -114,6 +114,7 @@ TEST_F(Vdec1UnitTest, PowerOn) {
     EXPECT_TRUE(fake_owner.enable_clock_state(ClockType::kGclkVdec));
     EXPECT_FALSE(fake_owner.clocks_gated());
   }  // ~power_ref
+  EXPECT_FALSE(fake_owner.enable_clock_state(ClockType::kGclkVdec));
   EXPECT_TRUE(fake_owner.clocks_gated());
 }
 
@@ -142,6 +143,7 @@ TEST_F(Vdec1UnitTest, PowerOnSm1) {
     EXPECT_FALSE(fake_owner.clocks_gated());
   }  // ~power_ref
 
+  EXPECT_FALSE(fake_owner.enable_clock_state(ClockType::kGclkVdec));
   EXPECT_TRUE(fake_owner.clocks_gated());
   EXPECT_EQ(0xffffffffu, AoRtiGenPwrIso0::Get().ReadFrom(fake_owner.mmio()->aobus).reg_value());
   EXPECT_EQ(0xffffffffu, AoRtiGenPwrSleep0::Get().ReadFrom(fake_owner.mmio()->aobus).reg_value());

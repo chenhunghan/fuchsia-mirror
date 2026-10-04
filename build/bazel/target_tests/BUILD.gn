@@ -1,0 +1,110 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_action.gni")
+
+bazel_action("target_tests") {
+  testonly = true
+  command = "build"
+
+  # LINT.IfChange(target_tests_bazel_target)
+  bazel_target = "//build/bazel/target_tests:target_tests_stamp"
+
+  # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:target_tests_bazel_target)
+  bazel_config = "fuchsia_platform"
+
+  # The suites themselves are built as top-level Bazel targets, because they
+  # are Bazel test_suite targets: they expose no files to depend on, and are
+  # typically private to their own package.
+  extra_bazel_targets_file =
+      "$root_build_dir/bazel_target_test_suites_to_build.txt"
+
+  # Test packages have no `package_outputs` to request this, but their
+  # symbols are needed to symbolize test failures.
+  copy_debug_symbols = true
+
+  deps = [
+    # The following are currently needed by `fx_package()`.
+    # TODO(b/519244675): Remove once `package-tool` is migrated to Bazel.
+    "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
+  ]
+
+  copy_outputs = [
+    {
+      bazel = "{{BAZEL_TARGET_OUT_DIR}}/target_tests.stamp"
+      ninja = "target_tests.stamp"
+    },
+  ]
+}
+
+# Pretends to generate bazel_test_packages.list, which is actually written by
+# regenerator.py during `fx gen`, and depends on `:target_tests` so that the
+# package manifests and blobs listed in it exist on disk before any consumer
+# (such as //build/images/updates:all_package_manifests.list) reads them.
+action("bazel_test_packages.list") {
+  testonly = true
+  script = "//build/scripts/no_op.sh"
+  outputs = [ "$root_build_dir/bazel_test_packages.list" ]
+  args = rebase_path(outputs, root_build_dir)
+  deps = [ ":target_tests" ]
+}
+
+# Lists the debug symbols of the ELF binaries in the Bazel test packages, for
+# the //:debug_symbols build API module, which is how infra uploads them for
+# symbolization. The symbols themselves are copied to
+# $root_build_dir/.build-id/ by `:target_tests`.
+#
+# The C++ runtime libraries in the packages (e.g. libc++.so.2) are copied from
+# the prebuilt Clang toolchain, whose debug symbols are exported separately,
+# so the manifest intentionally omits them.
+_bazel_test_packages_list = "$root_build_dir/bazel_test_packages.list"
+_debug_symbols_manifest =
+    "$target_out_dir/bazel_test_packages.debug_symbols.json"
+_debug_symbols_build_ids = "$target_out_dir/bazel_test_packages.build_ids.txt"
+_rebased_debug_symbols_manifest =
+    rebase_path(_debug_symbols_manifest, root_build_dir)
+
+action("debug_symbols") {
+  testonly = true
+  mnemonic = "DEBUG_SYM"
+  script = "//build/packages/generate_package_debug_symbols_manifest.py"
+  inputs = [
+    _bazel_test_packages_list,
+    "//build/api/debug_symbols.py",
+  ]
+  outputs = [
+    _debug_symbols_manifest,
+    _debug_symbols_build_ids,
+  ]
+  depfile = "$target_out_dir/bazel_test_packages.debug_symbols.d"
+  args = [
+    "--package-manifests-list",
+    rebase_path(_bazel_test_packages_list, root_build_dir),
+
+    # There's no GN label for each package, so attribute every entry to the
+    # action that builds them.
+    "--package-label",
+    get_label_info(":target_tests", "label_with_toolchain"),
+    "--debug-symbols-dir",
+    ".",
+    "--output-build-ids-txt",
+    rebase_path(_debug_symbols_build_ids, root_build_dir),
+    "--output-debug-manifest",
+    _rebased_debug_symbols_manifest,
+    "--target-cpu",
+    current_cpu,
+    "--depfile",
+    rebase_path(depfile, root_build_dir),
+  ]
+  deps = [ ":bazel_test_packages.list" ]
+  metadata = {
+    # Used by //:debug_symbols build API module.
+    debug_symbol_manifests = [
+      {
+        label = get_label_info(":$target_name", "label_with_toolchain")
+        manifest = _rebased_debug_symbols_manifest
+      },
+    ]
+  }
+}

@@ -448,3 +448,9 @@ redirects:
   to: /docs/reference/fidl/language/errcat.md#fi-0222
 - from: /docs/error/fi-0223
   to: /docs/reference/fidl/language/errcat.md#fi-0223
+- from: /docs/error/fi-0224
+  to: /docs/reference/fidl/language/errcat.md#fi-0224
+- from: /docs/error/fi-0225
+  to: /docs/reference/fidl/language/errcat.md#fi-0225
+- from: /docs/error/fi-0226
+  to: /docs/reference/fidl/language/errcat.md#fi-0226

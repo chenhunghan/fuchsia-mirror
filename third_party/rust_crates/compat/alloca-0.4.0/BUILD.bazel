@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "alloca-c",
+    srcs = [
+        "//third_party/rust_crates/vendor/alloca-0.4.0:alloca.c",
+    ],
+    visibility = [
+        "//third_party/rust_crates:__pkg__",
+        "//third_party/rust_crates/vendor/alloca-0.4.0:__pkg__",
+    ],
+    # Rust's libstd, libc, and rustix emit `-lfdio` on Fuchsia. GN supplies
+    # fdio implicitly via default target configs, whereas Bazel's sysroot does
+    # not include libfdio.so. Without this dep, linking pure third-party
+    # dependents such as //src/developer/fuchsia-criterion:criterion_bench_bin
+    # and //src/developer/fuchsia-criterion:fuchsia-criterion_test fails with:
+    # `ld.lld: error: unable to find library -lfdio`.
+    deps = select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
+)

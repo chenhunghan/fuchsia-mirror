@@ -1,7 +1,7 @@
 {
     metrics: [
         {
-            metric_id: 2,
+            metric_name: "per_component_crashes",
             metric_type: "Occurrence",
             selector: [
                 "core/exceptions:root/crash_counts:{MONIKER}",

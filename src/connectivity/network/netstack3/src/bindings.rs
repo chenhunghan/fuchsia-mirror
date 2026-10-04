@@ -31,7 +31,6 @@ mod interfaces_admin;
 mod interfaces_watcher;
 mod matchers;
 mod multicast_admin;
-mod name_worker;
 mod ndp_watcher;
 mod neighbor_worker;
 mod netdevice_worker;
@@ -405,6 +404,7 @@ pub(crate) struct GlobalConfig {
     pub(crate) sampled_stats_enabled: bool,
     pub(crate) multi_vmo: bool,
     pub(crate) max_rolling_capture_buffer_size: u32,
+    pub(crate) tcp_gro_enabled: bool,
 }
 
 impl Default for GlobalConfig {
@@ -414,6 +414,7 @@ impl Default for GlobalConfig {
             sampled_stats_enabled: false,
             multi_vmo: false,
             max_rolling_capture_buffer_size: 16777216,
+            tcp_gro_enabled: false,
         }
     }
 }
@@ -1312,7 +1313,6 @@ impl Netstack {
 }
 
 pub(crate) enum Service {
-    DnsServerWatcher(fidl_fuchsia_net_name::DnsServerWatcherRequestStream),
     DebugDiagnostics(fidl::endpoints::ServerEnd<fidl_fuchsia_net_debug::DiagnosticsMarker>),
     DebugInterfaces(fidl_fuchsia_net_debug::InterfacesRequestStream),
     FilterControl(fidl_fuchsia_net_filter::ControlRequestStream),
@@ -1528,9 +1528,7 @@ impl NetstackSeed {
             // do not outlive the services stream.
             .map(move |s| match s {
                 Service::Stack(stack) => services_handle
-                    .spawn_request_stream_handler(stack, |rs| {
-                        stack_fidl_worker::StackFidlWorker::serve(netstack.clone(), rs)
-                    }),
+                    .spawn_request_stream_handler(stack, |rs| stack_fidl_worker::serve(rs)),
                 Service::Socket(socket) => sockets_scope
                     .spawn_request_stream_handler(socket, |rs| {
                         socket::serve(netstack.ctx.clone(), rs)
@@ -1678,10 +1676,6 @@ impl NetstackSeed {
                 Service::PacketCapture(packet_capture) => services_handle
                     .spawn_request_stream_handler(packet_capture, |rs| {
                         packet_capture_worker::serve_packet_captures(netstack.ctx.clone(), rs)
-                    }),
-                Service::DnsServerWatcher(dns) => services_handle
-                    .spawn_request_stream_handler(dns, |rs| {
-                        name_worker::serve(netstack.clone(), rs)
                     }),
                 Service::FilterState(filter) => services_handle
                     .spawn_request_stream_handler(filter, |rs| {

@@ -85,7 +85,6 @@ constexpr uint32_t kHhiVpuClkCntl            = (0x6F << 2);
 constexpr uint32_t kHhiVipnanoqClkCntl       = (0x72 << 2);
 constexpr uint32_t kHhiHdmiClkCntl           = (0x73 << 2);
 constexpr uint32_t kHhiEthClkCntl            = (0x76 << 2);
-constexpr uint32_t kHhiVdecClkCntl           = (0x78 << 2);
 constexpr uint32_t kHhiVdec2ClkCntl          = (0x79 << 2);
 constexpr uint32_t kHhiVdec3ClkCntl          = (0x7a << 2);
 constexpr uint32_t kHhiVdec4ClkCntl          = (0x7b << 2);
@@ -153,7 +152,7 @@ constexpr uint32_t kDosGclkEn0               = (0x3f01 << 2);
 
 // NOTE: This list only contains the clocks in use currently and
 //       not all available clocks.
-static constexpr meson_clk_gate_t g12a_clk_gates[] = {
+inline constexpr meson_clk_gate_t g12a_clk_gates[] = {
     // SYS CPU Clock gates.
     {.reg = kHhiSysCpuClkCntl1, .bit = 24},  // CLK_SYS_PLL_DIV16
     {.reg = kHhiSysCpuClkCntl1, .bit = 1},   // CLK_SYS_CPU_CLK_DIV16
@@ -226,28 +225,34 @@ static constexpr meson_clk_gate_t g12a_clk_gates[] = {
     {.reg = kHhiGclk2Other, .bit = 25},  // CLK_VCLK2_VENCL
     {.reg = kHhiGclk2Other, .bit = 26},  // CLK_VCLK2_OTHER1
 
-    {.reg = kDosGclkEn0,
-     .bit = 0,
-     .register_set = kMesonRegisterSetDos,
-     .mask = 0x3ff},  // CLK_DOS_GCLK_VDEC
+    {
+        .reg = kDosGclkEn0,
+        .bit = 0,
+        .register_set = kMesonRegisterSetDos,
+        .mask = 0x3ff,
+        .hiu_reg = kHhiVdecClkCntl,
+        .hiu_mask = kHhiVdecClkCntlVdecMask,
+        .hiu_enable_val = kHhiVdecClkCntlVdecEnableVal,
+        .hiu_disable_val = kHhiVdecClkCntlVdecDisableVal,
+    },  // CLK_DOS_GCLK_VDEC
 };
 
 static_assert(g12a_clk::CLK_G12A_COUNT == std::size(g12a_clk_gates),
               "g12a_clk_gates[] and CLK_G12A_COUNT count mismatch");
 
-static constexpr meson_clk_msr_t g12a_clk_msr = {
+inline constexpr meson_clk_msr_t g12a_clk_msr = {
     .reg0_offset = (0x1 << 2),
     .reg2_offset = (0x3 << 2),
 };
 
-static constexpr meson_cpu_clk_t g12a_cpu_clks[] = {
+inline constexpr meson_cpu_clk_t g12a_cpu_clks[] = {
     {.reg = kHhiSysCpuClkCntl0, .pll = SYS_PLL, .initial_hz = 1'200'000'000},
 };
 
 // This clock table is meant only for CLK-MEASURE
 // Indexes here, correspond to actual clk mux
 // values written to measure respective clk.
-static const char* const g12a_clk_table[] = {
+inline constexpr const char* const g12a_clk_table[] = {
     "am_ring_osc_clk_out_ee[0]",  //  0
     "am_ring_osc_clk_out_ee[1]",  //  1
     "am_ring_osc_clk_out_ee[2]",  //  2

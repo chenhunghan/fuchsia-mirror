@@ -9,6 +9,7 @@ use bind::interpreter::decode_bind_rules::DecodedRules;
 use bind::interpreter::match_bind::DeviceProperties;
 use fidl_fuchsia_driver_framework as fdf;
 use fidl_fuchsia_driver_index as fdi;
+
 use std::collections::HashMap;
 use zx::Status;
 use zx::sys::zx_status_t;
@@ -72,52 +73,10 @@ impl CompositeNodeSpecManager {
             return Err(Status::INVALID_ARGS.into_raw());
         }
 
-        let parents = match (spec.parents.take(), spec.parents2.take()) {
-            (Some(parents), None) => parents
-                .into_iter()
-                .map(|parent| {
-                    Ok(fdf::ParentSpec2 {
-                        bind_rules: parent
-                            .bind_rules
-                            .into_iter()
-                            .map(|rule| {
-                                if let fdf::NodePropertyKey::StringValue(key) = rule.key {
-                                    Ok(fdf::BindRule2 {
-                                        key,
-                                        condition: rule.condition,
-                                        values: rule.values,
-                                    })
-                                } else {
-                                    Err(Status::NOT_SUPPORTED.into_raw())
-                                }
-                            })
-                            .collect::<Result<_, _>>()?,
-                        properties: parent
-                            .properties
-                            .into_iter()
-                            .map(|prop| {
-                                if let fdf::NodePropertyKey::StringValue(key) = prop.key {
-                                    Ok(fdf::NodeProperty2 { key, value: prop.value })
-                                } else {
-                                    Err(Status::NOT_SUPPORTED.into_raw())
-                                }
-                            })
-                            .collect::<Result<_, _>>()?,
-                    })
-                })
-                .collect::<Result<_, i32>>()?,
-            (None, Some(parents2)) => parents2,
-            (Some(_), Some(_)) => {
-                log::error!(
-                    "Both parents and parents2 were specified. Only one must be specified."
-                );
-                return Err(Status::INVALID_ARGS.into_raw());
-            }
-            (None, None) => {
-                log::error!("Neither parents and parents2 were specified, but one is required.");
-                return Err(Status::INVALID_ARGS.into_raw());
-            }
-        };
+        let parents = spec.parents2.take().ok_or_else(|| {
+            log::error!("parents2 was not specified, but it is required.");
+            Status::INVALID_ARGS.into_raw()
+        })?;
 
         if self.spec_list.contains_key(&name) {
             return Err(Status::ALREADY_EXISTS.into_raw());
@@ -133,7 +92,8 @@ impl CompositeNodeSpecManager {
         // they're all verified to be valid.
         // TODO(https://fxbug.dev/42056805): Update tests so that we can verify that properties exists in
         // each parent ref.
-        let mut parent_refs: Vec<(BindRules, CompositeParentRef)> = vec![];
+        let mut parent_refs: Vec<(BindRules, CompositeParentRef)> =
+            Vec::with_capacity(parents.len());
         for (idx, parent) in parents.iter().enumerate() {
             let bind_rules = convert_fidl_to_bind_rules(&parent.bind_rules)?;
             parent_refs
@@ -142,10 +102,7 @@ impl CompositeNodeSpecManager {
 
         // Add each parent ref into the map.
         for (bind_rules, parent_ref) in parent_refs {
-            self.parent_refs
-                .entry(bind_rules)
-                .and_modify(|refs| refs.push(parent_ref.clone()))
-                .or_insert_with(|| vec![parent_ref]);
+            self.parent_refs.entry(bind_rules).or_default().push(parent_ref);
         }
 
         let matched_composite_result = find_composite_driver_match(&parents, &composite_drivers);
@@ -177,10 +134,10 @@ impl CompositeNodeSpecManager {
         &self,
         properties: &DeviceProperties,
     ) -> Option<fdi::MatchDriverResult> {
-        let mut matching_refs: Vec<CompositeParentRef> = vec![];
+        let mut matching_refs: Vec<&CompositeParentRef> = vec![];
         for (node_props, parent_ref_list) in self.parent_refs.iter() {
-            if match_node(&node_props, properties) {
-                matching_refs.extend_from_slice(parent_ref_list.as_slice());
+            if match_node(node_props, properties) {
+                matching_refs.extend(parent_ref_list.iter());
             }
         }
 
@@ -190,7 +147,8 @@ impl CompositeNodeSpecManager {
 
         // Put in the matched composite info for this spec that we have stored in
         // |spec_list|.
-        let mut composite_parents_result: Vec<fdf::CompositeParent> = vec![];
+        let mut composite_parents_result: Vec<fdf::CompositeParent> =
+            Vec::with_capacity(matching_refs.len());
         for matching_ref in matching_refs {
             let composite_info = self.spec_list.get(&matching_ref.name);
             match composite_info {
@@ -322,12 +280,6 @@ impl CompositeNodeSpecManager {
 pub fn strip_parents_from_spec(spec: &Option<fdf::CompositeNodeSpec>) -> fdf::CompositeNodeSpec {
     // Strip the parents of the rules and properties since they are not needed by
     // the driver manager.
-    let parents_stripped = spec.as_ref().and_then(|spec| spec.parents.as_ref()).map(|parents| {
-        parents
-            .iter()
-            .map(|_parent| fdf::ParentSpec { bind_rules: vec![], properties: vec![] })
-            .collect::<Vec<_>>()
-    });
     let parents2_stripped = spec.as_ref().and_then(|spec| spec.parents2.as_ref()).map(|parents| {
         parents
             .iter()
@@ -337,7 +289,6 @@ pub fn strip_parents_from_spec(spec: &Option<fdf::CompositeNodeSpec>) -> fdf::Co
 
     fdf::CompositeNodeSpec {
         name: spec.as_ref().and_then(|spec| spec.name.clone()),
-        parents: parents_stripped,
         parents2: parents2_stripped,
         ..Default::default()
     }

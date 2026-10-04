@@ -10,7 +10,12 @@ closed protocol Hooks {
     strict SetOnline(struct {
         online bool;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
+    });
+    strict SetFailShortRead(struct {
+        fail_short_read bool;
+    }) -> (struct {
+        status zx.Result;
     });
 };
 

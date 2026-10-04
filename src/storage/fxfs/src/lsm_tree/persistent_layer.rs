@@ -187,12 +187,13 @@ trait LayerBuffer {
 
 struct ChunkBuffer<'iter> {
     handle: &'iter CachingObjectHandle<Arc<dyn LayerObject>>,
-    chunk: Option<CachedChunk>,
+    // The currently loaded chunk and its index.
+    chunk: Option<(usize, CachedChunk)>,
 }
 
 impl LayerBuffer for ChunkBuffer<'_> {
     fn read_at(&self, pos: usize, buf: &mut [u8]) -> usize {
-        let Some(chunk) = &self.chunk else {
+        let Some((_, chunk)) = &self.chunk else {
             return 0;
         };
         let to_read = std::cmp::min(buf.len(), chunk.len().saturating_sub(pos));
@@ -203,10 +204,11 @@ impl LayerBuffer for ChunkBuffer<'_> {
     }
 
     fn as_bytes_from(&self, pos: usize) -> &[u8] {
-        self.chunk.as_ref().and_then(|c| c.get(pos..)).unwrap_or(&[])
+        self.chunk.as_ref().and_then(|(_, c)| c.get(pos..)).unwrap_or(&[])
     }
 }
 
+#[derive(Clone, Copy)]
 struct SliceBuffer<'iter> {
     handle: &'iter dyn LayerObject,
     slice: &'iter [u8],
@@ -415,17 +417,113 @@ impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
         self.item_index += 1;
         Ok(())
     }
+
+    // Binary searches the current block for `search_key`.  The iterator must be positioned at the
+    // first item in the block, and that item must be less than `search_key`.  If the block
+    // contains a key that is greater than or equal to `search_key`, the iterator is positioned at
+    // the first such key and `Some(true)` is returned for an exact match, or `Some(false)`
+    // otherwise.  If every key in the block is less than `search_key`, `None` is returned and the
+    // caller should advance the iterator to the next block.
+    fn binary_search_block(
+        &mut self,
+        search_key: &mut SearchKey<'_, K>,
+    ) -> Result<Option<bool>, Error> {
+        if self.layer.version > OLD_KEY_SERIALIZATION_VERSION {
+            let target = search_key
+                .serialized_with_base(self.current_block_base_u64)
+                .ok_or_else(|| self.corruption_error("Search key precedes block"))?;
+            return self.binary_search_block_in_place(target);
+        }
+
+        let mut left_index = 0;
+        let mut right_index = self.item_count;
+        while left_index < (right_index - 1) {
+            let mid_index = left_index + ((right_index - left_index) / 2);
+            self.seek_to_block_item(mid_index).context("Read index offset for binary search")?;
+            self.deserialize_current_key()?;
+            match search_key.compare(self)?.context("Unexpected EOF")? {
+                Ordering::Greater => right_index = mid_index,
+                Ordering::Equal => return Ok(Some(true)),
+                Ordering::Less => left_index = mid_index,
+            }
+        }
+        if right_index < self.item_count {
+            self.seek_to_block_item(right_index)
+                .context("Read index for offset of right pointer")?;
+            self.deserialize_current_key()?;
+            return Ok(Some(false));
+        }
+        self.key = KeyState::None;
+        Ok(None)
+    }
+
+    // Like `binary_search_block`, but compares the serialized `target` key directly against the
+    // keys in the block without repositioning the iterator for each probe.
+    fn binary_search_block_in_place(&mut self, target: &[u8]) -> Result<Option<bool>, Error> {
+        let mut left_index = 0;
+        let mut right_index = self.item_count;
+        if right_index > 1 {
+            let block_size = self.layer.block_size.get() as usize;
+            let block_start =
+                self.layer.block_size.align_down((self.buffer.pos as u64).saturating_sub(1))
+                    as usize;
+            let block_bytes = self
+                .buffer
+                .buffer
+                .as_bytes_from(block_start)
+                .get(..block_size)
+                .ok_or_else(|| self.corruption_error("Short block"))?;
+            // `read_block_header` has checked that the seek entries don't overlap the header.
+            let seek_table_offset =
+                block_size - usize::from(right_index - 1) * PER_DATA_BLOCK_SEEK_ENTRY_SIZE;
+            let (data_bytes, seek_entries) = block_bytes.split_at(seek_table_offset);
+            let mut found = None;
+            while left_index < (right_index - 1) {
+                let mid_index = left_index + ((right_index - left_index) / 2);
+                let entry_pos = usize::from(mid_index - 1) * PER_DATA_BLOCK_SEEK_ENTRY_SIZE;
+                let offset = LittleEndian::read_u16(
+                    &seek_entries[entry_pos..entry_pos + PER_DATA_BLOCK_SEEK_ENTRY_SIZE],
+                ) as usize;
+                if offset >= seek_table_offset || offset <= PER_DATA_BLOCK_HEADER_SIZE {
+                    return Err(
+                        self.corruption_error(format!("Offset {offset} is out of valid range."))
+                    );
+                }
+                match compare_keys(&data_bytes[offset..], target)
+                    .map_err(|e| self.corruption_error(e))?
+                {
+                    Ordering::Greater => {
+                        right_index = mid_index;
+                        found = Some((mid_index, offset, false));
+                    }
+                    Ordering::Equal => {
+                        found = Some((mid_index, offset, true));
+                        break;
+                    }
+                    Ordering::Less => left_index = mid_index,
+                }
+            }
+            if let Some((index, offset, exact)) = found {
+                self.item_index = index + 1;
+                self.key = KeyState::InPlace;
+                self.buffer.pos = block_start + offset;
+                return Ok(Some(exact));
+            }
+        }
+        self.item_index = self.item_count;
+        self.key = KeyState::None;
+        Ok(None)
+    }
 }
 
-impl<'iter, K: Key, V: LayerValue> KeyOnlyIterator<'iter, K, V, ChunkBuffer<'iter>> {
-    fn new_async(layer: &'iter PersistentLayer<K, V>, pos: u64) -> Self {
-        assert!(layer.data.block_size.is_aligned(pos));
+impl<'iter, K: Key, V: LayerValue, B> KeyOnlyIterator<'iter, K, V, B> {
+    // Returns an iterator which reads the block at `pos` (the file offset of a key block) out of
+    // `buffer`, starting at `buffer_pos`.
+    fn new(layer: &'iter LayerData<K>, buffer: B, buffer_pos: usize, pos: u64) -> Self {
+        assert!(layer.block_size.is_aligned(pos));
         Self {
-            layer: &layer.data,
-            buffer: BufferCursor {
-                buffer: ChunkBuffer { handle: &layer.object_handle, chunk: None },
-                pos: (pos % CHUNK_SIZE) as usize,
-            },
+            layer,
+            buffer: BufferCursor { buffer, pos: buffer_pos },
             pos,
             item_index: 0,
             item_count: 0,
@@ -434,40 +532,67 @@ impl<'iter, K: Key, V: LayerValue> KeyOnlyIterator<'iter, K, V, ChunkBuffer<'ite
             _value_type: PhantomData,
         }
     }
+}
 
-    async fn advance(&mut self) -> Result<(), Error> {
-        if self.item_index >= self.item_count {
-            if self.pos >= self.layer.data_offset() + self.layer.data_size {
-                self.key = KeyState::None;
-                return Ok(());
-            }
-            if self.buffer.buffer.chunk.is_none() || CHUNK_SIZE.is_aligned(self.pos) {
-                self.buffer.buffer.chunk = Some(
-                    self.buffer
-                        .buffer
-                        .handle
-                        .read(self.pos as usize)
-                        .await
-                        .context("Reading during advance")?,
-                );
-            }
-            self.buffer.pos = (self.pos % CHUNK_SIZE) as usize;
-            self.read_block_header()?;
-        }
-        self.deserialize_current_key()
+impl<'iter, K: Key, V: LayerValue> KeyOnlyIterator<'iter, K, V, ChunkBuffer<'iter>> {
+    fn new_async(layer: &'iter PersistentLayer<K, V>, pos: u64) -> Self {
+        Self::new(
+            &layer.data,
+            ChunkBuffer { handle: &layer.object_handle, chunk: None },
+            (pos % CHUNK_SIZE) as usize,
+            pos,
+        )
     }
 
+    // Returns a new iterator for the block at `pos`, reusing the chunk held by `self` or `other`
+    // if either contains `pos`, which saves a cache lookup.
+    fn reposition(&self, pos: u64, other: Option<&Self>) -> Self {
+        let chunk_num = (pos / CHUNK_SIZE) as usize;
+        let chunk =
+            std::iter::once(self).chain(other).find_map(|iter| match &iter.buffer.buffer.chunk {
+                Some((n, chunk)) if *n == chunk_num => Some((chunk_num, chunk.clone())),
+                _ => None,
+            });
+        Self::new(
+            self.layer,
+            ChunkBuffer { handle: self.buffer.buffer.handle, chunk },
+            (pos % CHUNK_SIZE) as usize,
+            pos,
+        )
+    }
+
+    async fn advance(&mut self) -> Result<(), Error> {
+        if !self.try_advance()? {
+            let chunk_num = (self.pos / CHUNK_SIZE) as usize;
+            let chunk = self
+                .buffer
+                .buffer
+                .handle
+                .read(self.pos as usize)
+                .await
+                .context("Reading during advance")?;
+            self.buffer.buffer.chunk = Some((chunk_num, chunk));
+            self.buffer.pos = (self.pos % CHUNK_SIZE) as usize;
+            self.read_block_header()?;
+            self.deserialize_current_key()?;
+        }
+        Ok(())
+    }
+
+    // Advances without blocking.  Returns false, leaving the iterator unchanged, if the next block
+    // needs to be read from the underlying handle.
     fn try_advance(&mut self) -> Result<bool, Error> {
         if self.item_index >= self.item_count {
             if self.pos >= self.layer.data_offset() + self.layer.data_size {
                 self.key = KeyState::None;
                 return Ok(true);
             }
-            if self.buffer.buffer.chunk.is_none() || CHUNK_SIZE.is_aligned(self.pos) {
-                self.buffer.buffer.chunk = self.buffer.buffer.handle.try_read(self.pos as usize);
-                if self.buffer.buffer.chunk.is_none() {
+            let chunk_num = (self.pos / CHUNK_SIZE) as usize;
+            if !matches!(&self.buffer.buffer.chunk, Some((n, _)) if *n == chunk_num) {
+                let Some(chunk) = self.buffer.buffer.handle.try_read(self.pos as usize) else {
                     return Ok(false);
-                }
+                };
+                self.buffer.buffer.chunk = Some((chunk_num, chunk));
             }
             self.buffer.pos = (self.pos % CHUNK_SIZE) as usize;
             self.read_block_header()?;
@@ -479,21 +604,19 @@ impl<'iter, K: Key, V: LayerValue> KeyOnlyIterator<'iter, K, V, ChunkBuffer<'ite
 
 impl<'iter, K: Key, V: LayerValue> KeyOnlyIterator<'iter, K, V, SliceBuffer<'iter>> {
     fn new_sync(layer: &'iter SyncPersistentLayer<K, V>, pos: u64) -> Self {
-        assert!(layer.data.block_size.is_aligned(pos));
         let slice = layer.object_handle.as_slice().expect("slice must be present");
-        Self {
-            layer: &layer.data,
-            buffer: BufferCursor {
-                buffer: SliceBuffer { handle: layer.object_handle.as_ref(), slice },
-                pos: pos as usize,
-            },
+        Self::new(
+            &layer.data,
+            SliceBuffer { handle: layer.object_handle.as_ref(), slice },
+            pos as usize,
             pos,
-            item_index: 0,
-            item_count: 0,
-            key: KeyState::None,
-            current_block_base_u64: 0,
-            _value_type: PhantomData,
-        }
+        )
+    }
+
+    // Returns a new iterator for the block at `pos`.  `_other` exists for parity with the
+    // chunk-backed version; the whole layer is always available here.
+    fn reposition(&self, pos: u64, _other: Option<&Self>) -> Self {
+        Self::new(self.layer, self.buffer.buffer, pos as usize, pos)
     }
 
     fn advance(&mut self) -> Result<(), Error> {
@@ -654,6 +777,20 @@ impl<'a, K: Key> SearchKey<'a, K> {
         Self { key, buf: Vec::new(), cached_base: None }
     }
 
+    // Returns the key serialized relative to `base`, or None if the key sorts before any key that
+    // can be encoded relative to `base`.
+    fn serialized_with_base(&mut self, base: u64) -> Option<&[u8]> {
+        if self.key.get_leading_u64() < base {
+            return None;
+        }
+        if self.cached_base != Some(base) {
+            self.buf.clear();
+            self.key.serialize_key_with_base_into(&mut self.buf, base);
+            self.cached_base = Some(base);
+        }
+        Some(&self.buf)
+    }
+
     fn compare<V: LayerValue, B: LayerBuffer>(
         &mut self,
         iter: &KeyOnlyIterator<'_, K, V, B>,
@@ -662,17 +799,11 @@ impl<'a, K: Key> SearchKey<'a, K> {
             KeyState::None => Ok(None),
             KeyState::Deserialized(k) => Ok(Some(k.cmp_upper_bound(self.key))),
             KeyState::InPlace => {
-                let base = iter.current_block_base_u64;
-                if self.key.get_leading_u64() < base {
+                let Some(target) = self.serialized_with_base(iter.current_block_base_u64) else {
                     return Ok(Some(Ordering::Greater));
-                }
-                if self.cached_base != Some(base) {
-                    self.buf.clear();
-                    self.key.serialize_key_with_base_into(&mut self.buf, base);
-                    self.cached_base = Some(base);
-                }
+                };
                 Ok(Some(
-                    compare_keys(iter.buffer.as_bytes(), &self.buf)
+                    compare_keys(iter.buffer.as_bytes(), target)
                         .map_err(|e| iter.corruption_error(e))?,
                 ))
             }
@@ -834,7 +965,7 @@ macro_rules! seek_impl {
             // Pick a block midway.
             let mid_offset =
                 $self.data.block_size.align_down(left_offset + (right_offset - left_offset) / 2);
-            let mut iterator = $self.key_only_iterator(mid_offset);
+            let mut iterator = left.reposition(mid_offset, right.as_ref());
             iterator.advance()$(.$await)??;
             match search_key.compare(&iterator)?.context("Unexpected EOF")? {
                 Ordering::Greater => {
@@ -855,45 +986,18 @@ macro_rules! seek_impl {
         }
 
         // Finish the binary search on the block pointed to by `left`.
-        let mut left_index = 0;
-        let mut right_index = left.item_count;
-        // If the size is zero then we don't touch the iterator.
-        while left_index < (right_index - 1) {
-            let mid_index = left_index + ((right_index - left_index) / 2);
-            left.seek_to_block_item(mid_index).context("Read index offset for binary search")?;
-            left.advance()$(.$await)??;
-            match search_key.compare(&left)?.context("Unexpected EOF")? {
-                Ordering::Greater => {
-                    right_index = mid_index;
-                }
-                Ordering::Equal => {
-                    if excluded {
-                        left.advance()$(.$await)??;
-                    }
-                    return Ok(Iterator::new(left)?);
-                }
-                Ordering::Less => {
-                    left_index = mid_index;
-                }
-            }
+        match left.binary_search_block(&mut search_key)? {
+            Some(true) if excluded => left.advance()$(.$await)??,
+            Some(_) => {}
+            // When we don't find an entry that is greater than or equal to the target in `left`,
+            // we need to return with the first entry of the next block, which might already be
+            // pointed to by `right`.  Otherwise, advance to the next block (or the end of the
+            // layer).
+            None => match right {
+                Some(right) => return Ok(Iterator::new(right)?),
+                None => left.advance()$(.$await)??,
+            },
         }
-        // When we don't find an exact match, we need to return with the first entry *after* the the
-        // target key which might be the first one in the next block, currently already pointed to
-        // by the "right" buffer, but usually it's just the result of the right index within the
-        // "left" buffer.
-        if right_index < left.item_count {
-            left.seek_to_block_item(right_index)
-                .context("Read index for offset of right pointer")?;
-        } else if let Some(right) = right {
-            return Ok(Iterator::new(right)?);
-        } else {
-            // We want the end of the layer.  `right_index == left.item_count`, so `left_index ==
-            // left.item_count - 1`, and the left iterator must be positioned on `left_index` since
-            // we cannot have gone through the `Ordering::Greater` path above because `right_index`
-            // would not be equal to `left.item_count` in that case, so all we need to do is advance
-            // the iterator.
-        }
-        left.advance()$(.$await)??;
         Ok(Iterator::new(left)?)
     }};
 }

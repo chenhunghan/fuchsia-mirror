@@ -68,7 +68,13 @@ pub trait ReceiveBuffer: Buffer {
 /// A buffer supporting TCP sending operations.
 pub trait SendBuffer: Buffer {
     /// The payload type given to `peek_with`.
-    type Payload<'a>: InnerPacketBuilder + Payload + Debug + 'a;
+    ///
+    /// `Copy` rather than `Clone`: software segmentation (see
+    /// [`netstack3_ip::MaybeSegmentableTransportSerializer`]) hands a copy of
+    /// the payload to every segment it emits, so the payload must be a handle
+    /// to the buffered bytes (e.g. a [`netstack3_base::FragmentedPayload`]) and
+    /// never the bytes themselves.
+    type Payload<'a>: InnerPacketBuilder + Payload + Copy + Debug + 'a;
 
     /// Removes `count` bytes from the beginning of the buffer as already read.
     ///
@@ -687,7 +693,7 @@ pub(crate) mod testutil {
         fn new_incoming_connections(&mut self, _: usize) {}
     }
 
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     pub struct RepeatingPayload {
         len: usize,
     }

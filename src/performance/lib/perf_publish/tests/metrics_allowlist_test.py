@@ -139,3 +139,39 @@ class CatapultConverterTest(unittest.TestCase):
             "[no-summarize-metrics] can only appear at the beginning of the file",
             str(exception_context.exception),
         )
+
+    def test_per_metric_no_summarize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metrics_file = os.path.join(tmpdir, "metrics.txt")
+            with open(metrics_file, "w") as f:
+                f.write(
+                    "fuchsia.suite1: foo\n"
+                    "fuchsia.suite1: bar [no-summarize]\n"
+                    "fuchsia.suite1: opt_raw [optional] [no-summarize]\n"
+                )
+            allowlist = metrics_allowlist.MetricsAllowlist(metrics_file)
+        self.assertSetEqual(
+            allowlist.expected_metrics,
+            {
+                "fuchsia.suite1: foo",
+                "fuchsia.suite1: bar",
+            },
+        )
+        self.assertSetEqual(
+            allowlist.optional_metrics,
+            {"fuchsia.suite1: opt_raw"},
+        )
+        self.assertSetEqual(
+            allowlist.no_summarize_metrics,
+            {
+                "fuchsia.suite1: bar",
+                "fuchsia.suite1: opt_raw",
+            },
+        )
+        self.assertTrue(allowlist.should_summarize)
+        allowlist.check(
+            {
+                "fuchsia.suite1: foo",
+                "fuchsia.suite1: bar",
+            }
+        )

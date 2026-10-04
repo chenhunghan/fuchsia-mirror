@@ -272,6 +272,11 @@
         "value": "192"
     },
     {
+        "kind": "alias",
+        "name": "zx/Result",
+        "type": "int32"
+    },
+    {
         "kind": "bits/member",
         "name": "zx/Rights.APPLY_PROFILE",
         "value": "524288"

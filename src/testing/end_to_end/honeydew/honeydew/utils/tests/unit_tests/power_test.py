@@ -173,6 +173,13 @@ class PowerTests(unittest.IsolatedAsyncioTestCase):
         )
         mock_get_stats.side_effect = [stats_before, stats_after]
 
+        t_after_suspend = t0 + timedelta(seconds=10)
+
+        async def mock_suspend() -> None:
+            mock_datetime.now.return_value = t_after_suspend
+
+        self.mock_device.suspend.side_effect = mock_suspend
+
         await power.suspend_resume(self.mock_device, deadline)
 
         self.mock_device.ffx.run.assert_called_once_with(
@@ -181,7 +188,9 @@ class PowerTests(unittest.IsolatedAsyncioTestCase):
             machine=ffx_types.MachineFormat.RAW,
         )
         self.mock_device.suspend.assert_called_once()
-        mock_sleep.assert_called_once()
+        mock_sleep.assert_called_once_with(
+            Deadline(t_after_suspend + power.SUSPEND_RESUME_BASE_IDLE_DURATION)
+        )
         self.mock_device.resume.assert_called_once()
         self.assertEqual(mock_get_stats.call_count, 2)
 
@@ -238,6 +247,57 @@ class PowerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_sleep.call_count, 2)
         self.assertEqual(self.mock_device.resume.call_count, 2)
         self.assertEqual(mock_get_stats.call_count, 4)
+
+    @mock.patch("honeydew.utils.deadline.datetime", wraps=datetime.datetime)
+    @mock.patch.object(control_flows, "sleep_until_deadline")
+    @mock.patch.object(power, "get_sag_suspend_stats")
+    async def test_suspend_resume_max_idle_duration(
+        self,
+        mock_get_stats: mock.MagicMock,
+        mock_sleep: mock.MagicMock,
+        mock_datetime: mock.MagicMock,
+    ) -> None:
+        """Test case verifying per-attempt idle duration is capped by max_idle_duration."""
+        t0 = datetime.datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        mock_datetime.now.return_value = t0
+        deadline = Deadline.from_timeout(timedelta(minutes=5))
+
+        stats_no_suspend = power.SagSuspendStats(
+            success_count=10,
+            fail_count=1,
+            total_time_in_suspend=timedelta(seconds=1),
+        )
+        stats_suspended = power.SagSuspendStats(
+            success_count=11,
+            fail_count=1,
+            total_time_in_suspend=timedelta(seconds=2),
+        )
+
+        # 3 attempts: fail, fail, succeed
+        mock_get_stats.side_effect = [
+            stats_no_suspend,
+            stats_no_suspend,
+            stats_no_suspend,
+            stats_no_suspend,
+            stats_no_suspend,
+            stats_suspended,
+        ]
+
+        await power.suspend_resume(
+            self.mock_device,
+            deadline,
+            base_idle_duration=timedelta(seconds=20),
+            max_idle_duration=timedelta(seconds=30),
+        )
+
+        self.assertEqual(
+            mock_sleep.call_args_list,
+            [
+                mock.call(Deadline(t0 + timedelta(seconds=20))),
+                mock.call(Deadline(t0 + timedelta(seconds=30))),
+                mock.call(Deadline(t0 + timedelta(seconds=30))),
+            ],
+        )
 
     @mock.patch("honeydew.utils.deadline.datetime", wraps=datetime.datetime)
     @mock.patch.object(control_flows, "sleep_until_deadline")

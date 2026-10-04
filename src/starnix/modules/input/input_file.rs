@@ -388,13 +388,6 @@ fn mouse_properties() -> BitSet<{ min_bytes(INPUT_PROP_CNT) }> {
     attrs
 }
 
-/// Makes a device name string from a name and device ID details.
-///
-/// For practical reasons the device name should contain alphanumerics and `_`.
-fn get_device_name(name: &str, input_id: &uapi::input_id) -> String {
-    format!("{}_{:04x}_{:04x}_v{}", name, input_id.vendor, input_id.product, input_id.version)
-}
-
 impl InputFile {
     // Per https://www.linuxjournal.com/article/6429, the driver version is 32-bits wide,
     // and interpreted as:
@@ -407,16 +400,18 @@ impl InputFile {
     ///
     /// # Parameters
     /// - `input_id`: device's bustype, vendor id, product id, and version.
+    /// - `name`: device name.
     /// - `width`: width of screen.
     /// - `height`: height of screen.
     /// - `inspect_status`: The inspect status for the parent device of "touch_input_file".
     pub fn new_touch(
         input_id: uapi::input_id,
+        name: &str,
         width: i32,
         height: i32,
         node: &fuchsia_inspect::Node,
     ) -> Self {
-        let device_name = get_device_name("starnix_touch", &input_id);
+        let device_name = name.to_string();
         // Fuchsia scales the position reported by the touch sensor to fit view coordinates.
         // Hence, the range of touch positions is exactly the same as the range of view
         // coordinates.
@@ -467,9 +462,14 @@ impl InputFile {
     ///
     /// # Parameters
     /// - `input_id`: device's bustype, vendor id, product id, and version.
+    /// - `name`: device name.
     /// - `inspect_status`: The inspect status for the parent device of "keyboard_input_file".
-    pub fn new_keyboard(input_id: uapi::input_id, node: &fuchsia_inspect::Node) -> Self {
-        let device_name = get_device_name("starnix_buttons", &input_id);
+    pub fn new_keyboard(
+        input_id: uapi::input_id,
+        name: &str,
+        node: &fuchsia_inspect::Node,
+    ) -> Self {
+        let device_name = name.to_string();
         Self {
             driver_version: Self::DRIVER_VERSION,
             input_id,
@@ -497,9 +497,10 @@ impl InputFile {
     ///
     /// # Parameters
     /// - `input_id`: device's bustype, vendor id, product id, and version.
+    /// - `name`: device name.
     /// - `inspect_status`: The inspect status for the parent device of "mouse_input_file".
-    pub fn new_mouse(input_id: uapi::input_id, node: &fuchsia_inspect::Node) -> Self {
-        let device_name = get_device_name("starnix_mouse", &input_id);
+    pub fn new_mouse(input_id: uapi::input_id, name: &str, node: &fuchsia_inspect::Node) -> Self {
+        let device_name = name.to_string();
         Self {
             driver_version: Self::DRIVER_VERSION,
             input_id,
@@ -953,6 +954,7 @@ mod tests {
         let node = inspector.root();
         let keyboard_file = InputFile::new_keyboard(
             uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+            "keyboard_test",
             node,
         );
 
@@ -989,6 +991,7 @@ mod tests {
         let node = inspector.root();
         let input_file = InputFile::new_touch(
             uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+            "touch_test",
             100,
             100,
             node,
@@ -1049,6 +1052,7 @@ mod tests {
         let node = inspector.root();
         let mouse_file = InputFile::new_mouse(
             uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+            "mouse_test",
             node,
         );
 

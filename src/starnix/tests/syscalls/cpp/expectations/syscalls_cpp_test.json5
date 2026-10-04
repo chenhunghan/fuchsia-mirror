@@ -97,17 +97,12 @@
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_rwx",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r___and_rwx",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r___and_rw_",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rwx_and_r_x",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rw__and_r_x",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rwx_and_rw_",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r_x_and_rwx",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r___and_r_x",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rwx_and_r__",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_r_x",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_rw_",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rw__and_rwx",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rwx_and____",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rwx_and_rwx",
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r_x_and_rw_",
 
                 // TODO(https://g-issues.fuchsia.dev/issues/318701791)
@@ -128,12 +123,6 @@
                 // TODO(https://fxbug.dev/335701084)
                 "VmspliceTest.FileInPipe",
 
-                // TODO(https://fxbug.dev/331965426)
-                "FusePathWalkRefreshDirEntryTest/FusePathWalkRefreshDirEntryTest.PathWalkRefreshDirEntry/4",
-                "FusePathWalkRefreshDirEntryTest/FusePathWalkRefreshDirEntryTest.PathWalkRefreshDirEntry/5",
-                "FusePathWalkRefreshDirEntryTest/FusePathWalkRefreshDirEntryTest.PathWalkRefreshDirEntry/6",
-                "FusePathWalkRefreshDirEntryTest/FusePathWalkRefreshDirEntryTest.PathWalkRefreshDirEntry/7",
-
                 // TODO(https://fxbug.dev/333132302)
                 "Madvise.MadvRemoveZeroesMemory",
 
@@ -147,11 +136,11 @@
                 // TODO(https://fxbug.dev/439058791)
                 "DumpableTest.DumpableDropsOnUserChange",
 
-                // TODO(https://fxbug.dev/398654361)
-                "BinderWithoutSEStarnix/ManagerProviderClientTest/0.SameOperationsAsSELinuxTestSuiteBinderTestSubTestOne",
-
                 // TODO(https://fxbug.dev/495916611)
                 "ProcfsTest.ProcSysNetInvalidWriteReturnsEinval",
+
+                // TODO(https://fxbug.dev/566141223)
+                "ProcTaskDirTest.PidDirNotAccessibleAfterExitWithOpenChildFd",
 
                 // TODO(https://fxbug.dev/394934526)
                 "PtraceThreadTracerTest.SiblingThreadCannotIssuePtraceCommands",
@@ -163,11 +152,6 @@
 
                 // TODO(https://fxbug.dev/445790710): Implement ptrace poke across 2 mappings.
                 "PtraceTest.PokeAcrossMappings",
-
-                // These tests fail to mmap RWX memory region.
-                "PtracePokeMemory/PokeInPrivateRWXMappingTest.*/Memfd",
-                "PtracePokeMemory/PokeInPrivateRWXMappingTest.*/ReadOnlyFile",
-                "PtracePokeMemory/PokeInPrivateRWXMappingTest.*/WritableFile",
 
                 // TODO(https://fxbug.dev/555727179): Implement PTRACE_SINGLESTEP.
                 "SingleStepTest.InstructionPointerAdvances",

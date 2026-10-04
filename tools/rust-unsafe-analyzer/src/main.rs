@@ -99,21 +99,21 @@ impl<'ast> Visit<'ast> for UnsafeVisitor<'_> {
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        if let Some(token) = node.sig.unsafety {
+        if let syn::Safety::Unsafe(token) = node.sig.safety {
             self.record_span(UnsafeKind::FuncImpl, node.span(), token.span.start().line);
         }
         visit::visit_item_fn(self, node);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        if let Some(token) = node.sig.unsafety {
+        if let syn::Safety::Unsafe(token) = node.sig.safety {
             self.record_span(UnsafeKind::FuncImpl, node.span(), token.span.start().line);
         }
         visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast TraitItemFn) {
-        if let Some(token) = node.sig.unsafety {
+        if let syn::Safety::Unsafe(token) = node.sig.safety {
             self.record_span(UnsafeKind::TraitFuncDecl, node.span(), token.span.start().line);
         }
         visit::visit_trait_item_fn(self, node);

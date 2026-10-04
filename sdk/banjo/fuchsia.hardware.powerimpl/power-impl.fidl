@@ -18,26 +18,26 @@ closed protocol PowerImpl {
     strict GetPowerDomainStatus(struct {
         index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         status PowerDomainStatus;
     });
     /// Enable a power domain
     strict EnablePowerDomain(struct {
         index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Disable a power domain
     strict DisablePowerDomain(struct {
         index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Get Supported Voltage Range. min and max are in uV.
     strict GetSupportedVoltageRange(struct {
         index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         min uint32;
         max uint32;
     });
@@ -46,14 +46,14 @@ closed protocol PowerImpl {
         index uint32;
         voltage uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         actual_voltage uint32;
     });
     /// Get current voltage in uV.
     strict GetCurrentVoltage(struct {
         index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         current_voltage uint32;
     });
     /// Write to ctrl register of PMIC
@@ -62,14 +62,14 @@ closed protocol PowerImpl {
         reg_addr uint32;
         value uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Read ctrl register of PMIC
     strict ReadPmicCtrlReg(struct {
         index uint32;
         reg_addr uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         value uint32;
     });
 };

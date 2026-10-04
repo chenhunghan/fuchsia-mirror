@@ -37,6 +37,7 @@ rustc_library("rust") {
     "//src/devices/bin/driver-host/*",
     "//src/lib/trace/rust/*",
     "//src/ui/lib/input_pipeline/*",
+    "//vendor/*",
   ]
 }
 

@@ -12,7 +12,7 @@
 ##           [--target=GN_TARGET]
 ##           [--only=CHECK] [--skip=CHECK]
 ##           [--commit-msg] [--json-output=PATH]
-##           [--git] [--changed-lines] [-- PATTERN]
+##           [--git] [-- PATTERN]
 ##
 ##   --dry-run Stops the program short of running the linters
 ##   --all     Lints all code in the git repo under the current working
@@ -32,8 +32,6 @@
 ##             commit in the upstream branch (or against HEAD if no such commit
 ##             is found). Files that are locally modified, staged or touched by
 ##             any commits introduced on the local branch are linted.
-##   --changed-lines
-##             Lint changed lines only. Supported for C++ clang-tidy.
 ##   --parallel
 ##             Lints all files in parallel where applicable.
 ##   --verbose Print all lint commands prior to execution.
@@ -106,7 +104,6 @@ VERBOSE=
 FIX=
 PARALLEL=
 FILES_SPECIFIED=
-CHANGED_LINES=
 COMMIT_MSG=
 SHAC_EXTRA_ARGS=()
 
@@ -120,7 +117,6 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN="1" ;;
     --fix) FIX="1" ;;
     --parallel) PARALLEL="1" ;;
-    --changed-lines) CHANGED_LINES="1" ;;
     --commit-msg|--commit) COMMIT_MSG="1" ;;
     --all)
       GET_FILES=get_all_files
@@ -241,8 +237,6 @@ fi
 
 [[ -n "${DRY_RUN}" ]] && exit 0
 
-# Separate files for clang-tidy and SHAC
-clang_tidy_files=()
 shac_files=()
 for file in "${FILES[@]}"; do
   if [[ ! -f "${file}" ]]; then
@@ -252,38 +246,9 @@ for file in "${FILES[@]}"; do
     continue
   fi
   shac_files+=("$file")
-
-  case "${file}" in
-    *.c|*.cc|*.cpp|*.h|*.hh|*.hpp)
-      clang_tidy_files+=("${file}")
-      ;;
-  esac
 done
 
-# Stage 2: Direct clang-tidy execution on C++ files
-if [[ ${#clang_tidy_files[@]} -gt 0 && -z "${COMMIT_MSG}" ]]; then
-  declare CLANG_TIDY="${PREBUILT_CLANG_DIR}/bin/clang-tidy"
-  declare CLANG_APPLY_REPLACEMENTS="${PREBUILT_CLANG_DIR}/bin/clang-apply-replacements"
-  declare RUN_CLANG_TIDY="${PREBUILT_CLANG_DIR}/bin/run-clang-tidy"
-
-  if [[ -f "${FUCHSIA_BUILD_DIR}/compile_commands.json" ]]; then
-    clang_tidy_cmd=(
-      "${PREBUILT_PYTHON3}"
-      "${RUN_CLANG_TIDY}"
-      -clang-tidy-binary "${CLANG_TIDY}"
-      -clang-apply-replacements-binary "${CLANG_APPLY_REPLACEMENTS}"
-      -p "${FUCHSIA_BUILD_DIR}"
-    )
-    if [[ -n "${FIX}" ]]; then
-      clang_tidy_cmd+=("-fix")
-    fi
-    print-and-execute "${clang_tidy_cmd[@]}" "${clang_tidy_files[@]}" || true
-  else
-    fx-warn "compile_commands.json not found in ${FUCHSIA_BUILD_DIR}; skipping clang-tidy. Run 'fx compdb' or 'fx gen' to enable C++ linting."
-  fi
-fi
-
-# Stage 3: Run SHAC for universal static analysis
+# Stage 2: Run SHAC for universal static analysis
 shac_workdir="$FUCHSIA_DIR"
 if [[ "$(git rev-parse --is-inside-work-tree 2> /dev/null)" == "true" ]] && \
     [ -f "$(git rev-parse --show-toplevel)/shac.star" ]; then

@@ -24,8 +24,6 @@ use netstack_testing_common::{
 
 #[derive(Default)]
 pub struct NetcfgOwnedDeviceArgs {
-    // Whether to use the out of stack DHCP client.
-    pub use_out_of_stack_dhcp_client: bool,
     // Whether to include the socketproxy protocols in netcfg.
     pub socket_proxy_type: SocketProxyType,
     // Additional service providers to include in the realm.
@@ -53,11 +51,8 @@ pub async fn with_netcfg_owned_device<
     additional_args: NetcfgOwnedDeviceArgs,
     after_interface_up: F,
 ) -> String {
-    let NetcfgOwnedDeviceArgs {
-        use_out_of_stack_dhcp_client,
-        socket_proxy_type,
-        extra_known_service_providers,
-    } = additional_args;
+    let NetcfgOwnedDeviceArgs { socket_proxy_type, extra_known_service_providers } =
+        additional_args;
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
         .create_netstack_realm_with::<N, _, _>(
@@ -66,22 +61,15 @@ pub async fn with_netcfg_owned_device<
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client,
                     socket_proxy_type,
                     config: manager_config,
                 },
+                KnownServiceProvider::DhcpClient,
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
             ]
             .into_iter()
             .chain(extra_known_service_providers)
-            // If the client requested an out of stack DHCP client or to use
-            // the socket proxy, add them to the list of service providers.
-            .chain(
-                use_out_of_stack_dhcp_client
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            )
             .chain(socket_proxy_type.known_service_provider().into_iter()),
         )
         .expect("create netstack realm");

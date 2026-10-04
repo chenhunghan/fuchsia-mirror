@@ -4,12 +4,12 @@
 
 # Test driver for Bash script tests
 
-import("//build/go/go_library.gni")
+import("//build/go/go_binary.gni")
 
-go_library("host_runner_test_lib") {
+go_binary("host_runner") {
   visibility = [
     "//tools/devshell/*",
     "//vendor/*",
   ]
-  sources = [ "host_test.go" ]
+  sources = [ "main.go" ]
 }

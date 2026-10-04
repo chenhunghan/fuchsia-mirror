@@ -13,7 +13,6 @@
 #include <unordered_set>
 
 #include "src/devices/bin/driver_manager/driver_development/info_iterator.h"
-#include "src/devices/bin/driver_manager/node_property_conversion.h"
 #include "src/devices/lib/log/log.h"
 
 namespace fdd = fuchsia_driver_development;
@@ -40,9 +39,9 @@ void SetNodeInfoBuilderNodeProperties(
     return;
   }
 
-  fidl::VectorView<fdf::wire::NodeProperty> node_properties(allocator, properties->size());
+  fidl::VectorView<fdf::wire::NodeProperty2> node_properties(allocator, properties->size());
   for (size_t i = 0; i < properties->size(); ++i) {
-    node_properties[i] = ToDeprecatedProperty(allocator, properties.value()[i]);
+    node_properties[i] = fidl::ToWire(allocator, properties.value()[i]);
   }
   node_info_builder.node_property_list(node_properties);
 }
@@ -498,7 +497,7 @@ void DriverDevelopmentService::AddTestNode(AddTestNodeRequestView request,
                                            AddTestNodeCompleter::Sync& completer) {
   fuchsia_driver_framework::NodeAddArgs args;
   args.name(fidl::ToNatural(request->args.name()));
-  args.properties(fidl::ToNatural(request->args.properties()));
+  args.properties2(fidl::ToNatural(request->args.properties()));
 
   driver_runner_.root_node()->AddChild(
       std::move(args), /* controller */ {}, /* node */ {},

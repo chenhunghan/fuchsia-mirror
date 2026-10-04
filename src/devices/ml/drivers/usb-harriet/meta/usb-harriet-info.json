@@ -1,9 +1,0 @@
-{
-    "short_description": "USB Harriet driver",
-    "manufacturer": "Harriet",
-    "families": [],
-    "models": [],
-    "areas": [
-        "ML"
-    ]
-}

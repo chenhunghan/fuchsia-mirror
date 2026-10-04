@@ -6,9 +6,12 @@
 
 mod connection;
 mod packet;
+/// In-memory byte transport implementations.
+pub mod transport;
 
 pub use connection::*;
 pub use packet::*;
+pub use transport::MpscTransport;
 
 /// Protocol version. This can be extracted from the payload of the sync packet
 /// and will determine what features a connection supports.

@@ -9,7 +9,7 @@ library zx;
 // LINT.IfChange(zx_status_t)
 
 /// Indicates an operation was successful.
-const OK Status = 0;
+const OK Result = 0;
 
 // ======= Internal failures =======
 

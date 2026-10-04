@@ -37,8 +37,6 @@ void cpp_thread_current_set_restricted_state(RestrictedState* raw_rs);
 bool cpp_thread_current_is_signaled();
 bool cpp_thread_current_check_for_restricted_kick();
 bool cpp_thread_is_in_restricted_mode(Thread* thread);
-void cpp_vmm_set_active_aspace_normal();
-void cpp_vmm_set_active_aspace_restricted();
 
 void rust_restricted_state_destroy(RestrictedState* ptr);
 bool rust_restricted_state_in_restricted(const RestrictedState* state);

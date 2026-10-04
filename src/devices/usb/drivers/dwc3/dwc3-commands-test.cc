@@ -10,6 +10,8 @@
 #include "src/devices/usb/drivers/dwc3/dwc3-test-fixture.h"
 #include "src/devices/usb/drivers/dwc3/dwc3.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace dwc3 {
 
 class Dwc3CommandsTest : public TestFixture<true> {
@@ -65,7 +67,7 @@ TEST_F(Dwc3CommandsTest, CmdEpSetConfig) {
     auto* uep = Dwc3TestHelper::GetUserEndpoint(drv, 2);
     ASSERT_NE(uep, nullptr);
     auto& ep = uep->ep;
-    ep.type = fuchsia_hardware_usb_descriptor::EndpointType::kBulk;  // USB_ENDPOINT_BULK
+    ep.type = fdescriptor::EndpointType::kBulk;
     ep.max_packet_size = 512;
     ep.interval = 0;
 

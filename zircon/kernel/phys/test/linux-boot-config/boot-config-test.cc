@@ -24,7 +24,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
   zbitl::View zbi(
       zbitl::StorageFromRawHeader<ktl::span<ktl::byte>>(static_cast<zbi_header_t*>(zbi_ptr)));
   auto linux_boot_config = GetLinuxBootConfig();
-  if (!linux_boot_config.has_value()) {
+  if (linux_boot_config.empty()) {
     if (kExpectedBootConfigContents.empty()) {
       printf("%s: Empty boot config.\n", ProgramName());
       return 0;
@@ -32,22 +32,22 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
     return -1;
   }
 
-  if (linux_boot_config->size_bytes() != kExpectedBootConfigContents.size()) {
-    printf("%s: Expected boot config of size %zx but found %zx\n", ProgramName(),
-           kExpectedBootConfigContents.size(), linux_boot_config->size_bytes());
+  if (linux_boot_config.size_bytes() != kExpectedBootConfigContents.size()) {
+    printf("%s: Expected boot config of size %#zx but found %#zx\n", ProgramName(),
+           kExpectedBootConfigContents.size(), linux_boot_config.size_bytes());
     return -1;
   }
 
-  if (memcmp(linux_boot_config->contents().data(), kExpectedBootConfigContents.data(),
+  if (memcmp(linux_boot_config.contents().data(), kExpectedBootConfigContents.data(),
              kExpectedBootConfigContents.size()) != 0) {
     printf("%s: Expected boot config payload mismatch.\n Actual:\n%*s\nExpected:\n%*s\n",
-           ProgramName(), static_cast<int>(linux_boot_config->size_bytes()),
-           linux_boot_config->contents().data(),
+           ProgramName(), static_cast<int>(linux_boot_config.size_bytes()),
+           linux_boot_config.contents().data(),
            static_cast<int>(kExpectedBootConfigContents.size()),
            kExpectedBootConfigContents.data());
     return -1;
   }
 
-  printf("%s: Boot Config(Size = %zx) is OK!.\n", ProgramName(), linux_boot_config->size_bytes());
+  printf("%s: Boot Config(Size = %zx) is OK!.\n", ProgramName(), linux_boot_config.size_bytes());
   return 0;
 }

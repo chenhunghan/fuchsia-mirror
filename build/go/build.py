@@ -20,7 +20,7 @@ from gen_library_metadata import FUCHSIA_MODULE, get_sources
 # rmtree manually removes all subdirectories and files instead of using
 # shutil.rmtree, to avoid registering spurious reads on stale
 # subdirectories. See https://fxbug.dev/42153728.
-def rmtree(dir):
+def rmtree(dir: str) -> None:
     if not os.path.exists(dir):
         return
     for root, dirs, files in os.walk(dir, topdown=False):
@@ -34,7 +34,7 @@ def rmtree(dir):
                 os.rmdir(full_path)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--root-out-dir", help="Path to root of build output", required=True

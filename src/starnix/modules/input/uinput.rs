@@ -588,9 +588,12 @@ impl DeviceOps for VirtualDevice {
         let child_node =
             self.inspect_status.node.create_child(format!("file_{}", file_nodes.len()));
         let input_file = match &self.devt {
-            DeviceId::Keyboard => Arc::new(InputFile::new_keyboard(self.input_id, &child_node)),
+            DeviceId::Keyboard => {
+                Arc::new(InputFile::new_keyboard(self.input_id, "starnix_buttons", &child_node))
+            }
             DeviceId::Touchscreen(width, height) => Arc::new(InputFile::new_touch(
                 self.input_id,
+                "starnix_touch",
                 width.clone(),
                 height.clone(),
                 &child_node,

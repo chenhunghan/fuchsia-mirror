@@ -12,15 +12,19 @@ use crate::object_store::allocator::{
 };
 use crate::object_store::journal::super_block::{
     SuperBlockHeader, SuperBlockHeaderV32, SuperBlockRecord, SuperBlockRecordV56,
+    SuperBlockRecordV59,
 };
-use crate::object_store::journal::{JournalRecord, JournalRecordV56, JournalRecordV57};
+use crate::object_store::journal::{
+    JournalRecord, JournalRecordV56, JournalRecordV57, JournalRecordV59,
+};
 use crate::object_store::object_record::{
     FsverityMetadata, FsverityMetadataV50, ObjectKey, ObjectKeyV54, ObjectValue, ObjectValueV56,
+    ObjectValueV59,
 };
-use crate::object_store::transaction::{Mutation, MutationV56, MutationV57};
+use crate::object_store::transaction::{Mutation, MutationV56, MutationV57, MutationV59};
 use crate::object_store::{
     EncryptedMutations, EncryptedMutationsV49, EncryptedTransaction, EncryptedTransactionV57,
-    StoreInfo, StoreInfoV52,
+    EncryptedTransactionV59, StoreInfo, StoreInfoV52,
 };
 use crate::serialized_types::{Version, Versioned, VersionedLatest, versioned_type};
 use std::collections::BTreeMap;
@@ -34,7 +38,7 @@ use std::collections::BTreeMap;
 ///
 /// IMPORTANT: When changing this (major or minor), update the list of possible versions at
 /// https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/cobalt_config/fuchsia/local_storage/versions.txt.
-pub const LATEST_VERSION: Version = Version { major: 58, minor: 0 };
+pub const LATEST_VERSION: Version = Version { major: 59, minor: 0 };
 
 /// The last version of the filesystem where keys in layer files used the old serialization format
 /// (prior to SerializeKey and delta encoding).
@@ -123,16 +127,19 @@ versioned_types! {
         49.. => EncryptedMutationsV49,
     }
     EncryptedTransaction {
+        59.. => EncryptedTransactionV59,
         57.. => EncryptedTransactionV57,
     }
     FsverityMetadata {
         50.. => FsverityMetadataV50,
     }
     JournalRecord {
+        59.. => JournalRecordV59,
         57.. => JournalRecordV57,
         56.. => JournalRecordV56,
     }
     Mutation {
+        59.. => MutationV59,
         57.. => MutationV57,
         56.. => MutationV56,
     }
@@ -140,6 +147,7 @@ versioned_types! {
         54.. => ObjectKeyV54,
     }
     ObjectValue {
+        59.. => ObjectValueV59,
         56.. => ObjectValueV56,
     }
     PersistentLayerHeader {
@@ -155,6 +163,7 @@ versioned_types! {
         32.. => SuperBlockHeaderV32,
     }
     SuperBlockRecord {
+        59.. => SuperBlockRecordV59,
         56.. => SuperBlockRecordV56,
     }
     BlobMetadata {
@@ -168,3 +177,25 @@ versioned_types! {
 static_assertions::const_assert!(
     <EncryptedTransaction as HasVersion>::VERSION <= <Mutation as HasVersion>::VERSION
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[fuchsia::test]
+    fn test_get_type_fingerprints() {
+        let latest = get_type_fingerprints(LATEST_VERSION);
+        assert!(!latest.is_empty());
+        assert!(latest.contains_key("JournalRecord"));
+        assert!(latest.contains_key("Mutation"));
+        assert!(latest.contains_key("ObjectKey"));
+
+        let earliest = get_type_fingerprints(EARLIEST_SUPPORTED_VERSION);
+        assert!(!earliest.is_empty());
+        assert!(earliest.contains_key("JournalRecord"));
+        assert!(!earliest.contains_key("EncryptedTransaction"));
+
+        let too_old = get_type_fingerprints(Version { major: 1, minor: 0 });
+        assert!(too_old.is_empty());
+    }
+}

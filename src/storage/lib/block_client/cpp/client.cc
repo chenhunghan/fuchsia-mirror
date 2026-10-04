@@ -54,6 +54,18 @@ zx::result<storage::OwnedVmoid> Client::RegisterVmo(const zx::vmo& vmo) {
   return zx::ok(storage::OwnedVmoid(std::move(vmoid), this));
 }
 
+zx::result<uint8_t> Client::RegisterKey(zx::eventpair key_token) {
+  const fidl::WireResult result = fidl::WireCall(session_)->RegisterKey(std::move(key_token));
+  if (!result.ok()) {
+    return zx::error(result.status());
+  }
+  const fit::result response = result.value();
+  if (response.is_error()) {
+    return zx::error(response.error_value());
+  }
+  return zx::ok(response.value()->slot);
+}
+
 zx_status_t Client::Transaction(BlockFifoRequest* requests, size_t count) {
   if (count == 0)
     return ZX_OK;

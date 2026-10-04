@@ -124,6 +124,7 @@ TEST_F(CreateCobaltConfigTest, ConfigFields) {
                          std::chrono::seconds(1), std::chrono::seconds(2), std::chrono::seconds(3),
                          test_jitter, 4, true, 1048000, "core", "x64", "0.1.2");
   EXPECT_EQ(config.upload_schedule_cfg.jitter, test_jitter);
+  EXPECT_TRUE(config.defer_observation_encryption);
 }
 
 TEST_F(CreateCobaltConfigTest, BuildTypeUser) {

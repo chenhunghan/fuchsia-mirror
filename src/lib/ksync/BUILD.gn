@@ -49,7 +49,8 @@ rustc_library("ksync") {
     features = [ "kernel" ]
     if (enable_lock_dep) {
       features += [ "lock_dep" ]
-    } else if (enable_lock_dep_metadata_only) {
+    } else if (enable_lock_dep_metadata_only || lock_name_tracing_enabled ||
+               scheduler_lock_spin_tracing_enabled) {
       features += [ "lock_metadata_only" ]
     }
     if (scheduler_lock_spin_tracing_enabled) {

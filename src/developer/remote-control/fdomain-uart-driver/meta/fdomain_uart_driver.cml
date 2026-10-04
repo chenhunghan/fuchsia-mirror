@@ -1,0 +1,27 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "syslog/client.shard.cml" ],
+    program: {
+        runner: "elf",
+        binary: "bin/fdomain_uart_driver",
+    },
+    use: [
+        {
+            protocol: [
+                "fuchsia.boot.Arguments",
+                "fuchsia.developer.remotecontrol.connector.Connector",
+            ],
+        },
+        {
+            // devfs exposes dev-class directories with r* rights (which include
+            // CONNECT). Bidirectional UART I/O is performed via the
+            // fuchsia.hardware.serial/Device FIDL protocol after connecting to
+            // the device node, rather than via POSIX file writes.
+            directory: "dev-class-serial",
+            rights: [ "r*" ],
+            path: "/dev/class/serial",
+        },
+    ],
+}

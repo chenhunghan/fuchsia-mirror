@@ -105,7 +105,15 @@ void ClientBehavior(std::string_view binder_dir, test_helper::Poker completed) {
 
     ASSERT_THAT(ioctl(fd_for_ioctl, BINDER_WRITE_READ, &write_read), SyscallSucceeds());
 
-    queue.pop();
+    // The queue is empty when this iteration only read (the `queue.empty()` branch above). This
+    // happens if the previous read returned the BR_TRANSACTION_COMPLETE of the kGetService or
+    // kServiceSendFd transaction without its BR_REPLY, which is what queues the next ioctls: this
+    // iteration then waits for that BR_REPLY. Binder does not guarantee that both are returned by
+    // the same read, e.g. Starnix returns the BR_TRANSACTION_COMPLETE alone if the wait for the
+    // reply is interrupted.
+    if (!queue.empty()) {
+      queue.pop();
+    }
 
     binder_uintptr_t cursor = (binder_uintptr_t)read_buffer.data();
     binder_uintptr_t limit = cursor + write_read.read_consumed;

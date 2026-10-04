@@ -73,7 +73,7 @@ type DeviceInfo = struct {
 
 type SetKeyResult = struct {
     key_id uint16;
-    status zx.Status;
+    status zx.Result;
 };
 
 type SetKeysConfirm = struct {

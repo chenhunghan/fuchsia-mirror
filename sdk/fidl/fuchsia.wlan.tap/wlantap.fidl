@@ -47,7 +47,7 @@ closed protocol WlantapCtl {
         config WlantapPhyConfig;
         proxy server_end:WlantapPhy;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -135,7 +135,7 @@ closed protocol WlantapPhy {
 
     strict ScanComplete(struct {
         scan_id uint64;
-        status zx.Status;
+        status zx.Result;
     });
 
     // wlan_softmac_protocol_ops_t

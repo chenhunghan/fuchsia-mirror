@@ -11,6 +11,7 @@ pub mod executor;
 pub mod mpsc;
 pub mod mutex;
 pub mod notification;
+pub mod pool;
 pub mod rpc;
 pub mod semaphore;
 

@@ -56,19 +56,6 @@ fuchsia_structured_config_rust_lib("bt_device_id_profile_config") {
   cm_label = ":manifest"
 }
 
-# The default structured config for this component disables the default DI
-# advertisement.
-fuchsia_structured_config_values("default_config_values") {
-  cm_label = ":manifest"
-  values = {
-    vendor_id = 65535  # Vendor ID = 0xFFFF (disabled)
-    product_id = 0  # Product ID not specified
-    version = 0  # Product version not specified
-    primary = true
-    service_description = ""
-  }
-}
-
 fuchsia_component("component") {
   cm_label = ":manifest"
   deps = [ ":bin" ]
@@ -81,10 +68,7 @@ fuchsia_package("without-config") {
 }
 
 fuchsia_package("bt-device-id") {
-  deps = [
-    ":component",
-    ":default_config_values",
-  ]
+  deps = [ ":component" ]
 }
 
 fuchsia_unittest_package("bt-device-id-tests") {

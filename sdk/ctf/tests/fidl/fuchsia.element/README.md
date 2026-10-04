@@ -6,9 +6,10 @@ This is a compatibility test for `fuchsia.element` FIDL APIs.
 
 Fuchsia provides tools and APIs to create product experiences that combine
 software from the platform (e.g. `session_manager`), product (the [session
-component][glossary.session-component]), and user-visible components.
-Interoperability between components is a challenge because they may implement
-the framework’s contracts differently or rely on undocumented behaviors.
+component](/docs/glossary/README.md#session-component)), and user-visible
+components. Interoperability between components is a challenge because they may
+implement the framework’s contracts differently or rely on undocumented
+behaviors.
 
 The Fuchsia [Compatibility Test Suite][doc-cts-rfc] (CTS) is a collection of
 tests that ensure a Fuchsia product build is backwards-compatible with software
@@ -73,7 +74,6 @@ $ fx test fuchsia-element-tests -o
 
 [doc-cts-rfc]: /docs/contribute/governance/rfcs/0015_cts.md
 [doc-event-capabilities]: /docs/concepts/components/v2/capabilities/event.md
-[glossary.session-component]: /docs/glossary#session-component
 [source-element-management]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/session/lib/element_management
 [source-element-manager-fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.element/element_manager.fidl
 [source-element-manager]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/session/bin/element_manager

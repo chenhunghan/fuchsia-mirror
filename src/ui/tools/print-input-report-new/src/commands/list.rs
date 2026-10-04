@@ -149,69 +149,41 @@ async fn get_device_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fidl_fuchsia_input_report as fidl_legacy_input_report;
-    use futures::TryStreamExt;
+    use crate::testing::FakeInputDevice;
+    use fidl_next_fuchsia_input_report as fidl_input_report;
     use googletest::prelude::*;
-    use std::sync::Arc;
-
-    async fn handle_input_device_request(
-        mut stream: fidl_legacy_input_report::InputDeviceRequestStream,
-        device_info: fidl_legacy_input_report::DeviceInformation,
-    ) {
-        while let Ok(Some(request)) = stream.try_next().await {
-            match request {
-                fidl_legacy_input_report::InputDeviceRequest::GetDescriptor { responder } => {
-                    let descriptor = fidl_legacy_input_report::DeviceDescriptor {
-                        device_information: Some(device_info.clone()),
-                        ..Default::default()
-                    };
-                    responder.send(&descriptor).unwrap();
-                }
-                _ => panic!("Unsupported"),
-            }
-        }
-    }
-
-    /// Serves a fake InputDevice that always returns the given `device_info`
-    /// when asked for it.
-    fn serve_fake_input_device(
-        device_info: fidl_legacy_input_report::DeviceInformation,
-    ) -> Arc<vfs::service::Service> {
-        vfs::service::host(move |stream: fidl_legacy_input_report::InputDeviceRequestStream| {
-            let device_info = device_info.clone();
-            async move {
-                handle_input_device_request(stream, device_info).await;
-            }
-        })
-    }
 
     /// Creates a fake service directory with two input devices.
     /// Only the GetDescriptor method is supported on the devices for now.
     fn setup_fake_service_directory() -> fidl_legacy_io::DirectoryProxy {
         let service_dir = vfs::pseudo_directory! {
             "instance1" => vfs::pseudo_directory! {
-                "input_device" => serve_fake_input_device(
-                    fidl_legacy_input_report::DeviceInformation {
+                "input_device" => FakeInputDevice::new(fidl_input_report::DeviceDescriptor {
+                    device_information: Some(fidl_input_report::DeviceInformation {
                         vendor_id: Some(0x1234),
                         product_id: Some(0x5678),
                         manufacturer_name: Some("Manuf1".to_string()),
                         product_name: Some("Prod1".to_string()),
                         serial_number: Some("Ser1".to_string()),
                         ..Default::default()
-                    }
-                ),
+                    }),
+                    ..Default::default()
+                })
+                .serve(),
             },
             "instance2" => vfs::pseudo_directory! {
-                "input_device" => serve_fake_input_device(
-                    fidl_legacy_input_report::DeviceInformation {
+                "input_device" => FakeInputDevice::new(fidl_input_report::DeviceDescriptor {
+                    device_information: Some(fidl_input_report::DeviceInformation {
                         vendor_id: Some(0xaaaa),
                         product_id: Some(0xbbbb),
                         manufacturer_name: Some("Manuf2".to_string()),
                         product_name: Some("Prod2".to_string()),
                         serial_number: Some("Ser2".to_string()),
                         ..Default::default()
-                    }
-                ),
+                    }),
+                    ..Default::default()
+                })
+                .serve(),
             }
         };
         vfs::directory::serve_read_only(service_dir, vfs::execution_scope::ExecutionScope::new())

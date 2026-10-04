@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    crate_name = "ebpf_bench",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    deps = [
+        "//src/developer/fuchsia-criterion",
+        "//src/starnix/lib/ebpf",
+        "//src/starnix/lib/ebpf_api",
+        "//src/starnix/lib/ebpf_loader",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:criterion",
+    ],
+)

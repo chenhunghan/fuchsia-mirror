@@ -30,6 +30,12 @@ class LinuxVirtualUsbPowerHubTests(unittest.TestCase):
         )
         self.platform_patcher.start()
 
+        # Pretend host udev rules are installed so the at-desk permission
+        # check passes against the fake sysfs paths used below.
+        self.access_patcher = mock.patch("os.access", return_value=True)
+        self.access_patcher.start()
+        self.addCleanup(self.access_patcher.stop)
+
     def tearDown(self) -> None:
         self.platform_patcher.stop()
         super().tearDown()
@@ -107,15 +113,28 @@ class LinuxVirtualUsbPowerHubTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Multiple USB devices"):
             linux_virtual_usb_hub.LinuxVirtualUsbPowerHub()
 
-    @mock.patch.object(
-        linux_virtual_usb_hub.LinuxVirtualUsbPowerHub,
-        "_find_usb_bus_id",
-        return_value="1-6; rm -rf /",
-    )
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    @mock.patch("os.path.exists", return_value=True)
+    @mock.patch("glob.glob", return_value=["/sys/bus/usb/devices/1-6;reboot"])
     def test_init_with_invalid_bus_id_raises_error(
-        self, mock_find_bus_id: mock.Mock
+        self,
+        mock_glob: mock.Mock,
+        mock_exists: mock.Mock,
+        mock_open_file: mock.Mock,
     ) -> None:
         """Test instantiation with invalid bus ID pattern raises error."""
+
+        def mock_open_side_effect(
+            filepath: str, *args: Any, **kwargs: Any
+        ) -> Any:
+            if "idVendor" in filepath:
+                return mock.mock_open(read_data="18d1\n")()
+            elif "idProduct" in filepath:
+                return mock.mock_open(read_data="a02b\n")()
+            return mock.mock_open()()
+
+        mock_open_file.side_effect = mock_open_side_effect
+
         with self.assertRaisesRegex(ValueError, "Invalid usb_bus_id format"):
             linux_virtual_usb_hub.LinuxVirtualUsbPowerHub()
 
@@ -133,6 +152,62 @@ class LinuxVirtualUsbPowerHubTests(unittest.TestCase):
         hub.power_off()
         mock_run.assert_called_once_with(
             cmd=["sh", "-c", "echo 0 > /sys/bus/usb/devices/1-6/authorized"]
+        )
+
+    @mock.patch("time.sleep")
+    @mock.patch.object(
+        linux_virtual_usb_hub.LinuxVirtualUsbPowerHub,
+        "_find_usb_bus_id",
+        side_effect=["1-6", ValueError("not found"), "2-3"],
+    )
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_power_off_retries_bus_id_lookup(
+        self,
+        mock_run: mock.Mock,
+        mock_find_bus_id: mock.Mock,
+        mock_sleep: mock.Mock,
+    ) -> None:
+        """Test power_off retries a failed bus ID lookup."""
+        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub(
+            bus_id_lookup_attempts=2
+        )
+        hub.power_off()
+        self.assertEqual(mock_find_bus_id.call_count, 3)
+        mock_sleep.assert_called_once()
+        mock_run.assert_called_once_with(
+            cmd=["sh", "-c", "echo 0 > /sys/bus/usb/devices/2-3/authorized"]
+        )
+
+    @mock.patch.object(
+        linux_virtual_usb_hub.LinuxVirtualUsbPowerHub,
+        "_find_usb_bus_id",
+        side_effect=["1-6", "2-3"],
+    )
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_power_off_re_resolves_bus_id(
+        self, mock_run: mock.Mock, mock_find_bus_id: mock.Mock
+    ) -> None:
+        """Test power_off uses a re-resolved bus ID that power_on reuses."""
+        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub()
+        hub.power_off()
+        hub.power_on()
+        mock_run.assert_has_calls(
+            [
+                mock.call(
+                    cmd=[
+                        "sh",
+                        "-c",
+                        "echo 0 > /sys/bus/usb/devices/2-3/authorized",
+                    ]
+                ),
+                mock.call(
+                    cmd=[
+                        "sh",
+                        "-c",
+                        "echo 1 > /sys/bus/usb/devices/2-3/authorized",
+                    ]
+                ),
+            ]
         )
 
     @mock.patch.object(

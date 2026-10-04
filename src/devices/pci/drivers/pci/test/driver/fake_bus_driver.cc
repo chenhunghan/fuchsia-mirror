@@ -5,6 +5,7 @@
 #include "fake_bus_driver.h"
 
 #include <lib/ddk/binding_driver.h>
+#include <lib/ddk/driver.h>
 #include <lib/ddk/platform-defs.h>
 #include <lib/fit/defer.h>
 
@@ -26,6 +27,13 @@ zx_status_t FakeBusDriver::Create(zx_device_t* parent, const char* name, uint8_t
   }
 
   auto cleanup = fit::defer([&bus_driver] { bus_driver->DdkAsyncRemove(); });
+  zx::unowned_resource ioport_resource(get_ioport_resource(parent));
+  if (ioport_resource->is_valid()) {
+    zx::resource dup;
+    if (ioport_resource->duplicate(ZX_RIGHT_SAME_RIGHTS, &dup) == ZX_OK) {
+      bus_driver->upstream().fake_pio_regions().SetResource(std::move(dup));
+    }
+  }
   st = bus_driver->CreateDevice(bus_driver->test_bdf(), kFakeQuadroDeviceConfig.data(),
                                 kFakeQuadroDeviceConfig.max_size());
   if (st != ZX_OK) {

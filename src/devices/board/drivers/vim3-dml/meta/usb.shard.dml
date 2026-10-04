@@ -89,13 +89,6 @@
             },
         },
         {
-            name: "fusb302-22",
-            service: "fuchsia.hardware.i2c.Service",
-            from: "#i2c-5000",
-            to: "#fusb302-22",
-            constraints: { address: 0x22 },
-        },
-        {
             name: "gpio-usb-pd",
             service: "fuchsia.hardware.gpio.Service",
             from: "#gpio-controller-ff634400",
@@ -106,6 +99,13 @@
                 pull: "Up",
                 buffer_mode: "Input",
             },
+        },
+        {
+            name: "i2c",
+            service: "fuchsia.hardware.i2c.Service",
+            from: "#i2c-5000",
+            to: "#fusb302-22",
+            constraints: { address: 0x22 },
         },
         {
             name: "pdev",

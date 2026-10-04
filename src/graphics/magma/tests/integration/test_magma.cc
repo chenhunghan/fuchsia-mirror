@@ -268,27 +268,6 @@ class TestConnection {
 #endif
   }
 
-  void Context() {
-    ASSERT_TRUE(connection_);
-
-    uint32_t context_id[2];
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection_, &context_id[0]));
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
-
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection_, &context_id[1]));
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
-
-    magma_connection_release_context(connection_, context_id[0]);
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
-
-    magma_connection_release_context(connection_, context_id[1]);
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
-
-    // Already released
-    magma_connection_release_context(connection_, context_id[1]);
-    EXPECT_EQ(MAGMA_STATUS_INVALID_ARGS, magma_connection_flush(connection_));
-  }
-
   void Context2() const {
     ASSERT_TRUE(connection_);
 
@@ -994,7 +973,8 @@ class TestConnection {
     ASSERT_TRUE(connection_);
 
     uint32_t context_id;
-    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection_, &context_id));
+    EXPECT_EQ(MAGMA_STATUS_OK,
+              magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM, &context_id));
     EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
 
     uint64_t some_pattern = 0xabcd12345678beef;
@@ -1449,7 +1429,8 @@ class TestConnectionWithContext : public TestConnection {
  public:
   TestConnectionWithContext() {
     if (connection()) {
-      EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection(), &context_id_));
+      EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_create_context2(
+                                     connection(), MAGMA_PRIORITY_MEDIUM, &context_id_));
     }
   }
 
@@ -1640,11 +1621,6 @@ TEST_F(Magma, Buffer) {
 TEST_F(Magma, Connection) {
   TestConnection test;
   test.Connection();
-}
-
-TEST_F(Magma, Context) {
-  TestConnection test;
-  test.Context();
 }
 
 TEST_F(Magma, Context2) {

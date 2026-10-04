@@ -37,4 +37,34 @@ size_t fidl::internal::DisplayError<::test_zxtypes::StatusEnumAlias>::Format(
   return std::min(written, capacity - 1);
 }
 
+size_t fidl::internal::DisplayError<::test_zxtypes::ResultEnum>::Format(
+    const ::test_zxtypes::ResultEnum& value, char* destination, size_t capacity) {
+  const char* member_name = [&]() -> const char* {
+    switch (static_cast<int32_t>(value)) {
+      case 0u:
+        return "OK";
+      default:
+        return "[UNKNOWN]";
+    }
+  }();
+  size_t written = snprintf(destination, capacity, "%s.%s (value: %u)",
+                            "test.zxtypes/ResultEnum", member_name, static_cast<int32_t>(value));
+  return std::min(written, capacity - 1);
+}
+
+size_t fidl::internal::DisplayError<::test_zxtypes::ResultEnumAlias>::Format(
+    const ::test_zxtypes::ResultEnumAlias& value, char* destination, size_t capacity) {
+  const char* member_name = [&]() -> const char* {
+    switch (static_cast<int32_t>(value)) {
+      case 0u:
+        return "OK";
+      default:
+        return "[UNKNOWN]";
+    }
+  }();
+  size_t written = snprintf(destination, capacity, "%s.%s (value: %u)",
+                            "test.zxtypes/ResultEnumAlias", member_name, static_cast<int32_t>(value));
+  return std::min(written, capacity - 1);
+}
+
 #pragma clang diagnostic pop

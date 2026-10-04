@@ -114,6 +114,7 @@ if (is_host) {
       ":compare_utils_test",
       ":discover_migration_candidates_test",
       ":flags_differences_test",
+      ":gn_runner_test",
       ":normalize_clang_args_test",
       ":normalize_rustc_args_test",
       ":path_normalizer_test",

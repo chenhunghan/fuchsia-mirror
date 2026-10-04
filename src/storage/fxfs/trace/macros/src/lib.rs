@@ -34,7 +34,9 @@ impl Parse for TraceItem {
         } else {
             let mut item_fn = input.parse::<ItemFn>()?;
             item_fn.attrs = attrs;
-            item_fn.sig.unsafety = unsafe_token;
+            if let Some(unsafe_token) = unsafe_token {
+                item_fn.sig.safety = syn::Safety::Unsafe(unsafe_token);
+            }
             TraceItem::Fn(item_fn)
         };
         Ok(trace_item)
@@ -175,7 +177,10 @@ struct RemoveImplTrait;
 impl VisitMut for RemoveImplTrait {
     fn visit_type_mut(&mut self, node: &mut Type) {
         if let Type::ImplTrait(..) = node {
-            *node = Type::Infer(syn::TypeInfer { underscore_token: Token![_](node.span()) });
+            *node = Type::Infer(syn::TypeInfer {
+                attrs: Vec::new(),
+                underscore_token: Token![_](node.span()),
+            });
         } else {
             syn::visit_mut::visit_type_mut(self, node);
         }

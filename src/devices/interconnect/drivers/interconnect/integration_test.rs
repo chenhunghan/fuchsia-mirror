@@ -5,7 +5,7 @@
 use anyhow::{Result, anyhow};
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_driver_development::ManagerProxy;
-use fidl_fuchsia_driver_framework::{NodePropertyKey, NodePropertyValue};
+use fidl_fuchsia_driver_framework::NodePropertyValue;
 use fidl_fuchsia_driver_test::RealmArgs;
 use fidl_fuchsia_interconnect_test as ft;
 use fuchsia_async as fasync;
@@ -85,7 +85,7 @@ async fn test_interconnect_driver() -> Result<()> {
 
     let expected_props = [0, 1, 2];
     for (node, expected_prop) in nodes.iter().zip(&expected_props) {
-        let expected_key = NodePropertyKey::StringValue(bind_fuchsia::ID.to_owned());
+        let expected_key = bind_fuchsia::ID.to_owned();
         let expected_value = NodePropertyValue::IntValue(*expected_prop);
         let prop_found = node
             .node_property_list

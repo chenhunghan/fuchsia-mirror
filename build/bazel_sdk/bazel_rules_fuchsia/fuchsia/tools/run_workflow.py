@@ -35,7 +35,7 @@ WorkflowArguments = namedtuple(
     ],
 )
 
-ARGUMENTS = None
+ARGUMENTS: WorkflowArguments | None = None
 
 
 def parse_workflow_args() -> None:
@@ -51,14 +51,14 @@ def parse_workflow_args() -> None:
         "--help": ("help", BOOL_ARG | FORWARD_ARG),
     }
     cla = sys.argv[1:]
-    args = {
+    args: dict[str, Any] = {
         "manifest": None,
         "dump": None,
         "dry_run": None,
         "verbose": None,
         "help": None,
     }
-    workflow_arguments = []
+    workflow_arguments: list[str] = []
     while cla:
         arg = cla.pop(0)
         if arg in arg_opts:
@@ -89,7 +89,8 @@ def parse_workflow_args() -> None:
     ARGUMENTS = WorkflowArguments(global_arguments=workflow_arguments, **args)
 
 
-def run(*command: Path | str, **kwargs: dict[str, Any]) -> None:
+def run(*command: Path | str, **kwargs: Any) -> None:
+    assert ARGUMENTS is not None
     if ARGUMENTS.verbose:
         print("Executing command: ", command)
     if ARGUMENTS.dry_run:
@@ -117,7 +118,7 @@ class Entity(ABC):
         mnemonic_suffix: str,
         explicit_args: list[tuple[float, str]],
         propagated_args: list[tuple[float, str]],
-        global_args: list[tuple[float, str]],
+        global_args: list[str],
     ) -> None:
         self._entity_collection = entity_collection
         self._label = label
@@ -152,7 +153,7 @@ class Entity(ABC):
 
     def sort_arguments(self, args: list[tuple[float, str]]) -> list[str]:
         return list(
-            (list(zip(*sorted(args, key=lambda arg: arg[0]))) or [None, []])[1]
+            (list(zip(*sorted(args, key=lambda arg: arg[0]))) or [(), ()])[1]
         )
 
     @property
@@ -165,7 +166,7 @@ class Entity(ABC):
 
     @property
     def global_args(self) -> list[str]:
-        return self.sort_arguments(self._global_args)
+        return self._global_args
 
     @property
     def task_num(self) -> int:
@@ -177,11 +178,11 @@ class Entity(ABC):
         raise Exception("Entity.task_count is not implemented.")
 
     @classmethod
-    def create(cls, *_, **kwargs) -> "Entity":
+    def create(cls, *_: Any, **kwargs: Any) -> "Entity":
         raise Exception("Entity.create is not implemented.")
 
     @abstractmethod
-    def run(self, total_tasks: int) -> None:
+    def run(self, total_tasks: int = 1) -> None:
         raise Exception("Entity.run is not implemented.")
 
     def __str__(self) -> str:
@@ -190,7 +191,11 @@ class Entity(ABC):
 
 class Task(Entity):
     def __init__(
-        self, *, task_runner: Path, default_argument_scope: str, **entity_kwargs
+        self,
+        *,
+        task_runner: Path,
+        default_argument_scope: str,
+        **entity_kwargs: Any,
     ) -> None:
         super().__init__(**entity_kwargs)
         self._task_runner = task_runner.resolve()
@@ -227,7 +232,7 @@ class Task(Entity):
     def create(
         cls,
         entity: dict[str, Any],
-        **entity_kwargs,
+        **entity_kwargs: Any,
     ) -> "Task":
         return Task(
             task_runner=Path(entity["task_runner"]),
@@ -240,27 +245,29 @@ class Task(Entity):
         )
 
     @property
-    def effective_args(self) -> list[str]:
+    def effective_args(self) -> list[str | Path]:
+        previous_state_args: list[str | Path] = (
+            ["--workflow_previous_state", self._previous_state_file]
+            if self._previous_state_file
+            else []
+        )
+        meta_arg_values: list[str | Path] = [
+            "--workflow_task_name",
+            self.name,
+            *(
+                ["--workflow_final_task"]
+                if self._entity_collection.last_task == self
+                else []
+            ),
+            *previous_state_args,
+            "--workflow_next_state",
+            self.incremental_workflow_state_file,
+            "--default_argument_scope",
+            self.default_argument_scope,
+        ]
         meta_args = [
             arg
-            for meta_arg in [
-                "--workflow_task_name",
-                self.name,
-                *(
-                    ["--workflow_final_task"]
-                    if self._entity_collection.last_task == self
-                    else []
-                ),
-                *(
-                    ["--workflow_previous_state", self._previous_state_file]
-                    if self._previous_state_file
-                    else []
-                ),
-                "--workflow_next_state",
-                self.incremental_workflow_state_file,
-                "--default_argument_scope",
-                self.default_argument_scope,
-            ]
+            for meta_arg in meta_arg_values
             for arg in ["__META_ARGUMENT__", meta_arg]
         ]
         global_args = [
@@ -307,7 +314,7 @@ class Task(Entity):
 
 
 class Workflow(Entity):
-    def __init__(self, *, sequence: list[Entity], **entity_kwargs) -> None:
+    def __init__(self, *, sequence: list[Entity], **entity_kwargs: Any) -> None:
         super().__init__(**entity_kwargs)
         self._sequence = sequence
 
@@ -322,14 +329,14 @@ class Workflow(Entity):
         entity: dict[str, Any],
         propagated_args: list[tuple[float, str]],
         task_num: int = 1,
-        **entity_kwargs,
+        **entity_kwargs: Any,
     ) -> "Workflow":
-        explicit_args = [
+        explicit_args: list[tuple[float, str]] = [
             (i - len(entity["args"]), arg)
             for i, arg in enumerate(entity["args"])
         ]
         child_task_num = task_num
-        sequence = []
+        sequence: list[Entity] = []
         for step in entity["sequence"]:
             sequence.append(
                 entity_collection.create(
@@ -374,7 +381,7 @@ class EntityCollection:
         self._global_working_dir = global_working_dir
         self._mnemonics_by_label: dict[str, list[str]] = {}
         self._entity_by_mnemonic: dict[str, Entity] = {}
-        self._last_task = None
+        self._last_task: Task | None = None
         self._entrypoint = self.create(
             label=entrypoint,
             task_num=1,
@@ -385,7 +392,9 @@ class EntityCollection:
         return len(self._mnemonics_by_label.get(mnemonic, [])) > 1
 
     def _determine_mnemonics(self, label: str) -> tuple[str, str]:
-        mnemonic = re.search(r"[\w\.\-_]+$", label)[0]
+        match = re.search(r"[\w\.\-_]+$", label)
+        assert match is not None
+        mnemonic = match[0]
         associated_mnemonics = self._mnemonics_by_label.get(mnemonic, [])
 
         suffix = f".{len(associated_mnemonics) + 1}"
@@ -404,10 +413,11 @@ class EntityCollection:
     ) -> Workflow | Task:
         mnemonic, suffix = self._determine_mnemonics(label)
         entity_type = self._data_entities[label]["type"]
-        entity = {
+        entity_types: dict[str, type[Task] | type[Workflow]] = {
             "task": Task,
             "workflow": Workflow,
-        }[entity_type].create(
+        }
+        entity = entity_types[entity_type].create(
             entity_collection=self,
             label=label,
             mnemonic=mnemonic,
@@ -417,7 +427,7 @@ class EntityCollection:
             entity=self._data_entities[label],
             task_num=task_num,
         )
-        if entity_type == "task":
+        if isinstance(entity, Task):
             self._last_task = entity
         self._entity_by_mnemonic[mnemonic + suffix] = entity
         return entity
@@ -434,6 +444,7 @@ class EntityCollection:
     def entrypoint(self) -> Entity:
         return self._entrypoint
 
+    @staticmethod
     def from_manifest(
         entities: dict[str, dict[str, Any]],
         entrypoint: str,
@@ -452,8 +463,10 @@ class WorkflowRunner:
         entrypoint: str,
         args: list[str],
     ) -> None:
+        match = re.search(r"[\w\.\-_]+$", entrypoint)
+        assert match is not None
         self._working_directory = Path(tempfile.gettempdir()) / (
-            "workflow.%s" % re.search(r"[\w\.\-_]+$", entrypoint)[0]
+            "workflow.%s" % match[0]
         )
         self.entrypoint = EntityCollection.from_manifest(
             entities, entrypoint, args, self._working_directory
@@ -478,7 +491,7 @@ class WorkflowRunner:
             prefixes: list[str] = [],
             is_last_child: bool = False,
         ) -> None:
-            def print_entry(first_line: Any, *additional_lines: Any):
+            def print_entry(first_line: str, *additional_lines: str) -> None:
                 print(
                     reduce(add, prefixes[:-1], "")
                     + (
@@ -513,6 +526,7 @@ class WorkflowRunner:
                         is_last,
                     )
             else:
+                assert isinstance(node, Task)
                 print_entry(
                     f'{Terminal.bold("Task:")} {Terminal.purple(node.mnemonic) + suffix} (step {node.task_num}/{root.task_count})',
                     f'{Terminal.bold("Label:")} {Terminal.underline(node.label)}',
@@ -534,9 +548,10 @@ class WorkflowRunner:
         return self
 
 
-def main():
+def main() -> int:
     # Parse arguments.
     parse_workflow_args()
+    assert ARGUMENTS is not None
 
     # Parse the workflow.
     workflow_spec = json.loads(Path(ARGUMENTS.manifest).read_text())
@@ -559,6 +574,7 @@ def main():
     except TaskExecutionException as e:
         print(e)
         return 1
+    return 0
 
 
 if __name__ == "__main__":

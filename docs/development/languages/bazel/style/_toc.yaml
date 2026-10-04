@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Please, read https://fuchsia.dev/fuchsia-src/contribute/docs/documentation-navigation-toc
+# before making changes to this file, and add a member of the fuchsia.dev
+# team as reviewer.
+toc:
+- title: "Overview"
+  path: /docs/development/languages/bazel/style
+- title: "Common"
+  path: /docs/development/languages/bazel/style/common.md
+- title: "BUILD.bazel files"
+  path: /docs/development/languages/bazel/style/build_files.md
+- title: ".bzl files"
+  path: /docs/development/languages/bazel/style/bzl_files.md
+- title: "Rules, macros, and functions"
+  path: /docs/development/languages/bazel/style/rules_macros.md

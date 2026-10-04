@@ -8,6 +8,8 @@
 #include <hwreg/bitfields.h>
 #include <usb/descriptors.h>
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 #define DUMP_REG(reg, mmio) __DUMP_REG(reg, mmio, false)
 #define DUMP_REG_W_IDX(reg, idx, mmio) __DUMP_REG_W_IDX(reg, idx, mmio, false)
 #define DUMP_STARRED_REG(reg, mmio) __DUMP_REG(reg, mmio, true)
@@ -38,7 +40,7 @@ constexpr bool DWC_EP_IS_OUT(uint8_t ep) { return ep >= 16; }
 // in endpoints -> 0 - 15
 // out endpoints -> 17 - 31 (16 is unused)
 constexpr uint8_t DWC_ADDR_TO_INDEX(uint8_t addr) {
-  return static_cast<uint8_t>((addr & 0xF) + (16 * !(addr & USB_DIR_IN)));
+  return static_cast<uint8_t>(usb_ep_num(addr) + (16 * usb_ep_is_out(addr)));
 }
 
 // OTG control/status register.

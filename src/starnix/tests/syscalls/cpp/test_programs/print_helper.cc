@@ -10,6 +10,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <print>
+
 #include <linux/capability.h>
 #include <linux/prctl.h>
 
@@ -78,21 +80,21 @@ int MaxCapabilitySupported() {
   fclose(fp);
 
   if (n != 1) {
-    fprintf(stderr, "Could not parse cap_last_cap file.\n");
+    std::println(stderr, "Could not parse cap_last_cap file.");
     exit(EXIT_FAILURE);
   }
   return cap_num;
 }
 
 void PrintCapabilities() {
-  fprintf(stdout, "CAP_NUM,EFFECTIVE,PERMITTED,INHERITABLE,BOUNDING,AMBIENT\n");
+  std::println(stdout, "CAP_NUM,EFFECTIVE,PERMITTED,INHERITABLE,BOUNDING,AMBIENT");
 
   const int cap_last_cap = MaxCapabilitySupported();
 
   for (int capability = 0; capability <= cap_last_cap; capability++) {
-    fprintf(stdout, "%d,%d,%d,%d,%d,%d\n", capability, b2d(HasCapabilityEffective(capability)),
-            b2d(HasCapabilityPermitted(capability)), b2d(HasCapabilityInheritable(capability)),
-            b2d(HasCapabilityBounding(capability)), b2d(HasCapabilityAmbient(capability)));
+    std::println(stdout, "{},{},{},{},{},{}", capability, b2d(HasCapabilityEffective(capability)),
+                 b2d(HasCapabilityPermitted(capability)), b2d(HasCapabilityInheritable(capability)),
+                 b2d(HasCapabilityBounding(capability)), b2d(HasCapabilityAmbient(capability)));
   }
 }
 
@@ -102,7 +104,16 @@ void PrintSecurebits() {
     err(EXIT_FAILURE, "prctl(PR_GET_SECUREBITS)");
   }
 
-  fprintf(stdout, "%x\n", res);
+  std::println(stdout, "{:x}", res);
+}
+
+void PrintPDeathSig() {
+  int pdeathsig = -1;
+  if (prctl(PR_GET_PDEATHSIG, &pdeathsig) == -1) {
+    err(EXIT_FAILURE, "prctl(PR_GET_PDEATHSIG)");
+  }
+
+  std::println(stdout, "{}", pdeathsig);
 }
 
 }  // namespace
@@ -113,9 +124,10 @@ int main(int argc, char** argv) {
   }
 
   if (argc != 2) {
-    fprintf(stderr, "Usage: %s <command>\n", argv[0]);
-    fprintf(stderr, "commands:\n");
-    fprintf(stderr, "\tsecurebits: print the securebits flags\n");
+    std::println(stderr, "Usage: {} <command>", argv[0]);
+    std::println(stderr, "commands:");
+    std::println(stderr, "\tsecurebits: print the securebits flags");
+    std::println(stderr, "\tpdeathsig: print the parent-death signal number");
     exit(EXIT_FAILURE);
   }
 
@@ -123,8 +135,10 @@ int main(int argc, char** argv) {
     PrintSecurebits();
   } else if (strcmp(argv[1], "capabilities") == 0) {
     PrintCapabilities();
+  } else if (strcmp(argv[1], "pdeathsig") == 0) {
+    PrintPDeathSig();
   } else {
-    fprintf(stderr, "Invalid command: %s\n", argv[1]);
+    std::println(stderr, "Invalid command: {}", argv[1]);
     exit(EXIT_FAILURE);
   }
 

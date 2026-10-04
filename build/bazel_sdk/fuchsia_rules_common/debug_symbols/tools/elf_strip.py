@@ -23,23 +23,23 @@ import sys
 from debug_symbols.tools.pylib import elf_info
 
 
-def debug(msg: str):
+def debug(msg: str) -> None:
     # uncomment the line below to enable debug messages.
     # print('LOG: ' + msg, file=sys.stderr)
     pass
 
 
-def write_file(path: str, content: str):
+def write_file(path: str, content: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(content)
 
 
-def create_empty(path: str):
+def create_empty(path: str) -> None:
     write_file(path, "")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--debug", action="store_true", default=False, help="Enable debug logs"

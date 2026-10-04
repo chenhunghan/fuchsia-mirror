@@ -13,6 +13,8 @@
 #include "src/devices/testing/mock-ddk/mock-device.h"
 #include "src/devices/usb/drivers/usb-bus/tests/common.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_bus {
 
 class BusTest : public zxtest::Test {
@@ -97,8 +99,7 @@ class BusTest : public zxtest::Test {
   std::optional<component::OutgoingDirectory> outgoing_;
   UsbBus* bus_;
 
-  void AddDeviceFidl(uint32_t device_id, uint32_t hub_id,
-                     fuchsia_hardware_usb_descriptor::UsbSpeed speed) {
+  void AddDeviceFidl(uint32_t device_id, uint32_t hub_id, fdescriptor::UsbSpeed speed) {
     libsync::Completion completion;
     auto result = fdf::RunOnDispatcherSync((*dispatcher_)->async_dispatcher(), [&]() {
       hci_->hci_interface_client()
@@ -120,7 +121,7 @@ TEST_F(BusTest, FidlAddDevice) {
   libsync::Completion completion;
   auto result = fdf::RunOnDispatcherSync((*dispatcher_)->async_dispatcher(), [&]() {
     hci_->hci_interface_client()
-        ->AddDevice(2, 0, fuchsia_hardware_usb_descriptor::UsbSpeed::kFull)
+        ->AddDevice(2, 0, fdescriptor::UsbSpeed::kFull)
         .ThenExactlyOnce(
             [&](fidl::WireUnownedResult<fuchsia_hardware_usb_hci::UsbHciInterface::AddDevice>&
                     response) {
@@ -170,7 +171,7 @@ TEST_F(BusTest, FidlRemoveDeviceNotPresent) {
 }
 
 TEST_F(BusTest, FidlRemoveDeviceAlreadyInProgress) {
-  AddDeviceFidl(6, 0, fuchsia_hardware_usb_descriptor::UsbSpeed::kFull);
+  AddDeviceFidl(6, 0, fdescriptor::UsbSpeed::kFull);
 
   libsync::Completion completion1;
   libsync::Completion completion2;
@@ -216,7 +217,7 @@ TEST_F(BusTest, FidlRemoveDeviceAlreadyInProgress) {
 }
 
 TEST_F(BusTest, FidlResetPort) {
-  AddDeviceFidl(3, 0, fuchsia_hardware_usb_descriptor::UsbSpeed::kFull);
+  AddDeviceFidl(3, 0, fdescriptor::UsbSpeed::kFull);
 
   libsync::Completion completion;
   auto result = fdf::RunOnDispatcherSync((*dispatcher_)->async_dispatcher(), [&]() {
@@ -236,7 +237,7 @@ TEST_F(BusTest, FidlResetPort) {
 }
 
 TEST_F(BusTest, FidlReinitializeDevice) {
-  AddDeviceFidl(4, 0, fuchsia_hardware_usb_descriptor::UsbSpeed::kFull);
+  AddDeviceFidl(4, 0, fdescriptor::UsbSpeed::kFull);
 
   auto* bus_dev = parent_->GetLatestChild();
   auto* usb_dev = bus_dev->GetLatestChild();

@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use modinv::modinv::inv_mod_u32;
-use num::bigint::BigUint;
-use num::traits::Pow;
+use num_bigint::BigUint;
+use num_traits::Pow;
 use ring::signature::KeyPair;
 use thiserror::Error;
 use zerocopy::IntoBytes;

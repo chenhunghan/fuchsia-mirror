@@ -47,6 +47,7 @@ struct UsbConnection {
     usb_socket_reader: ReadHalf<Socket>,
     usb_socket_writer: WriteHalf<Socket>,
     connection_tx: mpsc::Sender<ConnectionRequest>,
+    send_initial_sync: bool,
 }
 
 impl UsbConnection {
@@ -54,13 +55,34 @@ impl UsbConnection {
         vsock_service: Arc<VsockService<Vec<u8>>>,
         usb_socket: zx::Socket,
         connection_tx: mpsc::Sender<ConnectionRequest>,
+        send_initial_sync: bool,
     ) -> Self {
         assert!(
             usb_socket.info().unwrap().options.contains(SocketOpts::DATAGRAM),
             "USB socket must be a datagram socket"
         );
         let (usb_socket_reader, usb_socket_writer) = Socket::from_socket(usb_socket).split();
-        Self { vsock_service, usb_socket_reader, usb_socket_writer, connection_tx }
+        Self {
+            vsock_service,
+            usb_socket_reader,
+            usb_socket_writer,
+            connection_tx,
+            send_initial_sync,
+        }
+    }
+
+    async fn send_reset_sync(&mut self) {
+        let outgoing_magic = ProtocolVersion::LATEST.magic();
+        let mut header = Header::new(PacketType::Sync);
+        header.payload_len = (outgoing_magic.len() as u32).into();
+        header.device_cid.set(self.vsock_service.current_cid());
+        header.host_cid.set(CID_HOST);
+        let sync_pkt = Packet { header: &header, payload: &outgoing_magic };
+        let mut sync_buf = [0u8; 64];
+        sync_pkt.write_to_unchecked(&mut sync_buf);
+        if let Err(err) = self.usb_socket_writer.write(&sync_buf[..sync_pkt.size()]).await {
+            debug!("Failed to send reset sync packet on usb socket: {err:?}");
+        }
     }
 
     /// Waits for an [`PacketType::Sync`] packet and sends the reply back, and then returns the
@@ -69,6 +91,12 @@ impl UsbConnection {
         &mut self,
         mut found_magic: Option<Vec<u8>>,
     ) -> Option<(ProtocolVersion, u32)> {
+        let mut sent_reset_sync = false;
+        if self.send_initial_sync && found_magic.is_none() {
+            self.send_initial_sync = false;
+            self.send_reset_sync().await;
+            sent_reset_sync = true;
+        }
         let mut data = [0; MTU];
         while found_magic.is_none() {
             let mut packets = match read_packet_stream(&mut self.usb_socket_reader, &mut data).await
@@ -95,13 +123,22 @@ impl UsbConnection {
                         found_magic = Some(payload.to_owned());
                     }
                     Ok(packet) => {
-                        warn!(
-                            "Got unexpected packet of type {:?} and length {} while waiting for sync packet. Ignoring.",
-                            packet.header.packet_type, packet.header.payload_len
-                        );
+                        if !sent_reset_sync {
+                            debug!(
+                                "Got unexpected packet of type {:?} and length {} while waiting for sync packet; sending Sync to reset host link.",
+                                packet.header.packet_type, packet.header.payload_len
+                            );
+                            self.send_reset_sync().await;
+                            sent_reset_sync = true;
+                        } else {
+                            debug!(
+                                "Ignoring unexpected packet of type {:?} and length {} while waiting for sync packet.",
+                                packet.header.packet_type, packet.header.payload_len
+                            );
+                        }
                     }
                     Err(err) => {
-                        warn!("Got invalid vsock packet while waiting for sync packet: {err:?}");
+                        debug!("Got invalid vsock packet while waiting for sync packet: {err:?}");
                     }
                 }
             }
@@ -176,13 +213,13 @@ impl UsbConnection {
                         return Some((outgoing_version, device_cid.get()));
                     }
                     Ok(packet) => {
-                        warn!(
+                        debug!(
                             "Got unexpected packet of type {:?} and length {} while waiting for sync packet. Ignoring.",
                             packet.header.packet_type, packet.header.payload_len
                         );
                     }
                     Err(err) => {
-                        warn!("Got invalid vsock packet while waiting for sync packet: {err:?}");
+                        debug!("Got invalid vsock packet while waiting for sync packet: {err:?}");
                     }
                 }
             }
@@ -302,6 +339,7 @@ async fn usb_socket_reader<const MTU: usize>(
 struct UsbCallbackHandler {
     usb_callback_server: vsockbridge::CallbackRequestStream,
     connection_tx: mpsc::Sender<ConnectionRequest>,
+    send_initial_sync: bool,
 }
 
 impl UsbCallbackHandler {
@@ -316,9 +354,15 @@ impl UsbCallbackHandler {
             responder.send()?;
 
             debug!("Received new socket from usb driver");
-            UsbConnection::new(vsock_service.clone(), socket, self.connection_tx.clone())
-                .run(synchronized.take())
-                .await;
+            let send_initial_sync = std::mem::replace(&mut self.send_initial_sync, false);
+            UsbConnection::new(
+                vsock_service.clone(),
+                socket,
+                self.connection_tx.clone(),
+                send_initial_sync,
+            )
+            .run(synchronized.take())
+            .await;
         }
         Ok(())
     }
@@ -343,11 +387,19 @@ impl Driver for UsbVsockServiceDriver {
         context.serve_outgoing(&mut outgoing)?;
 
         scope.spawn(async move {
+            let mut is_reconnect = false;
             while let Some(request_stream) = outgoing.next().await {
                 let (usb_callback, usb_callback_server) = create_endpoints();
                 usb_device.set_callback(usb_callback).await.expect("usb device service went away");
 
-                run_connection(usb_callback_server.into_stream(), request_stream, None).await
+                run_connection(
+                    usb_callback_server.into_stream(),
+                    request_stream,
+                    None,
+                    is_reconnect,
+                )
+                .await;
+                is_reconnect = true;
             }
         });
 
@@ -361,6 +413,7 @@ async fn run_connection(
     usb_callback_server: vsockbridge::CallbackRequestStream,
     mut request_stream: vsock::DeviceRequestStream,
     synchronized: Option<oneshot::Sender<()>>,
+    send_initial_sync: bool,
 ) {
     debug!("Waiting for start message on vsock implementation service");
     let (connection_tx, incoming_connections) = mpsc::channel(1);
@@ -378,8 +431,11 @@ async fn run_connection(
     let svc = Arc::new(svc);
     let (mut scopes_stream, scopes) = ScopeStream::new_with_name("usb-vsock-connection".to_owned());
 
-    let usb_callback_handler =
-        UsbCallbackHandler { usb_callback_server, connection_tx: connection_tx.clone() };
+    let usb_callback_handler = UsbCallbackHandler {
+        usb_callback_server,
+        connection_tx: connection_tx.clone(),
+        send_initial_sync,
+    };
     let usb_svc = svc.clone();
     scopes.push(async move {
         if let Err(err) = usb_callback_handler.run(usb_svc, synchronized).await {
@@ -443,6 +499,7 @@ mod tests {
             usb_callback_server.into_stream(),
             vsock_impl_server.into_stream(),
             Some(started_tx),
+            false,
         ));
         let usb_callback_client = usb_callback_client.into_proxy();
 

@@ -80,10 +80,7 @@ kernel_bindgen_crate("debuglog-types") {
   notice_year = 2026
 
   type_allowlist = [ "dlog_.*" ]
-  var_allowlist = [
-    "DLOG_.*",
-    "ZX_LOG_FLAGS_MASK",
-  ]
+  var_allowlist = [ "DLOG_.*" ]
 
   expect_lints = [ "non_camel_case_types" ]
 

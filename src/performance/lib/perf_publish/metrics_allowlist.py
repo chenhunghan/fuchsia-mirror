@@ -8,6 +8,7 @@ import os
 from collections.abc import Set
 
 _OPTIONAL_SUFFIX: str = " [optional]"
+_NO_SUMMARIZE_SUFFIX: str = " [no-summarize]"
 
 
 class MetricsAllowlist:
@@ -20,6 +21,11 @@ class MetricsAllowlist:
         self.file_path = file_path
         self.optional_metrics: set[str] = set()
         self.expected_metrics: set[str] = set()
+        # Individual metrics tagged with the `[no-summarize]` suffix that should keep their raw
+        # sample lists when file-level summarization (`should_summarize`) is enabled.
+        self.no_summarize_metrics: set[str] = set()
+        # File-level flag set to False only when `[no-summarize-metrics]` appears at the top of the
+        # file, which disables summarization for the entire file.
         self._should_summarize = True
 
         allow_command = True
@@ -35,16 +41,28 @@ class MetricsAllowlist:
                     continue
                 if line.strip().startswith("#") or line.strip() == "":
                     continue
-                if line.endswith(_OPTIONAL_SUFFIX):
-                    self.optional_metrics.add(
-                        line.removesuffix(_OPTIONAL_SUFFIX)
-                    )
+                is_optional = False
+                skip_metric_summarization = False
+                while True:
+                    if line.endswith(_OPTIONAL_SUFFIX):
+                        line = line.removesuffix(_OPTIONAL_SUFFIX)
+                        is_optional = True
+                    elif line.endswith(_NO_SUMMARIZE_SUFFIX):
+                        line = line.removesuffix(_NO_SUMMARIZE_SUFFIX)
+                        skip_metric_summarization = True
+                    else:
+                        break
+                if is_optional:
+                    self.optional_metrics.add(line)
                 else:
                     self.expected_metrics.add(line)
+                if skip_metric_summarization:
+                    self.no_summarize_metrics.add(line)
                 allow_command = False
 
     @property
     def should_summarize(self) -> bool:
+        """Whether file-level summarization is enabled (False if `[no-summarize-metrics]` is set)."""
         return self._should_summarize
 
     def check(self, actual_metrics: Set[str]) -> None:

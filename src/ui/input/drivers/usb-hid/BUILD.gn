@@ -47,17 +47,13 @@ driver_bind_rules("two_endpoint_hid_bind") {
   ]
 }
 
-fuchsia_cc_driver("usb-hid-driver") {
-  output_name = "usb-hid"
-  configs += [
-    "//build/config:all_source",
-    "//build/config/fuchsia:enable_zircon_asserts",
-  ]
+source_set("usb-hid-common") {
   sources = [
     "usb-hid.cc",
     "usb-hid.h",
   ]
-  deps = [
+  public_configs = [ "//build/config:all_source" ]
+  public_deps = [
     ":usb_hid_bind",
     "//sdk/banjo/fuchsia.hardware.usb:fuchsia.hardware.usb_banjo_cpp",
     "//sdk/banjo/fuchsia.hardware.usb.composite:fuchsia.hardware.usb.composite_banjo_cpp",
@@ -75,6 +71,12 @@ fuchsia_cc_driver("usb-hid-driver") {
     "//zircon/system/ulib/pretty",
     "//zircon/system/ulib/sync",
   ]
+}
+
+fuchsia_cc_driver("usb-hid-driver") {
+  output_name = "usb-hid"
+  configs += [ "//build/config/fuchsia:enable_zircon_asserts" ]
+  deps = [ ":usb-hid-common" ]
 }
 
 fuchsia_driver_component("usb-hid") {
@@ -178,6 +180,7 @@ group("fake") {
 test("usb-hid-test") {
   sources = [ "usb-hid-test.cc" ]
   deps = [
+    ":usb-hid-common",
     "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
     "//sdk/fidl/fuchsia.hardware.input:fuchsia.hardware.input_cpp",
     "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_cpp",
@@ -185,8 +188,8 @@ test("usb-hid-test") {
     "//sdk/lib/device-watcher/cpp",
     "//sdk/lib/fdio",
     "//sdk/lib/fdio-caller",
-    "//src/devices/usb/lib/usb",
-    "//src/devices/usb/testing/usb-virtual-bus-launcher",
+    "//src/devices/usb/lib/usb:usb-dfv2-compat-logging",
+    "//src/devices/usb/testing/usb-virtual-bus-launcher:usb-virtual-bus-launcher-dfv2-compat-logging",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
     "//src/ui/input/lib/hid",

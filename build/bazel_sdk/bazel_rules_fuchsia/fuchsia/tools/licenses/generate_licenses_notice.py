@@ -5,20 +5,23 @@
 """Utility that produces OSS licenses notice text file."""
 
 import argparse
+from collections import defaultdict
 from sys import stderr
 
-from fuchsia.tools.licenses.classification_types import *
-from fuchsia.tools.licenses.spdx_types import *
+from fuchsia.tools.licenses.classification_types import (
+    LicensesClassifications,
+)
+from fuchsia.tools.licenses.spdx_types import SpdxDocument, SpdxIndex
 
 _VERBOSE = True
 
 
-def _log(*kwargs):
+def _log(*kwargs: object) -> None:
     if _VERBOSE:
         print(*kwargs, file=stderr)
 
 
-def main():
+def main() -> None:
     """Parses arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -83,10 +86,10 @@ def main():
 
     with open(output_path, "w") as notice:
 
-        def write(text):
+        def write(text: str) -> None:
             notice.write(text)
 
-        def write_delimiter():
+        def write_delimiter() -> None:
             write(
                 "================================================================================\n"
             )

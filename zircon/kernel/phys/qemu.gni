@@ -94,6 +94,7 @@ if (current_cpu == "x64") {
     },
     {
       name = "linuxboot"
+      has_embed = false
       environment = "//zircon/kernel/arch/x86/phys:kernel.phys32"
       deps = [ "//zircon/kernel/arch/x86/phys:linuxboot" ]
       shim_deps = [ "//zircon/kernel/arch/x86/phys/boot-shim:linux-x86-32-boot-shim($environment)" ]
@@ -142,6 +143,7 @@ if (current_cpu == "arm64" || current_cpu == "riscv64") {
   qemu_boot_formats += [
     {
       name = "linuxboot"
+      has_embed = true
       environment = phys_toolchain
       deps = [ "//zircon/kernel/arch/$current_cpu/phys:linuxboot" ]
       shim_deps = [ "//zircon/kernel/arch/${current_cpu}/phys/boot-shim:linux-${current_cpu}-boot-shim($environment)" ]

@@ -56,9 +56,7 @@ use fixture::fixture;
 #[fixture(base_fixture)]
 #[fuchsia::test]
 async fn my_test(ctx: TestContext) {
-  let _daemon = ctx.isolate().start_daemon().await.unwrap();
-
-  let output = ctx.isolate().ffx(&["daemon", "echo"]).await.expect("daemon echo");
+  let output = ctx.isolate().ffx(&["version"]).await.expect("version");
   assert!(output.status.success());
 }
 ```

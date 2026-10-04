@@ -450,6 +450,10 @@ constexpr ErrorDef<222> ErrExperimentalNoResource(
 constexpr ErrorDef<223, std::string_view, std::string_view> ErrNoResourceForbidsCompose(
     "'{0}' has the '@no_resource` attribute, and thus "
     "cannot compose '{1}' unless it is also has the '@no_resource' attribute");
+constexpr ErrorDef<224, Name> ErrCannotBeNonZero("{0} cannot be non-zero");
+constexpr ErrorDef<225, Name> ErrCannotIndicateNonZeroTwice("{0} cannot be non-zero twice");
+constexpr ErrorDef<226, Name, const Type *> ErrConstantMayNotBeZero(
+    "{0} may not be zero because its type {1} is constrained to non-zero values");
 
 // To add a new error:
 //
@@ -686,6 +690,9 @@ static constexpr const DiagnosticDef *kAllDiagnosticDefs[] = {
     /* fi-0221 */ &ErrResourceForbiddenHere,
     /* fi-0222 */ &ErrExperimentalNoResource,
     /* fi-0223 */ &ErrNoResourceForbidsCompose,
+    /* fi-0224 */ &ErrCannotBeNonZero,
+    /* fi-0225 */ &ErrCannotIndicateNonZeroTwice,
+    /* fi-0226 */ &ErrConstantMayNotBeZero,
 };
 
 // In reporter.h we assert that reported error IDs are <= kNumDiagnosticDefs.

@@ -7,25 +7,26 @@
 
 #include <fuchsia/hardware/usb/cpp/banjo-mock.h>
 
+#include <cstring>
+
 // Some test utilities in "fuchsia/hardware/usb/function/cpp/banjo-mock.h" expect the following
 // operators to be implemented.
-bool operator==(const usb_request_complete_callback_t& lhs,
-                const usb_request_complete_callback_t& rhs) {
+inline bool operator==(const usb_request_complete_callback_t& lhs,
+                       const usb_request_complete_callback_t& rhs) {
   // Comparison of these struct is not useful. Return true always.
   return true;
 }
 
-bool operator==(const usb_ss_ep_comp_descriptor_t& lhs, const usb_ss_ep_comp_descriptor_t& rhs) {
-  // Comparison of these struct is not useful. Return true always.
-  return true;
+inline bool operator==(const usb_ss_ep_comp_descriptor_t& lhs,
+                       const usb_ss_ep_comp_descriptor_t& rhs) {
+  return memcmp(&lhs, &rhs, sizeof(lhs)) == 0;
 }
 
-bool operator==(const usb_endpoint_descriptor_t& lhs, const usb_endpoint_descriptor_t& rhs) {
-  // Comparison of these struct is not useful. Return true always.
-  return true;
+inline bool operator==(const usb_endpoint_descriptor_t& lhs, const usb_endpoint_descriptor_t& rhs) {
+  return memcmp(&lhs, &rhs, sizeof(lhs)) == 0;
 }
 
-bool operator==(const usb_request_t& lhs, const usb_request_t& rhs) {
+inline bool operator==(const usb_request_t& lhs, const usb_request_t& rhs) {
   // Only comparing endpoint address. Use ExpectCallWithMatcher for more specific
   // comparisons.
   return lhs.header.ep_address == rhs.header.ep_address;

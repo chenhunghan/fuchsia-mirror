@@ -394,7 +394,7 @@ impl<'a> ScannedStore<'a> {
                                 ))?;
                             }
                             match key_type {
-                                KeyType::FscryptInoLblk32File => {
+                                KeyType::FscryptInoLblk32File | KeyType::FscryptInoLblk64File => {
                                     if matches!(
                                         self.objects.get(&current_file.object_id),
                                         Some(
@@ -407,7 +407,7 @@ impl<'a> ScannedStore<'a> {
                                         ))?;
                                     }
                                 }
-                                KeyType::FscryptInoLblk32Dir => {
+                                KeyType::FscryptInoLblk32Dir | KeyType::FscryptInoLblk64Dir => {
                                     if !matches!(
                                         self.objects.get(&current_file.object_id),
                                         Some(
@@ -562,9 +562,11 @@ impl<'a> ScannedStore<'a> {
                                             *key_id,
                                         ))?;
                                     }
-                                    Some(KeyType::FscryptInoLblk32File)
-                                        if attribute_id != AttributeId::DATA
-                                            && attribute_id != AttributeId::FSVERITY_MERKLE =>
+                                    Some(
+                                        KeyType::FscryptInoLblk32File
+                                        | KeyType::FscryptInoLblk64File,
+                                    ) if attribute_id != AttributeId::DATA
+                                        && attribute_id != AttributeId::FSVERITY_MERKLE =>
                                     {
                                         self.fsck.error(FsckError::InvalidInoLblk32KeyUsage(
                                             self.store_id,

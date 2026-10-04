@@ -26,6 +26,7 @@
 
 #include <fake-mmio-reg/fake-mmio-reg.h>
 #include <gtest/gtest.h>
+#include <usb/descriptors.h>
 
 #include "lib/driver/fake-platform-device/cpp/fake-pdev.h"
 #include "lib/driver/testing/cpp/driver_test.h"
@@ -36,6 +37,7 @@
 namespace dwc3 {
 
 namespace fclock = fuchsia_hardware_clock;
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 namespace fhi = fuchsia_hardware_interconnect;
 namespace fpdev = fuchsia_hardware_platform_device;
 namespace fphy = fuchsia_hardware_usb_phy;
@@ -68,6 +70,7 @@ class Dwc3TestHelper {
     return drv.device_state_;
   }
   static void SetPowerOn(Dwc3& drv, bool power_on) { drv.power_on_ = power_on; }
+  static bool HasConnectionLease(const Dwc3& drv) { return drv.connection_lease_.is_valid(); }
   static fuchsia_hardware_usb_descriptor::UsbSpeed GetConnectionSpeed(const Dwc3& drv) {
     return drv.connection_speed_;
   }
@@ -147,12 +150,15 @@ class Dwc3TestHelper {
     }
   }
   static bool GetPowerOn(Dwc3& drv) { return drv.power_on_; }
+  static void HandleIrq(Dwc3& drv) { drv.HandleIrq(nullptr, nullptr, ZX_OK, nullptr); }
   static bool IsActive(Dwc3& drv) { return drv.is_active(); }
   static zx_status_t EpSetStall(Dwc3& drv, Dwc3::Endpoint& ep, bool stall) {
     return drv.EpSetStall(ep, stall);
   }
   static void UserEpQueueNext(Dwc3& drv, Dwc3::UserEndpoint& uep) { drv.UserEpQueueNext(uep); }
-  static void UserEpReset(Dwc3& drv, Dwc3::UserEndpoint& uep) { drv.UserEpReset(uep); }
+  static void UserEpReset(Dwc3& drv, Dwc3::UserEndpoint& uep, bool force = false) {
+    drv.UserEpReset(uep, force);
+  }
   static void SetDeviceAddress(Dwc3& drv, uint32_t address) { drv.SetDeviceAddress(address); }
   static bool IsFifoEmpty(Dwc3& drv) { return drv.ep0_.shared_fifo.IsEmpty(); }
   static void SetEpTransferState(Dwc3& drv, uint8_t ep_num, TransferState state) {
@@ -164,6 +170,13 @@ class Dwc3TestHelper {
         uep->ep.transfer_state = state;
       }
     }
+  }
+  static TransferState GetEpTransferState(Dwc3& drv, uint8_t ep_num) {
+    if (ep_num < 2) {
+      return ((ep_num == 0) ? drv.ep0_.out : drv.ep0_.in).transfer_state;
+    }
+    auto* uep = drv.get_user_endpoint(ep_num);
+    return uep ? uep->ep.transfer_state : TransferState::kIdle;
   }
   static void SetEpRsrcId(Dwc3& drv, uint8_t ep_num, uint32_t rsrc_id) {
     if (ep_num < 2) {
@@ -212,6 +225,14 @@ class Dwc3TestHelper {
     return uep ? uep->ep.transfer_state == dwc3::Dwc3::Endpoint::TransferState::kIdle : true;
   }
 
+  static bool IsEpEnabled(Dwc3& drv, uint8_t ep_num) {
+    if (ep_num < 2) {
+      return ((ep_num == 0) ? drv.ep0_.out : drv.ep0_.in).enabled;
+    }
+    auto* uep = drv.get_user_endpoint(ep_num);
+    return uep ? uep->ep.enabled : false;
+  }
+
   static Dwc3::UserEndpoint* GetUserEndpoint(Dwc3& drv, uint8_t ep_num) {
     return drv.get_user_endpoint(ep_num);
   }
@@ -239,7 +260,7 @@ class Dwc3TestHelper {
                         zx_status_t status, const zx_packet_interrupt_t* interrupt) {
     drv.HandleIrq(dispatcher, irq, status, interrupt);
   }
-  static void SetCurSetup(Dwc3& drv, const fuchsia_hardware_usb_descriptor::wire::UsbSetup& setup) {
+  static void SetCurSetup(Dwc3& drv, const fdescriptor::wire::UsbSetup& setup) {
     drv.ep0_.cur_setup = setup;
   }
   static void* GetEp0BufferVirt(Dwc3& drv) { return drv.ep0_.buffer->virt(); }
@@ -265,6 +286,9 @@ class Dwc3TestHelper {
   static bool IsEp0InStalled(Dwc3& drv) { return drv.ep0_.in.stalled; }
   static void SetEp0OutEnabled(Dwc3& drv, bool enabled) { drv.ep0_.out.enabled = enabled; }
   static void SetEp0InEnabled(Dwc3& drv, bool enabled) { drv.ep0_.in.enabled = enabled; }
+  static void SetEp0CurTransferLen(Dwc3& drv, size_t len) { drv.ep0_.cur_transfer_len = len; }
+  static uint64_t GetEp0OutTotalBytes(const Dwc3& drv) { return drv.ep0_.out.total_bytes; }
+  static uint64_t GetEp0InTotalBytes(const Dwc3& drv) { return drv.ep0_.in.total_bytes; }
   static void PushTrbToSharedFifo(Dwc3& drv, const dwc3_trb_t& trb) {
     dwc3_trb_t* ptr = drv.ep0_.shared_fifo.AdvanceWrite();
     *ptr = trb;
@@ -281,8 +305,7 @@ class Dwc3TestHelper {
   }
 
   // Simulation constructs for EP0
-  static void SimulateSetupReceived(Dwc3& drv,
-                                    const fuchsia_hardware_usb_descriptor::wire::UsbSetup& setup) {
+  static void SimulateSetupReceived(Dwc3& drv, const fdescriptor::wire::UsbSetup& setup) {
     WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
 
     ZX_ASSERT_MSG(!drv.ep0_.shared_fifo.IsEmpty(), "SimulateSetupReceived called on empty FIFO!");
@@ -356,11 +379,11 @@ class FakeUsbPhy : public fidl::Server<fphy::UsbPhy>, public fidl::Server<fphy::
   }
   bool has_completer() const { return completer_.has_value(); }
 
-  void TriggerConnection(bool connected) {
+  void TriggerConnection(bool connected, zx::eventpair wake_lease = {}) {
     ZX_ASSERT(completer_.has_value());
     fuchsia_hardware_usb_phy::ConnectionWatcherWatchConnectStatusChangedResponse response{{
         .connected = connected,
-        .wake_lease = {},
+        .wake_lease = std::move(wake_lease),
     }};
     completer_->Reply(zx::ok(std::move(response)));
     completer_.reset();
@@ -651,14 +674,14 @@ class TestFixture : public gtest_base {
     uep->server->SendCompletions();
   }
 
-  static void TriggerEpTransferInProgress(Dwc3& drv, uint8_t ep_num) {
+  static void TriggerEpTransferInProgress(Dwc3& drv, uint8_t ep_num, uint32_t residual = 0) {
     auto* uep = drv.get_user_endpoint(ep_num);
     ZX_ASSERT(uep != nullptr);
 
     if (uep->fifo.GetActiveCount() > 0) {
       dwc3_trb_t* trb = uep->fifo.read_;
       trb->control &= ~TRB_HWO;
-      trb->status = 0;
+      trb->status = TRB_BUFSIZ(residual);
       uep->fifo.Write(trb, 1);
     }
 
@@ -686,7 +709,7 @@ class TestFixture : public gtest_base {
   PlatformExtension* GetPlatformExtension(Dwc3& drv) { return drv.platform_extension_.get(); }
 
  public:
-  void TriggerConnectionPlugIn(fuchsia_hardware_usb_descriptor::UsbSpeed speed) {
+  void TriggerConnectionPlugIn(::fuchsia_hardware_usb_descriptor::wire::UsbSpeed speed) {
     namespace fdescriptor = fuchsia_hardware_usb_descriptor;
     // Wait for the mock PHY to establish connection observer registration.
     // Relies on the test runtime's overarching test timeout to prevent flakiness under CI load.
@@ -987,17 +1010,28 @@ class TestEndpointEventHandler
 
 class FakeUsbDciInterface : public fidl::WireServer<fuchsia_hardware_usb_dci::UsbDciInterface> {
  public:
-  using ControlCallback = std::function<void(fuchsia_hardware_usb_descriptor::wire::UsbSetup,
-                                             cpp20::span<const uint8_t>)>;
+  using ControlCallback =
+      std::function<void(fdescriptor::wire::UsbSetup, cpp20::span<const uint8_t>)>;
   using SetConnectedCallback = std::function<void(bool connected)>;
-  using SetSpeedCallback =
-      std::function<void(fuchsia_hardware_usb_descriptor::wire::UsbSpeed speed)>;
+  using SetSpeedCallback = std::function<void(fdescriptor::wire::UsbSpeed speed)>;
 
   void SetControlCallback(ControlCallback cb) { control_cb_ = std::move(cb); }
   void SetControlStatus(zx_status_t status) { control_status_ = status; }
   void SetReadData(std::vector<uint8_t> data) { read_data_ = std::move(data); }
   void SetSetConnectedCallback(SetConnectedCallback cb) { set_connected_cb_ = std::move(cb); }
   void SetSetSpeedCallback(SetSpeedCallback cb) { set_speed_cb_ = std::move(cb); }
+  void SetDeferSetConnectedFalse(bool defer) { defer_set_connected_false_ = defer; }
+  bool has_deferred_set_connected() const { return deferred_set_connected_.has_value(); }
+  void CompleteDeferredSetConnected(zx_status_t status = ZX_OK) {
+    ASSERT_TRUE(deferred_set_connected_.has_value());
+    auto completer = std::move(*deferred_set_connected_);
+    deferred_set_connected_.reset();
+    if (status == ZX_OK) {
+      completer.Reply(zx::ok());
+    } else {
+      completer.Reply(zx::error(status));
+    }
+  }
 
   void Control(ControlRequestView request, ControlCompleter::Sync& completer) override {
     control_called_.store(true);
@@ -1012,7 +1046,7 @@ class FakeUsbDciInterface : public fidl::WireServer<fuchsia_hardware_usb_dci::Us
       return;
     }
 
-    if ((request->setup.bm_request_type & USB_DIR_MASK) == USB_DIR_IN) {
+    if (usb_request_is_in(request->setup.bm_request_type)) {
       uint8_t* data = read_data_.data();
       size_t size = read_data_.size();
       response_.read = fidl::VectorView<uint8_t>::FromExternal(data, size);
@@ -1023,6 +1057,13 @@ class FakeUsbDciInterface : public fidl::WireServer<fuchsia_hardware_usb_dci::Us
   void SetConnected(SetConnectedRequestView request,
                     SetConnectedCompleter::Sync& completer) override {
     set_connected_called_.store(true);
+    if (defer_set_connected_false_ && !request->is_connected) {
+      deferred_set_connected_.emplace(completer.ToAsync());
+      if (set_connected_cb_) {
+        set_connected_cb_(request->is_connected);
+      }
+      return;
+    }
     if (set_connected_cb_) {
       set_connected_cb_(request->is_connected);
     }
@@ -1049,6 +1090,8 @@ class FakeUsbDciInterface : public fidl::WireServer<fuchsia_hardware_usb_dci::Us
   std::atomic<bool> control_called_{false};
   std::atomic<bool> set_connected_called_{false};
   std::atomic<bool> set_speed_called_{false};
+  bool defer_set_connected_false_ = false;
+  std::optional<SetConnectedCompleter::Async> deferred_set_connected_;
   ControlCallback control_cb_;
   SetConnectedCallback set_connected_cb_;
   SetSpeedCallback set_speed_cb_;
@@ -1153,12 +1196,10 @@ class UnmanagedTestFixture : public TestFixture<false> {
     return binding;
   }
 
-  static fuchsia_hardware_usb_descriptor::wire::UsbSetup MakeSetupPacket(uint8_t bm_request_type,
-                                                                         uint8_t b_request,
-                                                                         uint16_t w_value,
-                                                                         uint16_t w_index,
-                                                                         uint16_t w_length) {
-    fuchsia_hardware_usb_descriptor::wire::UsbSetup setup;
+  static fdescriptor::wire::UsbSetup MakeSetupPacket(uint8_t bm_request_type, uint8_t b_request,
+                                                     uint16_t w_value, uint16_t w_index,
+                                                     uint16_t w_length) {
+    fdescriptor::wire::UsbSetup setup;
     setup.bm_request_type = bm_request_type;
     setup.b_request = b_request;
     setup.w_value = w_value;
@@ -1167,12 +1208,11 @@ class UnmanagedTestFixture : public TestFixture<false> {
     return setup;
   }
 
-  static fuchsia_hardware_usb_descriptor::wire::UsbSetup MakeGetDescriptorSetup(
-      uint16_t length = 18) {
-    fuchsia_hardware_usb_descriptor::wire::UsbSetup setup;
-    setup.bm_request_type = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
-    setup.b_request = USB_REQ_GET_DESCRIPTOR;
-    setup.w_value = static_cast<uint16_t>(USB_DT_DEVICE << 8);
+  static fdescriptor::wire::UsbSetup MakeGetDescriptorSetup(uint16_t length = 18) {
+    fdescriptor::wire::UsbSetup setup;
+    setup.bm_request_type = kStandardDeviceIn;
+    setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor);
+    setup.w_value = usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice);
     setup.w_index = 0;
     setup.w_length = length;
     return setup;

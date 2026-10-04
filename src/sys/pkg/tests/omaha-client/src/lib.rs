@@ -618,6 +618,9 @@ impl TestEnvBuilder {
                                 .path("/config/build-info")
                                 .rights(fio::R_STAR_DIR),
                         )
+                        .capability(Capability::protocol::<
+                            fidl_fuchsia_feedback::CrashReporterMarker,
+                        >())
                         .capability(Capability::protocol::<fpaver::PaverMarker>())
                         .capability(Capability::protocol::<fpkg::PackageCacheMarker>())
                         .capability(Capability::protocol::<fpkg::PackageResolverMarker>())
@@ -677,6 +680,9 @@ impl TestEnvBuilder {
                         ))
                         .capability(Capability::configuration(
                             "fuchsia.system-updater.ConcurrentPackageResolves",
+                        ))
+                        .capability(Capability::configuration(
+                            "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
                         ))
                         .capability(Capability::configuration(
                             "fuchsia.system-updater.VerifyExistingBlobs",
@@ -2025,44 +2031,6 @@ fn assert_signature(report: CrashReport, expected_signature: &str) {
             ..
         } if signature == expected_signature && program == "system"
     )
-}
-
-/// When we fail with an installation error, we should file a crash report.
-#[fuchsia::test]
-async fn test_crash_report_installation_error() {
-    let (hook, mut recv) = ThrottleHook::new(Ok(FileReportResults::default()));
-    let env = TestEnvBuilder::new()
-        .default_with_response(OmahaResponse::Update)
-        .installer(MockUpdateInstallerService::with_response(Err(
-            finstaller::UpdateNotStartedReason::AlreadyInProgress,
-        )))
-        .crash_reporter(MockCrashReporterService::new(hook))
-        .build()
-        .await;
-
-    let mut stream = env.check_now().await;
-
-    // Consume states to get InstallationError.
-    expect_states(
-        &mut stream,
-        &[
-            State::CheckingForUpdates(CheckingForUpdatesData::default()),
-            State::InstallingUpdate(InstallingData {
-                update: update_info(),
-                installation_progress: progress(None),
-                ..Default::default()
-            }),
-            State::InstallationError(InstallationErrorData {
-                update: update_info(),
-                installation_progress: progress(None),
-                ..Default::default()
-            }),
-        ],
-    )
-    .await;
-
-    // Observe the crash report was filed.
-    assert_signature(recv.next().await.unwrap(), "fuchsia-installation-error");
 }
 
 /// When we fail 5 times to check for updates, we should file a crash report.

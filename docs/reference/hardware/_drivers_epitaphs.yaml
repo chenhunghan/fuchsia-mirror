@@ -734,3 +734,9 @@
   available_in_git: '2354ad44d6ab58c285c6d977e0e47f7b914871bd'
   areas: ['Storage']
   path: '/src/storage/fvm/driver'
+- short_description: 'Coral driver'
+  deletion_reason: 'Hardware no longer supported'
+  gerrit_change_id: '1843369'
+  available_in_git: '37dcc72f6feaee5f4afc4008b00bc23e7fb6c1aa'
+  areas: ['ML']
+  path: '/src/devices/ml/drivers/usb-harriet'

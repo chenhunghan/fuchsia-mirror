@@ -147,6 +147,14 @@ impl DefineSubsystemConfiguration<SwdConfig> for SwdSubsystemConfig {
             ),
         )?;
 
+        builder.set_config_capability(
+            "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
+            match subsystem_config.excessive_update_duration_seconds {
+                Some(d) => Config::new(ConfigValueType::Uint32, d.into()),
+                None => Config::new_void(),
+            },
+        )?;
+
         if matches!(context.feature_set_level, FeatureSetLevel::Standard | FeatureSetLevel::Utility)
         {
             let bundle_name = match subsystem_config.trust_store {
@@ -449,6 +457,49 @@ mod tests {
             let completed_config = builder.build();
             assert!(completed_config.bundles.contains("swd_trust_store_public"));
             assert!(!completed_config.bundles.contains("swd_trust_store_restricted"));
+        }
+    }
+
+    #[test]
+    fn test_excessive_update_duration_seconds_config() {
+        use crate::subsystems::ConfigurationBuilderImpl;
+
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            board_config: &Default::default(),
+            gendir: Default::default(),
+            resource_dir: Default::default(),
+            developer_only_options: Default::default(),
+        };
+
+        // Default: None -> void
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig::default();
+            SwdSubsystemConfig::define_configuration(&context, &config, &mut builder).unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.system-updater.ExcessiveUpdateDurationSeconds"),
+                Some(&Config::new_void()),
+            );
+        }
+
+        // Configured: Some(3600) -> Uint32(3600)
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config =
+                SwdConfig { excessive_update_duration_seconds: Some(3600), ..Default::default() };
+            SwdSubsystemConfig::define_configuration(&context, &config, &mut builder).unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.system-updater.ExcessiveUpdateDurationSeconds"),
+                Some(&Config::new(ConfigValueType::Uint32, 3600.into())),
+            );
         }
     }
 }

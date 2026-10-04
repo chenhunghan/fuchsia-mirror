@@ -317,7 +317,7 @@ zx_status_t AdbClientImpl::DiscoverAndConnect() {
           }
 
           fidl::SyncClient device{std::move(connect_result.value())};
-          if (auto status = ProcessDevice(device, instance); status == ZX_OK) {
+          if (auto status = ProcessDevice(device); status == ZX_OK) {
             FX_LOGS(INFO) << "Found ADB device via service: " << instance;
             return ZX_OK;
           }
@@ -334,7 +334,7 @@ zx_status_t AdbClientImpl::DiscoverAndConnect() {
 }
 
 zx_status_t AdbClientImpl::ProcessDevice(
-    fidl::SyncClient<fuchsia_hardware_usb_device::Device>& device, std::string_view instance) {
+    fidl::SyncClient<fuchsia_hardware_usb_device::Device>& device) {
   auto desc_result = device->GetDeviceDescriptor();
   if (desc_result.is_error()) {
     FX_LOGS(ERROR) << "GetDeviceDescriptor failed: " << desc_result.error_value().status();
@@ -364,12 +364,10 @@ zx_status_t AdbClientImpl::ProcessDevice(
   }
 
   FX_LOGS(INFO) << "Searching for ADB interface in descriptors";
-  return FindAdbInterface(instance, full_desc_result->desc().data(),
-                          full_desc_result->desc().size());
+  return FindAdbInterface(full_desc_result->desc().data(), full_desc_result->desc().size());
 }
 
-zx_status_t AdbClientImpl::FindAdbInterface(std::string_view instance, const uint8_t* data,
-                                            size_t len) {
+zx_status_t AdbClientImpl::FindAdbInterface(const uint8_t* data, size_t len) {
   usb_desc_iter_t iter;
   if (usb_desc_iter_init_unowned(const_cast<uint8_t*>(data), len, &iter) != ZX_OK) {
     return ZX_ERR_INTERNAL;
@@ -384,7 +382,7 @@ zx_status_t AdbClientImpl::FindAdbInterface(std::string_view instance, const uin
       usb_endpoint_descriptor_t* ep = nullptr;
       while ((ep = usb_desc_iter_next_endpoint(&iter)) != nullptr) {
         if (usb_ep_type(ep) == fdescriptor::EndpointType::kBulk) {
-          if (usb_ep_direction(ep) == USB_ENDPOINT_IN) {
+          if (usb_ep_direction(ep) == fdescriptor::EndpointDirection::kIn) {
             bulk_in_addr_ = ep->b_endpoint_address;
           } else {
             bulk_out_addr_ = ep->b_endpoint_address;
@@ -395,15 +393,15 @@ zx_status_t AdbClientImpl::FindAdbInterface(std::string_view instance, const uin
         FX_LOGS(INFO) << "Found ADB bulk endpoints: IN 0x" << std::hex
                       << static_cast<uint32_t>(bulk_in_addr_) << ", OUT 0x"
                       << static_cast<uint32_t>(bulk_out_addr_);
-        return ConnectEndpoints(instance);
+        return ConnectEndpoints();
       }
     }
   }
   return ZX_ERR_NOT_FOUND;
 }
 
-zx_status_t AdbClientImpl::ConnectEndpoints(std::string_view instance) {
-  FX_LOGS(INFO) << "Connecting to endpoints for instance: " << instance;
+zx_status_t AdbClientImpl::ConnectEndpoints() {
+  FX_LOGS(INFO) << "Connecting to ADB bulk endpoints";
   auto base_svc_dir = component::OpenDirectory("/svc");
   if (base_svc_dir.is_error()) {
     FX_LOGS(ERROR) << "Failed to open /svc: " << base_svc_dir.status_string();
@@ -411,83 +409,85 @@ zx_status_t AdbClientImpl::ConnectEndpoints(std::string_view instance) {
   }
 
   std::string svc_name = fuchsia_hardware_usb::UsbService::Name;
-  std::string svc_path = std::string("/svc/") + svc_name;
-
-  // Try the provided instance first
-  std::vector<std::string> instances_to_try;
-  instances_to_try.push_back(std::string(instance));
-
-  // Also collect all other instances as fallbacks
-  if (std::filesystem::exists(svc_path)) {
-    for (const auto& entry : std::filesystem::directory_iterator(svc_path)) {
-      std::string name = entry.path().filename().string();
-      if (name != instance) {
-        instances_to_try.push_back(name);
-      }
-    }
+  auto watcher_dir = component::OpenDirectoryAt(base_svc_dir->borrow(), svc_name);
+  if (watcher_dir.is_error()) {
+    FX_LOGS(ERROR) << "Failed to open /svc/" << svc_name << ": " << watcher_dir.status_string();
+    return watcher_dir.status_value();
   }
 
-  // Iterate through available UsbService instances. We expect at least two:
+  // Watch /svc/fuchsia.hardware.usb.UsbService for the usb-composite interface node instance.
+  // We expect at least two instances:
   // 1. One from the usb-bus (parent device). This will likely fail to connect to
   //    endpoints because the usb-composite driver has already bound to it and
   //    claimed the device.
   // 2. One from usb-composite (interface node). This is the one we want to connect
   //    to, as it provides access to the scoped ADB interface endpoints.
-  for (const auto& try_instance : instances_to_try) {
-    FX_LOGS(INFO) << "Attempting to connect to UsbService instance: " << try_instance;
-    auto open_result = component::OpenServiceAt<fuchsia_hardware_usb::UsbService>(
-        base_svc_dir->borrow(), try_instance);
-    if (open_result.is_error()) {
-      continue;
-    }
+  auto result = device_watcher::WatchDirectoryForItems<zx_status_t>(
+      watcher_dir->borrow(),
+      [this, &base_svc_dir](std::string_view try_instance) -> std::optional<zx_status_t> {
+        if (try_instance == "." || try_instance == "..") {
+          return std::nullopt;
+        }
 
-    auto connect_result = open_result->connect_device();
-    if (connect_result.is_error()) {
-      continue;
-    }
+        FX_LOGS(INFO) << "Attempting to connect to UsbService instance: " << try_instance;
+        auto open_result = component::OpenServiceAt<fuchsia_hardware_usb::UsbService>(
+            base_svc_dir->borrow(), try_instance);
+        if (open_result.is_error()) {
+          return std::nullopt;
+        }
 
-    fidl::SyncClient usb{std::move(connect_result.value())};
+        auto connect_result = open_result->connect_device();
+        if (connect_result.is_error()) {
+          return std::nullopt;
+        }
 
-    auto in_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
-    if (in_endpoints.is_error()) {
-      continue;
-    }
-    auto out_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
-    if (out_endpoints.is_error()) {
-      continue;
-    }
+        fidl::SyncClient usb{std::move(connect_result.value())};
 
-    fuchsia_hardware_usb::UsbConnectToEndpointRequest in_req;
-    in_req.ep_addr(bulk_in_addr_);
-    in_req.ep(std::move(in_endpoints->server));
+        auto in_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
+        if (in_endpoints.is_error()) {
+          return std::nullopt;
+        }
+        auto out_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
+        if (out_endpoints.is_error()) {
+          return std::nullopt;
+        }
 
-    auto in_res = usb->ConnectToEndpoint(std::move(in_req));
-    if (in_res.is_error()) {
-      FX_LOGS(WARNING) << "ConnectToEndpoint (IN) failed for " << try_instance << ": "
-                       << in_res.error_value().FormatDescription();
-      continue;
-    }
+        fuchsia_hardware_usb::UsbConnectToEndpointRequest in_req;
+        in_req.ep_addr(bulk_in_addr_);
+        in_req.ep(std::move(in_endpoints->server));
 
-    fuchsia_hardware_usb::UsbConnectToEndpointRequest out_req;
-    out_req.ep_addr(bulk_out_addr_);
-    out_req.ep(std::move(out_endpoints->server));
+        auto in_res = usb->ConnectToEndpoint(std::move(in_req));
+        if (in_res.is_error()) {
+          FX_LOGS(WARNING) << "ConnectToEndpoint (IN) failed for " << try_instance << ": "
+                           << in_res.error_value().FormatDescription();
+          return std::nullopt;
+        }
 
-    auto out_res = usb->ConnectToEndpoint(std::move(out_req));
-    if (out_res.is_error()) {
-      FX_LOGS(WARNING) << "ConnectToEndpoint (OUT) failed for " << try_instance << ": "
-                       << out_res.error_value().FormatDescription();
-      continue;
-    }
+        fuchsia_hardware_usb::UsbConnectToEndpointRequest out_req;
+        out_req.ep_addr(bulk_out_addr_);
+        out_req.ep(std::move(out_endpoints->server));
 
-    bulk_in_.Bind(std::move(in_endpoints->client), dispatcher_, this);
-    bulk_out_.Bind(std::move(out_endpoints->client), dispatcher_);
+        auto out_res = usb->ConnectToEndpoint(std::move(out_req));
+        if (out_res.is_error()) {
+          FX_LOGS(WARNING) << "ConnectToEndpoint (OUT) failed for " << try_instance << ": "
+                           << out_res.error_value().FormatDescription();
+          return std::nullopt;
+        }
 
-    FX_LOGS(INFO) << "Successfully bound ADB endpoints using instance: " << try_instance;
-    usb_connected_ = true;
+        bulk_in_.Bind(std::move(in_endpoints->client), dispatcher_, this);
+        bulk_out_.Bind(std::move(out_endpoints->client), dispatcher_);
+
+        FX_LOGS(INFO) << "Successfully bound ADB endpoints using instance: " << try_instance;
+        usb_connected_ = true;
+        return ZX_OK;
+      });
+
+  if (result.is_ok()) {
     return ZX_OK;
   }
 
-  FX_LOGS(ERROR) << "Failed to connect to any UsbService instance for ADB endpoints";
+  FX_LOGS(ERROR) << "Failed to connect to any UsbService instance for ADB endpoints: "
+                 << result.error_value();
   return ZX_ERR_NOT_FOUND;
 }
 

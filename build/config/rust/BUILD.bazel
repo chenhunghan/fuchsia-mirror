@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(bootfs)
+# Best practices for Rust binaries that go into size-constrained bootfs.
+#
+# TODO(https://fxbug.dev/568722249): The GN config also enables ThinLTO
+# (//build/config/lto:thinlto) when target_cpu == "arm64" && is_debug, which
+# is not ported yet.
+build_flags(
+    name = "bootfs",
+    # Optimize for size.
+    # TODO(https://fxbug.dev/42165168): use "z" when resolved.
+    rustflags = ["-Copt-level=s"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/rust/BUILD.gn:bootfs)

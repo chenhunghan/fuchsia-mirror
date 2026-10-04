@@ -36,7 +36,7 @@ closed protocol Pipe {
     strict SetBufferSize(struct {
         size uint64;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
     });
 
     /// Set event used to signal device state. Discards existing event
@@ -48,7 +48,7 @@ closed protocol Pipe {
     /// Acquire VMO for IO buffer. Can be called multiple times. Each call
     /// returns a new handle to the VMO.
     strict GetBuffer() -> (resource struct {
-        res zx.Status;
+        res zx.Result;
         vmo zx.Handle:<VMO, optional>;
     });
 
@@ -58,7 +58,7 @@ closed protocol Pipe {
         count uint64;
         offset uint64;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
         actual uint64;
     });
 
@@ -68,7 +68,7 @@ closed protocol Pipe {
         count uint64;
         offset uint64;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
         actual uint64;
     });
 
@@ -91,7 +91,7 @@ closed protocol Pipe {
         read_count uint64;
         read_offset uint64;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
         actual uint64;
     });
 };

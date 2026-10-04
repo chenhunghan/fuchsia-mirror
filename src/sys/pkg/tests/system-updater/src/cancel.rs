@@ -9,7 +9,12 @@ use pretty_assertions::assert_eq;
 
 #[fuchsia::test]
 async fn cancel_update() {
-    let env = TestEnv::builder().build().await;
+    let env = TestEnv::builder()
+        .crash_reporter(MockCrashReporterService::new(|report| {
+            panic!("unexpected crash report: {report:?}")
+        }))
+        .build()
+        .await;
 
     let mut handle_update_pkg = env.resolver.url(UPDATE_PKG_URL).block_once();
 
@@ -36,7 +41,13 @@ async fn cancel_update() {
 
 #[fuchsia::test]
 async fn cancel_update_packageless() {
-    let env = TestEnv::builder().ota_manifest(make_manifest([])).build().await;
+    let env = TestEnv::builder()
+        .ota_manifest(make_manifest([]))
+        .crash_reporter(MockCrashReporterService::new(|report| {
+            panic!("unexpected crash report: {report:?}")
+        }))
+        .build()
+        .await;
 
     let handle_ota_manifest = env.http_loader_service.block_once();
 

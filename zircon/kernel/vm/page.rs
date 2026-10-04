@@ -352,6 +352,7 @@ impl VmPage {
     /// Returns whether this page is in the FREE state. When in the FREE state the page is assumed to
     /// be conceptually owned by the relevant PmmNode, and hence unless its lock is held this query
     /// must be assumed to be racy.
+    #[inline]
     pub fn is_free(&self) -> bool {
         self.state() == VmPageState(bindings::vm_page_state::FREE)
     }
@@ -359,6 +360,7 @@ impl VmPage {
     /// Returns whether this page is in the FREE_LOANED state. Similar to the FREE state the page is
     /// assumed to be conceptually owned by the relevant PmmNode, however this distinguishes whether the
     /// page is part of the general purpose free list, versus the more narrowly usable set of loaned pages.
+    #[inline]
     pub fn is_free_loaned(&self) -> bool {
         self.state() == VmPageState(bindings::vm_page_state::FREE_LOANED)
     }
@@ -372,6 +374,7 @@ impl VmPage {
     /// VMO.
     /// May be queried by anyone who either has conceptual ownership of the page, or has sufficient
     /// knowledge that the loaned state cannot be being altered in parallel.
+    #[inline]
     pub fn is_loaned(&self) -> bool {
         (self.loaned_state_priv.load(Ordering::Relaxed) & Self::LOANED_STATE_IS_LOANED) != 0
     }
@@ -381,6 +384,7 @@ impl VmPage {
     /// loaned the page, or via deletion of the contiguous VMO that loaned the page.  Such pages are
     /// not in the free_loaned_list_ in pmm, which is how reuse is prevented.
     /// Should only be called by the PmmNode under its lock.
+    #[inline]
     pub fn is_loan_cancelled(&self) -> bool {
         (self.loaned_state_priv.load(Ordering::Relaxed) & Self::LOANED_STATE_IS_LOAN_CANCELLED) != 0
     }
@@ -388,6 +392,7 @@ impl VmPage {
     /// Sets the loaned flag on the page.
     /// Manipulation of 'loaned' should only be done by the PmmNode under the loaned pages lock whilst
     /// it has conceptual ownership of the page.
+    #[inline]
     pub fn set_is_loaned(&self) {
         self.loaned_state_priv.fetch_or(Self::LOANED_STATE_IS_LOANED, Ordering::Relaxed);
     }
@@ -395,6 +400,7 @@ impl VmPage {
     /// Clears the loaned flag on the page.
     /// Manipulation of 'loaned' should only be done by the PmmNode under the loaned pages lock whilst
     /// it has conceptual ownership of the page.
+    #[inline]
     pub fn clear_is_loaned(&self) {
         self.loaned_state_priv.fetch_and(!Self::LOANED_STATE_IS_LOANED, Ordering::Relaxed);
     }
@@ -402,6 +408,7 @@ impl VmPage {
     /// Sets the loan_cancelled flag on the page.
     /// Manipulation of 'loan_cancelled' should only be done by the PmmNode under its lock, but may be
     /// done when the PmmNode does not have conceptual ownership of the page.
+    #[inline]
     pub fn set_is_loan_cancelled(&self) {
         self.loaned_state_priv.fetch_or(Self::LOANED_STATE_IS_LOAN_CANCELLED, Ordering::Relaxed);
     }
@@ -409,6 +416,7 @@ impl VmPage {
     /// Clears the loan_cancelled flag on the page.
     /// Manipulation of 'loan_cancelled' should only be done by the PmmNode under its lock, but may be
     /// done when the PmmNode does not have conceptual ownership of the page.
+    #[inline]
     pub fn clear_is_loan_cancelled(&self) {
         self.loaned_state_priv.fetch_and(!Self::LOANED_STATE_IS_LOAN_CANCELLED, Ordering::Relaxed);
     }
@@ -443,11 +451,13 @@ impl VmPage {
 
     /// Return the physical address of the page.
     // future plan to store in a compressed form
+    #[inline]
     pub const fn paddr(&self) -> PAddr {
         PAddr(self.paddr_priv)
     }
 
     /// Return the current VmPageState of this page.
+    #[inline]
     pub fn state(&self) -> VmPageState {
         // SAFETY: state_priv is only set to valid vm_page_state values.
         VmPageState(unsafe {
@@ -465,6 +475,7 @@ impl VmPage {
     ///
     /// The caller must ensure that it owns the page or holds the necessary locks to modify its
     /// state.
+    #[inline]
     pub unsafe fn set_state(&self, new_state: VmPageState) {
         let old_state = self.state();
         self.state_priv.store(new_state.as_raw(), Ordering::Relaxed);
@@ -482,6 +493,7 @@ impl VmPage {
     /// The caller must ensure that `object` is the currently active union variant, and that reading
     /// this subfield is safe (e.g. by possessing conceptual ownership of this subfield or holding
     /// the page queue lock).
+    #[inline]
     pub unsafe fn get_object(&self) -> *mut core::ffi::c_void {
         // SAFETY: Dereferencing UnsafeCell to read the object field from the active union variant.
         // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
@@ -494,6 +506,7 @@ impl VmPage {
     ///
     /// The caller must ensure that `object` is the currently active union variant, and that it has
     /// ownership of this subfield or holds the page queue lock to modify it safely without data races.
+    #[inline]
     pub unsafe fn set_object(&self, object: *mut core::ffi::c_void) {
         // SAFETY: Dereferencing UnsafeCell to mutate the object field in the active union variant.
         // The caller guarantees ownership of this subfield or holding the page queue lock.
@@ -507,6 +520,7 @@ impl VmPage {
     /// The caller must ensure that `object` is the currently active union variant, and that reading
     /// this subfield is safe (e.g. by possessing conceptual ownership of this subfield or holding
     /// the page queue lock).
+    #[inline]
     pub unsafe fn get_page_offset(&self) -> u64 {
         // SAFETY: Dereferencing UnsafeCell to read the page_offset field from the active union variant.
         // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
@@ -519,6 +533,7 @@ impl VmPage {
     ///
     /// The caller must ensure that `object` is the currently active union variant, and that it has
     /// ownership of this subfield or holds the page queue lock to modify it safely without data races.
+    #[inline]
     pub unsafe fn set_page_offset(&self, offset: u64) {
         // SAFETY: Dereferencing UnsafeCell to mutate the page_offset field in the active union variant.
         // The caller guarantees ownership of this subfield or holding the page queue lock.
@@ -531,6 +546,7 @@ impl VmPage {
     ///
     /// The caller must ensure that `object` is the currently active union variant, and that reading
     /// this subfield is safe without data races.
+    #[inline]
     pub unsafe fn get_pin_count(&self) -> u8 {
         // SAFETY: Dereferencing UnsafeCell to read the object flags from the active union variant.
         // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
@@ -543,6 +559,7 @@ impl VmPage {
     ///
     /// The caller must ensure that `object` is the currently active union variant, and that reading
     /// this subfield is safe without data races.
+    #[inline]
     pub unsafe fn is_always_need(&self) -> bool {
         // SAFETY: Dereferencing UnsafeCell to read the object flags from the active union variant.
         // The caller guarantees `object` is active and that reading it does not race with
@@ -555,6 +572,7 @@ impl VmPage {
     /// # Safety
     ///
     /// The caller must ensure that `object` is the currently active union variant.
+    #[inline]
     pub unsafe fn get_page_queue_ref(&self) -> &AtomicU8 {
         // SAFETY: Dereferencing UnsafeCell to obtain a shared reference to the AtomicU8 in the
         // active union variant. Atomic operations on the reference are thread-safe.
@@ -575,6 +593,7 @@ impl Default for VmPage {
 }
 
 impl fbl::DoublyLinkedListContainable<VmPage> for VmPage {
+    #[inline]
     fn get_node(&self) -> &fbl::DoublyLinkedListNode<VmPage> {
         // SAFETY: `queue_node` is an UnsafeCell wrapping `DoublyLinkedListNode`. Returning a
         // shared reference to the node is safe because the node manages its own internal
@@ -596,6 +615,7 @@ pub struct VmPagePtr(NonNull<VmPage>);
 
 impl VmPagePtr {
     /// Construct a `VmPagePtr` from an existing `NonNull<VmPage>`
+    #[inline]
     pub fn new(ptr: NonNull<VmPage>) -> Self {
         VmPagePtr(ptr)
     }
@@ -605,6 +625,7 @@ impl VmPagePtr {
     /// # Safety
     ///
     /// `ptr` must be either null or a valid pointer to a kernel page.
+    #[inline]
     pub const unsafe fn from_raw(ptr: *mut VmPage) -> Option<Self> {
         match NonNull::new(ptr) {
             Some(nn) => Some(Self(nn)),
@@ -612,12 +633,27 @@ impl VmPagePtr {
         }
     }
 
+    /// Creates a `VmPagePtr` from a non-null raw pointer without checking for null in release
+    /// builds.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null and a valid pointer to a kernel page.
+    #[inline]
+    pub unsafe fn from_raw_unchecked(ptr: *mut VmPage) -> Self {
+        debug_assert!(!ptr.is_null());
+        // SAFETY: Caller guarantees `ptr` is non-null.
+        Self(unsafe { NonNull::new_unchecked(ptr) })
+    }
+
     /// Returns the non-null pointer.
+    #[inline]
     pub fn as_non_null(self) -> NonNull<VmPage> {
         self.0
     }
 
     /// Returns the raw pointer.
+    #[inline]
     pub fn as_raw(self) -> *mut VmPage {
         self.0.as_ptr()
     }
@@ -628,13 +664,26 @@ impl VmPagePtr {
     /// # Safety
     ///
     /// `ptr` must be either null or a valid pointer to a kernel page.
+    #[inline]
     pub unsafe fn from_ffi(ptr: *mut bindings::vm_page_t) -> Option<Self> {
         // SAFETY: ptr is either null or a valid pointer to a kernel page.
         unsafe { Self::from_raw(ptr.cast()) }
     }
 
+    /// Temporary helper for interacting with FFI methods that guarantee a non-null `*mut vm_page_t`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null and a valid pointer to a kernel page.
+    #[inline]
+    pub unsafe fn from_ffi_unchecked(ptr: *mut bindings::vm_page_t) -> Self {
+        // SAFETY: Caller guarantees `ptr` is non-null and a valid pointer to a kernel page.
+        unsafe { Self::from_raw_unchecked(ptr.cast()) }
+    }
+
     /// Temporary helper for interacting with FFI methods that, due to how the bindings are auto
     /// generated, expect a *vm_page_t and not a *VmPage.
+    #[inline]
     pub fn as_ffi(self) -> *mut bindings::vm_page_t {
         self.0.as_ptr().cast()
     }
@@ -646,6 +695,7 @@ impl VmPagePtr {
     /// The caller must ensure that `self` points to a valid, live `VmPage`. Note that obtaining
     /// a shared `&VmPage` does NOT imply exclusive Rust ownership over the page structure or its
     /// subfields; callers must respect the safety requirements of individual subfields and methods.
+    #[inline]
     pub unsafe fn as_ref(&self) -> &VmPage {
         // SAFETY: The caller guarantees that the pointer is valid and properly aligned.
         unsafe { self.0.as_ref() }
@@ -659,6 +709,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it either has conceptual ownership of the page or knows it is safe to
     /// inspect the state.
+    #[inline]
     pub unsafe fn is_free(self) -> bool {
         // SAFETY: The caller guarantees via function safety preconditions that it is safe to
         // inspect the page state.
@@ -673,6 +724,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it either has conceptual ownership of the page or knows it is safe to
     /// inspect the state.
+    #[inline]
     pub unsafe fn is_free_loaned(self) -> bool {
         // SAFETY: The caller guarantees via function safety preconditions that it is safe to
         // inspect the page state.
@@ -692,6 +744,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it either has conceptual ownership of the page or knows it is safe to
     /// inspect the state.
+    #[inline]
     pub unsafe fn is_loaned(self) -> bool {
         // SAFETY: The caller guarantees via function safety preconditions that it is safe to
         // inspect the loaned state.
@@ -708,6 +761,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it either has conceptual ownership of the page or knows it is safe to
     /// inspect the state.
+    #[inline]
     pub unsafe fn is_loan_cancelled(self) -> bool {
         // SAFETY: The caller guarantees via function safety preconditions that it is safe to
         // inspect the loaned state.
@@ -720,6 +774,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it has conceptual ownership of the page and holds the loaned pages
     /// lock of the PmmNode.
+    #[inline]
     pub unsafe fn set_is_loaned(self) {
         // SAFETY: The caller guarantees conceptual ownership of the page and holds the necessary PmmNode lock.
         unsafe { self.as_ref().set_is_loaned() }
@@ -731,6 +786,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it has conceptual ownership of the page and holds the loaned pages
     /// lock of the PmmNode.
+    #[inline]
     pub unsafe fn clear_is_loaned(self) {
         // SAFETY: The caller guarantees conceptual ownership of the page and holds the necessary PmmNode lock.
         unsafe { self.as_ref().clear_is_loaned() }
@@ -741,6 +797,7 @@ impl VmPagePtr {
     /// # Safety
     ///
     /// The caller must ensure that it holds the loaned pages lock of the PmmNode.
+    #[inline]
     pub unsafe fn set_is_loan_cancelled(self) {
         // SAFETY: The caller guarantees holding the necessary PmmNode lock.
         unsafe { self.as_ref().set_is_loan_cancelled() }
@@ -751,6 +808,7 @@ impl VmPagePtr {
     /// # Safety
     ///
     /// The caller must ensure that it holds the loaned pages lock of the PmmNode.
+    #[inline]
     pub unsafe fn clear_is_loan_cancelled(self) {
         // SAFETY: The caller guarantees holding the necessary PmmNode lock.
         unsafe { self.as_ref().clear_is_loan_cancelled() }
@@ -774,6 +832,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it either has conceptual ownership of the page or knows it is safe to
     /// inspect the state.
+    #[inline]
     pub unsafe fn paddr(self) -> PAddr {
         // SAFETY: The caller guarantees via function safety preconditions that it is safe to
         // inspect the page state.
@@ -786,6 +845,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that the page is attached to a VM object (`state_union` is in `object` variant)
     /// and that reading this subfield is safe without data races.
+    #[inline]
     pub unsafe fn get_object(self) -> *mut core::ffi::c_void {
         // SAFETY: Safety deferred to caller per function safety preconditions.
         unsafe { self.as_ref().get_object() }
@@ -797,6 +857,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that the page is attached to a VM object (`state_union` is in `object` variant)
     /// and that reading this subfield is safe without data races.
+    #[inline]
     pub unsafe fn get_page_offset(self) -> u64 {
         // SAFETY: Safety deferred to caller per function safety preconditions.
         unsafe { self.as_ref().get_page_offset() }
@@ -808,6 +869,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that the page is attached to a VM object (`state_union` is in `object` variant)
     /// and that reading this subfield is safe without data races.
+    #[inline]
     pub unsafe fn get_pin_count(self) -> u8 {
         // SAFETY: Safety deferred to caller per function safety preconditions.
         unsafe { self.as_ref().get_pin_count() }
@@ -819,12 +881,14 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that the page is attached to a VM object (`state_union` is in
     /// `object` variant) and that reading this subfield is safe without data races.
+    #[inline]
     pub unsafe fn is_always_need(self) -> bool {
         // SAFETY: Safety deferred to caller per function safety preconditions.
         unsafe { self.as_ref().is_always_need() }
     }
 
     /// Return the current VmPageState of this page.
+    #[inline]
     pub fn state(self) -> VmPageState {
         unsafe { self.as_ref().state() }
     }
@@ -835,6 +899,7 @@ impl VmPagePtr {
     ///
     /// The caller must ensure that it has conceptual ownership of the page (dictating its lifecycle)
     /// or holds the necessary locks to modify its state.
+    #[inline]
     pub unsafe fn set_state(self, new_state: VmPageState) {
         // SAFETY: The caller guarantees conceptual ownership of the page or holding the necessary
         // locks to modify its state.

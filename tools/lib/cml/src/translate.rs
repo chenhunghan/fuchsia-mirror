@@ -6321,32 +6321,13 @@ mod tests {
                 }
             ],
         });
-        let features = FeatureSet::from(vec![Feature::DeliveryType]);
-        let options = CompileOptions::new().features(&features);
-        let decl = compile(&input, options).unwrap();
+        let decl = compile(&input, CompileOptions::new()).unwrap();
         assert_matches!(
             decl.capabilities.as_ref().unwrap()[0],
             fdecl::Capability::Protocol(fdecl::Protocol {
                 delivery: Some(fdecl::DeliveryType::OnReadable),
                 ..
             })
-        );
-    }
-
-    #[test]
-    fn test_compile_protocol_setting_delivery_type_requires_feature_flag() {
-        let input = must_parse_cml!({
-            "capabilities": [
-                {
-                    "protocol": "fuchsia.echo.Echo",
-                    "delivery": "on_readable",
-                }
-            ],
-        });
-        assert_matches!(
-            compile(&input, CompileOptions::new()),
-            Err(Error::RestrictedFeature(feature))
-            if feature == "delivery_type"
         );
     }
 }

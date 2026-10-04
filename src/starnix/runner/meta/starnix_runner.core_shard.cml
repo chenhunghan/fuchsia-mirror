@@ -10,6 +10,7 @@
                 "fuchsia.ui.composition.FlatlandFactory",
                 "fuchsia.ui.display.singleton.DisplayPower",
                 "fuchsia.ui.display.singleton.Info",
+                "fuchsia.ui.input.DeviceListenerRegistry",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.policy.DeviceListenerRegistry",
                 "fuchsia.ui.test.input.Registry",
@@ -134,6 +135,13 @@
             source_availability: "unknown",
         },
         {
+            protocol: [ "fuchsia.memory.attribution.PageRefaultSink" ],
+            from: "#memory_monitor2",
+            to: "#starnix_runner",
+            availability: "optional",
+            source_availability: "unknown",
+        },
+        {
             protocol: [
                 "fuchsia.sysmem.Allocator",
                 "fuchsia.sysmem2.Allocator",
@@ -217,6 +225,7 @@
                 "fuchsia.hardware.adb.Service",
                 "fuchsia.hardware.cpu.ctrl.Service",
                 "fuchsia.hardware.google.nanohub.StarnixDataChannelService",
+                "fuchsia.hardware.power.stats.Service",
             ],
             from: "parent",
             to: [ "#starnix_runner" ],

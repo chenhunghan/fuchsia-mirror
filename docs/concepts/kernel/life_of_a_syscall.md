@@ -213,7 +213,7 @@ The syscall implementation is a hand-written function with the naming convention
 `sys_<syscall>`. These functions contain the core logic of the syscall, and are
 architecture-agnostic.
 
-[//zircon/kernel/lib/syscalls/channel.cc](/zircon/kernel/lib/syscalls/channel.cc)
+[//zircon/kernel/lib/syscalls/channel.rs](/zircon/kernel/lib/syscalls/channel.rs)
 
 ```
 zx_status_t sys_channel_create(...) {

@@ -6,7 +6,7 @@ use anyhow::{Error, format_err};
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
 use futures::StreamExt;
-use num::Num;
+use num_traits::Num;
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::str::FromStr;

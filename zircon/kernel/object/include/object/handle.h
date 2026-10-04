@@ -239,6 +239,7 @@ void cpp_handle_destroy(Handle* handle);
 bool cpp_handle_has_rights(const Handle* handle, zx_rights_t rights);
 void cpp_handle_get_dispatcher(const Handle* handle,
                                ffi::Uninitialized<fbl::RefPtr<Dispatcher>>* out_dispatcher);
+Dispatcher* cpp_handle_get_dispatcher_raw(const Handle* handle);
 zx_rights_t cpp_handle_get_rights(const Handle* handle);
 }
 

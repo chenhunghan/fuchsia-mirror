@@ -11,18 +11,21 @@ import json
 import sys
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", help="dump of package manifests")
     parser.add_argument("--output", help="Write to this file")
     args = parser.parse_args()
 
-    out_package_manifest_list = {"content": {"manifests": []}, "version": "1"}
+    manifests: list[str] = []
     with open(args.input, "r") as f:
         for line in f.readlines():
-            out_package_manifest_list["content"]["manifests"].append(
-                line.strip()
-            )
+            manifests.append(line.strip())
+
+    out_package_manifest_list = {
+        "content": {"manifests": manifests},
+        "version": "1",
+    }
 
     with open(args.output, "w") as out:
         json.dump(out_package_manifest_list, out, indent=2, sort_keys=True)

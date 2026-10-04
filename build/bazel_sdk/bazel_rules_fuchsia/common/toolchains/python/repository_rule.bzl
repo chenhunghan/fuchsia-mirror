@@ -39,6 +39,8 @@ Example usage:
 
 """
 
+load("//common:repository_utils.bzl", "bazel_major_version_is_at_least")
+
 # Set to True to enable log messages.
 _LOG = False
 
@@ -58,15 +60,21 @@ def _make_path_from_str(repo_ctx, path_str):
         path_str = "%s/%s" % (repo_ctx.workspace_root, path_str)
     return repo_ctx.path(path_str)
 
-# Ensure this repository rule is re-run everytime the content
-# of a given path changes (if relative to the workspace root).
-# Does not do anything if path is empty or absolute.
+# Ensure this repository rule is re-run everytime the content of a given path
+# changes. Relative paths are relative to the workspace root. Does not do
+# anything if path is empty.
 def _record_path_dependency(repo_ctx, path_str):
-    if path_str and not path_str.startswith("/"):
-        repo_ctx.path("%s/%s" % (repo_ctx.workspace_root, path_str))
-        log("### Recording %s as path dependency for repository %s ###" % (path_str, repo_ctx.name))
-    else:
-        log("### IGNORING %s AS PATH DEPENDENCY FOR REPOSITORY %s ####" % (path_str, repo_ctx.name))
+    if not path_str:
+        return
+    if not path_str.startswith("/"):
+        path_str = "%s/%s" % (repo_ctx.workspace_root, path_str)
+
+    # repo_ctx.path() only records a dependency for Labels, never for path
+    # strings, so the file must be watched explicitly. watch() requires
+    # Bazel 7.1+, so Bazel 6 users (e.g. HSP) get no tracking.
+    if bazel_major_version_is_at_least(repo_ctx, 7):
+        repo_ctx.watch(path_str)
+    log("### Recording %s as path dependency for repository %s ###" % (path_str, repo_ctx.name))
 
 def _compact_python_runtime_impl(repo_ctx):
     # If content_hash_file is provided, make sure this repository rule
@@ -245,9 +253,8 @@ can be used:
    point to content hash file. This is used by the Bazel SDK test suite's
    bazel_test.py script.
 
-3) As a fallback, if interpreter_path is given, and is a path relative to
-   the workspace, its hash will be used as the source of truth. Note that
-   if this path is absolute, it will be ignored entirely.
+3) As a fallback, if interpreter_path is given, its hash will be used as the
+   source of truth.
 """ % _VERSION_FILE_VARNAME,
     environ = [_VERSION_FILE_VARNAME],
     attrs = {

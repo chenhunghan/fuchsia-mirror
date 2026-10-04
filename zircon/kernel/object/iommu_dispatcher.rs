@@ -9,18 +9,13 @@ use fbl::{Array, Canary, RefPtr};
 use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
-use zx_types::{
-    ZX_OBJ_TYPE_IOMMU, ZX_RIGHT_DUPLICATE, ZX_RIGHT_INSPECT, ZX_RIGHT_TRANSFER, zx_rights_t,
-};
+use zx_types::{ZX_DEFAULT_IOMMU_RIGHTS, ZX_OBJ_TYPE_IOMMU, zx_rights_t};
 
 use super::KernelHandle;
 use super::iommu::Iommu;
 use super::iommu_dispatcher_ffi::cpp_iommu_dispatcher_create;
 
 use object_constants_rs as object_constants;
-
-/// Default rights assigned to an IommuDispatcher handle (ZX_RIGHTS_BASIC & ~ZX_RIGHT_WAIT).
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER | ZX_RIGHT_DUPLICATE | ZX_RIGHT_INSPECT;
 
 zr::static_assert_size_and_align!(
     IommuDispatcherState,
@@ -84,7 +79,7 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 impl IommuDispatcher {
     /// Returns default rights for an IommuDispatcher handle.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_IOMMU_RIGHTS
     }
 
     /// Creates a new IommuDispatcher and returns its kernel handle and rights.
@@ -101,7 +96,7 @@ impl IommuDispatcher {
                 cpp_iommu_dispatcher_create(type_param, desc_ptr, desc_len, out)
             })
         }?;
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_IOMMU_RIGHTS))
     }
 
     /// Returns a reference to the underlying `Iommu` facade object.

@@ -102,7 +102,7 @@ type Artifact = resource table {
     ///
     /// The `result` and `input` fields are invalid if this field is present and
     /// anything other than `ZX_OK`.
-    3: error zx.Status;
+    3: error zx.Result;
 };
 
 /// Marker indicating the last message in a diagnostic output stream.

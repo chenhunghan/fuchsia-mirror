@@ -136,8 +136,6 @@ pub struct LoopbackDeviceState<D: WeakDeviceIdentifier, BT: TxMetadataBindingsTy
     >,
 }
 
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
 /// Metadata associated with a frame in the Loopback TX queue.
 pub struct LoopbackTxQueueMeta<D: WeakDeviceIdentifier, BT: TxMetadataBindingsTypes> {
     /// Device that should be used to deliver the packet. If not set then the
@@ -397,8 +395,7 @@ where
     }
 }
 
-impl<CC, BC> SendableFrameMeta<CC, BC>
-    for DeviceSocketMetadata<LoopbackDevice, <CC as DeviceIdContext<LoopbackDevice>>::DeviceId>
+impl<CC, BC> SendableFrameMeta<CC, BC> for DeviceSocketMetadata<LoopbackDevice, CC, BC>
 where
     CC: TransmitQueueHandler<
             LoopbackDevice,
@@ -418,8 +415,8 @@ where
         S: NetworkSerializer,
         S::Buffer: BufferMut,
     {
-        let Self { device_id, metadata } = self;
-        let tx_meta = LoopbackTxQueueMeta::default();
+        let Self { device_id, metadata, ip_layer_metadata } = self;
+        let tx_meta = LoopbackTxQueueMeta { target_device: None, ip_layer_metadata };
         match metadata {
             Some(EthernetHeaderParams { dest_addr, protocol }) => send_as_ethernet_frame_to_dst(
                 core_ctx,

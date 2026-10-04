@@ -11,23 +11,8 @@ type Condition = strict enum {
     REJECT = 2;
 };
 
-/// Represents a bind rule in a parent specification.
-type BindRule = struct {
-    /// Property key. Only string-based keys are supported.
-    key NodePropertyKey;
-
-    /// Condition for evaluating the property values in
-    /// the matching process. The values must be ACCEPT
-    /// or REJECT.
-    condition Condition;
-
-    /// A list of property values. Must not be empty. The property
-    /// values must be the same type.
-    values vector<NodePropertyValue>:MAX_PROPERTY_COUNT;
-};
 
 /// Represents a bind rule in a parent specification.
-@available(added=27)
 type BindRule2 = struct {
     /// Property key.
     key NodePropertyKeyString;
@@ -42,20 +27,9 @@ type BindRule2 = struct {
     values vector<NodePropertyValue>:MAX_PROPERTY_COUNT;
 };
 
-/// Specification for a node that parents the composite node created from the
-/// composite node specification.
-type ParentSpec = struct {
-    /// Parent's bind rules. Property keys must be unique. Must not be empty.
-    bind_rules vector<BindRule>:MAX_PROPERTY_COUNT;
-
-    /// Properties for matching against a composite driver's bind rules.
-    /// Keys must be unique and string-based.
-    properties vector<NodeProperty>:MAX_PROPERTY_COUNT;
-};
 
 /// Specification for a node that parents the composite node created from the
 /// composite node specification.
-@available(added=27)
 type ParentSpec2 = struct {
     /// Parent's bind rules. Property keys must be unique. Must not be empty.
     bind_rules vector<BindRule2>:MAX_PROPERTY_COUNT;
@@ -72,18 +46,12 @@ type CompositeNodeSpec = table {
 
     /// The nodes in the composite node spec. Must not be empty. The first node is
     /// the primary node.
-    2: parents vector<ParentSpec>:MAX;
-
-    /// The nodes in the composite node spec. Must not be empty. The first node is
-    /// the primary node.
-    @available(added=27)
     3: parents2 vector<ParentSpec2>:MAX;
 
     /// An identifier for the driver host which a driver that binds to this node spec should live
     /// in. All drivers which specify the same identifier will be colocated into the same driver
     /// host. If the driver host hasn't been started, it will be started upon the time the node is
     /// bound to. 
-    @available(added=30)
     4: driver_host string:MAX_DRIVER_HOST_LENGTH;
 };
 
@@ -97,10 +65,8 @@ type CompositeNodeSpecError = flexible enum {
     /// created composite node spec.
     ALREADY_EXISTS = 3;
     /// The spec failed to be added to the driver index.
-    @available(added=20)
     DRIVER_INDEX_FAILURE = 4;
     /// The `parents` and `parents2` fields were both specified.
-    @available(added=27)
     DUPLICATE_PARENTS = 5;
 };
 

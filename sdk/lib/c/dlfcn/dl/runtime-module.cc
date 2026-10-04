@@ -66,7 +66,9 @@ void RuntimeModule::Initialize() {
     return;
   }
   initialized_ = true;
-  module().init.CallInit(load_bias());
+
+  auto init_module = module().init.callable_init(load_bias());
+  init_module();
 }
 
 }  // namespace dl

@@ -7,7 +7,7 @@ import("//build/rust/rustc_staticlib.gni")
 
 rustc_staticlib("fastboot-c") {
   name = "fastboot_c"
-  with_unit_tests = true
+  with_unit_tests = "fuchsia"
   edition = "2024"
 
   configs += [ "//build/config/rust/lints:deny_unused_results" ]

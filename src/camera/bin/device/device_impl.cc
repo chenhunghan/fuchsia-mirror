@@ -300,6 +300,7 @@ void DeviceImpl::ConnectToStream(uint32_t index,
       configs_[current_configuration_index_].stream_configs[index], std::move(request),
       std::move(on_stream_requested), std::move(on_buffers_requested), std::move(on_no_clients),
       description, std::move(streaming_failure_record));
+  streams_[index]->SetMuteState(mute_state_);
 }
 
 void DeviceImpl::OnStreamRequested(uint32_t index,

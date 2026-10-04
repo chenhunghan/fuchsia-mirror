@@ -11,6 +11,7 @@ use log::warn;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use termion::{color, style};
+use zerocopy::IntoBytes;
 
 static ORDINAL_ARG_NAME: &str = "ordinal";
 static BYTES_ARG_NAME: &str = "bytes";
@@ -46,35 +47,51 @@ impl<R: std::io::Read> Iterator for TraceIterator<R> {
     }
 }
 
-/// Change a raw serialized flow event (begin or end) into a flow step and return the raw bytes.
-fn flow_event_into_flow_step(bytes: &[u8], flow_id: u64) -> Result<Vec<u8>> {
+/// Change a raw serialized flow event (begin or end) into a flow step.
+fn flow_event_into_flow_step(bytes: &[u8], flow_id: u64) -> Result<Vec<u64>> {
     let (_, mut parsed) = fxt::RawEventRecord::parse(bytes)?;
     parsed.set_flow_step_payload(flow_id);
     parsed.serialize().map_err(|e| anyhow!(e))
 }
 
+enum RecordBytes {
+    Raw(Vec<u8>),
+    Serialized(Vec<u64>),
+}
+
+impl RecordBytes {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Raw(bytes) => bytes,
+            Self::Serialized(words) => words.as_slice().as_bytes(),
+        }
+    }
+}
+
 /// Parse a trace session and call a function for each trace record that is an event record.
-/// The function takes the parsed event record and the raw bytes and returns raw bytes.
+/// The function takes the parsed event record and its raw bytes and returns the original bytes
+/// or serialized words.
 /// This allows the function to examine the event record and modify it if needed.
-fn process_event_records<F: FnMut(fxt::EventRecord, Vec<u8>) -> Vec<u8>>(
+fn process_event_records<F: FnMut(fxt::EventRecord, Vec<u8>) -> RecordBytes>(
     input: Vec<u8>,
     mut process: F,
 ) -> Result<Vec<u8>> {
-    let output: Vec<u8> = TraceIterator::from_bytes(input)
-        .flat_map(|r| match r {
+    let mut output = Vec::new();
+    for r in TraceIterator::from_bytes(input) {
+        match r {
             (Ok(TraceRecord::Event(event_record)), parsed_bytes, record_range) => {
                 assert_eq!(record_range.end, parsed_bytes.len());
-                let prefix = &parsed_bytes[..record_range.start];
-                if prefix.is_empty() {
-                    process(event_record, parsed_bytes)
+                output.extend_from_slice(&parsed_bytes[..record_range.start]);
+                let record = if record_range.start == 0 {
+                    parsed_bytes
                 } else {
-                    let processed = process(event_record, parsed_bytes[record_range].to_vec());
-                    [prefix, &processed].concat()
-                }
+                    parsed_bytes[record_range].to_vec()
+                };
+                output.extend_from_slice(process(event_record, record).as_bytes());
             }
-            (_, parsed_bytes, _) => parsed_bytes,
-        })
-        .collect();
+            (_, parsed_bytes, _) => output.extend_from_slice(&parsed_bytes),
+        }
+    }
     Ok(output)
 }
 
@@ -134,12 +151,12 @@ pub fn process_trace_file(
                 symbolizer.symbolize_event_record(&event_record, &parsed_bytes)
             {
                 modified = true;
-                symbolized_bytes
+                RecordBytes::Serialized(symbolized_bytes)
             } else {
-                parsed_bytes
+                RecordBytes::Raw(parsed_bytes)
             }
         } else {
-            parsed_bytes
+            RecordBytes::Raw(parsed_bytes)
         }
     })?;
 
@@ -176,12 +193,13 @@ pub fn process_trace_file(
 
         // If there are flows to fix up then run through the trace again:
         if !flow_state.is_empty() {
-            trace = process_event_records(trace, |event_record, mut parsed_bytes| {
+            trace = process_event_records(trace, |event_record, parsed_bytes| {
+                let mut record = RecordBytes::Raw(parsed_bytes);
                 // If this is a flow event...
                 if let Some((flow_id, flow_stage)) = event_flow_info(&event_record) {
                     // If this is a flow event for a flow we care about...
                     if event_record.category.as_str() != "kernel:ipc" {
-                        return parsed_bytes;
+                        return record;
                     }
                     if let Some(call_state) = flow_state.get_mut(&flow_id) {
                         // Flows with steps should have been excluded above...
@@ -194,8 +212,10 @@ pub fn process_trace_file(
 
                         if matches!(call_state, CallState::ReadRequest | CallState::WriteResponse) {
                             // These should turn into FlowStep records.
-                            parsed_bytes = flow_event_into_flow_step(&parsed_bytes, flow_id)
-                                .expect("modifying flow event");
+                            record = RecordBytes::Serialized(
+                                flow_event_into_flow_step(record.as_bytes(), flow_id)
+                                    .expect("modifying flow event"),
+                            );
                         }
                         *call_state = call_state.next();
                     }
@@ -218,15 +238,17 @@ pub fn process_trace_file(
                         })
                         .collect();
                     if !remove_args.is_empty() {
-                        let (_, mut parsed) = fxt::RawEventRecord::parse(&parsed_bytes)
+                        let (_, mut parsed) = fxt::RawEventRecord::parse(record.as_bytes())
                             .expect("Removing raw FIDL-related args");
                         for i in remove_args.iter().rev() {
                             parsed.args.remove(*i);
                         }
-                        parsed_bytes = parsed.serialize().expect("serializing modified record");
+                        record = RecordBytes::Serialized(
+                            parsed.serialize().expect("serializing modified record"),
+                        );
                     }
                 }
-                parsed_bytes
+                record
             })?;
         }
     }
@@ -311,7 +333,7 @@ impl Symbolizer {
         &mut self,
         event_record: &fxt::EventRecord,
         parsed_bytes: &[u8],
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Vec<u64>> {
         if event_record.category.as_str() == "kernel:ipc" {
             // Count how many times we've seen flow begin, step and end for two-way messages.
             if let Some((flow_id, flow_stage)) = event_flow_info(&event_record) {
@@ -374,7 +396,7 @@ fn symbolize_fidl_call<'a>(
     method: &'a str,
     payload: Option<String>,
     _preserve_raw_message: bool,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<Vec<u64>> {
     let (_, mut raw_event_record) =
         RawEventRecord::parse(bytes).context("Unable to parse event record")?;
     raw_event_record.name = StringRef::Inline(method);
@@ -461,6 +483,38 @@ impl CategoryCounter {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn process_event_records_preserves_raw_bytes_and_appends_serialized_words() {
+        use fxt::event::EventHeader;
+        use fxt::fxt_builder::FxtBuilder;
+
+        // SessionParser requires the FXT magic record before event records.
+        let magic = [0x10, 0x00, 0x04, 0x46, 0x78, 0x54, 0x16, 0x00];
+        let mut header = EventHeader::empty();
+        header.set_event_type(0); // Instant event
+        header.set_thread_ref(1);
+        let event = FxtBuilder::new(header).atom(42u64.to_le_bytes()).build();
+        let mut trace = magic.to_vec();
+        trace.extend_from_slice(event.as_bytes());
+
+        let unchanged = process_event_records(trace.clone(), |_, bytes| RecordBytes::Raw(bytes))
+            .expect("processing raw event");
+        assert_eq!(unchanged, trace);
+
+        let mut visited = false;
+        let rewritten = process_event_records(trace, |_, bytes| {
+            visited = true;
+            let (_, mut event) = RawEventRecord::parse(&bytes).expect("parsing event");
+            event.name = StringRef::Inline("renamed");
+            RecordBytes::Serialized(event.serialize().expect("serializing event"))
+        })
+        .expect("processing serialized event");
+        assert!(visited);
+        assert_eq!(&rewritten[..magic.len()], &magic);
+        let (_, event) = RawEventRecord::parse(&rewritten[magic.len()..]).unwrap();
+        assert_eq!(event.name, StringRef::Inline("renamed"));
+    }
 
     #[fuchsia::test]
     async fn test_verify_missing() {

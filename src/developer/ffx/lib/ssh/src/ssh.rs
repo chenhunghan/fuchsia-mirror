@@ -13,13 +13,15 @@ use thiserror::Error;
 use tokio::process::Command;
 
 const SSH_PRIV: &str = "ssh.priv";
-const SSH_CONTROLMASTER_MODE: &str = "ssh.controlmaster.mode";
-const SSH_CONTROLMASTER_PATH: &str = "ssh.controlmaster.path";
-const SSH_CONTROLMASTER_DIR: &str = "ssh.controlmaster.dir";
+pub const SSH_AUTH_SOCK: &str = "ssh.auth-sock";
+pub const SSH_CONTROLMASTER_MODE: &str = "ssh.controlmaster.mode";
+pub const SSH_CONTROLMASTER_PATH: &str = "ssh.controlmaster.path";
+pub const SSH_CONTROLMASTER_DIR: &str = "ssh.controlmaster.dir";
 pub const KEEPALIVE_TIMEOUT_CONFIG: &str = "ssh.keepalive_timeout";
 pub const CONNECT_TIMEOUT_CONFIG: &str = "ssh.connect_timeout";
 pub const CONNECTION_ATTEMPTS_CONFIG: &str = "ssh.connection_attempts";
 pub const IDENTITIES_ONLY_CONFIG: &str = "ssh.identities_only";
+pub const SSH_IDENTITIES_ONLY: &str = "ssh.identities-only";
 
 #[derive(Error, Debug)]
 pub enum SshCommandError {
@@ -108,7 +110,6 @@ pub fn get_ssh_key_paths_from_env(
 }
 
 fn apply_auth_sock(cmd: &mut Command, context: &EnvironmentContext) {
-    const SSH_AUTH_SOCK: &str = "ssh.auth-sock";
     if let Ok(path) = context.get::<String, _>(SSH_AUTH_SOCK) {
         log::debug!("SSH_AUTH_SOCK retrieved via config: {}", path);
         cmd.env("SSH_AUTH_SOCK", path.as_str());
@@ -116,6 +117,16 @@ fn apply_auth_sock(cmd: &mut Command, context: &EnvironmentContext) {
             log::warn!("SSH_AUTH_SOCK file does not exist at: {}", path);
         }
     }
+}
+
+pub fn is_identities_only(context: &EnvironmentContext) -> Result<Option<bool>, SshCommandError> {
+    if let Ok(identities_only) = context.get::<bool, _>(SSH_IDENTITIES_ONLY) {
+        return Ok(Some(identities_only));
+    }
+    if let Ok(identities_only) = context.get::<bool, _>(IDENTITIES_ONLY_CONFIG) {
+        return Ok(Some(identities_only));
+    }
+    Ok(None)
 }
 
 fn apply_identities_only(
@@ -297,6 +308,22 @@ impl TryFrom<String> for ControlMasterMode {
     }
 }
 
+impl ControlMasterMode {
+    pub fn from_env(env: &EnvironmentContext) -> Result<Self, ManageSshControlMasterError> {
+        let controlmaster_mode_string: Option<String> = env.get(SSH_CONTROLMASTER_MODE)?;
+        match controlmaster_mode_string {
+            None => {
+                if env.is_isolated() {
+                    Ok(Self::None)
+                } else {
+                    Ok(Self::Managed)
+                }
+            }
+            Some(v) => Ok(Self::try_from(v)?),
+        }
+    }
+}
+
 async fn get_controlmaster_path(
     env: &EnvironmentContext,
     ssh_path: &str,
@@ -304,17 +331,7 @@ async fn get_controlmaster_path(
     ssh_keys: &Vec<String>,
     config: &SshConfig,
 ) -> Result<Option<PathBuf>, ManageSshControlMasterError> {
-    let controlmaster_mode_string: Option<String> = env.get(SSH_CONTROLMASTER_MODE)?;
-    let controlmaster_mode = match controlmaster_mode_string {
-        None => {
-            if env.is_isolated() {
-                ControlMasterMode::None
-            } else {
-                ControlMasterMode::Managed
-            }
-        }
-        Some(v) => ControlMasterMode::try_from(v)?,
-    };
+    let controlmaster_mode = ControlMasterMode::from_env(env)?;
 
     match controlmaster_mode {
         ControlMasterMode::None => Ok(None),
@@ -367,7 +384,7 @@ async fn build_ssh_command_with_ssh_config_and_env(
     if let Some(connection_attempts) = env.get::<Option<u64>, _>(CONNECTION_ATTEMPTS_CONFIG)? {
         config.set("ConnectionAttempts", connection_attempts.to_string())?;
     }
-    if let Some(identities_only) = env.get::<Option<bool>, _>(IDENTITIES_ONLY_CONFIG)? {
+    if let Some(identities_only) = is_identities_only(env)? {
         let val = if identities_only { "yes" } else { "no" };
         config.set("IdentitiesOnly", val.to_string())?;
     }

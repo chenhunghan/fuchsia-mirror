@@ -61,18 +61,6 @@ pub enum EmulatorInstanceError {
     #[error("Failed to serialize JSON: {0}")]
     SerializeJson(#[from] serde_json::Error),
 
-    #[error("Failed to create directory {path:?}: {source}")]
-    CreateDirectory { path: PathBuf, source: std::io::Error },
-
-    #[error("Failed to create watcher: {0}")]
-    WatcherCreation(#[from] notify::Error),
-
-    #[error("Failed to watch directory {path:?}: {source}")]
-    WatchDirectory { path: PathBuf, source: notify::Error },
-
-    #[error("Failed to send event: {0}")]
-    SendError(String),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -82,8 +70,7 @@ pub type Result<T> = std::result::Result<T, EmulatorInstanceError>;
 use fletcher64::get_file_hash;
 pub use instances::{EmulatorInstances, read_from_disk, read_from_disk_untyped, write_to_disk};
 pub use targets::{
-    EmulatorAddr, EmulatorTargetAction, EmulatorTargetInfo, EmulatorWatcher, get_all_targets,
-    get_target, instance_name_from_path, start_emulator_watching,
+    EmulatorAddr, EmulatorTargetInfo, get_all_targets, get_target, instance_name_from_path,
 };
 
 /// Holds a single mapping from a host port to the guest.

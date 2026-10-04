@@ -806,14 +806,11 @@ mod test {
 
     use super::*;
 
-    use fuchsia_async::{Socket, Task};
-    #[cfg(not(target_os = "fuchsia"))]
-    use fuchsia_emulated_handle::Socket as SyncSocket;
+    use crate::MpscTransport;
+    use fuchsia_async::Task;
     use futures::StreamExt;
-    #[cfg(target_os = "fuchsia")]
-    use zx::Socket as SyncSocket;
 
-    async fn usb_echo_server(echo_connection: Arc<Connection<Vec<u8>, Socket>>) {
+    async fn usb_echo_server(echo_connection: Arc<Connection<Vec<u8>, MpscTransport>>) {
         let mut builder = UsbPacketBuilder::new(vec![0; 128]);
         loop {
             println!("waiting for usb packet");
@@ -846,12 +843,11 @@ mod test {
 
     #[fuchsia::test]
     async fn data_over_control_socket() {
-        let (socket, other_socket) = SyncSocket::create_stream();
+        let (mut socket, other_socket) = MpscTransport::pair();
         let (incoming_requests_tx, _incoming_requests) = mpsc::channel(5);
-        let mut socket = Socket::from_socket(socket);
         let connection = Arc::new(Connection::new(
             ProtocolVersion::LATEST,
-            Some(Socket::from_socket(other_socket)),
+            Some(other_socket),
             incoming_requests_tx,
         ));
 
@@ -869,22 +865,21 @@ mod test {
 
     #[fuchsia::test]
     async fn data_over_normal_outgoing_socket() {
-        let (_control_socket, other_socket) = SyncSocket::create_stream();
+        let (_control_socket, other_socket) = MpscTransport::pair();
         let (incoming_requests_tx, _incoming_requests) = mpsc::channel(5);
         let connection = Arc::new(Connection::new(
             ProtocolVersion::LATEST,
-            Some(Socket::from_socket(other_socket)),
+            Some(other_socket),
             incoming_requests_tx,
         ));
 
         let echo_task = Task::spawn(usb_echo_server(connection.clone()));
 
-        let (socket, other_socket) = SyncSocket::create_stream();
-        let mut socket = Socket::from_socket(socket);
+        let (mut socket, other_socket) = MpscTransport::pair();
         connection
             .connect(
                 Address { device_cid: 1, host_cid: 2, device_port: 3, host_port: 4 },
-                Socket::from_socket(other_socket),
+                other_socket,
             )
             .await
             .unwrap();
@@ -901,11 +896,11 @@ mod test {
 
     #[fuchsia::test]
     async fn data_over_normal_incoming_socket() {
-        let (_control_socket, other_socket) = SyncSocket::create_stream();
+        let (_control_socket, other_socket) = MpscTransport::pair();
         let (incoming_requests_tx, mut incoming_requests) = mpsc::channel(5);
         let connection = Arc::new(Connection::new(
             ProtocolVersion::LATEST,
-            Some(Socket::from_socket(other_socket)),
+            Some(other_socket),
             incoming_requests_tx,
         ));
 
@@ -921,9 +916,8 @@ mod test {
             Address { device_cid: 1, host_cid: 2, device_port: 3, host_port: 4 }
         );
 
-        let (socket, other_socket) = SyncSocket::create_stream();
-        let mut socket = Socket::from_socket(socket);
-        connection.accept(request, Socket::from_socket(other_socket)).await.unwrap();
+        let (mut socket, other_socket) = MpscTransport::pair();
+        connection.accept(request, other_socket).await.unwrap();
 
         for size in [1u8, 2, 8, 16, 32, 64, 128, 255] {
             println!("round tripping packet of size {size}");
@@ -935,7 +929,10 @@ mod test {
         echo_task.abort().await;
     }
 
-    async fn copy_connection(from: &Connection<Vec<u8>, Socket>, to: &Connection<Vec<u8>, Socket>) {
+    async fn copy_connection(
+        from: &Connection<Vec<u8>, MpscTransport>,
+        to: &Connection<Vec<u8>, MpscTransport>,
+    ) {
         let mut builder = UsbPacketBuilder::new(vec![0; 1024]);
         loop {
             builder = from.fill_usb_packet(builder).await.unwrap();
@@ -948,11 +945,14 @@ mod test {
     }
 
     pub(crate) trait EndToEndTestFn<R>:
-        AsyncFnOnce(Arc<Connection<Vec<u8>, Socket>>, mpsc::Receiver<ConnectionRequest>) -> R
+        AsyncFnOnce(Arc<Connection<Vec<u8>, MpscTransport>>, mpsc::Receiver<ConnectionRequest>) -> R
     {
     }
     impl<T, R> EndToEndTestFn<R> for T where
-        T: AsyncFnOnce(Arc<Connection<Vec<u8>, Socket>>, mpsc::Receiver<ConnectionRequest>) -> R
+        T: AsyncFnOnce(
+            Arc<Connection<Vec<u8>, MpscTransport>>,
+            mpsc::Receiver<ConnectionRequest>,
+        ) -> R
     {
     }
 
@@ -960,20 +960,20 @@ mod test {
         left_side: impl EndToEndTestFn<R1>,
         right_side: impl EndToEndTestFn<R2>,
     ) -> (R1, R2) {
-        type Connection = crate::Connection<Vec<u8>, Socket>;
-        let (_control_socket1, other_socket1) = SyncSocket::create_stream();
-        let (_control_socket2, other_socket2) = SyncSocket::create_stream();
+        type Connection = crate::Connection<Vec<u8>, MpscTransport>;
+        let (_control_socket1, other_socket1) = MpscTransport::pair();
+        let (_control_socket2, other_socket2) = MpscTransport::pair();
         let (incoming_requests_tx1, incoming_requests1) = mpsc::channel(5);
         let (incoming_requests_tx2, incoming_requests2) = mpsc::channel(5);
 
         let connection1 = Arc::new(Connection::new(
             ProtocolVersion::LATEST,
-            Some(Socket::from_socket(other_socket1)),
+            Some(other_socket1),
             incoming_requests_tx1,
         ));
         let connection2 = Arc::new(Connection::new(
             ProtocolVersion::LATEST,
-            Some(Socket::from_socket(other_socket2)),
+            Some(other_socket2),
             incoming_requests_tx2,
         ));
 
@@ -997,12 +997,11 @@ mod test {
         end_to_end_test(
             async |conn, _incoming| {
                 println!("sending request on connection 1");
-                let (socket, other_socket) = SyncSocket::create_stream();
-                let mut socket = Socket::from_socket(socket);
+                let (mut socket, other_socket) = MpscTransport::pair();
                 let state = conn
                     .connect(
                         Address { device_cid: 1, host_cid: 2, device_port: 3, host_port: 4 },
-                        Socket::from_socket(other_socket),
+                        other_socket,
                     )
                     .await
                     .unwrap();
@@ -1022,9 +1021,8 @@ mod test {
                     Address { device_cid: 1, host_cid: 2, device_port: 3, host_port: 4 }
                 );
 
-                let (socket, other_socket) = SyncSocket::create_stream();
-                let mut socket = Socket::from_socket(socket);
-                let state = conn.accept(request, Socket::from_socket(other_socket)).await.unwrap();
+                let (mut socket, other_socket) = MpscTransport::pair();
+                let state = conn.accept(request, other_socket).await.unwrap();
 
                 println!("accepted request on connection 2");
                 for size in [1u8, 2, 8, 16, 32, 64, 128, 255] {
@@ -1044,10 +1042,8 @@ mod test {
         let addr = Address { device_cid: 1, host_cid: 2, device_port: 3, host_port: 4 };
         end_to_end_test(
             async |conn, _incoming| {
-                let (socket, other_socket) = SyncSocket::create_stream();
-                let mut socket = Socket::from_socket(socket);
-                let state =
-                    conn.connect(addr.clone(), Socket::from_socket(other_socket)).await.unwrap();
+                let (mut socket, other_socket) = MpscTransport::pair();
+                let state = conn.connect(addr.clone(), other_socket).await.unwrap();
                 conn.close(&addr).await;
                 assert_eq!(socket.read(&mut [0u8; 1]).await.unwrap(), 0);
                 state.wait_for_close().await.unwrap();
@@ -1057,9 +1053,8 @@ mod test {
                 let request = incoming.next().await.unwrap();
                 assert_eq!(request.address, addr.clone(),);
 
-                let (socket, other_socket) = SyncSocket::create_stream();
-                let mut socket = Socket::from_socket(socket);
-                let state = conn.accept(request, Socket::from_socket(other_socket)).await.unwrap();
+                let (mut socket, other_socket) = MpscTransport::pair();
+                let state = conn.accept(request, other_socket).await.unwrap();
                 assert_eq!(socket.read(&mut [0u8; 1]).await.unwrap(), 0);
                 state.wait_for_close().await.unwrap();
             },
@@ -1072,10 +1067,8 @@ mod test {
         let addr = Address { device_cid: 1, host_cid: 2, device_port: 3, host_port: 4 };
         end_to_end_test(
             async |conn, _incoming| {
-                let (socket, other_socket) = SyncSocket::create_stream();
-                let mut socket = Socket::from_socket(socket);
-                let state =
-                    conn.connect(addr.clone(), Socket::from_socket(other_socket)).await.unwrap();
+                let (mut socket, other_socket) = MpscTransport::pair();
+                let state = conn.connect(addr.clone(), other_socket).await.unwrap();
                 conn.reset(&addr).await.unwrap();
                 assert_eq!(socket.read(&mut [0u8; 1]).await.unwrap(), 0);
                 state.wait_for_close().await.expect_err("expected reset");
@@ -1085,9 +1078,8 @@ mod test {
                 let request = incoming.next().await.unwrap();
                 assert_eq!(request.address, addr.clone(),);
 
-                let (socket, other_socket) = SyncSocket::create_stream();
-                let mut socket = Socket::from_socket(socket);
-                let state = conn.accept(request, Socket::from_socket(other_socket)).await.unwrap();
+                let (mut socket, other_socket) = MpscTransport::pair();
+                let state = conn.accept(request, other_socket).await.unwrap();
                 assert_eq!(socket.read(&mut [0u8; 1]).await.unwrap(), 0);
                 state.wait_for_close().await.unwrap();
             },
@@ -1101,7 +1093,7 @@ mod test {
     async fn conn_shutdown(fill_packets: bool) {
         let (incoming_requests_tx, _incoming_requests) = mpsc::channel(5);
 
-        let connection = Arc::new(Connection::<Vec<u8>, fuchsia_async::Socket>::new(
+        let connection = Arc::new(Connection::<Vec<u8>, MpscTransport>::new(
             ProtocolVersion::LATEST,
             None,
             incoming_requests_tx,

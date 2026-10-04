@@ -14,10 +14,8 @@ import (
 
 	fnet "fidl/fuchsia/net"
 	fnetRoutes "fidl/fuchsia/net/routes"
-	"fidl/fuchsia/net/stack"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -106,70 +104,6 @@ func TestToTCPIPSubnet(t *testing.T) {
 		}
 		if to != expected {
 			t.Errorf("got = %s, want = %s", to, expected)
-		}
-	}
-}
-
-func TestForwardingEntryAndTcpipRouteConversions(t *testing.T) {
-	var (
-		gateway = tcpip.AddrFromSlice([]byte("efghijklmnopqrst"))
-		nextHop = ToNetIpAddress(gateway)
-	)
-
-	destination, err := tcpip.NewSubnet(util.Parse("171.205.0.0"), util.ParseMask("255.255.224.0"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		dest func(*stack.ForwardingEntry)
-		want tcpip.Route
-	}{
-		{
-			dest: func(fe *stack.ForwardingEntry) {
-				fe.DeviceId = 789
-			},
-			want: tcpip.Route{
-				Destination: destination,
-				NIC:         789,
-			},
-		},
-		{
-			dest: func(fe *stack.ForwardingEntry) {
-				nextHop := nextHop
-				fe.NextHop = &nextHop
-			},
-			want: tcpip.Route{
-				Destination: destination,
-				Gateway:     gateway,
-			},
-		},
-		{
-			dest: func(fe *stack.ForwardingEntry) {
-				fe.DeviceId = 789
-				nextHop := nextHop
-				fe.NextHop = &nextHop
-			},
-			want: tcpip.Route{
-				Destination: destination,
-				Gateway:     gateway,
-				NIC:         789,
-			},
-		},
-	} {
-		fe := stack.ForwardingEntry{
-			Subnet: fnet.Subnet{
-				Addr:      ToNetIpAddress(destination.ID()),
-				PrefixLen: 19,
-			},
-		}
-		tc.dest(&fe)
-		got := ForwardingEntryToTCPIPRoute(fe)
-		if got != tc.want {
-			t.Errorf("got ForwardingEntryToTCPIPRoute(%v) = %v, want = %v", fe, got, tc.want)
-		}
-		roundtripFe := TCPIPRouteToForwardingEntry(got)
-		if diff := cmp.Diff(roundtripFe, fe, cmpopts.IgnoreTypes(struct{}{})); diff != "" {
-			t.Fatalf("forwarding entry mismatch (-want +got):\n%s", diff)
 		}
 	}
 }

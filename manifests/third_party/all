@@ -99,7 +99,7 @@
     <project name="third_party/crashpad"
              path="third_party/crashpad/src"
              remote="https://fuchsia.googlesource.com/third_party/crashpad"
-             revision="65fe32cc58a1c07b2a62fbaed806e0f21bac037e"
+             revision="956bca99f794218ae8da7bc659147b2d8ae42e8c"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="chromium/mini_chromium"
              path="third_party/mini_chromium/src"
@@ -292,7 +292,7 @@
     <project name="llvm-project/libc"
              path="third_party/llvm-libc/src"
              remote="https://llvm.googlesource.com/llvm-project/libc"
-             revision="b3b74ce2bc5d0f9dd46d90b8b867cdf5b7879484"/>
+             revision="f8e576de66a6f3764b0054154dff0aaecb501c4c"/>
     <project name="third_party/luci-go"
              path="third_party/luci-go"
              revision="897c3b0c38036908e016300c70509509b13001a0"
@@ -407,12 +407,12 @@
              path="third_party/perfetto"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/perfetto"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="18543368b264fea4b93212a54751d2c34fac8181" />
+             revision="12a4a79422c109baf37715e26ef53014f829bf45" />
     <project name="third_party/pigweed"
              path="third_party/pigweed/src"
              remote="https://fuchsia.googlesource.com/third_party/pigweed.googlesource.com/pigweed/pigweed"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="7b8f882578a83c7921e15f9e0403e0a00cc817d9"/>
+             revision="2d6719b0f651b01457d4bf206c108fbea8e7092a"/>
     <project name="third_party/github.com/google/python_portpicker"
              path="third_party/python_portpicker/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/python_portpicker"

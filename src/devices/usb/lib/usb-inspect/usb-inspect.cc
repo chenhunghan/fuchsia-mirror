@@ -14,17 +14,19 @@
 
 #include <format>
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_inspect {
 
 const char* SpeedToString(usb_speed_t speed) {
-  switch (speed) {
-    case USB_SPEED_FULL:
+  switch (static_cast<fdescriptor::UsbSpeed>(speed)) {
+    case fdescriptor::UsbSpeed::kFull:
       return "full";
-    case USB_SPEED_LOW:
+    case fdescriptor::UsbSpeed::kLow:
       return "low";
-    case USB_SPEED_HIGH:
+    case fdescriptor::UsbSpeed::kHigh:
       return "high";
-    case USB_SPEED_SUPER:
+    case fdescriptor::UsbSpeed::kSuper:
       return "super";
     default:
       return "undefined";
@@ -262,7 +264,7 @@ void DciInspect::UpdateConnectionStatus(bool connected, usb_speed_t speed) {
   speed_ = SpeedToString(speed);
 }
 
-void DciInspect::UpdateUsbMode(usb_mode_t usb_mode) {
+void DciInspect::UpdateUsbMode(UsbMode usb_mode) {
   std::lock_guard<std::mutex> _(lock_);
   usb_mode_ = usb_mode_to_string(usb_mode);
 }
@@ -352,7 +354,7 @@ void FunctionInspect::Init(inspect::Node& parent, const std::string& name, uint8
           break;
         }
 
-        if (header->b_descriptor_type == USB_DT_INTERFACE) {
+        if (header->b_descriptor_type == fdescriptor::DescriptorType::kInterface) {
           if (current_intf_node.has_value()) {
             inspector.emplace(std::move(*current_intf_node));
           }
@@ -371,7 +373,7 @@ void FunctionInspect::Init(inspect::Node& parent, const std::string& name, uint8
           current_intf_node->CreateUint("interface_protocol", desc->b_interface_protocol,
                                         &inspector);
 
-        } else if (header->b_descriptor_type == USB_DT_ENDPOINT) {
+        } else if (header->b_descriptor_type == fdescriptor::DescriptorType::kEndpoint) {
           const usb_endpoint_descriptor_t* desc =
               reinterpret_cast<const usb_endpoint_descriptor_t*>(header);
           std::string ep_name = std::format("endpoint-0x{:02x}", desc->b_endpoint_address);

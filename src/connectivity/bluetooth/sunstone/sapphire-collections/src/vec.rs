@@ -2,11 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use core::convert::{AsMut, AsRef};
 use core::ops::{Deref, DerefMut};
 
 pub mod raw_vec;
 
-use crate::storage::StorageFamily;
+use crate::AllocError;
+use crate::storage::{ArrayStorage, StorageFamily};
 use crate::vec::raw_vec::RawVec;
 
 /// A contiguous, growable vector collection backed by a `RawVecLike` container.
@@ -60,8 +62,8 @@ impl<T, A: StorageFamily> Vec<T, A> {
     ///
     /// # Errors
     /// Returns `Err(AllocError)` if the buffer is full and cannot be grown.
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), crate::AllocError> {
-        let needed_capacity = self.len.checked_add(additional).ok_or(crate::AllocError)?;
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), AllocError> {
+        let needed_capacity = self.len.checked_add(additional).ok_or(AllocError)?;
         self.inner.grow_at_least(needed_capacity)
     }
 
@@ -69,8 +71,8 @@ impl<T, A: StorageFamily> Vec<T, A> {
     ///
     /// # Errors
     /// Returns `Err(AllocError)` if the buffer is full and cannot be grown.
-    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), crate::AllocError> {
-        let needed_capacity = self.len.checked_add(additional).ok_or(crate::AllocError)?;
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), AllocError> {
+        let needed_capacity = self.len.checked_add(additional).ok_or(AllocError)?;
         self.inner.grow_exactly(needed_capacity)
     }
 
@@ -165,12 +167,12 @@ impl<T, A: StorageFamily> Vec<T, A> {
     ///
     /// # Errors
     /// Returns `Err(AllocError)` if the buffer is full and cannot be grown.
-    pub fn try_extend(&mut self, other: &[T]) -> Result<(), crate::AllocError>
+    pub fn try_extend(&mut self, other: &[T]) -> Result<(), AllocError>
     where
         T: Clone,
     {
         let needed_capacity = self.len() + other.len();
-        self.inner.grow_at_least(needed_capacity).map_err(|_| crate::AllocError)?;
+        self.inner.grow_at_least(needed_capacity).map_err(|_| AllocError)?;
         for item in other {
             // SAFETY: We ensured that the capacity is at least needed_capacity, so the index
             // `self.len` is within bounds.
@@ -192,20 +194,37 @@ impl<T, A: StorageFamily> Vec<T, A> {
     ///
     /// # Errors
     /// Returns `Err(AllocError)` if the new length exceeds capacity and the buffer cannot be grown.
-    pub fn try_resize(&mut self, new_len: usize, value: T) -> Result<(), crate::AllocError>
+    pub fn try_resize(&mut self, new_len: usize, value: T) -> Result<(), AllocError>
     where
         T: Clone,
     {
+        self.try_resize_with(new_len, |_| value.clone())
+    }
+
+    /// Resizes the `Vec` in-place so that `len` is equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the `Vec` is extended by the difference, with each
+    /// additional slot filled with the result of calling `f` with the index of that slot. Unlike
+    /// `std::vec::Vec::resize_with`, `f` receives the index of the element being created. If
+    /// `new_len` is less than `len`, the `Vec` is truncated.
+    ///
+    /// # Errors
+    /// Returns `Err(AllocError)` if the new length exceeds capacity and the buffer cannot be grown.
+    pub fn try_resize_with<F: FnMut(usize) -> T>(
+        &mut self,
+        new_len: usize,
+        mut f: F,
+    ) -> Result<(), AllocError> {
         if new_len > self.len() {
-            let padding_len = new_len - self.len();
-            self.inner.grow_at_least(new_len).map_err(|_| crate::AllocError)?;
-            for _ in 0..padding_len {
+            self.inner.grow_at_least(new_len)?;
+            while self.len < new_len {
+                // Panic Safety: If `f` panics, it occurs before writing the value and
+                // incrementing `self.len`, keeping `self.len` consistent.
+                let value = f(self.len);
                 // SAFETY: We ensured that the capacity is at least new_len, so the index
                 // `self.len` is within bounds.
-                // Panic Safety: If cloning panics, it occurs before writing the value and
-                // incrementing `self.len`, keeping `self.len` consistent.
                 unsafe {
-                    self.inner.buffer_mut().get_unchecked_mut(self.len).write(value.clone());
+                    self.inner.buffer_mut().get_unchecked_mut(self.len).write(value);
                 }
                 self.len += 1;
             }
@@ -291,7 +310,41 @@ impl<T, A: StorageFamily> Drop for Vec<T, A> {
     }
 }
 
-use crate::storage::ArrayStorage;
+impl<T, S: StorageFamily> AsRef<[T]> for Vec<T, S> {
+    fn as_ref(&self) -> &[T] {
+        &*self
+    }
+}
+
+impl<T, S: StorageFamily> AsMut<[T]> for Vec<T, S> {
+    fn as_mut(&mut self) -> &mut [T] {
+        &mut *self
+    }
+}
+
+impl<T: Clone, A: StorageFamily> TryFrom<&[T]> for Vec<T, A>
+where
+    Self: Default,
+{
+    type Error = AllocError;
+
+    fn try_from(slice: &[T]) -> Result<Self, Self::Error> {
+        let mut this = Vec::new();
+        this.try_extend(slice)?;
+        Ok(this)
+    }
+}
+
+impl<T: Clone, A: StorageFamily> Clone for Vec<T, A>
+where
+    RawVec<T, A>: Default,
+{
+    fn clone(&self) -> Self {
+        let mut cloned = Self::default();
+        cloned.try_extend(self.deref()).expect("Vec::Clone failed due to an allocation error");
+        cloned
+    }
+}
 
 /// A vector collection backed by a stack-allocated fixed-size raw array.
 pub type StackVec<T, const SIZE: usize> = Vec<T, ArrayStorage<SIZE>>;
@@ -434,6 +487,60 @@ mod tests {
         // Fail to resize past capacity
         assert!(vec.try_resize(7, 0).is_err());
         assert_eq!(&vec[..], &[1, 2, 3, 9, 9]);
+    }
+
+    #[test]
+    fn test_vec_try_resize_with() {
+        let mut vec = StackVec::<usize, 6>::new();
+        vec.try_resize_with(4, |i| i * 10).unwrap();
+        assert_eq!(&vec[..], &[0, 10, 20, 30]);
+
+        // New elements receive their own index, not a count of calls.
+        vec.try_resize_with(6, |i| i).unwrap();
+        assert_eq!(&vec[..], &[0, 10, 20, 30, 4, 5]);
+
+        vec.try_resize_with(2, |_| unreachable!("shrinking must not call f")).unwrap();
+        assert_eq!(&vec[..], &[0, 10]);
+
+        assert!(vec.try_resize_with(7, |i| i).is_err());
+        assert_eq!(&vec[..], &[0, 10]);
+    }
+
+    #[test]
+    fn test_vec_try_resize_with_panic_keeps_initialized_prefix() {
+        let mut vec = StackVec::<Rc<()>, 4>::new();
+        let tracker = Rc::new(());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vec.try_resize_with(4, |i| if i < 2 { tracker.clone() } else { panic!("boom") })
+        }));
+        assert!(result.is_err());
+        assert_eq!(vec.len(), 2);
+        assert_eq!(Rc::strong_count(&tracker), 3);
+
+        drop(vec);
+        assert_eq!(Rc::strong_count(&tracker), 1);
+    }
+
+    #[test]
+    fn test_vec_try_from_slice() {
+        let vec = StackVec::<i32, 4>::try_from(&[1, 2, 3][..]).unwrap();
+        assert_eq!(&vec[..], &[1, 2, 3]);
+
+        assert!(StackVec::<i32, 2>::try_from(&[1, 2, 3][..]).is_err());
+    }
+
+    #[test]
+    fn test_vec_clone() {
+        let mut vec = StackVec::<i32, 4>::new();
+        vec.try_extend(&[1, 2, 3]).unwrap();
+
+        let mut cloned = vec.clone();
+        assert_eq!(&cloned[..], &[1, 2, 3]);
+
+        // The clone is independent of the original.
+        cloned[0] = 10;
+        assert_eq!(&vec[..], &[1, 2, 3]);
+        assert_eq!(&cloned[..], &[10, 2, 3]);
     }
 
     #[test]

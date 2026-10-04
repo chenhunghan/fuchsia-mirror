@@ -27,20 +27,9 @@ use object_constants_rs::{
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_FIFO_MAX_SIZE_BYTES, ZX_FIFO_PEER_CLOSED, ZX_FIFO_READABLE, ZX_FIFO_WRITABLE,
-    ZX_OBJ_TYPE_FIFO, ZX_RIGHT_DUPLICATE, ZX_RIGHT_INSPECT, ZX_RIGHT_READ, ZX_RIGHT_SIGNAL,
-    ZX_RIGHT_SIGNAL_PEER, ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT, ZX_RIGHT_WRITE, ZX_USER_SIGNAL_ALL,
-    zx_rights_t,
+    ZX_DEFAULT_FIFO_RIGHTS, ZX_FIFO_MAX_SIZE_BYTES, ZX_FIFO_PEER_CLOSED, ZX_FIFO_READABLE,
+    ZX_FIFO_WRITABLE, ZX_OBJ_TYPE_FIFO, ZX_USER_SIGNAL_ALL, zx_rights_t,
 };
-
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_SIGNAL
-    | ZX_RIGHT_SIGNAL_PEER;
 
 pub const ALLOWED_SIGNALS: u32 = ZX_USER_SIGNAL_ALL;
 
@@ -118,7 +107,7 @@ impl_peered_dispatcher_facade_with_state!(
 
 impl FifoDispatcher {
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_FIFO_RIGHTS
     }
 
     /// Creates a new FifoDispatcher pair and returns their kernel handles and rights.
@@ -170,7 +159,7 @@ impl FifoDispatcher {
         handle0.dispatcher().init_peer(handle1.dispatcher().clone());
         handle1.dispatcher().init_peer(handle0.dispatcher().clone());
 
-        Ok((handle0, handle1, DEFAULT_RIGHTS))
+        Ok((handle0, handle1, ZX_DEFAULT_FIFO_RIGHTS))
     }
 
     fn on_zero_handles_locked(&self, _token: &ksync::LockToken<'_, PeerHolderMuClass<Self>>) {

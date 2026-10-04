@@ -8,7 +8,7 @@ import argparse
 import os
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--allowlist",

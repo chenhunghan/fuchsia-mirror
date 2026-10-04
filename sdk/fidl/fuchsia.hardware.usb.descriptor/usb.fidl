@@ -14,6 +14,14 @@ type UsbSpeed = strict enum : uint32 {
     ENHANCED_SUPER = 5;
 };
 
+/// USB operational modes.
+type UsbMode = strict enum : uint32 {
+    NONE = 0;
+    HOST = 1;
+    PERIPHERAL = 2;
+    OTG = 3;
+};
+
 @packed
 type UsbSetup = struct {
     bm_request_type uint8;
@@ -73,6 +81,21 @@ type UsbInterfaceDescriptor = struct {
     i_interface uint8;
 };
 
+/// Mask for bit 7 of `bEndpointAddress` (or `bmRequestType`) used to extract the `EndpointDirection`.
+const ENDPOINT_DIRECTION_MASK uint8 = 0x80;
+
+/// Mask for bits [3:0] of `bEndpointAddress` used to extract the endpoint number.
+const ENDPOINT_NUMBER_MASK uint8 = 0x0f;
+
+/// Mask for bits [10:0] of `wMaxPacketSize` used to extract the maximum packet size.
+const ENDPOINT_MAX_PACKET_SIZE_MASK uint16 = 0x07ff;
+
+/// Mask for bits [1:0] of `bmAttributes` in SuperSpeed Endpoint Companion descriptor (`Mult`).
+const SS_EP_COMP_ISOCH_MULT_MASK uint8 = 0x03;
+
+/// Mask for bit 7 of `bmAttributes` in SuperSpeed Endpoint Companion descriptor (`SSP_ISO_COMP`).
+const SS_EP_COMP_ISOCH_COMP_MASK uint8 = 0x80;
+
 /// Endpoint transfer direction (IN from device to host, or OUT from host to device)
 /// encoded in bit 7 of the endpoint address (`bEndpointAddress`), as defined in
 /// USB 2.0 specification section 9.6.6.
@@ -80,6 +103,9 @@ type EndpointDirection = strict enum : uint8 {
     OUT = 0x00;
     IN = 0x80;
 };
+
+/// Mask for bits [1:0] of `bmAttributes` used to extract the `EndpointType`.
+const ENDPOINT_TYPE_MASK uint8 = 0x03;
 
 /// Endpoint transfer type as defined in USB 2.0 specification section 9.6.6.
 type EndpointType = strict enum : uint8 {
@@ -89,5 +115,224 @@ type EndpointType = strict enum : uint8 {
     INTERRUPT = 3;
 };
 
-/// Mask for bits [1:0] of `bmAttributes` used to extract the `EndpointType`.
-const ENDPOINT_TYPE_MASK uint8 = 0x03;
+/// Mask for bits [3:2] of `bmAttributes` used to extract the `SynchronizationType`.
+const SYNCHRONIZATION_TYPE_MASK uint8 = 0x0c;
+
+/// Endpoint synchronization type (bits [3:2] of `bmAttributes`), as defined in USB 2.0 specification section 9.6.6.
+type SynchronizationType = strict enum : uint8 {
+    NO_SYNCHRONIZATION = 0;
+    ASYNCHRONOUS = 1;
+    ADAPTIVE = 2;
+    SYNCHRONOUS = 3;
+};
+
+/// Mask for bits [5:4] of `bmAttributes` used to extract the `UsageType`.
+const USAGE_TYPE_MASK uint8 = 0x30;
+
+/// Endpoint usage type (bits [5:4] of `bmAttributes`), as defined in USB 2.0 specification section 9.6.6.
+type UsageType = flexible enum : uint8 {
+    DATA = 0;
+    FEEDBACK = 1;
+    IMPLICIT_FEEDBACK = 2;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// Mask for bits [6:5] of `bmRequestType` used to extract the `RequestType`.
+const REQUEST_TYPE_MASK uint8 = 0x60;
+
+/// Setup request type (bits [6:5] of `bmRequestType`), as defined in USB 2.0 specification Table 9-2.
+type RequestType = flexible enum : uint8 {
+    STANDARD = 0x00;
+    CLASS = 0x20;
+    VENDOR = 0x40;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// Mask for bits [4:0] of `bmRequestType` used to extract the `RequestRecipient`.
+const REQUEST_RECIPIENT_MASK uint8 = 0x1f;
+
+/// Setup request recipient (bits [4:0] of `bmRequestType`), as defined in USB 2.0 specification Table 9-2.
+type RequestRecipient = flexible enum : uint8 {
+    DEVICE = 0x00;
+    INTERFACE = 0x01;
+    ENDPOINT = 0x02;
+    OTHER = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// Combined `bmRequestType` for Standard Device requests (OUT/IN).
+const STANDARD_DEVICE_REQUEST_OUT uint8 = 0x00; // OUT | STANDARD | DEVICE
+const STANDARD_DEVICE_REQUEST_IN uint8 = 0x80; // IN | STANDARD | DEVICE
+
+/// Combined `bmRequestType` for Standard Interface requests (OUT/IN).
+const STANDARD_INTERFACE_REQUEST_OUT uint8 = 0x01; // OUT | STANDARD | INTERFACE
+const STANDARD_INTERFACE_REQUEST_IN uint8 = 0x81; // IN | STANDARD | INTERFACE
+
+/// Combined `bmRequestType` for Standard Endpoint requests (OUT/IN).
+const STANDARD_ENDPOINT_REQUEST_OUT uint8 = 0x02; // OUT | STANDARD | ENDPOINT
+const STANDARD_ENDPOINT_REQUEST_IN uint8 = 0x82; // IN | STANDARD | ENDPOINT
+
+/// Standard setup request codes as defined in USB 2.0 specification Table 9-4.
+type StandardRequest = flexible enum : uint8 {
+    GET_STATUS = 0x00;
+    CLEAR_FEATURE = 0x01;
+    SET_FEATURE = 0x03;
+    SET_ADDRESS = 0x05;
+    GET_DESCRIPTOR = 0x06;
+    SET_DESCRIPTOR = 0x07;
+    GET_CONFIGURATION = 0x08;
+    SET_CONFIGURATION = 0x09;
+    GET_INTERFACE = 0x0a;
+    SET_INTERFACE = 0x0b;
+    SYNCH_FRAME = 0x0c;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// Standard USB class codes as defined in USB 2.0 specification Table 9-8 and Table 9-12 (and the USB-IF Defined Class Codes registry).
+/// Architectural Note: Driver maintainers should explicitly handle `.is_unknown()` fallback
+/// paths in match/switch statements for extensible class codes and vendor protocols, preserving
+/// wire compatibility with novel USB hardware and future specification additions.
+type UsbClass = flexible enum : uint8 {
+    PER_INTERFACE = 0x00;
+    AUDIO = 0x01;
+    COMM = 0x02;
+    HID = 0x03;
+    PHYSICAL = 0x05;
+    IMAGING = 0x06;
+    PRINTER = 0x07;
+    MSC = 0x08;
+    HUB = 0x09;
+    CDC = 0x0a;
+    CCID = 0x0b;
+    SECURITY = 0x0d;
+    VIDEO = 0x0e;
+    HEALTHCARE = 0x0f;
+    AUDIO_VIDEO = 0x10;
+    BILLBOARD = 0x11;
+    TYPE_C_BRIDGE = 0x12;
+    DIAGNOSTIC = 0xdc;
+    WIRELESS = 0xe0;
+    MISC = 0xef;
+    APPLICATION_SPECIFIC = 0xfe;
+    VENDOR = 0xff;
+    /// By designating 0xee as @unknown UNDEFINED, it is impossible for a legitimate physical
+    /// USB device class descriptor to collide with our sentinel. This allows FIDL to safely
+    /// parse valid vendor-specific devices (0xff) while gracefully handling any unexpected or
+    /// newly invented class codes as is_unknown() == true.
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// Standard USB descriptor types as defined in USB 2.0 specification Table 9-5.
+type DescriptorType = flexible enum : uint8 {
+    DEVICE = 0x01;
+    CONFIGURATION = 0x02;
+    STRING = 0x03;
+    INTERFACE = 0x04;
+    ENDPOINT = 0x05;
+    DEVICE_QUALIFIER = 0x06;
+    OTHER_SPEED_CONFIGURATION = 0x07;
+    INTERFACE_POWER = 0x08;
+    OTG = 0x09;
+    DEBUG = 0x0a;
+    INTERFACE_ASSOCIATION = 0x0b;
+    BOS = 0x0f;
+    DEVICE_CAPABILITY = 0x10;
+    HID = 0x21;
+    HID_REPORT = 0x22;
+    HID_PHYSICAL = 0x23;
+    CS_INTERFACE = 0x24;
+    CS_ENDPOINT = 0x25;
+    HUB = 0x29;
+    HUB_SUPER_SPEED = 0x2a;
+    SS_EP_COMPANION = 0x30;
+    SS_ISOCH_EP_COMPANION = 0x31;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB feature selectors.
+type FeatureSelector = flexible enum : uint8 {
+    ENDPOINT_HALT = 0;
+    DEVICE_REMOTE_WAKEUP = 1;
+    DEVICE_TEST_MODE = 2;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Misc subclass codes.
+type MiscSubclass = flexible enum : uint8 {
+    RNDIS = 0x04;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Misc protocol codes.
+type MiscProtocol = flexible enum : uint8 {
+    RNDIS_ETHERNET = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Wireless subclass codes.
+type WirelessSubclass = flexible enum : uint8 {
+    MISC = 0x01;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Wireless protocol codes.
+type WirelessProtocol = flexible enum : uint8 {
+    MISC_RNDIS = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Vendor subclass codes.
+type VendorSubclass = flexible enum : uint8 {
+    ADB_FASTBOOT = 0x42;
+    VSOCK_BRIDGE = 0x43;
+    VENDOR = 0xff;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB ADB/Fastboot protocol codes (for VendorSubclass.ADB_FASTBOOT 0x42).
+type AdbFastbootProtocol = flexible enum : uint8 {
+    ADB = 0x01;
+    FASTBOOT = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Vsock protocol codes (for VendorSubclass.VSOCK_BRIDGE 0x43).
+type VsockProtocol = flexible enum : uint8 {
+    VSOCK_BRIDGE = 0x00;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB Test/Vendor protocol codes (for VendorSubclass.VENDOR 0xff).
+type TestVendorProtocol = flexible enum : uint8 {
+    TEST_FTDI = 0x01;
+    TEST_HID_ONE_ENDPOINT = 0x02;
+    TEST_HID_TWO_ENDPOINT = 0x03;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// Configuration attributes (`bm_attributes`).
+const CONFIGURATION_REMOTE_WAKEUP uint8 = 0x20;
+const CONFIGURATION_SELF_POWERED uint8 = 0x40;
+const CONFIGURATION_RESERVED_7 uint8 = 0x80;
+
+/// Device status bits returned by `GET_STATUS` for a device.
+const DEVICE_STATUS_SELF_POWERED uint16 = 0x0001;
+const DEVICE_STATUS_REMOTE_WAKEUP uint16 = 0x0002;
+
+/// Endpoint status bits returned by `GET_STATUS` for an endpoint.
+const ENDPOINT_STATUS_HALTED uint16 = 0x0001;

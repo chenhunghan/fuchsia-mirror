@@ -263,14 +263,19 @@ bool UdpWriteRead(perftest::RepeatState* state, int message_size, int message_co
   CHECK_ZERO_ERRNO(
       getsockopt(server_sock.get(), SOL_SOCKET, SO_RCVBUF, &rcvbuf_opt, &rcvbuf_optlen));
 
-  int want_rcvbuf = ExpectedGetBufferSize(message_size * message_count, BufferSizeType::kUdpRecv);
+  // The receive buffer must hold all `message_count` messages at once since
+  // they are all written before any is read. Netstacks charge a per-message
+  // bookkeeping overhead against the receive buffer in addition to the
+  // payload, so leave room for it on top of the payload bytes.
+  constexpr int kPerMessageRcvbufOverhead = 256;
+  const int rcv_bufsize = (message_size + kPerMessageRcvbufOverhead) * message_count;
+  int want_rcvbuf = ExpectedGetBufferSize(rcv_bufsize, BufferSizeType::kUdpRecv);
   // On Linux, payloads are stored with a fixed per-packet overhead. Linux
   // accounts for this overhead by setting the actual buffer size to double
   // the size set with SO_RCVBUF. This hack fails when SO_RCVBUF is small and
   // many packets are sent; avoid that case by setting RCVBUF only when the
   // bytes-to-be-sent exceed the default value (which is large).
   if (rcvbuf_opt < want_rcvbuf) {
-    int rcv_bufsize = message_size * message_count;
     CHECK_ZERO_ERRNO(
         setsockopt(server_sock.get(), SOL_SOCKET, SO_RCVBUF, &rcv_bufsize, sizeof(rcv_bufsize)));
     CHECK_ZERO_ERRNO(

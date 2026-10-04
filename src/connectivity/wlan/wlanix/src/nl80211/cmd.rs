@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use netlink_packet_utils::DecodeError;
-use num::FromPrimitive;
 use num_derive::FromPrimitive;
+use num_traits::FromPrimitive;
 use std::convert::TryFrom;
 
 use crate::nl80211::constants::*;

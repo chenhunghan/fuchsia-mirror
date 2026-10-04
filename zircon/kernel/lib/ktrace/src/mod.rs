@@ -7,7 +7,8 @@
 use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num, ints_disabled};
 use crate::kernel::thread::{FxtRef, ThreadPtr};
 pub use crate::kernel::types::Koid;
-pub use crate::platform_rs::timer::{InstantBootTicks, timer_current_boot_ticks};
+pub use crate::platform_rs::timer::InstantBootTicks;
+use crate::platform_rs::timer::timer_current_boot_ticks;
 use core::cell::UnsafeCell;
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::NonNull;
@@ -18,10 +19,9 @@ pub use fxt_layout::{
     LargeRecordHeader, RecordHeader, RecordType, StringRefHeader,
 };
 use kalloc::Box;
-pub use kstring::declare_interned_category;
-use kstring::declare_interned_string;
 use kstring::interned_category::InternedCategory;
 pub use kstring::interned_string::InternedString;
+pub use kstring::{declare_interned_category, declare_interned_string};
 use spsc_buffer::{Buffer, NoOpAllocator, Reservation};
 use zx_status::Status;
 use zx_types::zx_status_t;
@@ -72,8 +72,10 @@ pub enum ArgValue<'a> {
     Uint64(u64),
     Double(f64),
     String(&'a str),
+    InternedString(&'static InternedString),
     Pointer(usize),
     Koid(u64),
+    Blob(&'a [u8]),
 }
 
 impl<'a> From<bool> for ArgValue<'a> {
@@ -109,6 +111,16 @@ impl<'a> From<f64> for ArgValue<'a> {
 impl<'a> From<&'a str> for ArgValue<'a> {
     fn from(v: &'a str) -> Self {
         ArgValue::String(v)
+    }
+}
+impl<'a> From<&'a [u8]> for ArgValue<'a> {
+    fn from(v: &'a [u8]) -> Self {
+        ArgValue::Blob(v)
+    }
+}
+impl<'a> From<&'static InternedString> for ArgValue<'a> {
+    fn from(v: &'static InternedString) -> Self {
+        ArgValue::InternedString(v)
     }
 }
 
@@ -205,6 +217,8 @@ impl<'a> Argument<'a> {
             | ArgValue::Pointer(_)
             | ArgValue::Koid(_) => 2,
             ArgValue::String(s) => 1 + s.len().min(0x7fff).div_ceil(8),
+            ArgValue::InternedString(_) => 1,
+            ArgValue::Blob(b) => 1 + b.len().div_ceil(8).min(0x7fff),
         }
     }
 
@@ -256,6 +270,14 @@ impl<'a> Argument<'a> {
                 res.write_word(header.bits())?;
                 res.write_bytes(&s.as_bytes()[..string_len as usize])?;
             }
+            ArgValue::InternedString(s) => {
+                let mut header =
+                    ArgumentHeader::for_argument(name_id, size_words, ArgumentType::String);
+                let mut str_ref = StringRefHeader::new();
+                str_ref.set_is_inline(false).set_id_or_len(s.id());
+                header.set_value_bits(str_ref.bits() as u32);
+                res.write_word(header.bits())?;
+            }
             ArgValue::Pointer(v) => {
                 let header =
                     ArgumentHeader::for_argument(name_id, size_words, ArgumentType::Pointer);
@@ -272,6 +294,14 @@ impl<'a> Argument<'a> {
                     ArgumentHeader::for_argument(name_id, size_words, ArgumentType::Bool);
                 header.set_value_bits(*v as u32);
                 res.write_word(header.bits())?;
+            }
+            ArgValue::Blob(b) => {
+                let mut header =
+                    ArgumentHeader::for_argument(name_id, size_words, ArgumentType::Blob);
+                let byte_len = b.len().min((size_words as usize - 1) * 8);
+                header.set_value_bits(byte_len as u32);
+                res.write_word(header.bits())?;
+                res.write_bytes(&b[..byte_len])?;
             }
         }
         Ok(())
@@ -295,7 +325,7 @@ impl<'a, const N: usize> KTraceScope<'a, N> {
         context: Context,
         args: [Argument<'a>; N],
     ) -> Self {
-        let timestamp = timer_current_boot_ticks();
+        let timestamp = KTrace::timestamp();
         Self { category, name, timestamp, context, args }
     }
 }
@@ -304,7 +334,7 @@ impl<'a, const N: usize> Drop for KTraceScope<'a, N> {
     #[inline(never)]
     #[cold]
     fn drop(&mut self) {
-        let end_time = timer_current_boot_ticks();
+        let end_time = KTrace::timestamp();
         let ktrace = KTrace::get_instance();
         ktrace.emit_event(
             EventType::DurationComplete,
@@ -472,7 +502,7 @@ impl KTraceBuffer {
 
         match self.buffer_mut().reserve(total_size) {
             Err(status) => {
-                let now = timer_current_boot_ticks();
+                let now = KTrace::timestamp();
                 self.drop_stats_mut().track(now, size);
                 Err(status)
             }
@@ -623,6 +653,12 @@ impl KTrace {
     pub fn get_instance() -> &'static Self {
         // SAFETY: KTrace must be initialized during kernel boot.
         unsafe { &*INSTANCE.0.get().cast::<KTrace>() }
+    }
+
+    /// Returns the current timestamp from the ktrace clock source.
+    #[inline]
+    pub fn timestamp() -> InstantBootTicks {
+        timer_current_boot_ticks()
     }
 
     /// Returns the raw pointer to the KTraceBuffer for the given CPU.
@@ -1472,8 +1508,10 @@ mod tests {
             Argument::new(DROP_STATS_REF, 101112u64),
             Argument::new(DROP_STATS_REF, 123.456f64),
             Argument::new(DROP_STATS_REF, "hello_world"),
+            Argument::new(DROP_STATS_REF, DROP_STATS_REF),
             Argument::new(DROP_STATS_REF, ArgValue::Pointer(0x12345678)),
             Argument::new(DROP_STATS_REF, Koid(9999)),
+            Argument::new(DROP_STATS_REF, &b"blob_payload"[..]),
         ];
 
         let total_arg_words: usize = args.iter().map(|a| a.size_words()).sum();
@@ -1571,7 +1609,15 @@ mod tests {
         expect_true!(&read_bytes[(word_idx + 1) * 8..(word_idx + 1) * 8 + 11] == b"hello_world");
         word_idx += 3;
 
-        // 8: Pointer (2 words)
+        // 8: InternedString (1 word)
+        let is_hdr =
+            u64::from_ne_bytes(read_bytes[word_idx * 8..(word_idx + 1) * 8].try_into().unwrap());
+        expect_eq!(is_hdr & 0xf, 6); // kString
+        expect_eq!((is_hdr >> 4) & 0xfff, 1);
+        expect_eq!((is_hdr >> 32) & 0xffff, u64::from(DROP_STATS_REF.id()));
+        word_idx += 1;
+
+        // 9: Pointer (2 words)
         let ptr_hdr =
             u64::from_ne_bytes(read_bytes[word_idx * 8..(word_idx + 1) * 8].try_into().unwrap());
         expect_eq!(ptr_hdr & 0xf, 7); // kPointer
@@ -1582,7 +1628,7 @@ mod tests {
         expect_eq!(ptr_val, 0x12345678);
         word_idx += 2;
 
-        // 9: Koid (2 words)
+        // 10: Koid (2 words)
         let koid_hdr =
             u64::from_ne_bytes(read_bytes[word_idx * 8..(word_idx + 1) * 8].try_into().unwrap());
         expect_eq!(koid_hdr & 0xf, 8); // kKoid
@@ -1593,13 +1639,22 @@ mod tests {
         expect_eq!(koid_val, 9999);
         word_idx += 2;
 
+        // 11: Blob (1 header + 2 payload words = 3 words)
+        let blob_hdr =
+            u64::from_ne_bytes(read_bytes[word_idx * 8..(word_idx + 1) * 8].try_into().unwrap());
+        expect_eq!(blob_hdr & 0xf, 10); // kBlob
+        expect_eq!((blob_hdr >> 4) & 0xfff, 3);
+        expect_eq!((blob_hdr >> 32) as u32, 12); // 12 bytes
+        expect_true!(&read_bytes[(word_idx + 1) * 8..(word_idx + 1) * 8 + 12] == b"blob_payload");
+        word_idx += 3;
+
         expect_eq!(word_idx, total_words);
     }
 
     /// A scope with arguments can be bound to a local variable.
     #[test]
     fn scope_owns_arguments() {
-        let value = timer_current_boot_ticks().0 as u64;
+        let value = KTrace::timestamp().0 as u64;
         let scope = begin_scope!(META_CAT, "scope_owns_arguments", "val" => value);
 
         expect_ne!(scope.timestamp.0, 0);

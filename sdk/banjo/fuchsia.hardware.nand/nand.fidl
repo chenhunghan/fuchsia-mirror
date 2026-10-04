@@ -152,7 +152,7 @@ closed protocol Nand {
         @in_out
         op NandOperation;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         @mutable
         op NandOperation;
     });
@@ -162,7 +162,7 @@ closed protocol Nand {
     /// returned data should be saved somewhere else, along blocks that become
     /// bad after they've been in use.
     strict GetFactoryBadBlockList() -> (struct {
-        status zx.Status;
+        status zx.Result;
         bad_blocks vector<uint32>:MAX;
     });
 };

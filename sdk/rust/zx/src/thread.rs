@@ -138,7 +138,7 @@ impl Thread {
         synth_code: u32,
         synth_data: u32,
     ) -> Result<(), Status> {
-        let arch = unsafe { std::mem::zeroed::<sys::zx_exception_header_arch_t>() };
+        let arch: sys::zx_exception_header_arch_t = zerocopy::FromZeros::new_zeroed();
         let context = sys::zx_exception_context_t { arch, synth_code, synth_data };
 
         // SAFETY: basic FFI call. `&context` is a valid pointer.

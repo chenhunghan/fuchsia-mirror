@@ -6,7 +6,13 @@
 #define SRC_UI_SCENIC_LIB_FLATLAND_FLATLAND_SESSION_TYPES_H_
 
 #include <fidl/fuchsia.ui.composition/cpp/fidl.h>
+#include <lib/fit/result.h>
+#include <lib/zx/counter.h>
+#include <lib/zx/event.h>
+#include <lib/zx/handle.h>
+#include <zircon/status.h>
 
+#include <variant>
 #include <vector>
 
 #include "src/ui/scenic/lib/allocation/image_metadata.h"
@@ -45,6 +51,60 @@ constexpr LayerId kInvalidLayerId = LayerId(0);
 constexpr LayerStackId kInvalidLayerStackId = LayerStackId(0);
 constexpr ImageId kInvalidImageId = ImageId(0);
 constexpr ViewportId kInvalidViewportId = ViewportId(0);
+
+// Session-side shape of fuchsia.ui.composition.WaitFence: a fence Scenic waits on.
+class WaitFence {
+ public:
+  WaitFence() = default;
+  ~WaitFence() = default;
+  WaitFence(WaitFence&&) noexcept = default;
+  WaitFence& operator=(WaitFence&&) noexcept = default;
+  WaitFence(const WaitFence&) = delete;
+  WaitFence& operator=(const WaitFence&) = delete;
+
+  // Validates `fence`'s object type and rights (ZX_INFO_HANDLE_BASIC) and takes ownership of the
+  // handle.  Errors:
+  //   ZX_ERR_BAD_HANDLE     `fence` carries an invalid handle
+  //   ZX_ERR_WRONG_TYPE     `basic` is not an EVENT or EVENTPAIR, or `timestamp` not a COUNTER
+  //   ZX_ERR_ACCESS_DENIED  a required right is missing: ZX_RIGHT_WAIT
+  [[nodiscard]] static fit::result<zx_status_t, WaitFence> From(
+      fuchsia_ui_composition::wire::WaitFence fence);
+
+  bool is_valid() const;
+
+  zx::handle TakeHandle();
+
+ private:
+  std::variant<std::monostate, zx::event, zx::counter> fence_;
+};
+
+// Session-side shape of fuchsia.ui.composition.SignalFence: a fence Scenic signals,
+// writing the timestamp into it first if it is a counter.
+class SignalFence {
+ public:
+  SignalFence() = default;
+  ~SignalFence() = default;
+  SignalFence(SignalFence&&) noexcept = default;
+  SignalFence& operator=(SignalFence&&) noexcept = default;
+  SignalFence(const SignalFence&) = delete;
+  SignalFence& operator=(const SignalFence&) = delete;
+
+  // As WaitFence::From(). The required rights differ per arm, matching what
+  // signaling does (`utils::SignalCounterFences()`: `write()`, then `signal()`):
+  //   `basic` (EVENT):        ZX_RIGHT_SIGNAL
+  //   `timestamp` (COUNTER):  ZX_RIGHT_WRITE | ZX_RIGHT_SIGNAL
+  [[nodiscard]] static fit::result<zx_status_t, SignalFence> From(
+      fuchsia_ui_composition::wire::SignalFence fence);
+
+  bool is_valid() const;
+
+  // Appends the fence to the classic release leg (`PresentArgs.release_fences` /
+  // `release_counters`), leaving this invalid.
+  void MoveInto(std::vector<zx::event>& events, std::vector<zx::counter>& counters);
+
+ private:
+  std::variant<std::monostate, zx::event, zx::counter> fence_;
+};
 
 // The session-side state of a single Flatland2 layer.
 //
@@ -85,6 +145,18 @@ struct LayerObject {
   // Stored optimization hints from LayerProperties.
   std::vector<types::Rectangle> hint_damage_rects;
   std::vector<types::Rectangle> hint_visible_rects;
+
+  // Set by `SetLayerImage()`. Moved into the `fence_queue_` wait set by the
+  // first `Present()` that publishes this layer in `Mode::kImage`, or dropped
+  // un-waited if the binding is replaced first (`SetLayerImage()`, `ResetLayer()`,
+  // `UnbindLayerImage()`). Valid only while an image is bound.
+  WaitFence pending_acquire_fence;
+
+  // The current binding's release fence.  No `Present()` consumes it (unlike
+  // `pending_acquire`): it stays with the binding for its entire displayed
+  // lifetime (possibly forever).  On supersession it joins the *next*
+  // `Present()`'s release fences and rides the classic leg from there.
+  SignalFence binding_release_fence;
 
   // The number of references to this layer: one for the client's LayerId binding
   // (Flatland2 sessions; the facade holds none) and one per layer-stack membership.

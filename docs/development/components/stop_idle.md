@@ -213,9 +213,7 @@ You may follow these steps for those connections:
   to declare the capability if this protocol connection is derived from another
   connection, and is otherwise not normally served from the outgoing directory.
 
-- Add `delivery: "on_readable"` when declaring the capability. You need to add
-  your component to the `delivery_type` visibility list at
-  `tools/cmc/build/restricted_features/BUILD.gn`. The framework
+- Add `delivery: "on_readable"` when declaring the capability. The framework
   will then monitor the readable signal on the server endpoint of
   new connection requests, and connect the server endpoint to the provider
   component when there is a message pending. Example:

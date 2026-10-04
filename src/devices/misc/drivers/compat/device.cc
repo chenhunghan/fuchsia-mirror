@@ -941,7 +941,7 @@ zx_status_t Device::AddCompositeNodeSpec(const char* name, const composite_node_
   }
 
   fidl::Arena allocator;
-  auto parents = fidl::VectorView<fdf::wire::ParentSpec>(allocator, spec->parent_count);
+  auto parents = fidl::VectorView<fdf::wire::ParentSpec2>(allocator, spec->parent_count);
   for (size_t i = 0; i < spec->parent_count; i++) {
     auto parents_result = ConvertNodeRepresentation(allocator, spec->parents[i]);
     if (!parents_result.is_ok()) {
@@ -952,7 +952,7 @@ zx_status_t Device::AddCompositeNodeSpec(const char* name, const composite_node_
 
   auto fidl_spec = fdf::wire::CompositeNodeSpec::Builder(allocator)
                        .name(fidl::StringView(allocator, name))
-                       .parents(std::move(parents))
+                       .parents2(std::move(parents))
                        .Build();
 
   auto result = fidl::WireCall(*composite_node_manager)->AddSpec(std::move(fidl_spec));

@@ -16,28 +16,28 @@ from api.log import log_pb2
 
 
 def add_output_file_digests_to_record(
-    log_record: log_pb2.LogRecord, digests: dict[Path, str]
-):
+    log_record: log_pb2.LogRecord, digests: dict[str, str]
+) -> None:
     log_record.command.output.output_files.extend(digests.keys())
     for k, v in digests.items():
         log_record.remote_metadata.output_file_digests[str(k)] = v
 
 
 class ActionDifferTests(unittest.TestCase):
-    def test_construction_only(self):
+    def test_construction_only(self) -> None:
         left_log_dump = log_pb2.LogDump()
         right_log_dump = log_pb2.LogDump()
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         action_diff.ActionDiffer(left, right, cfg)
 
-    def test_trace_output_not_in_record(self):
+    def test_trace_output_not_in_record(self) -> None:
         left_log_dump = log_pb2.LogDump()
         right_log_dump = log_pb2.LogDump()
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
         path = Path("does/not/exist.txt")
         out = io.StringIO()
@@ -53,7 +53,7 @@ class ActionDifferTests(unittest.TestCase):
             any(check_message in line for line in root_causes[0].explanation)
         )
 
-    def test_trace_output_already_matches(self):
+    def test_trace_output_already_matches(self) -> None:
         path = Path("obj/foo.o")
         left_record = log_pb2.LogRecord()
         right_record = log_pb2.LogRecord()
@@ -64,7 +64,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         out = io.StringIO()
@@ -75,7 +75,7 @@ class ActionDifferTests(unittest.TestCase):
         self.assertIn(check_message, out.getvalue())
         self.assertEqual(len(root_causes), 0)
 
-    def test_trace_output_to_originating_action_with_command_diff(self):
+    def test_trace_output_to_originating_action_with_command_diff(self) -> None:
         path = Path("obj/foo.o")
         left_record = log_pb2.LogRecord()
         left_record.remote_metadata.action_digest = "18723601ce7d/145"
@@ -89,7 +89,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         left_action = remotetool.ShowActionResult(
@@ -121,7 +121,7 @@ class ActionDifferTests(unittest.TestCase):
             any(check_message in line for line in root_causes[0].explanation)
         )
 
-    def test_trace_output_to_action_with_platform_diff(self):
+    def test_trace_output_to_action_with_platform_diff(self) -> None:
         path = Path("obj/foo.o")
         left_record = log_pb2.LogRecord()
         left_record.remote_metadata.action_digest = "18723601ce7d/145"
@@ -135,7 +135,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         left_action = remotetool.ShowActionResult(
@@ -167,7 +167,7 @@ class ActionDifferTests(unittest.TestCase):
             any(check_message in line for line in root_causes[0].explanation)
         )
 
-    def test_trace_output_to_action_with_extra_input(self):
+    def test_trace_output_to_action_with_extra_input(self) -> None:
         path = Path("obj/foo.o")
         left_record = log_pb2.LogRecord()
         left_record.remote_metadata.action_digest = "18723601ce7d/145"
@@ -181,7 +181,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         left_action = remotetool.ShowActionResult(
@@ -213,7 +213,7 @@ class ActionDifferTests(unittest.TestCase):
             any(check_message in line for line in root_causes[0].explanation)
         )
 
-    def test_trace_output_to_action_with_different_source_input(self):
+    def test_trace_output_to_action_with_different_source_input(self) -> None:
         path = Path("obj/foo.o")
         left_record = log_pb2.LogRecord()
         left_record.remote_metadata.action_digest = "18723601ce7d/145"
@@ -229,7 +229,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         left_action = remotetool.ShowActionResult(
@@ -263,7 +263,9 @@ class ActionDifferTests(unittest.TestCase):
             any(check_message in line for line in root_causes[0].explanation)
         )
 
-    def test_trace_output_to_action_with_intermediate_input_not_in_record(self):
+    def test_trace_output_to_action_with_intermediate_input_not_in_record(
+        self,
+    ) -> None:
         path = Path("obj/foo.o")
         intermediate = Path("gen/include/header.h")
         remote_working_dir = Path("build/here")
@@ -282,7 +284,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         # actions for the outer call to trace_artifact()
@@ -331,7 +333,9 @@ class ActionDifferTests(unittest.TestCase):
             )
         )
 
-    def test_trace_output_to_action_with_different_intermediate_input(self):
+    def test_trace_output_to_action_with_different_intermediate_input(
+        self,
+    ) -> None:
         path = Path("obj/foo.o")
         intermediate = Path("gen/include/header.h")
         source = Path("lib/api.h")
@@ -374,7 +378,7 @@ class ActionDifferTests(unittest.TestCase):
         )
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         # actions for the outer call to trace_artifact()
@@ -437,7 +441,7 @@ class ActionDifferTests(unittest.TestCase):
             )
         )
 
-    def test_trace_actions_missing_digest_from_record(self):
+    def test_trace_actions_missing_digest_from_record(self) -> None:
         left_action_digest = "44182360ce7d/76"
         right_action_digest = "217733ba6ade/76"
         left_record = log_pb2.LogRecord()
@@ -448,7 +452,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         left_action = remotetool.ShowActionResult(
@@ -474,7 +478,7 @@ class ActionDifferTests(unittest.TestCase):
         self.assertIn(check_message, out.getvalue())
         self.assertEqual(len(root_causes), 0)
 
-    def test_trace_actions_with_command_diff(self):
+    def test_trace_actions_with_command_diff(self) -> None:
         left_action_digest = "44182360ce7d/76"
         right_action_digest = "217733ba6ade/76"
         left_record = log_pb2.LogRecord()
@@ -485,7 +489,7 @@ class ActionDifferTests(unittest.TestCase):
         right_log_dump = log_pb2.LogDump(records=[right_record])
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         left_action = remotetool.ShowActionResult(
@@ -519,7 +523,7 @@ class ActionDifferTests(unittest.TestCase):
             any(check_message in line for line in root_causes[0].explanation)
         )
 
-    def test_trace_actions_with_different_intermediate_input(self):
+    def test_trace_actions_with_different_intermediate_input(self) -> None:
         left_action_digest = "18723601ce7d/145"
         right_action_digest = "73733ba65ade/145"
         intermediate = Path("gen/include/header.h")
@@ -559,7 +563,7 @@ class ActionDifferTests(unittest.TestCase):
         )
         left = reproxy_logs.ReproxyLog(left_log_dump)
         right = reproxy_logs.ReproxyLog(right_log_dump)
-        cfg = dict()
+        cfg: dict[str, str] = dict()
         diff = action_diff.ActionDiffer(left, right, cfg)
 
         # actions for the outer call to trace_artifact()

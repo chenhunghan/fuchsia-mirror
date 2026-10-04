@@ -43,11 +43,9 @@ pub fn serve(
                         collection_inputs,
                         ..
                     } = source
-                        .lock_resolved_state()
+                        .component_sandbox()
                         .await
-                        .map_err(|e| format_err!("failed to resolve component: {:?}", e))?
-                        .sandbox
-                        .clone();
+                        .map_err(|e| format_err!("failed to resolve component: {:?}", e))?;
                     if !is_dispatcher_runner(&program_input, source.as_weak().into()).await {
                         // This API is explerimental and making it widely available has security
                         // implications. To allow us to get a bit of mileage on it to determine the

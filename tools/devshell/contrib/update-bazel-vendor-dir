@@ -35,6 +35,11 @@
 ##
 ## [0] https://fuchsia.dev/fuchsia-src/contribute/governance/policy/osrb-process
 ##
+## NOTE: Files or directories from vendored repositories that are not needed by
+## the build (e.g. large prebuilt binaries) can be dropped by adding an
+## `--exclude='<glob>'` below. The glob is relative to the Bazel vendor
+## directory, and must match at least one path.
+##
 
 # shellcheck source=/dev/null
 source "${FUCHSIA_DIR}/tools/devshell/lib/vars.sh" || exit $?
@@ -56,6 +61,9 @@ readonly BAZEL_VENDOR_DIR="${FUCHSIA_DIR}/third_party/bazel_vendor"
 readonly BAZEL_REGISTRY_DIR="${FUCHSIA_DIR}/third_party/bazel_registries/bcr.bazel.build"
 # LINT.ThenChange(//build/bazel/enable_vendor_mode.bazelrc:bazel_registry_dir)
 
+# Excludes:
+#   rules_rust+/*/cargo-bazel{,.exe}: Prebuilt crate_universe generator binaries
+#     (~185 MB) shipped in rules_rust release archives. Unused by the build.
 "${PREBUILT_PYTHON3}" "${FUCHSIA_DIR}"/build/bazel/scripts/update_bazel_vendor_dir.py \
     --workspace="$(fx-get-bazel-workspace)" \
     --bazel="$(fx-get-bazel)" \
@@ -81,4 +89,6 @@ readonly BAZEL_REGISTRY_DIR="${FUCHSIA_DIR}/third_party/bazel_registries/bcr.baz
     --stub-repo='@@apple_support+' \
     --stub-repo='@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools' \
     --stub-repo='@@google_benchmark+' \
-    --stub-repo='@@rules_kotlin+'
+    --stub-repo='@@rules_kotlin+' \
+    --exclude='rules_rust+/*/cargo-bazel' \
+    --exclude='rules_rust+/*/cargo-bazel.exe'

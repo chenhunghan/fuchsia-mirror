@@ -74,7 +74,7 @@ auto CreateBufferCollectionConstraints(uint32_t cpu_usage) {
 
 auto CreateInputFormatDetails(const std::string& scheme, const std::vector<uint8_t>& key_id,
                               const std::vector<uint8_t>& init_vector) {
-  constexpr uint64_t kFormatDetailsVersionOrdinal = 0;
+  constexpr uint64_t kFormatDetailsVersionOrdinal = 1;
 
   fuchsia::media::FormatDetails details;
   details.set_format_details_version_ordinal(kFormatDetailsVersionOrdinal);

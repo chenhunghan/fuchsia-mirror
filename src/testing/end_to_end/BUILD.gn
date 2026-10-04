@@ -95,7 +95,6 @@ group_with_no_dir_target_deps("core_x64_unstable_tests") {
     # This test is designed to always fail to verify the test exoneration
     # mechanism.
     "examples/exoneration_failing_test($host_toolchain)",
-    "//src/developer/ffx/plugins/log/tests/e2e:ffx_log_e2e_test($host_toolchain)",
   ]
 }
 

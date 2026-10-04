@@ -82,6 +82,7 @@ if (is_host) {
     library_deps = [
       ":build_utils",
       ":stdio_redirection",
+      "//build/rbe:rbe_settings",
     ]
   }
 
@@ -224,6 +225,10 @@ if (is_host) {
 
   python_build_time_tests("bazel_tests_utils_test") {
     tests = [ "bazel_tests_utils_test.py" ]
+    inputs = [
+      "//build/bazel/rules/testing/fx_test.bzl",
+      "//build/bazel/starlark/FuchsiaTestInfo.cquery",
+    ]
     deps = [ ":bazel_tests_utils" ]
   }
 
@@ -333,6 +338,7 @@ group("tests") {
     ":build_utils_test($host_toolchain)",
     ":compute_content_hash_test($host_toolchain)",
     ":generate_host_test_wrapper_test($host_toolchain)",
+    ":generate_invocation_bazelrc_test($host_toolchain)",
     ":get_git_head_commit_test($host_toolchain)",
     ":minimal_workspace_test($host_toolchain)",
     ":remote_services_utils_test($host_toolchain)",
@@ -341,4 +347,42 @@ group("tests") {
     ":stdio_redirection_test($host_toolchain)",
     ":workspace_utils_test($host_toolchain)",
   ]
+}
+
+if (is_host) {
+  # Python scripts in this directory that aren't part of any other Python
+  # target, usually because they're run directly by action() or Bazel rules.
+  # Listing them here makes them subject to type checking.
+  python_library("type_checked_scripts") {
+    testonly = true
+
+    # This target only exists for type checking; depending on it would package
+    # a grab-bag of unrelated scripts.
+    visibility = [
+      ":*",
+      "//build:*",
+    ]
+    sources = [
+      "bazel_tool.py",
+      "check_regenerator_inputs.py",
+      "copy_assembled_system_outputs.py",
+      "copy_bazel_build_group_outputs.py",
+      "copy_bazel_debug_symbols.py",
+      "create_gn_targets_dir.py",
+      "export_rules_fuchsia.py",
+      "generate-bazel-install.py",
+      "git-clone-then-apply-bundle.py",
+      "hardlink-directory.py",
+      "merge_bazel_compdb.py",
+      "parse-workspace-event-log.py",
+      "prepare-fuchsia-checkout.py",
+      "refresh-bazel-compdb-bin.py",
+      "symlink-directory.py",
+      "update_bazel_vendor_dir.py",
+    ]
+    library_deps = [
+      # For copy_bazel_debug_symbols.py.
+      "//build/api:debug_symbols",
+    ]
+  }
 }

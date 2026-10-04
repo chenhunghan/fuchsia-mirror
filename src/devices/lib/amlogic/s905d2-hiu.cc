@@ -62,8 +62,9 @@ zx_status_t s905d2_hiu_init(zx_handle_t mmio_resource, fdf::MmioBuffer* device) 
   return ZX_OK;
 }
 
-zx_status_t s905d2_hiu_init_etc(fdf::MmioBuffer* device, fdf::MmioView hiubase) {
-  *device = std::move(hiubase);
+zx_status_t s905d2_hiu_init_etc(std::optional<fdf::MmioView>* device,
+                                const fdf::MmioView& hiubase) {
+  device->emplace(hiubase);
   return ZX_OK;
 }
 

@@ -173,7 +173,6 @@ static_library("ddk") {
     "//src/devices/misc/drivers/test:*",
     "//src/devices/misc/drivers/test-parent:*",
     "//src/devices/ml/drivers/aml-nna:*",
-    "//src/devices/ml/drivers/usb-harriet:*",
     "//src/devices/nand/drivers/aml-rawnand:*",
     "//src/devices/nand/drivers/aml-spinand:*",
     "//src/devices/nand/drivers/broker:*",

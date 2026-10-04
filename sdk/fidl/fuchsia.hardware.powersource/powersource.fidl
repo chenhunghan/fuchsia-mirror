@@ -73,7 +73,7 @@ type BatteryInfo = struct {
 closed protocol Source {
     /// Get device info.
     strict GetPowerInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         info SourceInfo;
     });
 
@@ -81,13 +81,13 @@ closed protocol Source {
     /// asserted when power info or battery info changes. ZX_USER_SIGNAL_0 is
     /// reset when either `GetPowerInfo()` or `GetBatteryInfo()` is called.
     strict GetStateChangeEvent() -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         handle zx.Handle:<EVENT, zx.Rights.WAIT>;
     });
 
     /// Get battery info. Only supported if type == PowerType::BATTERY.
     strict GetBatteryInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         info BatteryInfo;
     });
 };

@@ -45,8 +45,10 @@ if [[ "${is_test_execution}" == false ]]; then
   exit $?
 fi
 
-fx-command-run host-tool --print symbolizer > /dev/null
-if [[ "$host_tests_only" == false ]]; then
+if [[ ! -x "${HOST_OUT_DIR}/symbolizer" ]]; then
+  fx-command-run host-tool --print symbolizer > /dev/null
+fi
+if [[ "$host_tests_only" == false && ! -x "${HOST_OUT_DIR}/ffx" ]]; then
   fx-command-run host-tool --print ffx > /dev/null
 fi
 

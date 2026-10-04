@@ -29,6 +29,7 @@ class FifoTest : public testing::TestWithParam<bool> {
  protected:
   class TFifo : public Fifo<T> {
    public:
+    using Fifo<T>::buffer_;
     using Fifo<T>::first_;
     using Fifo<T>::read_;
     using Fifo<T>::write_;
@@ -97,6 +98,37 @@ TEST_P(FifoTestU32, ReInitTest) {
   fifo_.Release();
   ASSERT_TRUE(fifo_.Init(bti_, GetParam()).is_ok());
 
+  ASSERT_EQ(fifo_.write_, fifo_.first_);
+  ASSERT_EQ(fifo_.read_, fifo_.first_);
+}
+
+TEST_P(FifoTestU32, ReInitSameCacheOptionReusesBuffer) {
+  const dma_buffer::ContiguousBuffer* prev_buffer = fifo_.buffer_.get();
+  ASSERT_NE(prev_buffer, nullptr);
+
+  fifo_.Write(fifo_.write_);
+  fifo_.Advance(fifo_.write_);
+  ASSERT_NE(fifo_.write_, fifo_.first_);
+
+  ASSERT_TRUE(fifo_.Init(bti_, GetParam()).is_ok());
+
+  EXPECT_EQ(fifo_.buffer_.get(), prev_buffer);
+  ASSERT_EQ(fifo_.write_, fifo_.first_);
+  ASSERT_EQ(fifo_.read_, fifo_.first_);
+}
+
+TEST_P(FifoTestU32, ReInitDifferentCacheOption) {
+  fifo_.Write(fifo_.write_);
+  fifo_.Advance(fifo_.write_);
+  ASSERT_NE(fifo_.write_, fifo_.first_);
+
+  const bool new_cached = !GetParam();
+  ASSERT_TRUE(fifo_.Init(bti_, new_cached).is_ok());
+
+  const dma_buffer::CacheOptions expected_cache_options =
+      new_cached ? dma_buffer::CacheOptions::kEnabled : dma_buffer::CacheOptions::kDisabled;
+  ASSERT_NE(fifo_.buffer_, nullptr);
+  ASSERT_EQ(fifo_.buffer_->cache_options(), expected_cache_options);
   ASSERT_EQ(fifo_.write_, fifo_.first_);
   ASSERT_EQ(fifo_.read_, fifo_.first_);
 }

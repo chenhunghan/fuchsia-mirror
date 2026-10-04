@@ -68,13 +68,21 @@ impl<T: Send + Sync + 'static> RcuArc<T> {
     }
 
     /// Returns `true` if the RCU wrapper currently contains a value.
+    ///
+    /// Unlike `self.upgrade().is_some()`, this neither takes a transient strong reference nor
+    /// enters an `RcuReadScope`. A non-null pointer stored in the `RcuArc` always owns a strong
+    /// count, and the pointer is never dereferenced, so observing a non-null pointer is sufficient.
+    /// This guarantees that calling `is_some()` can never result in the caller running `T::drop()`,
+    /// which matters when `T::drop()` may acquire locks.
     pub fn is_some(&self) -> bool {
-        self.upgrade().is_some()
+        !self.ptr.is_null()
     }
 
     /// Returns `true` if the RCU wrapper does not contain a value.
+    ///
+    /// See [`Self::is_some`] for why this does not upgrade.
     pub fn is_none(&self) -> bool {
-        self.upgrade().is_none()
+        !self.is_some()
     }
 
     /// Extract the raw pointer from an `Option<Arc<T>>`.

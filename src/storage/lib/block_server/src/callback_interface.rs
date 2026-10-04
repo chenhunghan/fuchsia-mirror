@@ -4,8 +4,8 @@
 
 use crate::verifier::Verifier;
 use crate::{
-    ActiveRequests, DecodedRequest, DeviceInfo, HandleRequestResult, IntoOrchestrator, OffsetMap,
-    Operation, RequestId, SessionHelper, TraceFlowId, WriteFlags,
+    ActiveRequests, DecodedRequest, DeviceInfo, HandleRequestResult, IntoOrchestrator, KeyRegistry,
+    OffsetMap, Operation, RequestId, SessionHelper, TraceFlowId, WriteFlags,
 };
 use anyhow::Error;
 use block_protocol::{BlockFifoRequest, BlockFifoResponse};
@@ -108,6 +108,7 @@ pub struct SessionManager<I: Interface + ?Sized> {
     block_size: u32,
     // These represent active *client* requests, which correspond to one or more in-flight requests.
     active_requests: ActiveRequests<Arc<Session<I>>>,
+    key_registry: KeyRegistry,
     inflight_requests: Mutex<InflightRequests>,
     no_inflight_requests_condvar: Condvar,
     inner: Mutex<SessionManagerInner<I>>,
@@ -215,6 +216,10 @@ impl<I: Interface + ?Sized> super::SessionManager for SessionManager<I> {
     fn active_requests(&self) -> &ActiveRequests<Arc<Session<I>>> {
         &self.active_requests
     }
+
+    fn key_registry(&self) -> &KeyRegistry {
+        &self.key_registry
+    }
 }
 
 impl<I: Interface + ?Sized> SessionManager<I> {
@@ -235,6 +240,7 @@ impl<I: Interface + ?Sized> SessionManager<I> {
             interface,
             block_size,
             active_requests: ActiveRequests::default(),
+            key_registry: KeyRegistry::default(),
             inflight_requests: Mutex::new(InflightRequests::default()),
             no_inflight_requests_condvar: Condvar::new(),
             inner: Mutex::new(SessionManagerInner { open_sessions: HashMap::new() }),

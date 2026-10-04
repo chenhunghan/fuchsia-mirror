@@ -6,6 +6,7 @@
 
 import("//build/cpp/library_headers.gni")
 import("//build/zircon/zircon_cpu.gni")
+import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 source_set("platform") {
@@ -90,6 +91,34 @@ source_set("ffi") {
   deps = [ "//zircon/kernel/lib/ktl" ]
 }
 
+kernel_bindgen_crate("halt-token-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "//zircon/kernel/include/platform/halt_token.h" ]
+  non_rust_deps = [ ":platform" ]
+  cpp = true
+
+  notice_year = 2026
+  type_allowlist = [
+    "HaltToken",
+    "ktl::atomic",
+    "std::atomic",
+  ]
+  type_blocklist = [ "Event" ]
+  opaque_types = [
+    "ktl::atomic",
+    "std::atomic",
+  ]
+  function_blocklist = [ "HaltToken_.*" ]
+  var_blocklist = [ "HaltToken_.*" ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  deps = [ "//zircon/kernel/kernel:event-bindings" ]
+  raw_lines = [
+    "#![no_std]",
+    "pub use event_bindings::Event;",
+  ]
+  expect_lints = [ "non_camel_case_types" ]
+}
+
 kernel_rust_mod("platform-rs") {
   output_name = "platform_rs"
   source_root = "platform.rs"
@@ -101,5 +130,10 @@ kernel_rust_mod("platform-rs") {
     "timer.rs",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
-  deps = [ "//zircon/system/ulib/affine/rust:affine" ]
+  deps = [
+    ":halt-token-bindings",
+    "//sdk/rust/zx-status",
+    "//src/lib/zr",
+    "//zircon/system/ulib/affine/rust:affine",
+  ]
 }

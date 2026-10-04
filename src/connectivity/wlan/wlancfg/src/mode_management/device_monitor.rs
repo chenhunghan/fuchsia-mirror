@@ -18,20 +18,27 @@ pub struct Listener {
     legacy_shim: IfaceRef,
     phy_manager: Arc<Mutex<dyn PhyManagerApi>>,
     iface_manager: Arc<Mutex<dyn IfaceManagerApi>>,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 }
 
 pub async fn handle_event(listener: &Listener, evt: DeviceWatcherEvent) {
     info!("got event: {:?}", evt);
     match evt {
         DeviceWatcherEvent::OnPhyAdded { phy_id } => {
+            let _wake_lease =
+                listener.power_manager.take_wake_lease("wlancfg-device-phy-added").await;
             on_phy_added(listener, phy_id).await;
         }
         DeviceWatcherEvent::OnPhyRemoved { phy_id } => {
+            let _wake_lease =
+                listener.power_manager.take_wake_lease("wlancfg-device-phy-removed").await;
             info!("phy removed: {}", phy_id);
             let mut phy_manager = listener.phy_manager.lock().await;
             phy_manager.remove_phy(phy_id);
         }
         DeviceWatcherEvent::OnIfaceAdded { iface_id } => {
+            let _wake_lease =
+                listener.power_manager.take_wake_lease("wlancfg-device-iface-added").await;
             // Ensure the new interface is usable by the policy internals before providing it to the
             // legacy shim.
             let mut iface_manager = listener.iface_manager.lock().await;
@@ -45,6 +52,8 @@ pub async fn handle_event(listener: &Listener, evt: DeviceWatcherEvent) {
             }
         }
         DeviceWatcherEvent::OnIfaceRemoved { iface_id } => {
+            let _wake_lease =
+                listener.power_manager.take_wake_lease("wlancfg-device-iface-removed").await;
             let mut iface_manager = listener.iface_manager.lock().await;
             match iface_manager.handle_removed_iface(iface_id).await {
                 Ok(()) => {}
@@ -118,8 +127,9 @@ impl Listener {
         legacy_shim: IfaceRef,
         phy_manager: Arc<Mutex<dyn PhyManagerApi>>,
         iface_manager: Arc<Mutex<dyn IfaceManagerApi>>,
+        power_manager: Arc<dyn wlan_power_manager::PowerManager>,
     ) -> Self {
-        Listener { proxy, legacy_shim, phy_manager, iface_manager }
+        Listener { proxy, legacy_shim, phy_manager, iface_manager, power_manager }
     }
 }
 
@@ -150,6 +160,7 @@ mod tests {
         iface_manager: Arc<Mutex<FakeIfaceManager>>,
         monitor_proxy: fidl_service::DeviceMonitorProxy,
         monitor_stream: fidl_service::DeviceMonitorRequestStream,
+        power_manager: Arc<wlan_power_manager_testing::TestPowerManager>,
     }
 
     fn test_setup(add_phy_succeeds: bool, add_iface_succeeds: bool) -> TestValues {
@@ -158,8 +169,9 @@ mod tests {
         let iface_manager = Arc::new(Mutex::new(FakeIfaceManager::new()));
         let (monitor_proxy, monitor_requests) = create_proxy::<fidl_service::DeviceMonitorMarker>();
         let monitor_stream = monitor_requests.into_stream();
+        let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
 
-        TestValues { phy_manager, iface_manager, monitor_proxy, monitor_stream }
+        TestValues { phy_manager, iface_manager, monitor_proxy, monitor_stream, power_manager }
     }
 
     #[fuchsia::test]
@@ -172,6 +184,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Add Phy 0.
@@ -201,6 +214,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Add Phy 0.
@@ -228,6 +242,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         let fut = on_iface_added_legacy(&listener, 0);
@@ -261,6 +276,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         let fut = on_iface_added_legacy(&listener, 0);
@@ -295,6 +311,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         let fut = on_iface_added_legacy(&listener, 0);
@@ -328,6 +345,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         let fut = on_iface_added_legacy(&listener, 0);
@@ -375,6 +393,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         let fut = on_iface_added_legacy(&listener, 0);
@@ -422,6 +441,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so the QueryIface request fails.
@@ -447,6 +467,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Simulate an OnPhyAdded event
@@ -487,6 +508,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Simulate an OnPhyRemoved event.
@@ -532,6 +554,7 @@ mod tests {
             iface_ref,
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Run the iface removal handler.
@@ -569,6 +592,7 @@ mod tests {
             iface_ref,
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Run the iface removal handler.
@@ -604,6 +628,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         let fut = handle_event(&listener, DeviceWatcherEvent::OnIfaceAdded { iface_id: 0 });
@@ -662,6 +687,7 @@ mod tests {
             IfaceRef::new(),
             test_values.phy_manager.clone(),
             test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that querying the interface fails while attempting to create
@@ -902,5 +928,70 @@ mod tests {
                 responder.send(response).expect("sending fake iface info");
             }
         );
+    }
+
+    #[fuchsia::test]
+    fn test_device_monitor_wake_leases() {
+        let mut exec = fasync::TestExecutor::new();
+        let test_values = test_setup(true, true);
+        let listener = Listener::new(
+            test_values.monitor_proxy,
+            IfaceRef::new(),
+            test_values.phy_manager.clone(),
+            test_values.iface_manager.clone(),
+            test_values.power_manager.clone(),
+        );
+
+        // 1. OnPhyAdded
+        let fut = handle_event(&listener, DeviceWatcherEvent::OnPhyAdded { phy_id: 0 });
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
+
+        // 2. OnPhyRemoved
+        let fut = handle_event(&listener, DeviceWatcherEvent::OnPhyRemoved { phy_id: 0 });
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
+
+        // 3. OnIfaceAdded
+        let mut monitor_stream = test_values.monitor_stream;
+        let fut = handle_event(&listener, DeviceWatcherEvent::OnIfaceAdded { iface_id: 0 });
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        send_query_iface_response(
+            &mut exec,
+            &mut monitor_stream,
+            Some(fidl_service::QueryIfaceResponse {
+                role: fidl_common::WlanMacRole::Client,
+                id: 0,
+                phy_id: 0,
+                phy_assigned_id: 0,
+                sta_addr: [0; 6],
+                factory_addr: [0; 6],
+            }),
+        );
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            exec.run_until_stalled(&mut monitor_stream.next()),
+            Poll::Ready(Some(Ok(fidl_service::DeviceMonitorRequest::GetClientSme {
+                iface_id: 0,
+                responder,
+                ..
+            }))) => {
+                responder.send(Ok(())).expect("sending get_client_sme response");
+            }
+        );
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
+
+        // 4. OnIfaceRemoved
+        let fut = handle_event(&listener, DeviceWatcherEvent::OnIfaceRemoved { iface_id: 0 });
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
+
+        // Verify that all device watcher wake leases were taken.
+        let calls = test_values.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-device-phy-added".to_string()));
+        assert!(calls.contains(&"wlancfg-device-phy-removed".to_string()));
+        assert!(calls.contains(&"wlancfg-device-iface-added".to_string()));
+        assert!(calls.contains(&"wlancfg-device-iface-removed".to_string()));
     }
 }

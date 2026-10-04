@@ -223,7 +223,6 @@ rustc_library(
     ],
     with_unit_tests = True,
     deps = [
-        "//src/lib/fuchsia-sync",
         "//src/starnix/lib/linux_uapi",
         "//third_party/rust_crates/vendor:bitflags",
         "//third_party/rust_crates/vendor:byteorder",
@@ -231,5 +230,10 @@ rustc_library(
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:thiserror",
         "//third_party/rust_crates/vendor:zerocopy",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//src/starnix/lib/starnix_sync",
+        ],
+        "//conditions:default": [],
+    }),
 )

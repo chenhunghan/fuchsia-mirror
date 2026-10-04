@@ -376,7 +376,7 @@ build_api_module("rules_fuchsia_info") {
 # An action to generate the final version of rules_fuchsia to be used OOT
 # This ensures that the content of @fuchsia_rules_common is stored under
 # @rules_fuchsia/fuchsia_rules_common, and changes all instances of
-# '@rules_fuchsia_common//' to '//fuchsia_rules_common/' in the final
+# '@fuchsia_rules_common//' to '//fuchsia_rules_common/' in the final
 # Bazel files, making the result self-contained.
 action("rules_fuchsia.export") {
   script = "//build/bazel/scripts/export_rules_fuchsia.py"
@@ -1325,6 +1325,10 @@ generated_file("tests_from_metadata") {
     # Pull in tests from the non-device type-specific test groups.
     "//:host_tests",
 
+    # Bazel device tests are not in the metadata graph; this dep only makes
+    # sure they are built.
+    "//:target_tests",
+
     # Pull in tests from the developer
     "//:developer_specified_tests",
 
@@ -1460,6 +1464,16 @@ build_api_module("test_durations") {
   }
 }
 
+# Targets whose transitive dependencies may declare Bazel tests, shared by the
+# two collectors below.
+_bazel_test_suite_roots = [
+  # Pull in tests from the developer
+  "//:developer_specified_tests",
+
+  # And from discoverable, so that --with continues to work
+  "//:discoverable_packages",
+]
+
 # Collect the labels of the Bazel test_suite() and host_xxx_test() targets
 # holding host tests and write them to a text file, one per line. This is
 # __NOT__ a build API module and is only used by //build/bazel/host_tests and by
@@ -1470,20 +1484,14 @@ generated_file("bazel_host_test_suites") {
   walk_keys = [ "bazel_host_test_suite_barrier" ]
   outputs = [ "${root_build_dir}/bazel_host_test_suites.txt" ]
   output_conversion = "list lines"
-  deps = [
-    # Pull in tests from host_labels.
-    # This is deprecated, and tests should be in //:host_tests instead.
-    "//:host",
+  deps = _bazel_test_suite_roots + [
+           # Pull in tests from host_labels.
+           # This is deprecated, and tests should be in //:host_tests instead.
+           "//:host",
 
-    # Pull in tests from the non-device type-specific test groups.
-    "//:host_tests",
-
-    # Pull in tests from the developer
-    "//:developer_specified_tests",
-
-    # And from discoverable, so that --with continues to work
-    "//:discoverable_packages",
-  ]
+           # Pull in tests from the non-device type-specific test groups.
+           "//:host_tests",
+         ]
   metadata = {
     debug_symbol_manifests = [
       {
@@ -1494,6 +1502,40 @@ generated_file("bazel_host_test_suites") {
       },
     ]
   }
+}
+
+# Collect labels of ungrouped Bazel test_suite() and fx_test() targets that run
+# on a Fuchsia device, and write them to a text file, one per line. This is
+# __NOT__ a build API module and is only used by //build/regenerator.
+#
+# These are tracked separately from host tests because they must be queried and
+# built in the `fuchsia_platform` Bazel configuration.
+generated_file("ungrouped_bazel_target_test_suites") {
+  testonly = true
+  data_keys = [ "bazel_target_test_suite" ]
+  walk_keys = [
+    "bazel_target_test_suite_barrier",
+
+    # Exclude tests behind `tests_barrier`, such as those inside a
+    # `product_bundle_test_group()`, which collects its own Bazel target test
+    # suites separately.
+    "tests_barrier",
+  ]
+  outputs = [ "${root_build_dir}/ungrouped_bazel_target_test_suites.txt" ]
+  output_conversion = "list lines"
+  deps = _bazel_test_suite_roots
+}
+
+# Collect all Bazel device test suite labels across the build graph, including
+# those inside `product_bundle_test_group()` targets, so that
+# `//build/bazel/target_tests` builds all of them.
+generated_file("bazel_target_test_suites_to_build") {
+  testonly = true
+  data_keys = [ "bazel_target_test_suite" ]
+  walk_keys = [ "bazel_target_test_suite_barrier" ]
+  outputs = [ "${root_build_dir}/bazel_target_test_suites_to_build.txt" ]
+  output_conversion = "list lines"
+  deps = _bazel_test_suite_roots
 }
 
 # Tools provided by the build or as prebuilts, to be used outside the build.
@@ -2213,6 +2255,11 @@ build_api_module("nuc11_fastboot_images_location") {
 #     - Optional: Whether this target should trigger updating rust-project.json
 #     - Type: bool
 #
+#   copy_debug_symbols:
+#     - Optional: Whether to copy the debug symbols of all ELF binaries built by the Bazel
+#                 invocation that includes this target to ${root_build_dir}/.build-id/
+#     - Type: bool
+#
 #   extra_bazel_targets_file:
 #     - Optional: Path to a file listing extra Bazel targets, one label per line, to pass to
 #                 Bazel as top-level command line targets alongside 'bazel_target'.
@@ -2338,7 +2385,11 @@ group("default") {
 # an alternative to '//:default' when performing sub-builds.
 group("build_only") {
   testonly = true
-  deps = build_only_labels
+  deps = [ ":args" ] + build_only_labels
+  if (define_ninja_implicit_inputs &&
+      ninja_implicit_inputs_root_labels != [ "//:default" ]) {
+    deps += [ "//build/ninja_implicit_inputs:manifest" ]
+  }
 }
 
 ###
@@ -2358,6 +2409,20 @@ group("host_tests") {
     full_label = get_label_info(label, "label_no_toolchain")
     deps += [ "$full_label($host_toolchain)" ]
   }
+}
+
+# Tests that run on a Fuchsia device or emulator and are built by Bazel.
+#
+# GN-defined device tests are packages, and reach the build graph through the
+# package groups below instead.
+group("target_tests") {
+  testonly = true
+  visibility = [ ":*" ]
+
+  deps = [
+    "//build/bazel/target_tests",
+    "//build/bazel/target_tests:debug_symbols",
+  ]
 }
 
 # Can be any test-type. This is for local-developer use only.  It is not for use
@@ -2382,8 +2447,10 @@ group("discoverable_packages") {
   testonly = true
   visibility = [
     "//:bazel_host_test_suites",
+    "//:bazel_target_test_suites_to_build",
     "//:test_components",
     "//:tests_from_metadata",
+    "//:ungrouped_bazel_target_test_suites",
     "//build/images/updates:*",
   ]
   public_deps = discoverable_package_labels + universe_package_labels

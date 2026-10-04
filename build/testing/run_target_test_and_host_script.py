@@ -20,13 +20,12 @@ VARIABLE_SUBSTITUTION = {"{test_artifact_dir}": ""}
 
 def run_target_test(
     ffx_bin: str, test_url: str, outdir: str, ffx_test_args: list[str]
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Runs 'ffx test run <url> --output-directory outdir [args]'"""
 
     # use the same configuration in //src/developer/ffx/build/ffx_action.gni
     base_config = [
         "ffx.analytics.disabled=true",
-        "daemon.autostart=false",
         "log.enabled=false",
     ]
 
@@ -47,8 +46,8 @@ def run_target_test(
 
 
 def get_test_suite_artifact_dir(
-    output_root: pathlib.Path, test_suite_name: str
-):
+    output_root: str | pathlib.Path, test_suite_name: str
+) -> str:
     """Parses run_summary.json and reads back 'artifact_dir'.
 
     Raises:
@@ -76,7 +75,7 @@ def do_variable_substitution(input: str) -> str:
 
 def run_host_script(
     script_bin: str, script_args: list[str]
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Runs the host script."""
     substituted_args = []
     for arg in script_args:
@@ -89,18 +88,20 @@ def run_host_script(
 class RunTargetTestWithHostScript(unittest.TestCase):
     """Executes the target test via `ffx test`, then executes the host script in tearDown."""
 
-    def __init__(self, args=None, test_output_dir=None):
+    def __init__(
+        self, args: argparse.Namespace, test_output_dir: str | pathlib.Path
+    ) -> None:
         super().__init__()
         self.args = args
         self.test_output_dir = test_output_dir
-        self.test_status = None
+        self.test_status: subprocess.CompletedProcess[str] | None = None
 
-    def runTest(self):
+    def runTest(self) -> None:
         """Runs test on target"""
         self.test_status = run_target_test(
             self.args.ffx_bin,
             self.args.test_url,
-            self.test_output_dir,
+            str(self.test_output_dir),
             self.args.ffx_test_args,
         )
         self.assertEqual(
@@ -110,10 +111,14 @@ class RunTargetTestWithHostScript(unittest.TestCase):
             % self.test_status.stderr,
         )
 
-    def tearDown(self):
-        if self.args.host_script_bin and (
-            self.test_status.returncode == 0
-            or self.args.run_host_script_on_fail
+    def tearDown(self) -> None:
+        if (
+            self.args.host_script_bin
+            and self.test_status is not None
+            and (
+                self.test_status.returncode == 0
+                or self.args.run_host_script_on_fail
+            )
         ):
             artifact_subdir = get_test_suite_artifact_dir(
                 self.test_output_dir, self.args.test_url
@@ -132,7 +137,7 @@ class RunTargetTestWithHostScript(unittest.TestCase):
             )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ffx-bin",
@@ -167,9 +172,7 @@ def main():
         help="whether to run the host script if test fails",
     )
     args = parser.parse_args()
-    test_output_dir = os.getenv("FUCHSIA_TEST_OUTDIR")
-    if not test_output_dir:
-        test_output_dir = args.test_outdir
+    test_output_dir = os.getenv("FUCHSIA_TEST_OUTDIR") or args.test_outdir
     print("storing test output to: ", test_output_dir)
     test = RunTargetTestWithHostScript(
         args=args, test_output_dir=test_output_dir

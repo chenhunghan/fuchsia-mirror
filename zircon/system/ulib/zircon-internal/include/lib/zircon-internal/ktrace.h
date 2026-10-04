@@ -22,6 +22,7 @@ enum {
   KTRACE_GRP_RESTRICTED_BIT,
   KTRACE_GRP_POWER_BIT,
   KTRACE_GRP_OOM_BIT,
+  KTRACE_GRP_SCHEDULER_DEMAND_BIT,
 
   // Keep last.
   KTRACE_GRP_NEXT_UNUSED_BIT,
@@ -42,6 +43,7 @@ enum {
 #define KTRACE_GRP_RESTRICTED     (1u << KTRACE_GRP_RESTRICTED_BIT)
 #define KTRACE_GRP_POWER          (1u << KTRACE_GRP_POWER_BIT)
 #define KTRACE_GRP_OOM            (1u << KTRACE_GRP_OOM_BIT)
+#define KTRACE_GRP_SCHEDULER_DEMAND (1u << KTRACE_GRP_SCHEDULER_DEMAND_BIT)
 
 // Actions for ktrace control
 #define KTRACE_ACTION_START          1 // options = grpmask, 0 = all

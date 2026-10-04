@@ -788,9 +788,7 @@ impl BuiltinEnvironment {
                 let mut object_request = flags.to_object_request(server_end);
                 object_request.wait_till_ready().await;
                 if let Ok(root) = root.upgrade() {
-                    root.lock_resolved_state()
-                        .await
-                        .expect("failed to resolve root component state");
+                    root.resolve().await.expect("failed to resolve root component state");
                     root.open_exposed(OpenRequest::new(
                         root.execution_scope.clone(),
                         flags,

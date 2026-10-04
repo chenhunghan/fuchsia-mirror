@@ -23,5 +23,17 @@
             from: "#bluetooth-core",
             to: [ "#bt-device-id" ],
         },
+        {
+            config: [
+                "fuchsia.bluetooth.Primary",
+                "fuchsia.bluetooth.ProductId",
+                "fuchsia.bluetooth.ServiceDescription",
+                "fuchsia.bluetooth.VendorId",
+                "fuchsia.bluetooth.Version",
+            ],
+            from: "parent",
+            to: [ "#bt-device-id" ],
+            availability: "optional",
+        },
     ],
 }

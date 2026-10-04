@@ -64,6 +64,7 @@ const CategoryEntry kCategories[] = {
     {KTRACE_GRP_RESTRICTED_BIT, "kernel:restricted"_category},
     {KTRACE_GRP_POWER_BIT, "kernel:power"_category},
     {KTRACE_GRP_OOM_BIT, "kernel:oom"_category},
+    {KTRACE_GRP_SCHEDULER_DEMAND_BIT, "kernel:sched-demand"_category},
 };
 
 void SetupCategoryBits() {

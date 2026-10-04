@@ -6,25 +6,28 @@
 import unittest
 
 from fuchsia.tools.licenses.common_types import LicenseException
-from fuchsia.tools.licenses.spdx_types import *
+from fuchsia.tools.licenses.spdx_types import (
+    SpdxIdReplacer,
+    SpdxLicenseExpression,
+)
 
 
 class TestSpdxTypes(unittest.TestCase):
-    def test_license_expression_simple(self):
+    def test_license_expression_simple(self) -> None:
         input = "LicenseRef-Some-Id.1"
         exp = SpdxLicenseExpression.create(input)
         self.assertEqual((input,), exp.license_ids)
         self.assertEqual("{0}", exp.expression_template)
         self.assertEqual(input, exp.serialize())
 
-    def test_license_expression_non_standard(self):
+    def test_license_expression_non_standard(self) -> None:
         input = "License-13a9b0a42ef7d1ff"
         exp = SpdxLicenseExpression.create(input)
         self.assertEqual((input,), exp.license_ids)
         self.assertEqual("{0}", exp.expression_template)
         self.assertEqual(input, exp.serialize())
 
-    def test_license_expression_complex(self):
+    def test_license_expression_complex(self) -> None:
         input = (
             "LicenseRef-X AND (LicenseRef-Y+ OR LicenseRef-Z WITH LicenseRef-X)"
         )
@@ -37,7 +40,7 @@ class TestSpdxTypes(unittest.TestCase):
         )
         self.assertEqual(input, exp.serialize())
 
-    def test_license_expression_replace_ids(self):
+    def test_license_expression_replace_ids(self) -> None:
         input = (
             "LicenseRef-X AND (LicenseRef-Y+ OR LicenseRef-Z WITH LicenseRef-X)"
         )
@@ -54,7 +57,7 @@ class TestSpdxTypes(unittest.TestCase):
             exp.serialize(),
         )
 
-    def test_license_id_replacer(self):
+    def test_license_id_replacer(self) -> None:
         id_replacer = SpdxIdReplacer()
         id_replacer.replace_id(old_id="old", new_id="new")
         id_replacer.replace_id(old_id="foo", new_id="bar")

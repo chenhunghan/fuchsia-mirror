@@ -13,6 +13,7 @@
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/devfs/cpp/connector.h>
 #include <lib/driver/metadata/cpp/metadata_server.h>
+#include <lib/driver/mmio/cpp/mmio-view.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
 #include <lib/zircon-internal/thread_annotations.h>
@@ -137,7 +138,7 @@ class AmlClock : public fdf::DriverBase2,
   // Cpu Clocks.
   std::vector<MesonCpuClock> cpu_clks_;
 
-  std::optional<fdf::MmioBuffer> hiudev_;
+  std::optional<fdf::MmioView> hiudev_;
   std::vector<MesonPllClock> pllclk_;
   size_t pll_count_ = HIU_PLL_COUNT;
 

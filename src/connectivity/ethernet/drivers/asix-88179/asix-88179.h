@@ -23,7 +23,6 @@
 #include <usb/usb.h>
 
 namespace eth {
-namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 class Asix88179Ethernet;
 

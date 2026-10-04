@@ -1,9 +1,11 @@
-// Cmpyright 2021 The Fuchsia Authors. All rights reserved.
+// Copyright 2021 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use crate::mm::memory::MemoryObject;
-use crate::mm::{DesiredAddress, MappingName, MappingOptions, MemoryAccessorExt, ProtectionFlags};
+use crate::mm::{
+    DesiredAddress, MappingName, MappingOptions, MemoryAccessorExt, ProtectionFlags, VMEX_RESOURCE,
+};
 use crate::power::OnWakeOps;
 use crate::security;
 use crate::task::{
@@ -16,8 +18,8 @@ use crate::vfs::fsverity::{
 };
 use crate::vfs::{
     ActiveNamespaceNode, DirentSink, EpollFileObject, EpollKey, FallocMode, FdTableId, FileMapping,
-    FileSystemHandle, FileWriteGuardMode, FsNodeHandle, FsString, NamespaceNode, RecordLockCommand,
-    RecordLockOwner,
+    FileSystemHandle, FileWriteGuardMode, FsNodeHandle, FsString, FscryptPolicyFlags,
+    NamespaceNode, RecordLockCommand, RecordLockOwner,
 };
 use starnix_crypt::EncryptionKeyId;
 use starnix_lifecycle::{ObjectReleaser, ReleaserAction};
@@ -49,10 +51,11 @@ use starnix_uapi::vfs::FdEvents;
 use starnix_uapi::{
     F_OWNER_PGRP, F_OWNER_PID, F_OWNER_TID, FIBMAP, FIGETBSZ, FIONBIO, FIONREAD, FIOQSIZE,
     FS_CASEFOLD_FL, FS_IOC_ADD_ENCRYPTION_KEY, FS_IOC_ENABLE_VERITY, FS_IOC_FSGETXATTR,
-    FS_IOC_FSSETXATTR, FS_IOC_MEASURE_VERITY, FS_IOC_READ_VERITY_METADATA,
-    FS_IOC_REMOVE_ENCRYPTION_KEY, FS_IOC_SET_ENCRYPTION_POLICY, FS_VERITY_FL,
-    FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER, FSCRYPT_POLICY_V2, SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_HOLE,
-    SEEK_SET, errno, error, fscrypt_add_key_arg, fscrypt_identifier, fsxattr, off_t, pid_t, uapi,
+    FS_IOC_FSSETXATTR, FS_IOC_GET_ENCRYPTION_POLICY, FS_IOC_GET_ENCRYPTION_POLICY_EX,
+    FS_IOC_MEASURE_VERITY, FS_IOC_READ_VERITY_METADATA, FS_IOC_REMOVE_ENCRYPTION_KEY,
+    FS_IOC_SET_ENCRYPTION_POLICY, FS_VERITY_FL, FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER,
+    FSCRYPT_POLICY_V2, SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_HOLE, SEEK_SET, errno, error,
+    fscrypt_add_key_arg, fscrypt_identifier, fsxattr, off_t, pid_t, uapi,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -921,13 +924,6 @@ pub fn default_vfs_ioctl(
                 track_stub!(TODO("https://fxbug.dev/375649656"), "fscrypt policy v1");
                 return error!(ENOTSUP);
             }
-            if policy.flags != 0 {
-                track_stub!(
-                    TODO("https://fxbug.dev/375700939"),
-                    "fscrypt policy flags",
-                    policy.flags
-                );
-            }
             if policy.contents_encryption_mode as u32 != FSCRYPT_MODE_AES_256_XTS {
                 track_stub!(
                     TODO("https://fxbug.dev/375684057"),
@@ -963,19 +959,94 @@ pub fn default_vfs_ioctl(
                 return error!(ENOKEY);
             }
 
+            // Like Linux, reject flags that aren't defined rather than silently ignoring them.
+            let flags =
+                FscryptPolicyFlags::from_bits(policy.flags).ok_or_else(|| errno!(EINVAL))?;
+            let supported_flags = FscryptPolicyFlags::PAD_8
+                | FscryptPolicyFlags::PAD_16
+                | FscryptPolicyFlags::IV_INO_LBLK_64
+                | FscryptPolicyFlags::IV_INO_LBLK_32;
+            if !supported_flags.contains(flags) {
+                track_stub!(
+                    TODO("https://fxbug.dev/375700939"),
+                    "fscrypt policy flags",
+                    policy.flags
+                );
+                return error!(EINVAL);
+            }
+            if flags.contains(FscryptPolicyFlags::IV_INO_LBLK_64)
+                && flags.contains(FscryptPolicyFlags::IV_INO_LBLK_32)
+            {
+                return error!(EINVAL);
+            }
+            let new_policy = crate::vfs::FscryptNodePolicy {
+                key_identifier: policy.master_key_identifier,
+                flags,
+            };
+
             let attributes = file.node().fetch_and_refresh_info(current_task)?;
-            if let Some(wrapping_key_id) = &attributes.wrapping_key_id {
-                if wrapping_key_id != &policy.master_key_identifier {
+            if let Some(existing_policy) = &attributes.encryption_policy {
+                // TODO(https://fxbug.dev/567619442): Legacy directories formatted before fxfs
+                // persisted policy flags in `DirType` only report `PAD_16`, even on legacy eMMC
+                // devices that used `PAD_16 | IV_INO_LBLK_32`. Allow `PAD_16 | IV_INO_LBLK_32` to
+                // match an existing `PAD_16` policy until support for those legacy devices is
+                // dropped.
+                let is_legacy_lblk32_fallback = existing_policy.flags == FscryptPolicyFlags::PAD_16
+                    && new_policy.flags
+                        == (FscryptPolicyFlags::PAD_16 | FscryptPolicyFlags::IV_INO_LBLK_32);
+                if existing_policy.key_identifier != new_policy.key_identifier
+                    || (existing_policy.flags != new_policy.flags && !is_legacy_lblk32_fallback)
+                {
                     return error!(EEXIST);
                 }
             } else {
                 // Don't deadlock! update_attributes will also lock the attributes.
                 std::mem::drop(attributes);
                 file.node().update_attributes(current_task, |info| {
-                    info.wrapping_key_id = Some(policy.master_key_identifier);
+                    info.encryption_policy = Some(new_policy);
                     Ok(())
                 })?;
             }
+            Ok(Some(SUCCESS))
+        }
+        FS_IOC_GET_ENCRYPTION_POLICY => {
+            let attributes = file.node().fetch_and_refresh_info(current_task)?;
+            if attributes.encryption_policy.is_some() {
+                // `FS_IOC_GET_ENCRYPTION_POLICY` only supports v1 policies and returns `EINVAL`
+                // when the file is encrypted with a v2 policy.
+                return error!(EINVAL);
+            }
+            error!(ENODATA)
+        }
+        FS_IOC_GET_ENCRYPTION_POLICY_EX => {
+            let attributes = file.node().fetch_and_refresh_info(current_task)?;
+            let Some(node_policy) = attributes.encryption_policy else {
+                return error!(ENODATA);
+            };
+
+            let policy_size_ref = UserRef::<u64>::from(arg);
+            let policy_size = current_task.read_object(policy_size_ref.clone())?;
+            let v2_size = std::mem::size_of::<uapi::fscrypt_policy_v2>() as u64;
+            if policy_size < v2_size {
+                return error!(EOVERFLOW);
+            }
+
+            // Starnix/Fxfs only supports v2 policies with AES-256-XTS for contents and
+            // AES-256-CTS for filenames (see https://fxbug.dev/375684057), so only `key_identifier`
+            // and `flags` are persisted on the node.
+            let policy = uapi::fscrypt_policy_v2 {
+                version: FSCRYPT_POLICY_V2 as u8,
+                contents_encryption_mode: FSCRYPT_MODE_AES_256_XTS as u8,
+                filenames_encryption_mode: FSCRYPT_MODE_AES_256_CTS as u8,
+                flags: node_policy.flags.bits(),
+                log2_data_unit_size: 0,
+                __reserved: [0; 3],
+                master_key_identifier: node_policy.key_identifier,
+            };
+
+            current_task.write_object(policy_size_ref.clone(), &v2_size)?;
+            let policy_ref = policy_size_ref.next()?.cast::<uapi::fscrypt_policy_v2>();
+            current_task.write_object(policy_ref, &policy)?;
             Ok(Some(SUCCESS))
         }
         FS_IOC_REMOVE_ENCRYPTION_KEY => {
@@ -1034,7 +1105,17 @@ pub fn default_mmap(
             clone_flags |= zx::VmoChildOptions::NO_WRITE;
         }
         fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "CreatePrivateChildVmo");
-        Arc::new(memory.create_child(clone_flags, 0, memory.get_size()).map_err(impossible_error)?)
+        let mut child =
+            memory.create_child(clone_flags, 0, memory.get_size()).map_err(impossible_error)?;
+        // Zircon removes `Rights::EXECUTE` from snapshot children created without `NO_WRITE`
+        // (see `zx_vmo_create_child`). If the parent memory was executable, restore the right on
+        // the writable child so that `PROT_WRITE | PROT_EXEC` private mappings can be created.
+        if prot_flags.contains(ProtectionFlags::WRITE | ProtectionFlags::EXEC)
+            && memory.get_rights().contains(zx::Rights::EXECUTE)
+        {
+            child = child.replace_as_executable(&VMEX_RESOURCE).map_err(impossible_error)?;
+        }
+        Arc::new(child)
     };
 
     // Write guard is necessary only for shared mappings. Note that this doesn't depend on

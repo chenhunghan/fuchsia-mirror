@@ -4,7 +4,7 @@
 
 //! Statistics and sample aggregation.
 
-use num::{Num, NumCast, Zero};
+use num_traits::{CheckedSub, Num, NumCast, Zero, cast};
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
@@ -188,7 +188,7 @@ impl<T> ArithmeticMean<T> {
         Self: Statistic<Sample = T>,
         T: Clone + Num + NumCast,
     {
-        Ok(match num::cast::<_, T>(n.get()) {
+        Ok(match cast::<_, T>(n.get()) {
             Some(m) => {
                 self.fold(sample * m)?;
                 self.increment((n.get() as u64) - 1)?;
@@ -337,7 +337,7 @@ impl<T> Sum<T> {
         Self: Statistic<Sample = T>,
         T: Clone + Num + NumCast,
     {
-        if let Some(n) = num::cast::<_, T>(n.get()) {
+        if let Some(n) = cast::<_, T>(n.get()) {
             self.fold(sample * n)
         } else {
             Ok(for _ in 0..n.get() {
@@ -781,7 +781,7 @@ pub struct Diff<T> {
     right: Option<T>,
 }
 
-impl<T: num::CheckedSub + Copy> Statistic for Diff<T> {
+impl<T: CheckedSub + Copy> Statistic for Diff<T> {
     type Semantic = GaugeForceSimple8bRle;
     type Sample = T;
     type Aggregation = T;

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/driver/logging/cpp/logger.h>
+
 #include "usb-cdc-ecm-lib.h"
 
 struct FuzzInput {
@@ -28,7 +30,10 @@ static size_t UsbGetDescriptorsLength(void* ctx) {
 static zx_status_t UsbControlIn(void* ctx, uint8_t request_type, uint8_t request, uint16_t value,
                                 uint16_t index, int64_t timeout, uint8_t* out_read_buffer,
                                 size_t read_size, size_t* out_read_actual) {
-  if (!(request_type & USB_DIR_IN && request == USB_REQ_GET_DESCRIPTOR)) {
+  if ((request_type &
+       fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kIn)) == 0 ||
+      request !=
+          fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::StandardRequest::kGetDescriptor)) {
     return ZX_ERR_INTERNAL;
   }
   const size_t expected_str_size = sizeof(usb_string_descriptor_t) + ETH_MAC_SIZE * 4;
@@ -38,7 +43,8 @@ static zx_status_t UsbControlIn(void* ctx, uint8_t request_type, uint8_t request
   *out_read_actual = expected_str_size;
   usb_string_descriptor_t usb_str;
   usb_str.b_length = expected_str_size;
-  usb_str.b_descriptor_type = USB_DT_STRING;
+  usb_str.b_descriptor_type =
+      fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::DescriptorType::kString);
   memcpy(out_read_buffer, &usb_str, sizeof(usb_string_descriptor_t));
   uint8_t* ptr = reinterpret_cast<uint8_t*>(out_read_buffer) + sizeof(usb_string_descriptor_t);
   for (size_t i = 0; i < ETH_MAC_SIZE; i++) {
@@ -55,7 +61,19 @@ usb_protocol_ops_t kFuzzedUsbProtocolOps = {
     .get_descriptors = UsbGetDescriptors,
 };
 
+// The code under test logs through the DFv2 logger, which requires a global logger instance to be
+// set. The fuzzer does not run inside a driver host, so provide a default-constructed (no-op)
+// logger; emitting real log records would only slow the fuzzer down.
+static fdf::Logger& NoOpLogger() {
+  static fdf::Logger logger;
+  return logger;
+}
+
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, size_t Size) {
+  if (!fdf::Logger::HasGlobalInstance()) {
+    fdf::Logger::SetGlobalInstance(&NoOpLogger());
+  }
+
   FuzzInput input = {.data = Data, .size = Size};
   usb_protocol_t protocol = {.ops = &kFuzzedUsbProtocolOps, .ctx = &input};
   usb::UsbDevice usb = usb::UsbDevice(&protocol);

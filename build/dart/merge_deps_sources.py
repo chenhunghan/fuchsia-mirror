@@ -10,7 +10,7 @@ import json
 import sys
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         "Merges sources of a Dart target and its dependencies",
         fromfile_prefix_chars="@",
@@ -49,6 +49,8 @@ def main():
         with open(f, "r") as f:
             all_sources.update(json.load(f))
     json.dump(sorted(all_sources), args.output)
+
+    return 0
 
 
 if __name__ == "__main__":

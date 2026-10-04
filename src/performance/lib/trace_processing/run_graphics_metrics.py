@@ -63,7 +63,7 @@ RenderTotalAverage  Manual      11.583923586956521  milliseconds
 import argparse
 import pathlib
 import sys
-from typing import Any, Tuple
+from typing import Any
 
 from reporting import metrics
 from trace_processing import trace_importing, trace_model
@@ -77,7 +77,7 @@ def PrintClientInfo(model: trace_model.Model) -> None:
 
     def FindProcessAndThread(
         model: trace_model.Model, thread_id: int
-    ) -> Tuple[Any, Any]:
+    ) -> tuple[Any, Any]:
         for process in model.processes:
             for thread in process.threads:
                 if thread.tid == thread_id:

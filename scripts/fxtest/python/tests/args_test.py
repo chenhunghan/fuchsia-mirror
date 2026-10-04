@@ -253,6 +253,20 @@ class TestArgs(unittest.TestCase):
         flags.validate()
         self.assertEqual(flags.allow_temporary_emulator, False)
 
+    def test_preflight(self) -> None:
+        # Default should be True
+        flags = args.parse_args([])
+        flags.validate()
+        self.assertEqual(flags.preflight, True)
+
+        flags = args.parse_args(["--preflight"])
+        flags.validate()
+        self.assertEqual(flags.preflight, True)
+
+        flags = args.parse_args(["--no-preflight"])
+        flags.validate()
+        self.assertEqual(flags.preflight, False)
+
     def test_capture_syslog(self) -> None:
         # Default should be True
         flags = args.parse_args([])

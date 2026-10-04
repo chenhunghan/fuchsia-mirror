@@ -26,12 +26,17 @@ pub struct NonTrackingSize;
 impl SizeTracker for NonTrackingSize {
     const INIT: Self = NonTrackingSize;
     const IS_TRACKING: bool = false;
+    #[inline]
     fn increment(&mut self) {}
+    #[inline]
     fn decrement(&mut self) {}
+    #[inline]
     fn get(&self) -> usize {
         panic!("Cannot get the size if we are not tracking the size.")
     }
+    #[inline]
     fn set(&mut self, _size: usize) {}
+    #[inline]
     fn swap(&mut self, _other: &mut Self) {}
 }
 
@@ -41,18 +46,23 @@ pub struct TrackingSize(usize);
 impl SizeTracker for TrackingSize {
     const INIT: Self = TrackingSize(0);
     const IS_TRACKING: bool = true;
+    #[inline]
     fn increment(&mut self) {
         self.0 += 1;
     }
+    #[inline]
     fn decrement(&mut self) {
         self.0 -= 1;
     }
+    #[inline]
     fn get(&self) -> usize {
         self.0
     }
+    #[inline]
     fn set(&mut self, size: usize) {
         self.0 = size;
     }
+    #[inline]
     fn swap(&mut self, other: &mut Self) {
         core::mem::swap(&mut self.0, &mut other.0);
     }

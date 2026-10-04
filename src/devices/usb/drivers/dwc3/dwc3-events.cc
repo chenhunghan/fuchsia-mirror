@@ -203,12 +203,19 @@ void Dwc3::HandleEvent(uint32_t event) {
 void Dwc3::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_status_t status,
                      const zx_packet_interrupt_t* interrupt) {
   TRACE_DURATION("dwc3", "Dwc3::HandleIrq", "status", status);
-  irq_.ack();
 
   if (!controller_started_ || !power_on_) {
     // Ack but otherwise ignore interrupts that arrive while client has stopped us or the core is
-    // powered down. A limited number of interrupts may be triggered while things are settling, and
-    // we need to ack them to avoid blocking system suspend.
+    // powered down. If the core is still powered on, ensure event interrupts are masked to
+    // prevent level-triggered interrupts from continuously re-triggering. If power_on_ is false,
+    // MMIO cannot be safely accessed because the core's power domain/clocks may be disabled.
+    if (power_on_) {
+      auto* mmio = get_mmio();
+      GEVNTSIZ::Get(0).ReadFrom(mmio).set_EVNTINTRPTMASK(1).WriteTo(mmio);
+    }
+    if (irq_.is_valid()) {
+      irq_.ack();
+    }
     return;
   }
 
@@ -238,10 +245,22 @@ void Dwc3::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_sta
   for (auto& uep : user_endpoints_) {
     uep.server->SendCompletions();
   }
+
+  // Acknowledge the interrupt after clearing pending events to avoid immediately
+  // re-triggering on level-triggered interrupt lines while events are being processed.
+  if (irq_.is_valid()) {
+    irq_.ack();
+  }
 }
 
 void Dwc3::StartEvents() {
   TRACE_DURATION("dwc3", "Dwc3::StartEvents");
+  ep0_.out.stale_starts_to_end = 0;
+  ep0_.in.stale_starts_to_end = 0;
+  for (UserEndpoint& uep : user_endpoints_) {
+    uep.ep.stale_starts_to_end = 0;
+    uep.ep.stale_cancels_to_ignore = 0;
+  }
   zx::result result = event_fifo_.Init(bti_, /*cached=*/true);
   if (result.is_error()) {
     fdf::error("Failed to init event fifo {}", result);
@@ -280,16 +299,41 @@ void Dwc3::StopEvents() {
   // Mask the event interrupt to prevent further interrupts.
   GEVNTSIZ::Get(0).ReadFrom(mmio).set_EVNTINTRPTMASK(1).WriteTo(mmio);
 
-  // Clear GEVNTCOUNT to release any pending level-triggered interrupts.
+  // Clear GEVNTCOUNT to release any pending level-triggered interrupts, ending any
+  // in-flight DEPSTRTXFER resources that completed before the event ring was stopped.
   uint32_t event_bytes;
   while ((event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT()) > 0) {
     uint32_t event_count = event_bytes / sizeof(uint32_t);
+    for (uint32_t event : event_fifo_.Read(event_count)) {
+      if (!(event & DEPEVT_NON_EP) && DEPEVT_TYPE(event) == DEPEVT_CMD_CMPLT &&
+          DEPEVT_CMD_CMPLT_CMD_TYPE(event) == DEPCMD::DEPSTRTXFER && DEPEVT_STATUS(event) == 0) {
+        Endpoint stale_ep(DEPEVT_PHYS_EP(event));
+        stale_ep.rsrc_id = DEPEVT_CMD_CMPLT_RSRC_ID(event);
+        CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
+      }
+    }
     event_fifo_.Advance(event_count);
     GEVNTCOUNT::Get(0)
         .FromValue(0)
         .set_EVNT_HANDLER_BUSY(1)
         .set_EVNTCOUNT(event_bytes)
         .WriteTo(mmio);
+  }
+
+  for (Endpoint* ep : {&ep0_.out, &ep0_.in}) {
+    const bool had_stale = ep->stale_starts_to_end > 0;
+    ep->stale_starts_to_end = 0;
+    if (had_stale && !ep->enabled) {
+      EpEnable(*ep, false);
+    }
+  }
+  for (UserEndpoint& uep : user_endpoints_) {
+    const bool had_stale = uep.ep.stale_starts_to_end > 0 || uep.ep.stale_cancels_to_ignore > 0;
+    uep.ep.stale_starts_to_end = 0;
+    uep.ep.stale_cancels_to_ignore = 0;
+    if (had_stale && !uep.ep.enabled) {
+      EpEnable(uep.ep, false);
+    }
   }
 }
 

@@ -14,22 +14,6 @@ using zx;
 const MAX_NAMESPACE_COUNT uint32 = fuchsia.component.runner.MAX_NAMESPACE_COUNT;
 
 /// Contains the node properties that belong to a node.
-@available(added=19, deprecated=26)
-type NodePropertyEntry = struct {
-    /// Name of the node that has |node_properties|.
-    name NodeName;
-
-    /// Node properties that belong to the node whose name is |node_name|. If
-    /// the node is a composite then |properties| is empty and does not contain
-    /// its parents' properties.
-    properties NodePropertyVector;
-};
-
-@available(added=19, deprecated=26)
-alias NodePropertyDictionary = vector<NodePropertyEntry>:MAX;
-
-/// Contains the node properties that belong to a node.
-@available(added=26)
 type NodePropertyEntry2 = struct {
     /// Name of the node that has |node_properties|.
     name NodeName;
@@ -48,7 +32,6 @@ type PowerElementArgs = resource table {
     4: token fuchsia.power.broker.DependencyToken;
 };
 
-@available(added=26)
 alias NodePropertyDictionary2 = vector<NodePropertyEntry2>:MAX;
 
 /// Arguments for starting a driver.
@@ -60,26 +43,12 @@ type DriverStartArgs = resource table {
     8: node_name string:MAX;
 
     /// Node offers of the node the driver is bound to.
-    @available(added=25)
     10: node_offers NodeOffersVector;
 
     /// Provides a token representing this node which can be exchanged with the
     /// driver framework to discern additional information about this node.
-    @available(added=26)
     11: node_token zx.Handle:EVENT;
 
-    /// Node properties of the node the driver is bound to.
-    /// If the node is non-composite then the "default" entry will contain the
-    /// node's own properties.
-    /// If the node is a composite then there is an entry for each of its parents
-    /// and the "default" entry will reference the primary composite parent
-    /// node's properties. The composite parent node's properties are those that
-    /// were provided in the composite node specification and not the original
-    /// properties of the parent.
-    @available(added=19, deprecated=26)
-    9: node_properties NodePropertyDictionary;
-
-    @available(added=26)
     12: node_properties_2 NodePropertyDictionary2;
 
     /// Symbols provided to the driver, for |node|. These come from the driver
@@ -120,7 +89,6 @@ type DriverStartArgs = resource table {
 
     /// Root VMAR the driver is mapped into. All child mappings should be placed into this VMAR
     /// if they want to have the same scheduler profile applied to them.
-    @available(added=29)
     13: vmar zx.Handle:VMAR;
 
     /// Handles related to the driver's power elements on products where suspend is enabled by the
@@ -133,6 +101,5 @@ type DriverStartArgs = resource table {
     14: power_element_args PowerElementArgs;
 
     /// Log sink channel.
-    @available(added=32)
     15: log_sink client_end:fuchsia.logger.LogSink;
 };

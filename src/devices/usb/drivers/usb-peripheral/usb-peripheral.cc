@@ -205,7 +205,7 @@ zx::result<> UsbPeripheral::Start(fdf::DriverContext context) {
   if (!metadata.value().has_value()) {
     fbl::AutoLock lock(&lock_);
     // Assume peripheral mode by default.
-    parent_usb_mode_ = USB_MODE_PERIPHERAL;
+    parent_usb_mode_ = fdescriptor::UsbMode::kPeripheral;
   }
 
   // Create child.
@@ -377,13 +377,14 @@ zx::result<uint8_t> UsbPeripheral::ValidateFunction(size_t function_index, void*
   }
   auto* first_header = static_cast<const usb_descriptor_header_t*>(descriptors);
   uint8_t num_interfaces = 0;
-  if (first_header->b_descriptor_type == USB_DT_INTERFACE) {
+  if (first_header->b_descriptor_type == fdescriptor::DescriptorType::kInterface) {
     if (length < sizeof(usb_interface_descriptor_t) ||
         first_header->b_length != sizeof(usb_interface_descriptor_t)) {
       fdf::error("{}: interface descriptor is invalid", __func__);
       return zx::error(ZX_ERR_INVALID_ARGS);
     }
-  } else if (first_header->b_descriptor_type == USB_DT_INTERFACE_ASSOCIATION) {
+  } else if (first_header->b_descriptor_type ==
+             fdescriptor::DescriptorType::kInterfaceAssociation) {
     if (length < sizeof(usb_interface_assoc_descriptor_t) ||
         first_header->b_length != sizeof(usb_interface_assoc_descriptor_t)) {
       fdf::error("{}: interface association descriptor is invalid", __func__);
@@ -394,8 +395,7 @@ zx::result<uint8_t> UsbPeripheral::ValidateFunction(size_t function_index, void*
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
-  auto* end =
-      reinterpret_cast<const usb_descriptor_header_t*>(static_cast<uint8_t*>(descriptors) + length);
+  const uint8_t* end = static_cast<const uint8_t*>(descriptors) + length;
   auto* header = reinterpret_cast<const usb_descriptor_header_t*>(descriptors);
 
   while (reinterpret_cast<const uint8_t*>(header) + sizeof(usb_descriptor_header_t) <=
@@ -406,7 +406,7 @@ zx::result<uint8_t> UsbPeripheral::ValidateFunction(size_t function_index, void*
       fdf::error("{}: invalid or truncated descriptor length {}", __func__, header->b_length);
       return zx::error(ZX_ERR_INVALID_ARGS);
     }
-    if (header->b_descriptor_type == USB_DT_INTERFACE) {
+    if (header->b_descriptor_type == fdescriptor::DescriptorType::kInterface) {
       if (header->b_length < sizeof(usb_interface_descriptor_t)) {
         fdf::error("{}: interface descriptor too short", __func__);
         return zx::error(ZX_ERR_INVALID_ARGS);
@@ -433,7 +433,7 @@ zx::result<uint8_t> UsbPeripheral::ValidateFunction(size_t function_index, void*
         }
         num_interfaces++;
       }
-    } else if (header->b_descriptor_type == USB_DT_ENDPOINT) {
+    } else if (header->b_descriptor_type == fdescriptor::DescriptorType::kEndpoint) {
       if (header->b_length < sizeof(usb_endpoint_descriptor_t)) {
         fdf::error("{}: endpoint descriptor too short", __func__);
         return zx::error(ZX_ERR_INVALID_ARGS);
@@ -451,7 +451,7 @@ zx::result<uint8_t> UsbPeripheral::ValidateFunction(size_t function_index, void*
         reinterpret_cast<const uint8_t*>(header) + header->b_length);
   }
 
-  if (header != end) {
+  if (reinterpret_cast<const uint8_t*>(header) != end) {
     fdf::error("{}: trailing bytes in descriptor list", __func__);
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
@@ -543,12 +543,13 @@ zx_status_t UsbPeripheral::CheckAndStartController() {
             reinterpret_cast<usb_configuration_descriptor_t*>(config_desc_bytes.data());
 
         config_desc->b_length = sizeof(*config_desc);
-        config_desc->b_descriptor_type = USB_DT_CONFIG;
+        config_desc->b_descriptor_type =
+            fidl::ToUnderlying(fdescriptor::DescriptorType::kConfiguration);
         config_desc->b_num_interfaces = 0;
         config_desc->b_configuration_value = static_cast<uint8_t>(1 + config_idx);
         config_desc->i_configuration = 0;
-        config_desc->b_length = sizeof(*config_desc);
-        config_desc->bm_attributes = USB_CONFIGURATION_SELF_POWERED | USB_CONFIGURATION_RESERVED_7;
+        config_desc->bm_attributes =
+            fdescriptor::kConfigurationSelfPowered | fdescriptor::kConfigurationReserved7;
         config_desc->b_max_power = 0;
       }
 
@@ -556,6 +557,21 @@ zx_status_t UsbPeripheral::CheckAndStartController() {
         auto& function = GetFunction(function_index);
         size_t descriptors_length;
         auto* descriptors = function.GetDescriptors(&descriptors_length);
+        const uint8_t* ptr = reinterpret_cast<const uint8_t*>(descriptors);
+        const uint8_t* end = ptr + descriptors_length;
+        while (ptr < end) {
+          if (ptr + sizeof(usb_descriptor_header_t) > end) {
+            fdf::error("Descriptor header extends past buffer in CheckAndStartController");
+            return ZX_ERR_INVALID_ARGS;
+          }
+          auto* header = reinterpret_cast<const usb_descriptor_header_t*>(ptr);
+          if (header->b_length < sizeof(usb_descriptor_header_t) || ptr + header->b_length > end) {
+            fdf::error("Invalid descriptor b_length in CheckAndStartController: {}",
+                       header->b_length);
+            return ZX_ERR_INVALID_ARGS;
+          }
+          ptr += header->b_length;
+        }
         auto old_size = config_desc_bytes.size();
         config_desc_bytes.resize(old_size + descriptors_length);
         memcpy(config_desc_bytes.data() + old_size, descriptors, descriptors_length);
@@ -580,7 +596,7 @@ zx_status_t UsbPeripheral::CheckAndStartController() {
   bool send_event = false;
   {
     fbl::AutoLock lock(&lock_);
-    cur_usb_mode_ = USB_MODE_PERIPHERAL;
+    cur_usb_mode_ = fdescriptor::UsbMode::kPeripheral;
     // The host connection event can be received before we transition to kPeripheralReady.
     // This is not required once we move to a single dispatcher.
     if (state_ == DeviceState::kStarting) {
@@ -635,16 +651,16 @@ zx_status_t UsbPeripheral::StartController() {
 
   {
     fbl::AutoLock lock(&lock_);
-    if (cur_usb_mode_ == USB_MODE_PERIPHERAL) {
-      fdf::info("Controller already in mode USB_MODE_PERIPHERAL");
+    if (cur_usb_mode_ == fdescriptor::UsbMode::kPeripheral) {
+      fdf::info("Controller already in mode UsbMode::kPeripheral");
       return ZX_OK;
     }
-    if (parent_usb_mode_ != USB_MODE_PERIPHERAL) {
+    if (parent_usb_mode_ != fdescriptor::UsbMode::kPeripheral) {
       fdf::error("DCI device is not in peripheral mode, cannot start the controller");
       return ZX_ERR_BAD_STATE;
     }
 
-    fdf::info("Starting controller: cur_mode={} new_mode=USB_MODE_PERIPHERAL (state={})",
+    fdf::info("Starting controller: cur_mode={} new_mode=UsbMode::kPeripheral (state={})",
               usb_mode_to_string(cur_usb_mode_), state_);
   }
 
@@ -661,7 +677,7 @@ zx_status_t UsbPeripheral::StartController() {
     return result->error_value();
   }
 
-  SetUsbMode(USB_MODE_PERIPHERAL);
+  SetUsbMode(fdescriptor::UsbMode::kPeripheral);
 
   return ZX_OK;
 }
@@ -670,7 +686,7 @@ zx_status_t UsbPeripheral::StopController() {
 
   {
     fbl::AutoLock lock(&lock_);
-    if (cur_usb_mode_ == USB_MODE_NONE) {
+    if (cur_usb_mode_ == fdescriptor::UsbMode::kNone) {
       return ZX_OK;
     }
     fdf::info("Stopping controller: cur_mode={} (state={})", usb_mode_to_string(cur_usb_mode_),
@@ -692,9 +708,9 @@ zx_status_t UsbPeripheral::StopController() {
     }
   }
   // Note: Banjo DCI doesn't have a dedicated StopController call.
-  // Transitioning cur_usb_mode_ to USB_MODE_NONE is sufficient here.
+  // Transitioning cur_usb_mode_ to UsbMode::kNone is sufficient here.
 
-  SetUsbMode(USB_MODE_NONE);
+  SetUsbMode(fdescriptor::UsbMode::kNone);
 
   return ZX_OK;
 }
@@ -1135,17 +1151,16 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
                                          void* buffer, size_t length, size_t* out_actual) {
   TRACE_DURATION("usb-peripheral", __func__, "request_type", request_type, "value", value, "index",
                  index);
-  uint8_t type = request_type & USB_TYPE_MASK;
-
-  if (type != USB_TYPE_STANDARD) {
+  if (usb_request_type(request_type) != fdescriptor::RequestType::kStandard) {
     fdf::debug("Unsupported request type: {}", request_type);
     return ZX_ERR_NOT_SUPPORTED;
   }
 
   fbl::AutoLock lock(&lock_);
 
-  auto desc_type = static_cast<uint8_t>(value >> 8);
-  if (desc_type == USB_DT_DEVICE && index == 0) {
+  auto desc_type = usb_descriptor_type_from_w_value(value);
+  if (desc_type == fdescriptor::DescriptorType::kDevice && index == 0 &&
+      usb_descriptor_index_from_w_value(value) == 0) {
     if (device_desc_.b_length == 0) {
       fdf::error("Device descriptor not set");
       return ZX_ERR_INTERNAL;
@@ -1154,8 +1169,10 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
     memcpy(buffer, &device_desc_, length);
     *out_actual = length;
     return ZX_OK;
-  } else if ((desc_type == USB_DT_CONFIG || desc_type == USB_DT_OTHER_SPEED_CONFIG) && index == 0) {
-    index = value & 0xff;
+  } else if ((desc_type == fdescriptor::DescriptorType::kConfiguration ||
+              desc_type == fdescriptor::DescriptorType::kOtherSpeedConfiguration) &&
+             index == 0) {
+    index = usb_descriptor_index_from_w_value(value);
     if (index >= configurations_.size()) {
       fdf::error("Invalid configuration index: {}", index);
       return ZX_ERR_INVALID_ARGS;
@@ -1168,17 +1185,18 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
     auto desc_length = config_desc.size();
     length = std::min(length, desc_length);
     memcpy(buffer, config_desc.data(), length);
-    if (desc_type == USB_DT_OTHER_SPEED_CONFIG && length >= 2) {
-      static_cast<uint8_t*>(buffer)[1] = USB_DT_OTHER_SPEED_CONFIG;
+    if (desc_type == fdescriptor::DescriptorType::kOtherSpeedConfiguration && length >= 2) {
+      static_cast<uint8_t*>(buffer)[1] =
+          fidl::ToUnderlying(fdescriptor::DescriptorType::kOtherSpeedConfiguration);
     }
     *out_actual = length;
     return ZX_OK;
-  } else if (desc_type == USB_DT_STRING) {
+  } else if (desc_type == fdescriptor::DescriptorType::kString) {
     uint8_t desc[255];
     auto* header = reinterpret_cast<usb_descriptor_header_t*>(desc);
-    header->b_descriptor_type = USB_DT_STRING;
+    header->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kString);
 
-    auto string_index = static_cast<uint8_t>(value & 0xFF);
+    auto string_index = usb_descriptor_index_from_w_value(value);
     if (string_index == 0) {
       // special case - return language list
       header->b_length = 4;
@@ -1209,7 +1227,7 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
     memcpy(buffer, desc, length);
     *out_actual = length;
     return ZX_OK;
-  } else if (desc_type == USB_DT_DEVICE_QUALIFIER) {
+  } else if (desc_type == fdescriptor::DescriptorType::kDeviceQualifier) {
     if (device_desc_.b_length == 0) {
       fdf::error("Device descriptor not set");
       return ZX_ERR_INTERNAL;
@@ -1219,7 +1237,7 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
     // Bytes 9 and 10 (b_num_configurations and b_reserved) are set explicitly below.
     memcpy(&qualifier, &device_desc_, 8);
     qualifier.b_length = sizeof(usb_device_qualifier_descriptor_t);
-    qualifier.b_descriptor_type = USB_DT_DEVICE_QUALIFIER;
+    qualifier.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDeviceQualifier);
     // TODO(b/459580056): Replace the following WAR with a correct solution.
     qualifier.b_num_configurations = device_desc_.b_num_configurations;
     qualifier.b_reserved = 0;
@@ -1228,7 +1246,7 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
     memcpy(buffer, &qualifier, length);
     *out_actual = length;
     return ZX_OK;
-  } else if (desc_type == USB_DT_BOS && (value & 0xFF) == 0 && index == 0) {
+  } else if (desc_type == fdescriptor::DescriptorType::kBos && (value & 0xFF) == 0 && index == 0) {
     // USB 2.0 devices (bcdUSB < USB_2_0_1) without BOS capabilities must stall GET_DESCRIPTOR(BOS).
     if (le16toh(device_desc_.bcd_usb) < USB_2_0_1) {
       fdf::debug("BOS descriptor unsupported for bcd_usb < {:#x}: {:#x}", USB_2_0_1,
@@ -1237,7 +1255,7 @@ zx_status_t UsbPeripheral::GetDescriptor(uint8_t request_type, uint16_t value, u
     }
     usb_bos_descriptor_t bos{
         .b_length = sizeof(usb_bos_descriptor_t),
-        .b_descriptor_type = USB_DT_BOS,
+        .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kBos),
         .w_total_length = htole16(sizeof(usb_bos_descriptor_t)),
         .b_num_device_caps = 0,  // No device capabilities.
     };
@@ -1386,7 +1404,8 @@ void UsbPeripheral::SetConfiguration(uint8_t configuration,
               }
             }
             completer(final_status);
-          });
+          })
+          .wrap_with(scope_);
 
   executor_->schedule_task(std::move(join_task).wrap_with(scope_));
 }
@@ -1587,7 +1606,7 @@ void UsbPeripheral::ClearFunctions(std::optional<fit::callback<void()>> callback
   for (auto& function : to_teardown) {
     fpromise::bridge<void, zx_status_t> bridge;
     function->SetConfigured(
-        false, USB_SPEED_UNDEFINED,
+        false, fidl::ToUnderlying(fdescriptor::UsbSpeed::kUndefined),
         [completer = std::move(bridge.completer),
          name = function->name()](zx_status_t status) mutable {
           if (status != ZX_OK) {
@@ -1788,7 +1807,7 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
                                   cpp20::span<uint8_t> write_buffer,
                                   fit::callback<void(zx::result<std::vector<uint8_t>>)> completer) {
   uint8_t request_type = setup.bm_request_type;
-  uint8_t direction = request_type & USB_DIR_MASK;
+  uint8_t direction = request_type & fdescriptor::kEndpointDirectionMask;
   uint8_t request = setup.b_request;
   uint16_t value = le16toh(setup.w_value);
   uint16_t index = le16toh(setup.w_index);
@@ -1797,7 +1816,7 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
   TRACE_DURATION("usb-peripheral", __func__, "request_type", request_type, "value", value, "index",
                  index);
 
-  if (direction == USB_DIR_OUT && length > write_buffer.size()) {
+  if (direction == fdescriptor::EndpointDirection::kOut && length > write_buffer.size()) {
     fdf::warn("CommonControl: write buffer too small (length: {}, buffer size: {})", length,
               write_buffer.size());
     completer(zx::error(ZX_ERR_BUFFER_TOO_SMALL));
@@ -1812,11 +1831,11 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
   fdf::debug("usb_dev_control type={:#02X}, req={}, value={}, index={}, length={}", request_type,
              request, value, index, length);
 
-  switch (request_type & USB_RECIP_MASK) {
-    case USB_RECIP_DEVICE: {
+  switch (request_type & fdescriptor::kRequestRecipientMask) {
+    case fidl::ToUnderlying(fdescriptor::RequestRecipient::kDevice): {
       // handle standard device requests
-      if ((request_type & (USB_DIR_MASK | USB_TYPE_MASK)) == (USB_DIR_IN | USB_TYPE_STANDARD) &&
-          request == USB_REQ_GET_DESCRIPTOR) {
+      if (request_type == kStandardDeviceIn &&
+          request == fdescriptor::StandardRequest::kGetDescriptor) {
         std::vector<uint8_t> read_data_vec(length);
         size_t out_read_actual = 0;
         zx_status_t status = GetDescriptor(request_type, value, index, read_data_vec.data(), length,
@@ -1829,8 +1848,8 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
         }
         return;
       }
-      if (request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
-          request == USB_REQ_SET_CONFIGURATION && length == 0) {
+      if (request_type == kStandardDeviceOut &&
+          request == fdescriptor::StandardRequest::kSetConfiguration && length == 0) {
         SetConfiguration(static_cast<uint8_t>(value),
                          [completer = std::move(completer)](zx_status_t status) mutable {
                            if (status == ZX_OK) {
@@ -1841,8 +1860,8 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
                          });
         return;
       }
-      if (request_type == (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
-          request == USB_REQ_GET_CONFIGURATION && length > 0) {
+      if (request_type == kStandardDeviceIn &&
+          request == fdescriptor::StandardRequest::kGetConfiguration && length > 0) {
         uint8_t cur_config = 0;
         {
           fbl::AutoLock lock(&lock_);
@@ -1851,24 +1870,26 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
         completer(zx::ok(std::vector<uint8_t>{cur_config}));
         return;
       }
-      // Per USB 2.0 Spec Section 9.4.5 / USB 3.0 Spec Section 9.4.5, GET_STATUS to USB_RECIP_DEVICE
-      // returns a 16-bit status word containing two feature flags:
+      // Per USB 2.0 Spec Section 9.4.5 / USB 3.0 Spec Section 9.4.5, GET_STATUS to
+      // RequestRecipient::kDevice returns a
+      // 16-bit status word containing two feature flags:
       //   Bit 0: Self Powered (1 = self-powered, 0 = bus-powered)
       //   Bit 1: Remote Wakeup (1 = remote wakeup enabled, 0 = disabled)
       // All other bits are reserved and must be zero.
       // TODO(https://fxbug.dev/533013195): Add an API to get the current config (power and remote
       // wakeup) from the system or active peripheral configuration, and update these status flags
       // dynamically rather than returning static feature bits.
-      if (request_type == (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
-          request == USB_REQ_GET_STATUS && length == 2) {
+      if (request_type == kStandardDeviceIn &&
+          request == fdescriptor::StandardRequest::kGetStatus && length == 2) {
         std::vector<uint8_t> read_data_vec(length, 0);
-        read_data_vec[0] = 1 << USB_DEVICE_SELF_POWERED;
+        read_data_vec[0] = static_cast<uint8_t>(fdescriptor::kDeviceStatusSelfPowered);
         completer(zx::ok(std::move(read_data_vec)));
         return;
       }
       // Delegate to one of the function drivers.
-      // USB_RECIP_DEVICE should only be used when there is a single active interface.
-      // But just to be conservative, try all the available interfaces.
+      // RequestRecipient::kDevice should
+      // only be used when there is a single active interface. But just to be conservative, try all
+      // the available interfaces.
       std::vector<std::shared_ptr<UsbFunction>> funcs_to_call;
       zx_status_t dev_error = ZX_OK;
       {
@@ -1911,10 +1932,10 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
       completer(zx::error(ZX_ERR_NOT_SUPPORTED));
       return;
     }
-    case USB_RECIP_INTERFACE: {
+    case fidl::ToUnderlying(fdescriptor::RequestRecipient::kInterface): {
       uint8_t interface_num = static_cast<uint8_t>(index & 0xFF);
-      if (request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) &&
-          request == USB_REQ_SET_INTERFACE && length == 0) {
+      if (request_type == kStandardInterfaceOut &&
+          request == fdescriptor::StandardRequest::kSetInterface && length == 0) {
         SetInterface(interface_num, static_cast<uint8_t>(value),
                      [completer = std::move(completer)](zx_status_t status) mutable {
                        if (status == ZX_OK) {
@@ -1962,15 +1983,14 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
         completer(zx::error(error_status));
         return;
       }
-
-      if (request_type == (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) &&
-          request == USB_REQ_GET_STATUS && length == 2) {
+      if (request_type == kStandardInterfaceIn &&
+          request == fdescriptor::StandardRequest::kGetStatus && length == 2) {
         std::vector<uint8_t> read_data_vec(length, 0);
         completer(zx::ok(std::move(read_data_vec)));
         return;
       }
-      if (request_type == (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) &&
-          request == USB_REQ_GET_INTERFACE && length == 1) {
+      if (request_type == kStandardInterfaceIn &&
+          request == fdescriptor::StandardRequest::kGetInterface && length == 1) {
         completer(zx::ok(std::vector<uint8_t>{alt_setting}));
         return;
       }
@@ -1981,9 +2001,9 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
       }
       break;
     }
-    case USB_RECIP_ENDPOINT: {
+    case fidl::ToUnderlying(fdescriptor::RequestRecipient::kEndpoint): {
       uint8_t ep_addr = static_cast<uint8_t>(index);
-      bool is_ep0 = (ep_addr & USB_ENDPOINT_NUM_MASK) == 0;
+      bool is_ep0 = (ep_addr & fdescriptor::kEndpointNumberMask) == 0;
       if (!is_ep0) {
         bool unconfigured = false;
         {
@@ -2023,13 +2043,13 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
         }
       }
 
-      if (request_type == (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
-          request == USB_REQ_GET_STATUS && length == 2) {
+      if (request_type == kStandardEndpointIn &&
+          request == fdescriptor::StandardRequest::kGetStatus && length == 2) {
         uint16_t status = 0;
         if (!is_ep0) {
           fbl::AutoLock _(&lock_);
           if (stalled_eps_.contains(ep_addr)) {
-            status = 1;
+            status = fdescriptor::kEndpointStatusHalted;
           }
         }
         std::vector<uint8_t> read_data_vec = {static_cast<uint8_t>(status & 0xFF),
@@ -2037,8 +2057,9 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
         completer(zx::ok(std::move(read_data_vec)));
         return;
       }
-      if (request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
-          request == USB_REQ_SET_FEATURE && value == USB_ENDPOINT_HALT && length == 0) {
+      if (request_type == kStandardEndpointOut &&
+          request == fdescriptor::StandardRequest::kSetFeature &&
+          value == fdescriptor::FeatureSelector::kEndpointHalt && length == 0) {
         if (!is_ep0) {
           UsbDciCancelAll(ep_addr);
           UsbDciEndpointSetStall(ep_addr);
@@ -2046,8 +2067,9 @@ void UsbPeripheral::CommonControl(const fdescriptor::wire::UsbSetup& setup,
         completer(zx::ok(std::vector<uint8_t>()));
         return;
       }
-      if (request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
-          request == USB_REQ_CLEAR_FEATURE && value == USB_ENDPOINT_HALT && length == 0) {
+      if (request_type == kStandardEndpointOut &&
+          request == fdescriptor::StandardRequest::kClearFeature &&
+          value == fdescriptor::FeatureSelector::kEndpointHalt && length == 0) {
         if (!is_ep0) {
           UsbDciEndpointClearStall(ep_addr);
         }
@@ -2154,7 +2176,7 @@ void UsbPeripheral::OnHostConnectionChanged(bool connected) {
   std::vector<fpromise::promise<void, zx_status_t>> promises;
   for (auto& function : functions_to_unconfigure) {
     fpromise::bridge<void, zx_status_t> bridge;
-    function->SetConfigured(false, USB_SPEED_UNDEFINED,
+    function->SetConfigured(false, fidl::ToUnderlying(fdescriptor::UsbSpeed::kUndefined),
                             [completer = std::move(bridge.completer),
                              name = function->name()](zx_status_t status) mutable {
                               if (status != ZX_OK) {
@@ -2296,7 +2318,7 @@ zx_status_t UsbPeripheral::SetDeviceDescriptor(DeviceDescriptor desc) {
     return ZX_ERR_INVALID_ARGS;
   } else {
     device_desc_.b_length = sizeof(usb_device_descriptor_t);
-    device_desc_.b_descriptor_type = USB_DT_DEVICE;
+    device_desc_.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
     device_desc_.bcd_usb = desc.bcd_usb;
     device_desc_.b_device_class = desc.b_device_class;
     device_desc_.b_device_sub_class = desc.b_device_sub_class;
@@ -2471,7 +2493,7 @@ zx_status_t UsbPeripheral::SetDefaultConfig(std::vector<FunctionDescriptor>& fun
 
   auto& descriptor = configurations_.emplace_back(static_cast<uint8_t>(0));
   device_desc_.b_length = sizeof(usb_device_descriptor_t),
-  device_desc_.b_descriptor_type = USB_DT_DEVICE;
+  device_desc_.b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
   device_desc_.bcd_usb = htole16(USB_2_0);
   device_desc_.b_device_class = 0;
   device_desc_.b_device_sub_class = 0;

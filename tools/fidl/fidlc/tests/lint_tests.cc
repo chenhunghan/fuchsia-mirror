@@ -16,6 +16,10 @@ using ::testing::HasSubstr;
 #define ASSERT_WARNINGS(quantity, lib, content)                           \
   do {                                                                    \
     const auto& warnings = (lib).lints();                                 \
+    std::string error = "Found warning: ";                                \
+    for (size_t i = 0; i < warnings.size(); i++) {                        \
+      error.append(warnings[i]);                                          \
+    }                                                                     \
     if (strlen(content) != 0) {                                           \
       bool contains_content = false;                                      \
       for (size_t i = 0; i < warnings.size(); i++) {                      \
@@ -24,13 +28,9 @@ using ::testing::HasSubstr;
           break;                                                          \
         }                                                                 \
       }                                                                   \
-      ASSERT_TRUE(contains_content) << (content) << " not found";         \
+      ASSERT_TRUE(contains_content) << (content) << "\n" << error;        \
     }                                                                     \
     if (warnings.size() != (quantity)) {                                  \
-      std::string error = "Found warning: ";                              \
-      for (size_t i = 0; i < warnings.size(); i++) {                      \
-        error.append(warnings[i]);                                        \
-      }                                                                   \
       ASSERT_EQ(static_cast<size_t>(quantity), warnings.size()) << error; \
     }                                                                     \
   } while (0)
@@ -305,6 +305,146 @@ closed protocol Example {
   ASSERT_COMPILER_DIAGNOSTICS(library);
   ASSERT_FALSE(library.Lint({.included_check_ids = {"explicit-flexible-method-modifier"}}));
   ASSERT_WARNINGS(1, library, "OnFoo must have an explicit 'flexible' modifier");
+}
+
+// These libraries won't compile because they're trying to use `zx`, but we can
+// still check that the invalid uses of zx types triggers lints.
+TEST(LintTests, ZxTypesStructField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyStruct = struct {
+  foo zx.Status;
+  bar zx.Result;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesParameterStructField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyParamStruct = struct {
+  foo vector<zx.Status>:10;
+  bar vector<zx.Result>:10;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesInlineStructField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyStruct = struct {
+  foo struct {
+    bar zx.Status;
+  };
+  bar struct {
+    foo zx.Result;
+  };
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesTableField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyTable = table {
+  1: foo zx.Status;
+  2: bar zx.Result;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesParameterTableField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyParamTable = table {
+  1: foo vector<zx.Status>:10;
+  2: bar vector<zx.Result>:10;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesUnionField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyUnion = strict union {
+  1: foo zx.Status;
+  2: bar zx.Result;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesParameterUnionField) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+type MyParamUnion = strict union {
+  1: foo vector<zx.Status>:10;
+  2: bar vector<zx.Result>:10;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesMethodParameters) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+closed protocol Example {
+  Foo(struct {
+    foo zx.Status;
+    bar zx.Result;
+  });
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesMethodReturn) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+closed protocol Example {
+  Foo() -> (struct {
+    foo zx.Status;
+    bar zx.Result;
+  });
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Consider using zx.Result if the status can be OK");
+}
+
+TEST(LintTests, ZxTypesError) {
+  TestLibrary library(R"FIDL(
+library fuchsia.a;
+
+closed protocol Example {
+  Foo() -> () error zx.Status;
+  Bar() -> () error zx.Result;
+};
+)FIDL");
+  ASSERT_FALSE(library.Lint({.included_check_ids = {"zx-status-non-error", "zx-result-error"}}));
+  ASSERT_WARNINGS(1, library, "Use zx.Status for two-way errors instead of zx.Result");
 }
 }  // namespace
 }  // namespace fidlc

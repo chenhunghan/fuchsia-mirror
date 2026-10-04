@@ -17,8 +17,8 @@ rustc_library("wlan-fcg-crypto") {
     "//third_party/boringssl/rust:bssl-sys.shared-no-ssl",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:log",
-    "//third_party/rust_crates:num",
     "//third_party/rust_crates:num-derive",
+    "//third_party/rust_crates:num-integer",
     "//third_party/rust_crates:num-traits",
   ]
 

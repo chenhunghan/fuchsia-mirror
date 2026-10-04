@@ -28,6 +28,8 @@
 
 #include "asix-88179-regs.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 struct PhysrModeConfig {
   uint16_t media_mode;
   uint8_t link_speed;
@@ -126,10 +128,12 @@ zx_status_t Asix88179Ethernet::ReadMac(uint8_t register_address, T* data) {
   size_t out_length = 0;
   uint8_t register_length = sizeof(T);
 
-  zx_status_t status =
-      usb_.ControlIn(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, AX88179_REQ_MAC,
-                     register_address, register_length, ZX_TIME_INFINITE,
-                     reinterpret_cast<uint8_t*>(data), register_length, &out_length);
+  zx_status_t status = usb_.ControlIn(
+      kVendorDeviceIn, AX88179_REQ_MAC, register_address, register_length, ZX_TIME_INFINITE,
+      reinterpret_cast<uint8_t*>(data), register_length, &out_length);
+  if (status == ZX_OK && out_length != register_length) {
+    status = ZX_ERR_IO;
+  }
 
   return status;
 }
@@ -138,18 +142,20 @@ template <typename T>
 zx_status_t Asix88179Ethernet::WriteMac(uint8_t register_address, const T& data) {
   uint8_t register_length = sizeof(T);
 
-  return usb_.ControlOut(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, AX88179_REQ_MAC,
-                         register_address, register_length, ZX_TIME_INFINITE,
-                         reinterpret_cast<const uint8_t*>(&data), register_length);
+  return usb_.ControlOut(kVendorDeviceOut, AX88179_REQ_MAC, register_address, register_length,
+                         ZX_TIME_INFINITE, reinterpret_cast<const uint8_t*>(&data),
+                         register_length);
 }
 
 zx_status_t Asix88179Ethernet::ReadPhy(uint8_t register_address, uint16_t* data) {
   size_t out_length;
-  zx_status_t status =
-      usb_.ControlIn(USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, AX88179_REQ_PHY,
-                     AX88179_PHY_ID, register_address, ZX_TIME_INFINITE,
-                     reinterpret_cast<uint8_t*>(data), sizeof(*data), &out_length);
-  if (out_length == sizeof(*data)) {
+  zx_status_t status = usb_.ControlIn(kVendorDeviceIn, AX88179_REQ_PHY, AX88179_PHY_ID,
+                                      register_address, ZX_TIME_INFINITE,
+                                      reinterpret_cast<uint8_t*>(data), sizeof(*data), &out_length);
+  if (status == ZX_OK && out_length != sizeof(*data)) {
+    status = ZX_ERR_IO;
+  }
+  if (status == ZX_OK) {
     zxlogf(TRACE, "ax88179: read phy %#x: %#x", register_address, *data);
   }
   return status;
@@ -157,9 +163,8 @@ zx_status_t Asix88179Ethernet::ReadPhy(uint8_t register_address, uint16_t* data)
 
 zx_status_t Asix88179Ethernet::WritePhy(uint8_t register_address, uint16_t data) {
   zxlogf(TRACE, "ax88179: write phy %#x: %#x", register_address, data);
-  return usb_.ControlOut(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, AX88179_REQ_PHY,
-                         AX88179_PHY_ID, register_address, ZX_TIME_INFINITE,
-                         reinterpret_cast<uint8_t*>(&data), sizeof(data));
+  return usb_.ControlOut(kVendorDeviceOut, AX88179_REQ_PHY, AX88179_PHY_ID, register_address,
+                         ZX_TIME_INFINITE, reinterpret_cast<uint8_t*>(&data), sizeof(data));
 }
 
 zx_status_t Asix88179Ethernet::ConfigureBulkIn(uint8_t usb_mode, uint8_t link_speed) {
@@ -404,22 +409,23 @@ void Asix88179Ethernet::InterruptComplete(usb_request_t* usb_request) {
         res.is_ok() && *res == kInterruptRequestSize) {
       bool online = (status[2] & 1) != 0;
       bool was_online = online_;
-      online_ = online;
       if (online && !was_online) {
-        ConfigureMediumMode();
+        if (ConfigureMediumMode() == ZX_OK) {
+          online_ = true;
+          std::optional<usb::Request<>> pending_request;
 
-        std::optional<usb::Request<>> pending_request;
+          size_t request_length = usb::Request<>::RequestSize(parent_req_size_);
+          while ((pending_request = free_read_pool_.Get(request_length))) {
+            usb_.RequestQueue(pending_request->take(), &read_request_complete_);
+          }
 
-        size_t request_length = usb::Request<>::RequestSize(parent_req_size_);
-        while ((pending_request = free_read_pool_.Get(request_length))) {
-          usb_.RequestQueue(pending_request->take(), &read_request_complete_);
-        }
-
-        zxlogf(DEBUG, "ax88179: now online");
-        if (ifc_.is_valid()) {
-          ifc_.Status(ETHERNET_STATUS_ONLINE);
+          zxlogf(DEBUG, "ax88179: now online");
+          if (ifc_.is_valid()) {
+            ifc_.Status(ETHERNET_STATUS_ONLINE);
+          }
         }
       } else if (!online && was_online) {
+        online_ = false;
         zxlogf(DEBUG, "ax88179: now offline");
         if (ifc_.is_valid()) {
           ifc_.Status(0);
@@ -930,7 +936,7 @@ zx_status_t Asix88179Ethernet::Initialize() {
 
   for (auto endpoint : interface->GetEndpointList()) {
     const usb_endpoint_descriptor_t* endp = endpoint.descriptor();
-    if (usb_ep_direction(endp) == USB_ENDPOINT_OUT) {
+    if (usb_ep_direction(endp) == fdescriptor::EndpointDirection::kOut) {
       if (usb_ep_type(endp) == fdescriptor::EndpointType::kBulk) {
         bulk_out_address = endp->b_endpoint_address;
       }

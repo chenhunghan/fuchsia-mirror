@@ -442,6 +442,11 @@ type ControlOptions = table {
 /// set during that session and reverts the charger to autonomous hardware / board-configured
 /// defaults (e.g. restoring autonomous USB-C/BC1.2 input current limit selection and default
 /// charging mode).
+///
+/// # Debug Overrides
+/// Fields overridden through [`Debug`] take precedence over this protocol. A request that sets an
+/// overridden field is validated and accepted as usual, but the new constraint (like the revert on
+/// close) reaches the hardware only once the override is cleared. See [`Debug`].
 @discoverable
 open protocol Controller {
     /// Atomically applies operational and electrical constraints to the charger converter.
@@ -467,7 +472,55 @@ open protocol Controller {
     }) -> () error Error;
 };
 
+/// Debug control interface for hardware battery chargers.
+///
+/// Composes [`Controller`] without its single-client exclusivity or revert-on-close lifetime, so
+/// command-line diagnostic utilities (such as `batteryutil`) and integration tests can apply sticky
+/// charger overrides while the production policy client stays connected to [`Controller`]. Only
+/// reachable through [`DebugService`].
+///
+/// # Override Precedence
+/// Each field set through `SetControl` becomes an override that takes precedence over
+/// [`Controller`] regardless of request order: a [`Controller`] request that sets an overridden
+/// field is validated and accepted, but takes effect only once the override is cleared, and a
+/// [`Controller`] revert on close leaves overridden fields untouched. Fields that are not
+/// overridden stay under [`Controller`] control.
+///
+/// # Sticky Lifetime (No Revert on Close)
+/// Overrides are not tied to the connection that applied them: closing the channel leaves them in
+/// effect, so a utility can apply an override and exit. They remain in effect until
+/// [`Debug.ClearOverrides`] is called.
+///
+/// # Multiple Clients
+/// Any number of clients may connect concurrently; connections are never rejected with
+/// `ZX_ERR_ALREADY_BOUND`. All connections share one set of overrides: for each field, the most
+/// recent `SetControl` from any client wins, and [`Debug.ClearOverrides`] from any client
+/// withdraws all of them.
+open protocol Debug {
+    compose Controller;
+
+    /// Withdraws all overrides applied through `Debug`, including those applied by other clients.
+    ///
+    /// Each overridden field reverts to the constraint applied through the active [`Controller`]
+    /// connection, if any, or otherwise to the autonomous hardware / board-configured default that
+    /// [`Controller`] restores on close. Succeeds without effect if no field is overridden.
+    ///
+    /// Errors:
+    /// - `IO`: Communication failure with the charger hardware. Fields that could not be reverted
+    ///   remain overridden, so the call can be retried.
+    /// - `INTERNAL`: Internal driver error.
+    flexible ClearOverrides() -> () error Error;
+};
+
 service Service {
     charger client_end:Charger;
     controller client_end:Controller;
+};
+
+/// Debug service for command-line utilities and engineering/bringup consoles.
+///
+/// Restricted via component capability routing and product assembly; not exposed to production
+/// drivers or system daemons, which use [`Service`] instead.
+service DebugService {
+    debug client_end:Debug;
 };

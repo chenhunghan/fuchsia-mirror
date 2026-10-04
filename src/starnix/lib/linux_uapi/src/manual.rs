@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::{__IncompleteArrayField, __u8, __u32};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C)]
 #[derive(Copy, Clone, FromBytes, Immutable, KnownLayout, IntoBytes)]
@@ -37,22 +37,12 @@ pub struct fscrypt_identifier {
 
 impl Default for fscrypt_key_specifier__bindgen_ty_1 {
     fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        // SAFETY: this is what bindgen would generate
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
+        Self::new_zeroed()
     }
 }
 impl Default for fscrypt_key_specifier {
     fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        // SAFETY: this is what bindgen would generate
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
+        Self::new_zeroed()
     }
 }
 
@@ -68,12 +58,7 @@ pub struct fscrypt_add_key_arg {
 }
 impl Default for fscrypt_add_key_arg {
     fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        // SAFETY: this is what bindgen would generate
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
+        Self::new_zeroed()
     }
 }
 
@@ -123,4 +108,16 @@ macro_rules! impl_debug {
 impl_debug! {
     fuse_open_out__bindgen_ty_1,
     fuse_in_header__bindgen_ty_1,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fscrypt_defaults_are_zeroed() {
+        assert!(fscrypt_key_specifier__bindgen_ty_1::default().as_bytes().iter().all(|&b| b == 0));
+        assert!(fscrypt_key_specifier::default().as_bytes().iter().all(|&b| b == 0));
+        assert!(fscrypt_add_key_arg::default().as_bytes().iter().all(|&b| b == 0));
+    }
 }

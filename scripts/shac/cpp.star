@@ -8,6 +8,7 @@ load(
     "./common.star",
     "FORMATTER_MSG",
     "cipd_platform_name",
+    "get_build_dir",
     "get_fuchsia_dir",
     "os_exec",
 )
@@ -20,6 +21,9 @@ _IGNORED_GLOBS = [
     "!**/goldens/**",
     "!**/third_party/**",
 ]
+
+# Maximum number of affected C/C++ files to analyze with clang-tidy in a single run.
+_MAX_CLANG_TIDY_FILES = 100
 
 def _clang_format(ctx):
     """Formats C/C++/Proto code using clang-format."""
@@ -152,6 +156,108 @@ def _header_guards(ctx):
                     replacements = [formatted],
                 )
 
+def _clang_tidy(ctx):
+    """Runs clang-tidy on C/C++ source files."""
+    cpp_affected = ctx.scm.affected_files(glob = [
+        "*.c",
+        "*.cc",
+        "*.cpp",
+    ] + _IGNORED_GLOBS)
+
+    header_affected = ctx.scm.affected_files(glob = [
+        "*.h",
+        "*.hh",
+        "*.hpp",
+    ] + _IGNORED_GLOBS)
+
+    # SHAC's `ctx.scm.affected_files()` populates `meta.action` differently
+    # depending on how SHAC is invoked:
+    # 1. `shac check` (default git diff) or `shac check --all`: SHAC uses its
+    #    `gitCheckout` backend, setting `meta.action` to the git diff-filter
+    #    code (e.g. "M", "A") for modified/added files and `""` for untouched
+    #    files. Filtering to non-empty `meta.action` narrows `--all` runs down
+    #    to only the files actually modified in git.
+    # 2. `shac check <file1> ...` (e.g. `fx lint --files=...`): SHAC uses its
+    #    `specifiedFiles` backend, which does not query git and sets
+    #    `meta.action == ""` on all passed files (even if modified in git).
+    #
+    # Therefore, if any file has a non-empty `meta.action`, analyze only those
+    # modified/added files; otherwise fall back to all returned keys (which handles
+    # explicit file arguments, while `_MAX_CLANG_TIDY_FILES` below still skips
+    # `--all` runs when zero C/C++ files were modified in git).
+    cpp_modified = [f for f, m in cpp_affected.items() if m.action]
+    header_modified = [f for f, m in header_affected.items() if m.action]
+    if cpp_modified or header_modified:
+        cpp_files = cpp_modified
+        header_files = header_modified
+    else:
+        cpp_files = list(cpp_affected.keys())
+        header_files = list(header_affected.keys())
+
+    if not cpp_files and not header_files:
+        return
+
+    # Full AST compilation is computationally expensive (~1-5 seconds per file).
+    # Skip analysis when the number of target C/C++ files exceeds the threshold
+    # (such as on large C++ refactors or `--all` runs with no modified C/C++ files).
+    total_files = len(cpp_files) + len(header_files)
+    if total_files > _MAX_CLANG_TIDY_FILES:
+        return
+
+    # clang-tidy requires the build output directory to locate compile_commands.json
+    # and generated headers (such as FIDL bindings). If fuchsia_build_dir is not
+    # configured, we cannot resolve compilation flags and must exit early.
+    build_dir_var = ctx.vars.get("fuchsia_build_dir")
+    if not build_dir_var:
+        return
+
+    fuchsia_dir = get_fuchsia_dir(ctx)
+    platform = cipd_platform_name(ctx)
+    python_bin = "%s/prebuilt/third_party/python3/%s/bin/python3" % (
+        fuchsia_dir,
+        platform,
+    )
+    clang_tidy_bin = "%s/prebuilt/third_party/clang/%s/bin/clang-tidy" % (
+        fuchsia_dir,
+        platform,
+    )
+    driver_script = "%s/scripts/shac/clang_tidy.py" % fuchsia_dir
+    build_dir = get_build_dir(ctx)
+
+    res = os_exec(
+        ctx,
+        [
+            python_bin,
+            driver_script,
+            "--clang-tidy",
+            clang_tidy_bin,
+            "--build-dir",
+            build_dir,
+            "--root",
+            ctx.scm.root,
+        ] + cpp_files + header_files,
+    ).wait()
+
+    if res.stderr:
+        print(res.stderr.strip())  # allow-print
+
+    for finding in json.decode(res.stdout):
+        if "line" in finding:
+            ctx.emit.finding(
+                level = "warning",
+                message = finding["message"],
+                filepath = finding["filepath"],
+                line = finding["line"],
+                col = finding["col"],
+            )
+        else:
+            ctx.emit.finding(
+                level = "warning",
+                message = finding["message"],
+                filepath = finding["filepath"],
+            )
+
 def register_cpp_checks():
     shac.register_check(shac.check(_clang_format, formatter = True))
+    shac.register_check(shac.check(_clang_tidy))
     shac.register_check(shac.check(_header_guards, formatter = True))

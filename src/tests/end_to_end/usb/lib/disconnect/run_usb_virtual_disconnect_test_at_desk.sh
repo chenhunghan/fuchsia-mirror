@@ -19,6 +19,10 @@ TEST_TARGET=\
 TEST_GROUP="//src/tests/end_to_end/usb:usb_virtual_disconnect_test"
 UDEV_SCRIPT="${SCRIPT_DIR}/udev.sh"
 
+# Reuse TARGET_VID, TARGET_PIDS, and is_target_pid() from udev.sh.
+# shellcheck source=/dev/null
+source "${UDEV_SCRIPT}"
+
 usage() {
     cat <<USAGE_EOF
 Usage: $0 [options] [-- <extra fx test args>]
@@ -34,6 +38,25 @@ Examples:
   $0 -t fuchsia-1234-5678-9abc
   $0 -- --test-filter test_usb_disconnect_1 --min-severity-logs DEBUG
 USAGE_EOF
+}
+
+# The virtual hub toggles a real DUT's USB `authorized` attribute, so this
+# runner only works where a Fuchsia USB device is physically attached. Fail fast
+# when the DUT is unplugged or on remote environments (e.g. Cloudtops/VMs)
+# before prompting for sudo in udev.sh or running a build.
+require_attached_device() {
+    local dev pid
+    for dev in /sys/bus/usb/devices/*; do
+        [[ -f "${dev}/idVendor" ]] || continue
+        [[ "$(cat "${dev}/idVendor" 2>/dev/null)" == "${TARGET_VID}" ]] || continue
+        pid="$(cat "${dev}/idProduct" 2>/dev/null || echo "unknown")"
+        if is_target_pid "${pid}"; then
+            return 0
+        fi
+    done
+
+    echo "[!] ERROR: No supported Fuchsia USB device (VID ${TARGET_VID}) found on this host (DUT unplugged or running on a Cloudtop/VM)." >&2
+    return 1
 }
 
 # `fx test` can only run targets that are in the build graph. Add the test if
@@ -102,8 +125,14 @@ main() {
         return 1
     fi
 
-    # The test toggles the USB 'authorized' attribute without sudo.
-    # udev.sh is idempotent and exits early if already done.
+    require_attached_device
+
+    # The test toggles `/sys/bus/usb/devices/<bus_id>/authorized` without sudo.
+    # On its first run on a workstation, `udev.sh` requires `sudo` to write
+    # `/etc/udev/rules.d/99-fuchsia-usb-authorize.rules` and run `udevadm` to
+    # reload/trigger the rule (granting `a+w` on `authorized`). Subsequent runs
+    # detect that the rule and write permission are already in place and exit
+    # without needing `sudo`.
     echo "${UDEV_SCRIPT}"
     bash "${UDEV_SCRIPT}"
 

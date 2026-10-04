@@ -139,56 +139,12 @@ zx_status_t Vdec1::PowerOn() {
   DosSwReset0::Get().FromValue(0xfffffffc).WriteTo(mmio()->dosbus);
   DosSwReset0::Get().FromValue(0).WriteTo(mmio()->dosbus);
 
-  enum {
-    kGxmFclkDiv4 = 0,  // 500 MHz
-    kGxmFclkDiv3 = 1,  // 666 MHz
-    kGxmFclkDiv5 = 2,  // 400 MHz
-    kGxmFclkDiv7 = 3,  // 285.7 MHz
-    kGxmMp1 = 4,
-    kGxmMp2 = 5,
-    kGxmGp0 = 6,
-    kGxmXtal = 7,  // 24 MHz
-
-    // G12B has the same clock inputs as G12A.
-    kG12xFclkDiv2p5 = 0,  // 800 MHz
-    kG12xFclkDiv3 = 1,    // 666 MHz
-    kG12xFclkDiv4 = 2,    // 500 MHz
-    kG12xFclkDiv5 = 3,    // 400 MHz
-    kG12xFclkDiv7 = 4,    // 285.7 MHz
-    kG12xHifi = 5,
-    kG12xGp0 = 6,
-    kG12xXtal = 7,  // 24 MHz
-  };
-
-  // The maximum frequency used in linux is 648 MHz, but that requires using GP0, which is already
-  // being used by the GPU. The linux driver also uses 200MHz in some circumstances for videos <=
-  // 1080p30.
-  //
-  // We can run all the way up at 800 MHz without glitches, after fixing some glitches we were
-  // seeing before especially at higher clock rates.  However, 500 MHz is plenty for now, and it
-  // seems prudent to run at <= the max frequency used on linux, just in case.
-  uint32_t clock_sel;
-  switch (owner_->device_type()) {
-    case DeviceType::kG12A:
-    case DeviceType::kG12B:
-    case DeviceType::kSM1:
-      clock_sel = kG12xFclkDiv4;
-      break;
-    case DeviceType::kGXM:
-      clock_sel = kGxmFclkDiv4;
-      break;
-  }
-
-  HhiVdecClkCntl::Get()
-      .ReadFrom(mmio()->hiubus)
-      .set_vdec_en(true)
-      .set_vdec_sel(clock_sel)
-      .WriteTo(mmio()->hiubus);
-  // This driver doesn't currently reverse this setting during PowerOff(), but perhaps ideally it
-  // would.
+  // Note: HhiVdecClkCntl register access (setting 500 MHz fclk_div4 and enabling vdec_en) and
+  // DosGclkEn0 clock gating are handled via fuchsia.hardware.clock in amlogic-clk / vim3-clk.
   status = owner_->ToggleClock(ClockType::kGclkVdec, true);
   if (status != ZX_OK) {
     DECODE_ERROR("Failed to toggle clock: %s", zx_status_get_string(status));
+    owner_->GateClocks();
     return status;
   }
   DosMemPdVdec::Get().FromValue(0).WriteTo(mmio()->dosbus);
@@ -233,7 +189,11 @@ zx_status_t Vdec1::PowerOff() {
     temp.WriteTo(mmio()->aobus);
   }
   DosMemPdVdec::Get().FromValue(~0u).WriteTo(mmio()->dosbus);
-  HhiVdecClkCntl::Get().ReadFrom(mmio()->hiubus).set_vdec_en(false).WriteTo(mmio()->hiubus);
+
+  zx_status_t status = owner_->ToggleClock(ClockType::kGclkVdec, false);
+  if (status != ZX_OK) {
+    DECODE_ERROR("Failed to toggle clock: %s", zx_status_get_string(status));
+  }
 
   {
     auto temp = AoRtiGenPwrSleep0::Get().ReadFrom(mmio()->aobus);
@@ -241,13 +201,12 @@ zx_status_t Vdec1::PowerOff() {
     temp.WriteTo(mmio()->aobus);
   }
 
-  zx_status_t status = owner_->GateClocks();
-  if (status != ZX_OK) {
-    DECODE_ERROR("Failed to gate clocks: %s", zx_status_get_string(status));
-    return status;
+  zx_status_t gate_status = owner_->GateClocks();
+  if (gate_status != ZX_OK) {
+    DECODE_ERROR("Failed to gate clocks: %s", zx_status_get_string(gate_status));
   }
 
-  return ZX_OK;
+  return (status != ZX_OK) ? status : gate_status;
 }
 
 void Vdec1::StartDecoding() {

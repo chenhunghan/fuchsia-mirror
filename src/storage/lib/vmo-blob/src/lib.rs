@@ -130,3 +130,80 @@ impl File for VmoBlob {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vfs::node::Node;
+
+    fn create_test_blob(content: &[u8]) -> Arc<VmoBlob> {
+        let vmo = zx::Vmo::create(content.len().max(4096) as u64).unwrap();
+        vmo.set_content_size(&(content.len() as u64)).unwrap();
+        vmo.write(content, 0).unwrap();
+        VmoBlob::new(vmo, [0xabu8; 32])
+    }
+
+    #[fuchsia::test]
+    async fn test_vmo_blob_node_and_file_traits() {
+        let blob = create_test_blob(b"hello vmo blob");
+
+        assert_eq!(blob.get_vmo().get_content_size().unwrap(), 14);
+        assert_eq!(blob.entry_info(), EntryInfo::new(fio::INO_UNKNOWN, fio::DirentType::File));
+        assert!(blob.executable());
+        assert_eq!(blob.open_file(&FileOptions::default()).await, Ok(()));
+        assert_eq!(blob.truncate(0).await, Err(zx::Status::ACCESS_DENIED));
+        assert_eq!(blob.get_size().await, Ok(14));
+        assert_eq!(
+            blob.update_attributes(fio::MutableNodeAttributes::default()).await,
+            Err(zx::Status::NOT_SUPPORTED)
+        );
+        assert_eq!(blob.sync(SyncMode::Normal).await, Ok(()));
+
+        let attrs = blob.get_attributes(fio::NodeAttributesQuery::all()).await.unwrap();
+        assert_eq!(attrs.immutable_attributes.protocols, Some(fio::NodeProtocolKinds::FILE));
+        assert_eq!(attrs.immutable_attributes.content_size, Some(14));
+        assert_eq!(attrs.immutable_attributes.storage_size, Some(BLOCK_SIZE));
+        assert_eq!(attrs.immutable_attributes.root_hash, Some(vec![0xabu8; 32]));
+    }
+
+    #[fuchsia::test]
+    async fn test_get_backing_memory_and_vmex() {
+        let blob = create_test_blob(b"backing memory test");
+
+        // Shared buffer is not supported.
+        assert_eq!(
+            blob.get_backing_memory(fio::VmoFlags::SHARED_BUFFER).await.unwrap_err(),
+            zx::Status::NOT_SUPPORTED
+        );
+
+        // Write without PRIVATE_CLONE is not supported.
+        assert_eq!(
+            blob.get_backing_memory(fio::VmoFlags::WRITE).await.unwrap_err(),
+            zx::Status::NOT_SUPPORTED
+        );
+
+        // Read-only reference child VMO.
+        let ro_vmo = blob.get_backing_memory(fio::VmoFlags::READ).await.unwrap();
+        let mut buf = [0u8; 19];
+        ro_vmo.read(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"backing memory test");
+
+        // Writable private clone child VMO.
+        let rw_vmo = blob
+            .get_backing_memory(
+                fio::VmoFlags::READ | fio::VmoFlags::WRITE | fio::VmoFlags::PRIVATE_CLONE,
+            )
+            .await
+            .unwrap();
+        rw_vmo.write(b"MODIFIED", 0).unwrap();
+
+        // Execute without valid VMEX fails.
+        assert!(
+            blob.get_backing_memory(fio::VmoFlags::READ | fio::VmoFlags::EXECUTE).await.is_err()
+        );
+
+        // Initializing VMEX once succeeds, and a second time returns ALREADY_BOUND.
+        let _ = init_vmex_resource(zx::Resource::from(zx::NullableHandle::invalid()));
+        assert!(init_vmex_resource(zx::Resource::from(zx::NullableHandle::invalid())).is_err());
+    }
+}

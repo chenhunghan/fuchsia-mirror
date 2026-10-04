@@ -6,6 +6,7 @@
 #define SRC_STORAGE_LIB_BLOCK_CLIENT_CPP_CLIENT_H_
 
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
+#include <lib/zx/eventpair.h>
 #include <lib/zx/fifo.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
@@ -37,6 +38,7 @@ class Client : public storage::VmoidRegistry {
   zx_status_t BlockDetachVmo(storage::Vmoid vmoid) override;
 
   zx::result<storage::OwnedVmoid> RegisterVmo(const zx::vmo& vmo);
+  zx::result<uint8_t> RegisterKey(zx::eventpair key_token);
 
   // Issues a group of block requests over the underlying fifo, and waits for a response.
   zx_status_t Transaction(BlockFifoRequest* requests, size_t count);

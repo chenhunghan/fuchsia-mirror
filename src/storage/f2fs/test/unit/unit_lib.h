@@ -214,6 +214,9 @@ class MapTester {
   static pgoff_t GetCurrentNatAddr(NodeManager &manager, nid_t start) {
     return manager.CurrentNatAddr(start);
   }
+  static void CacheNatEntry(NodeManager &manager, nid_t nid, RawNatEntry &raw_entry) {
+    manager.CacheNatEntry(nid, raw_entry);
+  }
 };
 
 class MkfsTester {

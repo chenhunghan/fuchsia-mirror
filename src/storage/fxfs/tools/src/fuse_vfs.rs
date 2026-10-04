@@ -109,7 +109,6 @@ impl FuseFs {
                 // If the object has no remaining links, immediately tombstones it in the graveyard.
                 if let ReplacedChild::Object(object_id) = replaced_child {
                     self.fs
-                        .graveyard()
                         .tombstone_object(
                             dir.store().store_object_id(),
                             object_id,
@@ -191,7 +190,6 @@ impl FuseFs {
             // immediately tombstones it in the graveyard.
             if let ReplacedChild::Object(object_id) = replaced_child {
                 self.fs
-                    .graveyard()
                     .tombstone_object(
                         new_dir.store().store_object_id(),
                         object_id,

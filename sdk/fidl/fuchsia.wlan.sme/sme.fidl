@@ -227,6 +227,11 @@ closed protocol ConnectTransaction {
         ind fuchsia.wlan.internal.SignalReportIndication;
     });
 
+    /// Report that the monitored RSSI crossed a configured threshold.
+    strict -> OnRssiThresholdBreached(struct {
+        cur_rssi_dbm int8;
+    });
+
     /// Give an update of the channel switching.
     strict -> OnChannelSwitched(struct {
         info fuchsia.wlan.internal.ChannelSwitchInfo;
@@ -355,6 +360,13 @@ closed protocol ClientSme {
     strict GetApfPacketFilterEnabled() -> (struct {
         enabled bool;
     }) error zx.Status;
+
+    // Firmware RSSI threshold monitoring offload functionality
+    strict StartRssiMonitor(struct {
+        min_rssi_dbm int8;
+        max_rssi_dbm int8;
+    }) -> () error zx.Status;
+    strict StopRssiMonitor() -> () error zx.Status;
 };
 
 type ApConfig = struct {
@@ -452,9 +464,11 @@ closed protocol GenericSme {
         resp GenericSmeQuery;
     });
     /// Query the underlying SME to determine extended properties.
-    strict QueryIfaceCapabilities() -> (struct {
+    strict QueryIfaceCapabilities() -> (table {
         /// Android Packet Filter support
-        apf_support fuchsia.wlan.common.ApfPacketFilterSupport;
+        1: apf_support fuchsia.wlan.common.ApfPacketFilterSupport;
+        /// Firmware RSSI threshold monitoring offload support
+        2: rssi_monitor_support fuchsia.wlan.common.RssiMonitorSupport;
     }) error zx.Status;
     /// Attempt to establish a new connection to an underlying Client SME.
     /// Connections may be established for the whole lifetime of the SME,

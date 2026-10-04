@@ -24,6 +24,7 @@ pub mod connection;
 pub mod info;
 pub mod list;
 pub mod ssh_connector;
+pub mod uart_connector;
 pub mod usb_connector;
 pub mod vsock_connector;
 
@@ -48,8 +49,7 @@ pub use list::list_targets;
 pub use resolve::{
     DefaultTargetResolver, Resolution, TargetResolver, build_discovery,
     build_discovery_builder_common, build_discovery_from_config, discover_single_default_target,
-    get_discovered_targets, get_discovery_stream, maybe_locally_resolve_target_spec,
-    resolve_target_address,
+    get_discovered_targets, get_discovery_stream, resolve_target_address,
 };
 pub use target_connector::{
     FDomainConnection, OvernetConnection, TargetConnection, TargetConnectionError, TargetConnector,
@@ -59,15 +59,6 @@ pub use target_connector::{
 pub use fidl_fuchsia_developer_ffx::TargetProxy;
 
 pub use target_errors::{UNKNOWN_TARGET_NAME, UNSPECIFIED_TARGET_NAME};
-
-/// Emit an analytics event indicating an RCS proxy was created via the daemon.
-pub async fn emit_daemon_rcs_proxy_event(ty: &str) {
-    connection::emit_rcs_proxy_event(ty, Some(true), true).await
-}
-
-/// Attempt to connect to RemoteControl on a target device using a connection to a daemon.
-///
-/// The optional |target| is a string matcher as defined in fuchsia.developer.ffx.TargetQuery
 
 pub fn is_discovery_enabled(ctx: &EnvironmentContext) -> bool {
     // TODO (b/355292969): put back the discovery check after we've addressed the flakes associated
@@ -89,8 +80,6 @@ pub enum KnockError {
 pub enum KnockCriticalError {
     #[error("Timeout opening target {target}")]
     TimeoutOpeningTarget { target: String },
-    #[error("Lost connection to the Daemon: {detail}")]
-    LostDaemonConnection { detail: String },
     #[error("FIDL error: {0}")]
     Fidl(String),
     #[error("Target error: {0}")]

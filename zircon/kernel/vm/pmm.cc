@@ -163,8 +163,6 @@ uint64_t pmm_count_loan_cancelled_pages() { return Pmm::Node().CountLoanCancelle
 
 uint64_t pmm_count_total_bytes() { return Pmm::Node().CountTotalBytes(); }
 
-PageQueues* pmm_page_queues() { return Pmm::Node().GetPageQueues(); }
-
 Evictor* pmm_evictor() { return Pmm::Node().GetEvictor(); }
 
 bool pmm_set_free_memory_signal(uint64_t free_lower_bound, uint64_t free_upper_bound,

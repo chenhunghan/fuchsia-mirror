@@ -12,7 +12,9 @@
 #include <lib/zx/thread.h>
 #include <lib/zx/timer.h>
 #include <zircon/errors.h>
+#include <zircon/rights.h>
 #include <zircon/syscalls.h>
+#include <zircon/syscalls/object.h>
 #include <zircon/syscalls/profile.h>
 #include <zircon/syscalls/resource.h>
 #include <zircon/syscalls/types.h>
@@ -100,6 +102,18 @@ TEST(SchedulerProfileTest, CreateProfileWithDefaultPriorityIsOk) {
   zx::profile profile;
 
   ASSERT_OK(zx::profile::create(maybe_profile_rsrc.value(), 0u, &profile_info, &profile));
+}
+
+TEST(SchedulerProfileTest, CreatedProfileHasDefaultRights) {
+  zx::result<zx::resource> maybe_profile_rsrc = GetSystemProfileResource();
+  ASSERT_OK(maybe_profile_rsrc.status_value());
+  zx_profile_info_t profile_info = MakeSchedulerProfileInfo(ZX_PRIORITY_DEFAULT);
+  zx::profile profile;
+  ASSERT_OK(zx::profile::create(maybe_profile_rsrc.value(), 0u, &profile_info, &profile));
+
+  zx_info_handle_basic_t info = {};
+  ASSERT_OK(profile.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
+  EXPECT_EQ(ZX_DEFAULT_PROFILE_RIGHTS, info.rights);
 }
 
 TEST(SchedulerProfileTest, CreateProfileWithLowestPriorityIsOk) {

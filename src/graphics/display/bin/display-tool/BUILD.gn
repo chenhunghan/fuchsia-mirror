@@ -22,6 +22,7 @@ rustc_binary("bin") {
     "//sdk/rust/zx",
     "//src/graphics/display/lib/rust/display-utils",
     "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-image-format",
     "//src/lib/mapped-vmo",
     "//src/lib/trace/rust:trace",

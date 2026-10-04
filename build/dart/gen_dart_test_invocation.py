@@ -10,7 +10,7 @@ import string
 import sys
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate a script that invokes a Dart application"
     )
@@ -81,6 +81,8 @@ $results_parser $dart \\
         | stat.S_IROTH
     )
     os.chmod(app_file, permissions)
+
+    return 0
 
 
 if __name__ == "__main__":

@@ -283,11 +283,6 @@ fn listen_for_answers(socket: Socket, device_name: Option<String>) -> Result<Mdn
 }
 
 fn scope_id_to_name_checked(scope_id: u32) -> Result<String> {
-    let mut buf = vec![0; libc::IF_NAMESIZE];
-    let res = unsafe { libc::if_indextoname(scope_id, buf.as_mut_ptr() as *mut libc::c_char) };
-    if res.is_null() {
-        bail!("{scope_id} is not a valid network interface ID")
-    } else {
-        Ok(String::from_utf8_lossy(&buf.split(|&c| c == 0u8).next().unwrap_or(&[0u8])).to_string())
-    }
+    netext::scope_id_to_name_checked(scope_id)
+        .map_err(|_| format_err!("{scope_id} is not a valid network interface ID"))
 }

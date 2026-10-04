@@ -3,8 +3,16 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_build_action.gni")
+import("//build/bazel/bazel_test_suite.gni")
 
 visibility = [ ":*" ]
+
+# Exports the Bazel device tests defined in this directory tree to `tests.json`,
+# making them visible to `fx test` and infra builders.
+bazel_test_suite("bazel_tests") {
+  visibility += [ "//build/bazel:*" ]
+  target_tests = [ "//build/bazel/rules/packages/tests:example_test" ]
+}
 
 # All the test targets defined in this file.
 group("all") {
@@ -40,9 +48,6 @@ bazel_build_action("tests") {
     # The following are currently needed by `fx_package()`.
     # TODO(b/519244675): Remove once `package-tool` is migrated to Bazel.
     "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
-
-    # TODO(b/519243783): Remove once `cmc` is migrated to Bazel.
-    "//tools/cmc:bazel_input($host_toolchain)",
   ]
 }
 
@@ -60,8 +65,5 @@ bazel_build_action("quick_tests") {
     # The following are currently needed by `fx_package()`.
     # TODO(b/519244675): Remove once `package-tool` is migrated to Bazel.
     "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
-
-    # TODO(b/519243783): Remove once `cmc` is migrated to Bazel.
-    "//tools/cmc:bazel_input($host_toolchain)",
   ]
 }

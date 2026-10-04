@@ -59,7 +59,7 @@ type GetPowerSaveModeResponse = struct {
 // TODO(https://fxbug.dev/42164319): Move this to wlan_internal.fidl after https://fxbug.dev/42166364 is fixed
 type GetIfaceHistogramStatsResponse = strict union {
     1: stats fuchsia.wlan.stats.IfaceHistogramStats;
-    2: error_status zx.Status;
+    2: error_status zx.Result;
 };
 
 closed protocol DeviceWatcher {
@@ -224,9 +224,11 @@ closed protocol DeviceMonitor {
     });
     strict QueryIfaceCapabilities(struct {
         iface_id uint16;
-    }) -> (struct {
+    }) -> (table {
         /// Android Packet Filter support
-        apf_support fuchsia.wlan.common.ApfPacketFilterSupport;
+        1: apf_support fuchsia.wlan.common.ApfPacketFilterSupport;
+        /// Firmware RSSI threshold monitoring offload support
+        2: rssi_monitor_support fuchsia.wlan.common.RssiMonitorSupport;
     }) error zx.Status;
 
     // SME methods

@@ -71,15 +71,9 @@ func RebootWithCommand(t *testing.T, cmd string, eKind ExpectedRebootType, eActi
 
 	i.WaitForLogMessage("initializing platform")
 
-	// Make sure the shell is ready to accept commands over serial, and wait for fshost to start.
-	i.WaitForLogMessages([]string{"console.shell: enabled", "fshost started"})
-
-	if arch == emulator.X64 {
-		// Ensure the ACPI driver comes up in case our command will need to interact with the platform
-		// driver for power operations.
-		i.RunCommand("waitfor class=acpi topo=/dev/sys/platform/pt/acpi/_SB_/pt; echo ACPI_READY")
-		i.WaitForLogMessage("ACPI_READY")
-	}
+	// Make sure the shell is ready to accept commands over serial, and wait for fshost to start
+	// and driver enumeration to complete.
+	i.WaitForLogMessages([]string{"console.shell: enabled", "fshost started", "Bootup completed."})
 
 	// Trigger a reboot in one of the various ways.
 	i.RunCommand(cmd)

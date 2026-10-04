@@ -90,7 +90,7 @@ def _has_power_counters(
         rows = tp.run_query(
             "SELECT 1 FROM process_counter_track pct "
             "JOIN process p USING (upid) "
-            "WHERE p.name = 'kernel' AND pct.name LIKE 'Processing Rate:CPU:%' "
+            "WHERE p.name = 'kernel' AND pct.name LIKE 'Rate:CPU:%' "
             "LIMIT 1;"
         )
         return len(rows) > 0
@@ -108,7 +108,7 @@ def _analyze_core_utilization_from_counters(
     Docs: //docs/development/tracing/advanced/recording-cpu-frequency.md
 
     In Fuchsia traces with the 'kernel:power' category, CPU frequency changes appear
-    as 'Processing Rate:CPU:N' counter tracks under the 'kernel' process. The values
+    as 'Rate:CPU:N' counter tracks under the 'kernel' process. The values
     are on a normalized scale (1000 = 100% max frequency).
     """
     required_tables = {
@@ -139,7 +139,7 @@ def _analyze_core_utilization_from_counters(
     ),
     kernel_rate_raw AS (
       SELECT
-        CAST(SUBSTR(pct.name, 21) AS INT) AS cpu,
+        CAST(SUBSTR(pct.name, 10) AS INT) AS cpu,
         c.value AS rate_val,
         (LEAD(c.ts, 1, (SELECT end_ts FROM trace_window)) OVER (
           PARTITION BY pct.id ORDER BY c.ts
@@ -147,7 +147,7 @@ def _analyze_core_utilization_from_counters(
       FROM counter c
       JOIN process_counter_track pct ON c.track_id = pct.id
       JOIN process p USING (upid)
-      WHERE p.name = 'kernel' AND pct.name LIKE 'Processing Rate:CPU:%'
+      WHERE p.name = 'kernel' AND pct.name LIKE 'Rate:CPU:%'
     ),
     core_rate AS (
       SELECT
@@ -227,7 +227,7 @@ def _analyze_core_utilization_and_rate(
     Docs: //docs/development/tracing/advanced/recording-cpu-frequency.md
 
     In Fuchsia traces with the 'kernel:power' category, CPU frequency changes appear
-    as 'Processing Rate:CPU:N' counter tracks under the 'kernel' process. The values
+    as 'Rate:CPU:N' counter tracks under the 'kernel' process. The values
     are on a normalized scale (1000 = 100% max frequency).
     """
     if _has_power_counters(tp, db_objects):

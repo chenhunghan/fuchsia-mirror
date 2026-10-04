@@ -94,12 +94,12 @@ closed protocol Pciroot {
         bdf uint32;
         index uint32;
     }) -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         bti zx.Handle:BTI;
     });
     /// Get the platform information structure from the pciroot protocol to be used for bus init.
     strict GetPciPlatformInfo() -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         info PciPlatformInfo;
     });
 
@@ -115,7 +115,7 @@ closed protocol Pciroot {
         address PciBdf;
         offset uint16;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         value uint8;
     });
     /// Read 16 bytes from config space for device at bdf address |address|, offset |offset|.
@@ -123,7 +123,7 @@ closed protocol Pciroot {
         address PciBdf;
         offset uint16;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         value uint16;
     });
     /// Read 32 bytes from config space for device at bdf address |address|, offset |offset|.
@@ -131,7 +131,7 @@ closed protocol Pciroot {
         address PciBdf;
         offset uint16;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         value uint32;
     });
     /// Write 8 bytes to config space for device at bdf |address| offset |offset|.
@@ -140,7 +140,7 @@ closed protocol Pciroot {
         offset uint16;
         value uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Write 16 bytes to config space for device at bdf |address| offset |offset|.
     strict WriteConfig16(struct {
@@ -148,7 +148,7 @@ closed protocol Pciroot {
         offset uint16;
         value uint16;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Write 32 bytes to config space for device at bdf |address| offset |offset|.
     strict WriteConfig32(struct {
@@ -156,7 +156,7 @@ closed protocol Pciroot {
         offset uint16;
         value uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Request address space reservations from platform bus to use for mapping bars / bridges
     /// |in_base| is an optional requested start address which should otherwise be 0. |size| is the
@@ -173,7 +173,7 @@ closed protocol Pciroot {
         type PciAddressSpace;
         low bool;
     }) -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         base uint64;
         resource zx.Handle:RESOURCE;
         token zx.Handle:EVENTPAIR;
@@ -182,7 +182,7 @@ closed protocol Pciroot {
         msi_count uint32;
         can_target_64bit bool;
     }) -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         allocation zx.Handle:MSI;
         info MsiAllocationInfo;
     });
@@ -207,7 +207,7 @@ closed protocol Pciroot {
         /// The offset into |cfg_vmo| for the MSI capability.
         cfg_offset uint64;
     }) -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         interrupt zx.Handle:INTERRUPT;
     });
 };

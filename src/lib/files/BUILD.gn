@@ -2,37 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/testing/cc_test_executable.gni")
-
-cc_test_executable("files_unittests") {
-  testonly = true
-
-  sources = [
-    "directory_unittest.cc",
-    "file_descriptor_unittest.cc",
-    "file_unittest.cc",
-    "glob_unittest.cc",
-    "path_unittest.cc",
-    "scoped_temp_dir_unittest.cc",
-  ]
-
-  deps = [
-    ":files",
-    "//sdk/lib/syslog/cpp",
-    "//src/lib/fxl:common",
-    "//src/lib/fxl:strings",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
-    "//third_party/googletest:gtest",
-  ]
-}
-
 if (is_fuchsia) {
-  import("//build/components.gni")
+  import("//build/bazel/bazel_test_suite.gni")
 
-  fuchsia_unittest_package("files-tests") {
-    manifest = "meta/files_unittests.cml"
-    deps = [ ":files_unittests" ]
+  bazel_test_suite("files-tests") {
+    target_tests = [ "//src/lib/files:files-tests" ]
   }
 
   group("tests") {
@@ -94,6 +68,15 @@ source_set("files") {
     "//sdk/lib/fit",
     "//sdk/lib/utf-utils",
     "//src/lib/fxl:memory",
+  ]
+  visibility = [
+    ":*",
+    "//examples/*",
+    "//sdk/lib/*",
+    "//src/*",
+    "//tools/symbolizer:*",
+    "//vendor/*",
+    "//zircon/system/ulib/debugdata/test:*",
   ]
   public_deps = [
     "//src/lib/fxl:strings",

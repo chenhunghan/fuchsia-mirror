@@ -6,9 +6,10 @@
 import argparse
 import json
 import sys
+from typing import Any
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -29,7 +30,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def sorting(item):
+def sorting(item: object) -> Any:
     if isinstance(item, dict):
         return sorted((key, sorting(values)) for key, values in item.items())
     if isinstance(item, list):
@@ -37,7 +38,7 @@ def sorting(item):
     return item
 
 
-def is_subset(golden, generated):
+def is_subset(golden: object, generated: object) -> bool:
     if isinstance(golden, dict):
         if not isinstance(generated, dict):
             print("Generated is expected to be a dict, but is not")
@@ -66,7 +67,7 @@ def is_subset(golden, generated):
     return golden == generated
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     with open(args.generated, "r") as f:

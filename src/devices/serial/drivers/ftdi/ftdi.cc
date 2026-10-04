@@ -10,6 +10,7 @@
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/driver.h>
+#include <lib/zx/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,8 @@
 #include <usb/usb.h>
 
 #include "ftdi-i2c.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 #define FTDI_STATUS_SIZE 2
 #define FTDI_RX_HEADER_SIZE 4
@@ -332,9 +335,10 @@ zx_status_t FtdiDevice::SetBaudrate(uint32_t baudrate) {
       return ZX_ERR_INVALID_ARGS;
   }
   value = static_cast<uint16_t>((whole & 0x3fff) | (fraction << 14));
-  index = static_cast<uint16_t>(fraction >> 2);
-  status = usb_client_.ControlOut(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-                                  kFtdiSioSetBaudrate, value, index, ZX_TIME_INFINITE, NULL, 0);
+  ZX_DEBUG_ASSERT(port_index_ <= 255);
+  index = static_cast<uint16_t>((fraction >> 2) | ((port_index_ & 0xFF) << 8));
+  status = usb_client_.ControlOut(kVendorDeviceOut, kFtdiSioSetBaudrate, value, index,
+                                  ZX_TIME_INFINITE, NULL, 0);
   if (status == ZX_OK) {
     baudrate_ = baudrate;
   }
@@ -345,15 +349,18 @@ zx_status_t FtdiDevice::Reset() {
   if (!usb_client_.is_valid()) {
     return ZX_ERR_INVALID_ARGS;
   }
-  return usb_client_.ControlOut(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-                                kFtdiSioResetRequest, kFtdiSioReset, 0, ZX_TIME_INFINITE, NULL, 0);
+  ZX_DEBUG_ASSERT(port_index_ <= 255);
+  uint16_t index = static_cast<uint16_t>((port_index_ & 0xFF) << 8);
+  return usb_client_.ControlOut(kVendorDeviceOut, kFtdiSioResetRequest, kFtdiSioReset, index,
+                                ZX_TIME_INFINITE, NULL, 0);
 }
 
 zx_status_t FtdiDevice::SetBitMode(uint8_t line_mask, uint8_t mode) {
   uint16_t val = static_cast<uint16_t>(line_mask | (mode << 8));
-  zx_status_t status =
-      usb_client_.ControlOut(USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, kFtdiSioSetBitmode,
-                             val, 0, ZX_TIME_INFINITE, NULL, 0);
+  ZX_DEBUG_ASSERT(port_index_ <= 255);
+  uint16_t index = static_cast<uint16_t>((port_index_ & 0xFF) << 8);
+  zx_status_t status = usb_client_.ControlOut(kVendorDeviceOut, kFtdiSioSetBitmode, val, index,
+                                              ZX_TIME_INFINITE, NULL, 0);
   if (status != ZX_OK) {
     zxlogf(ERROR, "FTDI set bitmode failed with %d", status);
     return status;
@@ -524,8 +531,6 @@ zx_status_t FtdiDevice::Bind() {
     return ZX_ERR_NOT_SUPPORTED;
   }
 
-  fbl::AutoLock lock(&mutex_);
-
   // Find our endpoints.
   std::optional<usb::InterfaceList> usb_interface_list;
   status = usb::InterfaceList::Create(usb_client_, true, &usb_interface_list);
@@ -533,20 +538,33 @@ zx_status_t FtdiDevice::Bind() {
     return status;
   }
 
+  fbl::AutoLock lock(&mutex_);
+
   uint8_t bulk_in_addr = 0;
   uint8_t bulk_out_addr = 0;
 
   for (auto& interface : *usb_interface_list) {
+    if (interface.descriptor()->b_interface_number >= 4) {
+      return ZX_ERR_NOT_SUPPORTED;
+    }
+    uint8_t in_addr = 0;
+    uint8_t out_addr = 0;
     for (auto ep_itr : interface.GetEndpointList()) {
-      if (usb_ep_direction(ep_itr.descriptor()) == USB_ENDPOINT_OUT) {
+      if (usb_ep_direction(ep_itr.descriptor()) == fdescriptor::EndpointDirection::kOut) {
         if (usb_ep_type(ep_itr.descriptor()) == fdescriptor::EndpointType::kBulk) {
-          bulk_out_addr = ep_itr.descriptor()->b_endpoint_address;
+          out_addr = ep_itr.descriptor()->b_endpoint_address;
         }
       } else {
         if (usb_ep_type(ep_itr.descriptor()) == fdescriptor::EndpointType::kBulk) {
-          bulk_in_addr = ep_itr.descriptor()->b_endpoint_address;
+          in_addr = ep_itr.descriptor()->b_endpoint_address;
         }
       }
+    }
+    if (in_addr && out_addr) {
+      bulk_in_addr = in_addr;
+      bulk_out_addr = out_addr;
+      port_index_ = static_cast<uint16_t>(interface.descriptor()->b_interface_number + 1);
+      break;
     }
   }
 

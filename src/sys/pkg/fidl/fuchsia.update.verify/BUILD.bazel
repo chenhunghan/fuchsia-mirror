@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.update.verify",
+    srcs = [
+        "verify.fidl",
+    ],
+    visibility = [
+        "//src/connectivity/network:__subpackages__",
+        "//src/settings/service:__pkg__",
+        "//src/storage/blobfs:__subpackages__",
+        "//src/storage/fshost:__subpackages__",
+        "//src/sys/component_manager:__subpackages__",
+        "//src/sys/pkg:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//zircon/vdso/zx",
+    ],
+)

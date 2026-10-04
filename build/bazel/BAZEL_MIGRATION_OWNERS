@@ -3,3 +3,9 @@
 #
 # TODO(jayzhuang): Remove these patterns after the majority of migration is done.
 waynechou@google.com
+
+# Ensure people working on go/git-clone-fuchsia can make changes to all build
+# files during the project.
+annizhang@google.com
+awolter@google.com
+jcecil@google.com

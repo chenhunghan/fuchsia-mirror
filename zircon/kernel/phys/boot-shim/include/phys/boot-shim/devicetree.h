@@ -22,6 +22,7 @@
 #include <lib/zbitl/view.h>
 
 #include <ktl/bit.h>
+#include <ktl/concepts.h>
 #include <ktl/memory.h>
 #include <ktl/new.h>
 #include <ktl/optional.h>
@@ -49,7 +50,7 @@ struct DevicetreeBoot {
   // Note: The object is reallocated to not be at the tail of the ramdisk, such that when a data ZBI
   // is loaded in place it does not overwrite this region. This allows for this region to be
   // available during the entirety of the lifetime of the boot shim.
-  ktl::optional<linux_boot_config::LinuxBootConfig> linux_boot_config;
+  linux_boot_config::LinuxBootConfig linux_boot_config;
 
   // Devicetree span.
   devicetree::Devicetree fdt;
@@ -178,10 +179,11 @@ class BootShimHelper {
   // After calling the constructor, memory is fully initialized and `gDevicetreeBoot` is
   // initialized.
   explicit BootShimHelper(const char* shim_name, void* boot_payload)
-      : BootShimHelper(shim_name, boot_payload, []() {}) {}
+      : BootShimHelper(shim_name, boot_payload, [] {}) {}
 
   // Same as above, but allows injecting custom code to execute before `InitMemory` or `ArchSetup`.
-  explicit BootShimHelper(const char* shim_name, void* boot_payload, auto&& after_relocs_cb)
+  explicit BootShimHelper(const char* shim_name, void* boot_payload,
+                          ktl::invocable<> auto&& after_relocs_cb)
       : symbolize_((
             // Must happen before initializing the symbolize object.
             ApplyRelocations(), InitStdout(), after_relocs_cb(), shim_name)),
@@ -196,16 +198,9 @@ class BootShimHelper {
           ArchSetUpZbi(early_zbi);
           return devicetree::Devicetree(devicetree::ByteView(
               static_cast<const uint8_t*>(boot_payload), std::numeric_limits<uintptr_t>::max()));
-        }()) {}
-
-  // Initializes standard items that are not `DevicetreeItems`.
-  // Extra items in `Shim` must be initialized before calling this method.
-  bool InitItems() {
+        }()) {
     shim_.set_cmdline(gDevicetreeBoot.cmdline);
-    ktl::string_view linux_boot_config =
-        gDevicetreeBoot.linux_boot_config.value_or(linux_boot_config::LinuxBootConfig{}).contents();
-    shim_.set_linux_boot_config(std::span(
-        reinterpret_cast<const ktl::byte*>(linux_boot_config.data()), linux_boot_config.size()));
+    shim_.set_linux_boot_config(gDevicetreeBoot.linux_boot_config);
     shim_.set_allocator([](size_t size, size_t align, fbl::AllocChecker& ac) -> void* {
       return new (ktl::align_val_t{align}, gPhysNew<memalloc::Type::kPhysScratch>, ac)
           uint8_t[size];
@@ -215,7 +210,11 @@ class BootShimHelper {
     if constexpr (options.generate_peripheral_ranges) {
       shim_.set_mmio_observer(MarkAsPeripheral);
     }
+  }
 
+  // Initializes standard items that are not `DevicetreeItems`.
+  // Extra items in `Shim` must be initialized before calling this method.
+  bool InitItems() {
     // This will initialize these common set of items if they are present, otherwise they will
     // collapse to no-ops and be compiled out.
     shim_.OnInvocableItems(
@@ -229,11 +228,7 @@ class BootShimHelper {
             item.set_payload(*gDevicetreeBoot.nvram);
           }
         },
-        [this](boot_shim::RebootReasonItem& item) {
-          item.Init(
-              boot_shim::BootProperties(gDevicetreeBoot.cmdline, gDevicetreeBoot.linux_boot_config),
-              shim_.shim_name());
-        },
+        [this](boot_shim::RebootReasonItem& item) { item.Init(shim_); },
         [](boot_shim::UartItem<>& item) { item.Init(GetUartDriver().config()); });
 
     return shim_.Init();

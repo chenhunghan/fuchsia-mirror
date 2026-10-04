@@ -11,6 +11,7 @@
 #include <lib/driver/metadata/cpp/metadata.h>
 #include <zircon/status.h>
 
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 
 #include "src/connectivity/ethernet/lib/rndis/rndis.h"
@@ -398,7 +399,17 @@ zx_status_t RndisFunction::HandleCommand(const void* buffer, size_t size) {
       }
 
       auto query = static_cast<const rndis_query*>(buffer);
-      auto oid_response = QueryOid(query->oid, nullptr, 0);
+      size_t offset = offsetof(rndis_query, request_id) + query->info_buffer_offset;
+      if (query->info_buffer_offset > size - offsetof(rndis_query, request_id) ||
+          query->info_buffer_length > size - offset) {
+        response.emplace(QueryResponse(query->request_id, std::nullopt));
+        break;
+      }
+
+      void* input = query->info_buffer_length > 0
+                        ? const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(buffer) + offset)
+                        : nullptr;
+      auto oid_response = QueryOid(query->oid, input, query->info_buffer_length);
       response.emplace(QueryResponse(query->request_id, oid_response));
       break;
     }
@@ -415,7 +426,8 @@ zx_status_t RndisFunction::HandleCommand(const void* buffer, size_t size) {
       }
 
       size_t offset = offsetof(rndis_set, request_id) + set->info_buffer_offset;
-      if (offset + set->info_buffer_length > size) {
+      if (set->info_buffer_offset > size - offsetof(rndis_set, request_id) ||
+          set->info_buffer_length > size - offset) {
         response.emplace(SetResponse(set->request_id, RNDIS_STATUS_INVALID_DATA));
         break;
       }
@@ -530,8 +542,8 @@ void RndisFunction::Control(ControlRequest& request, ControlCompleter::Sync& com
   uint8_t bm_request_type = setup.bm_request_type();
   uint8_t b_request = setup.b_request();
 
-  if (bm_request_type == (USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-      b_request == USB_CDC_SEND_ENCAPSULATED_COMMAND) {
+  if (bm_request_type == kClassInterfaceOut &&
+      b_request == fdescriptor::CdcRequest::kSendEncapsulatedCommand) {
     zx_status_t status = HandleCommand(write_buffer.data(), write_buffer.size());
     if (status != ZX_OK) {
       fdf::error("Error handling command: {}", zx_status_get_string(status));
@@ -541,8 +553,8 @@ void RndisFunction::Control(ControlRequest& request, ControlCompleter::Sync& com
     completer.Reply(zx::ok(std::vector<uint8_t>{}));
     return;
   }
-  if (bm_request_type == (USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-      b_request == USB_CDC_GET_ENCAPSULATED_RESPONSE) {
+  if (bm_request_type == kClassInterfaceIn &&
+      b_request == fdescriptor::CdcRequest::kGetEncapsulatedResponse) {
     completer.Reply(HandleResponse(request.setup().w_length()));
     return;
   }
@@ -599,16 +611,16 @@ void RndisFunction::SetConfigured(SetConfiguredRequest& request,
   }
 
   switch (request.speed()) {
-    case fuchsia_hardware_usb_descriptor::UsbSpeed::kLow:
+    case fdescriptor::UsbSpeed::kLow:
       link_speed_ = 15'000;
       break;
-    case fuchsia_hardware_usb_descriptor::UsbSpeed::kFull:
+    case fdescriptor::UsbSpeed::kFull:
       link_speed_ = 120'000;
       break;
-    case fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh:
+    case fdescriptor::UsbSpeed::kHigh:
       link_speed_ = 4'800'000;
       break;
-    case fuchsia_hardware_usb_descriptor::UsbSpeed::kSuper:
+    case fdescriptor::UsbSpeed::kSuper:
       link_speed_ = 50'000'000;
       break;
     default:
@@ -1140,83 +1152,84 @@ zx::result<> RndisFunction::Start(fdf::DriverContext context) {
   // Initialize Descriptors
   descriptors_.assoc = usb_interface_assoc_descriptor_t{
       .b_length = sizeof(usb_interface_assoc_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE_ASSOCIATION,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterfaceAssociation),
       .b_first_interface = comm_intf_num,
       .b_interface_count = 2,
-      .b_function_class = USB_CLASS_WIRELESS,
-      .b_function_sub_class = USB_SUBCLASS_WIRELESS_MISC,
-      .b_function_protocol = USB_PROTOCOL_WIRELESS_MISC_RNDIS,
+      .b_function_class = fidl::ToUnderlying(fdescriptor::UsbClass::kWireless),
+      .b_function_sub_class = fidl::ToUnderlying(fdescriptor::WirelessSubclass::kMisc),
+      .b_function_protocol = fidl::ToUnderlying(fdescriptor::WirelessProtocol::kMiscRndis),
       .i_function = response.string_indices()[2],
   };
   descriptors_.communication_interface = usb_interface_descriptor_t{
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = comm_intf_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 1,
-      .b_interface_class = USB_CLASS_WIRELESS,
-      .b_interface_sub_class = USB_SUBCLASS_WIRELESS_MISC,
-      .b_interface_protocol = USB_PROTOCOL_WIRELESS_MISC_RNDIS,
+      .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kWireless),
+      .b_interface_sub_class = fidl::ToUnderlying(fdescriptor::WirelessSubclass::kMisc),
+      .b_interface_protocol = fidl::ToUnderlying(fdescriptor::WirelessProtocol::kMiscRndis),
       .i_interface = response.string_indices()[0],
   };
   descriptors_.cdc_header = usb_cs_header_interface_descriptor_t{
       .bLength = sizeof(usb_cs_header_interface_descriptor_t),
-      .bDescriptorType = USB_DT_CS_INTERFACE,
-      .bDescriptorSubType = USB_CDC_DST_HEADER,
+      .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+      .bDescriptorSubType = fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kHeader),
       .bcdCDC = htole16(0x0110),
   };
   descriptors_.call_mgmt = usb_cs_call_mgmt_interface_descriptor_t{
       .bLength = sizeof(usb_cs_call_mgmt_interface_descriptor_t),
-      .bDescriptorType = USB_DT_CS_INTERFACE,
-      .bDescriptorSubType = USB_CDC_DST_CALL_MGMT,
+      .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+      .bDescriptorSubType = fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kCallMgmt),
       .bmCapabilities = 0x00,
       .bDataInterface = data_intf_num,
   };
   descriptors_.acm = usb_cs_abstract_ctrl_mgmt_interface_descriptor_t{
       .bLength = sizeof(usb_cs_abstract_ctrl_mgmt_interface_descriptor_t),
-      .bDescriptorType = USB_DT_CS_INTERFACE,
-      .bDescriptorSubType = USB_CDC_DST_ABSTRACT_CTRL_MGMT,
+      .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+      .bDescriptorSubType =
+          fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kAbstractCtrlMgmt),
       .bmCapabilities = 0,
   };
   descriptors_.cdc_union = usb_cs_union_interface_descriptor_1_t{
       .bLength = sizeof(usb_cs_union_interface_descriptor_1_t),
-      .bDescriptorType = USB_DT_CS_INTERFACE,
-      .bDescriptorSubType = USB_CDC_DST_UNION,
+      .bDescriptorType = fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface),
+      .bDescriptorSubType = fidl::ToUnderlying(fdescriptor::CdcDescriptorSubtype::kUnion),
       .bControlInterface = comm_intf_num,
       .bSubordinateInterface = data_intf_num,
   };
   descriptors_.notification_ep = usb_endpoint_descriptor_t{
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = notification_addr,
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kInterrupt),
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kInterrupt),
       .w_max_packet_size = htole16(kNotificationMaxPacketSize),
       .b_interval = 1,
   };
   descriptors_.data_interface = usb_interface_descriptor_t{
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = data_intf_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 2,
-      .b_interface_class = USB_CLASS_CDC,
+      .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kCdc),
       .b_interface_sub_class = 0,
       .b_interface_protocol = 0,
       .i_interface = response.string_indices()[1],
   };
   descriptors_.in_ep = usb_endpoint_descriptor_t{
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = bulk_in_addr,
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = htole16(512),
       .b_interval = 0,
   };
   descriptors_.out_ep = usb_endpoint_descriptor_t{
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = bulk_out_addr,
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = htole16(512),
       .b_interval = 0,
   };

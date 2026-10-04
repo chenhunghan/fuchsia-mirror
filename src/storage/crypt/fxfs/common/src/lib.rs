@@ -120,6 +120,22 @@ impl CryptBase {
     pub fn set_filesystem_uuid(&mut self, uuid: &[u8; 16]) {
         self.filesystem_uuid = *uuid;
     }
+
+    pub async fn create_key_with_id(
+        &self,
+        owner: u64,
+        wrapping_key_id: WrappingKeyId,
+        object_type: ObjectType,
+    ) -> Result<(EncryptionKey, UnwrappedKey), zx::Status> {
+        <Self as Crypt>::create_key_with_id(
+            self,
+            owner,
+            wrapping_key_id,
+            object_type,
+            fidl_fuchsia_io::FscryptPolicyFlags::empty(),
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -161,6 +177,7 @@ impl Crypt for CryptBase {
         owner: u64,
         wrapping_key_id: WrappingKeyId,
         object_type: ObjectType,
+        _flags: fidl_fuchsia_io::FscryptPolicyFlags,
     ) -> Result<(EncryptionKey, UnwrappedKey), zx::Status> {
         if self.shutdown.load(Ordering::Relaxed) {
             return Err(zx::Status::INTERNAL);

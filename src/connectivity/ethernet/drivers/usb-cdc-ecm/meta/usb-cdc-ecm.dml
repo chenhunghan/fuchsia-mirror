@@ -3,10 +3,9 @@
 // found in the LICENSE file.
 {
     name: "usb-cdc-ecm",
-    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    include: [ "driver_component/driver.shard.cml" ],
     program: {
         colocate: "true",
-        compat: "driver/usb-cdc-ecm.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
         device_categories: [
             {

@@ -9,7 +9,7 @@ use fbl::Canary;
 use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
-use zx_types::{ZX_OBJ_TYPE_SUSPEND_TOKEN, ZX_RIGHT_INSPECT, ZX_RIGHT_TRANSFER, zx_rights_t};
+use zx_types::{ZX_DEFAULT_SUSPEND_TOKEN_RIGHTS, ZX_OBJ_TYPE_SUSPEND_TOKEN, zx_rights_t};
 
 use super::KernelHandle;
 use super::dispatcher::Dispatcher;
@@ -18,9 +18,6 @@ use super::suspend_token_dispatcher_ffi::cpp_suspend_token_dispatcher_create;
 use super::thread_dispatcher::ThreadDispatcher;
 
 use object_constants_rs as object_constants;
-
-/// Default rights assigned to a newly created SuspendTokenDispatcher handle.
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER | ZX_RIGHT_INSPECT;
 
 zr::static_assert_size_and_align!(
     SuspendTokenDispatcherState,
@@ -137,7 +134,7 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 impl SuspendTokenDispatcher {
     /// Returns the default rights for a SuspendTokenDispatcher handle.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_SUSPEND_TOKEN_RIGHTS
     }
 
     /// Creates a new `SuspendTokenDispatcher` suspending `task`.

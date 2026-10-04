@@ -6,6 +6,7 @@
 Generate tests.json.
 """
 
+import copy
 import json
 import pprint
 import sys
@@ -18,15 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent / "python/modules"))
 import bazel_tests_utils
 import build_utils
 from build_utils import CommandRunner
-from serialization import (
-    JSONValue,
-    instance_from_dict,
-    instance_to_dict,
-    serialize_dict,
-)
+from serialization import JSONValue, instance_from_dict
 
 
-@serialize_dict
 @dataclass(frozen=True)
 class Dimensions:
     """Swarming dimensions for a test environment or platform."""
@@ -64,16 +59,23 @@ class Dimensions:
     def is_subset_of(self, other: "Dimensions") -> bool:
         """Return True if all non-None dimensions in `self` are present with the same values in `other`.
 
-        `instance_to_dict()` omits fields whose value is `None`, returning a dict of
-        only the explicitly specified dimensions. Because `dict.items()` returns a
-        set-like `dict_items` view of `(key, value)` pairs, the `<=` operator performs
-        a set subset comparison, verifying that every dimension requirement in `self`
-        is satisfied by `other` (which may also specify additional dimensions).
+        Because `dict.items()` returns a set-like `dict_items` view of `(key,
+        value)` pairs, the `<=` operator performs a set subset comparison,
+        verifying that every dimension requirement in `self` is satisfied by
+        `other` (which may also specify additional dimensions).
         """
-        return instance_to_dict(self).items() <= instance_to_dict(other).items()
+        return self.to_dict().items() <= other.to_dict().items()
+
+    def to_dict(self) -> dict[str, str]:
+        """Return only the explicitly specified (non-None) dimensions.
+
+        This is called once per test/environment/platform combination, so it
+        deliberately avoids `instance_to_dict()`, whose per-call type-hint
+        reflection is far too slow for this hot path.
+        """
+        return {k: v for k, v in vars(self).items() if v is not None}
 
 
-@serialize_dict
 @dataclass(frozen=True)
 class EmulatorConfig:
     """Emulator-specific configuration for a test environment."""
@@ -97,8 +99,15 @@ class EmulatorConfig:
         if isinstance(self.kernel_args, list):
             object.__setattr__(self, "kernel_args", tuple(self.kernel_args))
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return only the explicitly specified (non-None) fields."""
+        return {
+            k: list(v) if isinstance(v, tuple) else v
+            for k, v in vars(self).items()
+            if v is not None
+        }
 
-@serialize_dict
+
 @dataclass(frozen=True)
 class Environment:
     """Full device environment specification in which a test should run."""
@@ -110,15 +119,33 @@ class Environment:
     tags: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        if not instance_to_dict(self.dimensions):
+        if not self.dimensions.to_dict():
             raise ValueError("each environment must specify dimensions")
         if isinstance(self.tags, list):
             object.__setattr__(self, "tags", tuple(self.tags))
 
     def __lt__(self, other: "Environment") -> bool:
-        return json.dumps(instance_to_dict(self), sort_keys=True) < json.dumps(
-            instance_to_dict(other), sort_keys=True
+        return json.dumps(self.to_dict(), sort_keys=True) < json.dumps(
+            other.to_dict(), sort_keys=True
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return only the explicitly specified (non-None) fields.
+
+        Like `Dimensions.to_dict()`, this avoids `instance_to_dict()` because it
+        is called for every resolved test environment and in `__lt__()`.
+        """
+        return {
+            k: (
+                v.to_dict()
+                if isinstance(v, (Dimensions, EmulatorConfig))
+                else list(v)
+                if isinstance(v, tuple)
+                else v
+            )
+            for k, v in vars(self).items()
+            if v is not None
+        }
 
 
 def partition_platforms(
@@ -147,7 +174,7 @@ def validate_known_platform(
         for p in (target_platforms | other_platforms)
     ):
         raise ValueError(
-            f"Could not match environment specifications: {instance_to_dict(env)}\n"
+            f"Could not match environment specifications: {env.to_dict()}\n"
             + "Consult //build/testing/platforms.gni for all allowable specifications"
         )
 
@@ -163,7 +190,7 @@ def matches_target_platform(
     if any(env.dimensions.is_subset_of(p) for p in other_platforms):
         return False
     raise ValueError(
-        f"Could not match environment specifications: {instance_to_dict(env)}\n"
+        f"Could not match environment specifications: {env.to_dict()}\n"
         + "Consult //build/testing/platforms.gni for all allowable specifications"
     )
 
@@ -258,7 +285,7 @@ def resolve_test_environments(
         test["build_only"] = True
         test["environments"] = []
     else:
-        test["environments"] = [instance_to_dict(e) for e in filtered_envs]
+        test["environments"] = [e.to_dict() for e in filtered_envs]
         if "build_only" in test:
             test["build_only"] = False
 
@@ -346,8 +373,34 @@ def build_tests_json(
     )
 
     validation_errors: list[str] = []
+    build_only_test_names: set[str] = set()
 
-    # Resolve, validate, and filter environments for tests from metadata.
+    bazel_tests = bazel_tests_utils.BazelTestsJson(
+        tests=[], grouped_tests={}, inputs=set()
+    )
+    if with_bazel_tests:
+        bazel_paths = build_utils.BazelPaths.new(build_dir=build_dir)
+        group_suite_files = [
+            build_dir / test_group["bazel_target_test_suites"]
+            for test_group in test_groups
+            if "bazel_target_test_suites" in test_group
+        ]
+        bazel_tests = bazel_tests_utils.generate_tests_json(
+            bazel_paths,
+            command_runner,
+            quiet=quiet,
+            extra_device_suite_files=group_suite_files,
+        )
+    else:
+        # `//build/images/updates:all_package_manifests.list` unconditionally
+        # reads `bazel_test_packages.list`, and its GN action is `no_op.sh`
+        # (`touch`), which would otherwise create an empty non-JSON file.
+        bazel_tests_utils.write_bazel_test_packages_list(build_dir, [])
+
+    tests.extend(bazel_tests.tests)
+
+    # Resolve, validate, and filter environments for tests from metadata and
+    # Bazel.
     for test in tests:
         test_info = test.get("test", {})
         test_name = test_info.get("name", "<unknown>")
@@ -368,6 +421,9 @@ def build_tests_json(
         except ValueError as err:
             validation_errors.append(f"{test_id}: {err}")
 
+        if test.get("build_only", False):
+            build_only_test_names.add(test_name)
+
     # For every group of tests that are supposed to target a specific product
     # bundle, we parse the tests, add `product_bundle: <name>` and add the test
     # to `tests`. When infra reads the final tests.json file, it will read that
@@ -386,7 +442,10 @@ def build_tests_json(
             pprint.pp(product_bundle_names)
             sys.exit(1)
 
-        raw_group_envs = test_group.get("environments", [])
+        group_build_only = test_group.get("build_only", False)
+        raw_group_envs = (
+            [] if group_build_only else test_group.get("environments", [])
+        )
         override_test_environments = test_group.get(
             "override_test_environments", True
         )
@@ -416,16 +475,20 @@ def build_tests_json(
         # Read the tests.json that is assigned to this specific product bundle.
         product_bundle_tests_file = build_dir / test_group["tests_json"]
         product_bundle_tests = json.loads(product_bundle_tests_file.read_text())
+        if with_bazel_tests and "bazel_target_test_suites" in test_group:
+            suite_file = build_dir / test_group["bazel_target_test_suites"]
+            product_bundle_tests.extend(
+                copy.deepcopy(bazel_tests.grouped_tests[suite_file])
+            )
 
         # Update the test spec to include the product bundle target and
         # environments.
         for test in product_bundle_tests:
             test_info = test.get("test", {})
-            name = test_info["name"] + "-" + product_bundle_name
-            test_info["name"] = name
+            original_name = test_info["name"]
+            name = original_name + "-" + product_bundle_name
             test_label = test_info.get("label")
             test_id = f"{name} ({test_label})" if test_label else name
-            test["product_bundle"] = product_bundle_name
 
             try:
                 resolve_test_environments(
@@ -441,34 +504,32 @@ def build_tests_json(
             except ValueError as err:
                 validation_errors.append(f"{test_id}: {err}")
 
-        tests += product_bundle_tests
+            # Check `build_only` after `resolve_test_environments()`, because
+            # environment resolution validates the test's environment specs and
+            # sets `build_only = True` if all of the test's environments are
+            # filtered out (or if the product_bundle_test_group itself has no
+            # runnable environments / is build_only).
+            #
+            # If the resolved test is build-only, do not mark it with a
+            # product_bundle or append the product_bundle_name to its name, and
+            # deduplicate it against other build-only tests: build-only tests
+            # are never flashed or run against the product bundle, and the
+            # underlying test target to build is identical.
+            if test.get("build_only", False):
+                if original_name in build_only_test_names:
+                    continue
+                build_only_test_names.add(original_name)
+            else:
+                test_info["name"] = name
+                test["product_bundle"] = product_bundle_name
+
+            tests.append(test)
 
     if validation_errors:
         raise ValueError(
             "Invalid test environment specifications found:\n"
             + "\n".join(f"  - {err}" for err in validation_errors)
         )
-
-    if with_bazel_tests:
-        # Now get the list of all Bazel tests.
-        # TODO(digit): This is just host tests for now, also get the list of
-        # Fuchsia Bazel tests.
-        fuchsia_dir = Path(__file__).parent.parent
-        assert (
-            fuchsia_dir / ".jiri_manifest"
-        ).exists(), f"Invalid Fuchsia source directory: {fuchsia_dir}"
-
-        # NOTE: Do not use fuchsia_dir here, since unit tests run with a different source dir,
-        # that BazelPaths.new() will find by walking up from build_dir.
-        bazel_paths = build_utils.BazelPaths.new(build_dir=build_dir)
-        bazel_tests_json, bazel_inputs = bazel_tests_utils.generate_tests_json(
-            bazel_paths,
-            command_runner,
-            quiet=quiet,
-        )
-        tests += bazel_tests_json
-    else:
-        bazel_inputs = set()
 
     # Write the final list of tests to tests.json if the contents changed.
     contents_changed = True
@@ -484,4 +545,4 @@ def build_tests_json(
         test_groups_path,
         environments_path,
         default_environments_path,
-    } | bazel_inputs
+    } | bazel_tests.inputs

@@ -188,42 +188,192 @@ TestBeds:
 [=====MOBLY RESULTS=====]
 ---
 Requested Tests:
+- test_explicit_skip
+- test_aborted
 - test_skip_with_sig
 Type: TestNameList
+...
 ---
-Begin Time: 1668122321142
-Details: Earlier test failed
-End Time: 1668122321143
+Begin Time: 1668122321140
+Details: Explicitly skipped
+End Time: 1668122321141
 Extra Errors: {}
 Extras: null
+Parent: null
 Result: SKIP
 Retry Parent: null
-Signature: test_skip_with_sig-1668122321142
+Signature: test_explicit_skip-1668122321140
+Stacktrace: null
+Termination Signal Type: TestSkip
+Test Class: GreetingsTest
+Test Name: test_explicit_skip
+Type: Record
+UID: null
+...
+---
+Begin Time: 1668122321142
+Details: Test received a SIGTERM.
+End Time: 1668122321145
+Extra Errors: {}
+Extras: null
+Parent: null
+Result: FAIL
+Retry Parent: null
+Signature: test_aborted-1668122321142
+Stacktrace: null
+Termination Signal Type: TestAbortAll
+Test Class: GreetingsTest
+Test Name: test_aborted
+Type: Record
+UID: null
+...
+---
+Begin Time: null
+Details: 'All remaining tests aborted due to: Test received a SIGTERM.'
+End Time: null
+Extra Errors: {}
+Extras: null
+Parent: null
+Result: SKIP
+Retry Parent: null
+Signature: null
 Stacktrace: null
 Termination Signal Type: TestAbortAll
 Test Class: GreetingsTest
 Test Name: test_skip_with_sig
 Type: Record
 UID: null
+...
 ---
 Error: 0
 Executed: 1
-Failed: 0
+Failed: 1
 Passed: 0
-Requested: 1
-Skipped: 1
+Requested: 3
+Skipped: 2
 Type: Summary
-
+...
 `
 
 	want := []runtests.TestCaseResult{
 		{
-			DisplayName:   "GreetingsTest.test_skip_with_sig",
-			FailureReason: runtests.FailureReasonFromMessage("[TestAbortAll] Earlier test failed"),
+			DisplayName: "GreetingsTest.test_explicit_skip",
+			SuiteName:   "GreetingsTest",
+			CaseName:    "test_explicit_skip",
+			Status:      runtests.TestSkipped,
+			Duration:    1 * time.Millisecond,
+			Format:      "Mobly",
+		},
+		{
+			DisplayName:   "GreetingsTest.test_aborted",
+			FailureReason: runtests.FailureReasonFromMessage("[TestAbortAll] Test received a SIGTERM."),
 			SuiteName:     "GreetingsTest",
-			CaseName:      "test_skip_with_sig",
+			CaseName:      "test_aborted",
 			Status:        runtests.TestFailure,
-			Duration:      1 * time.Millisecond,
+			Duration:      3 * time.Millisecond,
+			Format:        "Mobly",
+		},
+	}
+
+	testCaseCmp(t, stdout, want)
+}
+
+func TestParseMoblyTestSetupClassFailure(t *testing.T) {
+	stdout := `
+Running [InfraDriver]
+======== Mobly config content ========
+MoblyParams:
+  LogPath: /tmp
+TestBeds:
+- Controllers:
+    FuchsiaDevice:
+    - name: fuchsia-emulator
+      transport: fuchsia-controller
+  Name: InfraTestbed
+  TestParams: {}
+
+======================================
+
+[=====MOBLY RESULTS=====]
+---
+Requested Tests:
+- test_adb_pull
+- test_adb_push
+Type: TestNameList
+...
+---
+Begin Time: 1790657357608
+Details: 'Failed to create device for ''fuchsia-3e95-6dff-148f'': health check failed
+    on ''fuchsia-3e95-6dff-148f'''
+End Time: 1790657654783
+Extra Errors: {}
+Extras: null
+Parent: null
+Result: ERROR
+Retry Parent: null
+Signature: setup_class-1790657357608
+Stacktrace: null
+Termination Signal Type: FuchsiaDeviceError
+Test Class: AdbThroughputTest
+Test Name: setup_class
+Type: Record
+UID: null
+...
+---
+Begin Time: null
+Details: 'Failed to create device for ''fuchsia-3e95-6dff-148f'': health check failed
+    on ''fuchsia-3e95-6dff-148f'''
+End Time: null
+Extra Errors: {}
+Extras: null
+Parent: null
+Result: SKIP
+Retry Parent: null
+Signature: null
+Stacktrace: null
+Termination Signal Type: FuchsiaDeviceError
+Test Class: AdbThroughputTest
+Test Name: test_adb_pull
+Type: Record
+UID: null
+...
+---
+Begin Time: null
+Details: 'Failed to create device for ''fuchsia-3e95-6dff-148f'': health check failed
+    on ''fuchsia-3e95-6dff-148f'''
+End Time: null
+Extra Errors: {}
+Extras: null
+Parent: null
+Result: SKIP
+Retry Parent: null
+Signature: null
+Stacktrace: null
+Termination Signal Type: FuchsiaDeviceError
+Test Class: AdbThroughputTest
+Test Name: test_adb_push
+Type: Record
+UID: null
+...
+---
+Error: 1
+Executed: 0
+Failed: 0
+Passed: 0
+Requested: 2
+Skipped: 2
+Type: Summary
+...
+`
+
+	want := []runtests.TestCaseResult{
+		{
+			DisplayName:   "AdbThroughputTest.setup_class",
+			FailureReason: runtests.FailureReasonFromMessage("[FuchsiaDeviceError] Failed to create device for 'fuchsia-3e95-6dff-148f': health check failed on 'fuchsia-3e95-6dff-148f'"),
+			SuiteName:     "AdbThroughputTest",
+			CaseName:      "setup_class",
+			Status:        runtests.TestFailure,
+			Duration:      297175 * time.Millisecond,
 			Format:        "Mobly",
 		},
 	}

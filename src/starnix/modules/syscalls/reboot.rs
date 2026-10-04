@@ -17,7 +17,7 @@ use starnix_core::security;
 use starnix_core::task::{CurrentTask, ExitStatus};
 use starnix_core::vfs::FsString;
 use starnix_logging::{log_debug, log_error, log_info, log_warn, track_stub};
-use starnix_sync::{InterruptibleEvent, Mutex};
+use starnix_sync::{InterruptibleEvent, LockDepMutex, RebootErrorStateLock};
 use starnix_uapi::auth::CAP_SYS_BOOT;
 use starnix_uapi::errors::{EINTR, Errno};
 use starnix_uapi::signals::SigSet;
@@ -123,7 +123,7 @@ fn shutdown_and_block(
 ) -> Result<(), Errno> {
     let event = InterruptibleEvent::new();
     let event_clone = event.clone();
-    let error_state = Arc::new(Mutex::new(None));
+    let error_state = Arc::new(LockDepMutex::<_, RebootErrorStateLock>::new(None));
     let error_state_clone = error_state.clone();
 
     let kernel = current_task.kernel().clone();

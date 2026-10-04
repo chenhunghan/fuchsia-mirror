@@ -51,17 +51,8 @@ The command-line interface ([CLI][cli-doc]) provides the UX for `ffx`.
 It is responsible for:
 
 - Parsing user parameters (CLI parameters)
-- Communicating with the daemon (starting it if necessary)
 - Routing parsed parameters and requested FIDL proxies to the proper code path
   for execution
-
-## Daemon
-
-The daemon runs in the background on the host device and manages:
-
-- Target discovery
-- Target life cycle management (flashing, provisioning, and package serving)
-- Facilitating communication with target devices
 
 ## Remote control service
 

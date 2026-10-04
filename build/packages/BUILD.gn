@@ -5,6 +5,14 @@
 import("//build/python/python_host_test.gni")
 
 if (is_host) {
+  python_host_test("generate_package_debug_symbols_manifest_test") {
+    main_source = "generate_package_debug_symbols_manifest_test.py"
+    sources = [
+      "//build/api/debug_symbols.py",
+      "generate_package_debug_symbols_manifest.py",
+    ]
+  }
+
   python_host_test("generate_sdk_package_content_checklist_test") {
     main_source = "generate_sdk_package_content_checklist_test.py"
     sources = [ "generate_sdk_package_content_checklist.py" ]
@@ -14,5 +22,8 @@ if (is_host) {
 
 group("tests") {
   testonly = true
-  deps = [ ":generate_sdk_package_content_checklist_test($host_toolchain)" ]
+  deps = [
+    ":generate_package_debug_symbols_manifest_test($host_toolchain)",
+    ":generate_sdk_package_content_checklist_test($host_toolchain)",
+  ]
 }

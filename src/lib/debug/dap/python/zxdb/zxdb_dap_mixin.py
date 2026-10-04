@@ -8,6 +8,8 @@ from pydantic import Field, model_validator
 from pydap.dap_types import DapBaseModel, Thread
 from pydap.models import Response, StackTraceArguments, StackTraceResponse
 from zxdb_dap.models import (
+    ZxdbAsyncBacktraceArguments,
+    ZxdbAsyncBacktraceResponse,
     ZxdbPauseArguments,
     ZxdbThreadsResponse,
 )
@@ -137,3 +139,18 @@ class ZxdbDapMixin:
         """Sends a pause request with process scope."""
         resp = await self._send_request("pause", args)
         return Response.model_validate(resp)
+
+    async def zxdb_async_backtrace(
+        self: SupportsSendRequest,
+        args: ZxdbAsyncBacktraceArguments,
+    ) -> ZxdbAsyncBacktraceResponse:
+        """Sends a custom zxdb asyncBacktrace request.
+
+        Args:
+            args: Arguments containing threadId.
+
+        Returns:
+            ZxdbAsyncBacktraceResponse: Response containing async task nodes.
+        """
+        resp = await self._send_request("zxdb.AsyncBacktrace", args)
+        return ZxdbAsyncBacktraceResponse.model_validate(resp)

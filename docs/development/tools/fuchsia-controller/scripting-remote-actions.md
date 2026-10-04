@@ -234,7 +234,7 @@ With this approach, the protocol is expected to exit mid-execution of the method
 with a `PEER_CLOSED` error:
 
 ```py
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="src/developer/ffx/lib/fuchsia-controller/end_to_end_tests/mobly/reboot_test.py" region_tag="reboot_example" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="src/developer/fuchsia-controller/end_to_end_tests/mobly/reboot_test.py" region_tag="reboot_example" %}
 ```
 
 However, a challenging part comes afterward when you need to determine whether
@@ -284,7 +284,7 @@ Getting a snapshot from a fuchsia device involves running a snapshot and binding
 a `File` protocol for reading:
 
 ```py
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="src/developer/ffx/lib/fuchsia-controller/end_to_end_tests/mobly/target_identity_tests.py" region_tag="snapshot_example" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="src/developer/fuchsia-controller/end_to_end_tests/mobly/target_identity_tests.py" region_tag="snapshot_example" %}
 ```
 
 ## Implementing a FIDL server on a host
@@ -513,13 +513,13 @@ For more examples on server testing, see this
 <!-- Reference links -->
 
 [python-fidl-bindings]: /docs/development/tools/fuchsia-controller/fidl-bindings.md
-[fuchsia-controller]: /src/developer/ffx/lib/fuchsia-controller/README.md
+[fuchsia-controller]: /src/developer/fuchsia-controller/README.md
 [overnet]: /src/connectivity/overnet/README.md
-[fuchsia-controller-header-file]: /src/developer/ffx/lib/fuchsia-controller/cpp/fuchsia_controller_internal/fuchsia_controller.h
+[fuchsia-controller-header-file]: /src/developer/fuchsia-controller/cpp/fuchsia_controller_internal/fuchsia_controller.h
 [file-an-issue]: https://issuetracker.google.com/issues/new?component=1378581&template=1840403
 [interact-with-target-devices]: /docs/development/tools/ffx/getting-started.md#interacting_with_target_devices
 [test-server-and-event-handler]: /tools/fidl/fidlgen_python/tests/test_server_and_event_handler.py
-[test-fidl]: /src/developer/ffx/lib/fuchsia-controller/fidl/fuchsia_controller.test.fidl
+[test-fidl]: /src/developer/fuchsia-controller/fidl/fuchsia_controller.test.fidl
 [async-python]: /docs/development/tools/fuchsia-controller/async-python.md
 [get-started]: /docs/get-started/README.md
 [ffx-config]: /docs/development/tools/ffx/commands/config.md#runtime-configuration

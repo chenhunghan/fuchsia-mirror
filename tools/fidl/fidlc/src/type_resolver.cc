@@ -81,6 +81,10 @@ bool TypeResolver::ResolveAsOptional(Constant* constant) {
   return compile_step_->ResolveAsOptional(constant);
 }
 
+bool TypeResolver::ResolveAsNonZero(Constant* constant) {
+  return compile_step_->ResolveAsNonZero(constant);
+}
+
 bool TypeResolver::ResolveAsHandleSubtype(Resource* resource, Constant* constant,
                                           HandleSubtype* out_obj_type) {
   return compile_step_->ResolveHandleSubtypeIdentifier(resource, constant, out_obj_type);

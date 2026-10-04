@@ -4,12 +4,93 @@
 
 from dataclasses import dataclass
 import datetime
+import json
 import os
 import subprocess
 import typing
 
 import args
 from dataparse import dataparse
+
+_FFX_GLOBAL_VALUE_FLAGS = frozenset(
+    {
+        "-c",
+        "--config",
+        "-e",
+        "--env",
+        "--env-root",
+        "--machine",
+        "--stamp",
+        "-t",
+        "--target",
+        "--timeout",
+        "-l",
+        "--log-level",
+        "--isolate-dir",
+        "-o",
+        "--log-output",
+    }
+)
+
+
+def _extract_ffx_subcommand(ffx_args: typing.Sequence[str]) -> str | None:
+    """Extract the top-level ffx subcommand from ffx arguments, skipping global flags."""
+    skip_next = False
+    for arg in ffx_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _FFX_GLOBAL_VALUE_FLAGS:
+            skip_next = True
+        elif arg.startswith("-"):
+            continue
+        else:
+            return arg
+    return None
+
+
+def _resolve_direct_ffx_path(
+    out_dir: str, ffx_args: typing.Sequence[str]
+) -> str | None:
+    """Return the path to the built ffx binary if it and any required subtool exist on disk."""
+    if not out_dir:
+        return None
+    ffx_path = os.path.join(out_dir, "host-tools", "ffx")
+    if not (os.path.isfile(ffx_path) and os.access(ffx_path, os.X_OK)):
+        return None
+
+    subcommand = _extract_ffx_subcommand(ffx_args)
+    if subcommand:
+        subtool_name = f"ffx-{subcommand}"
+        subtool_path = os.path.join(out_dir, "host-tools", subtool_name)
+        if not os.path.isfile(subtool_path):
+            # If the subtool binary does not exist on disk, check whether it is an
+            # external subtool in ffx_tools.json that `fx ffx` would build on the fly.
+            ffx_tools_path = os.path.join(out_dir, "ffx_tools.json")
+            if os.path.isfile(ffx_tools_path):
+                try:
+                    with open(ffx_tools_path) as f:
+                        tools = json.load(f)
+                    if any(
+                        isinstance(entry, dict)
+                        and entry.get("name") == subtool_name
+                        for entry in tools
+                    ):
+                        return None
+                except (OSError, json.JSONDecodeError):
+                    return None
+
+    return ffx_path
+
+
+def _resolve_direct_host_tool_path(out_dir: str, tool_name: str) -> str | None:
+    """Return the path to a built host tool in host-tools/ if it exists and is executable."""
+    if not out_dir:
+        return None
+    tool_path = os.path.join(out_dir, "host-tools", tool_name)
+    if os.path.isfile(tool_path) and os.access(tool_path, os.X_OK):
+        return tool_path
+    return None
 
 
 class EnvironmentError(Exception):
@@ -102,19 +183,31 @@ class ExecutionEnvironment:
             )
 
         usb_socket_path = flags.ffx_usb_socket_path
-        if not usb_socket_path:
+        if (
+            not usb_socket_path
+            and create_log_file
+            and not flags.host
+            and not flags.dry
+            and flags.previous is None
+        ):
             # This looks heavy but we're just snagging a config value out of the
             # caller's config. No special subprocess wrapper since this is the
             # one place we *want* to leak the caller's config into our context.
-            cmd = [
-                "fx",
-                "--dir",
-                out_dir,
-                "ffx",
+            ffx_config_args = [
                 "config",
                 "get",
                 "connectivity.usb_socket_path",
             ]
+            if direct_ffx := _resolve_direct_ffx_path(out_dir, ffx_config_args):
+                cmd = [direct_ffx, *ffx_config_args]
+            else:
+                cmd = [
+                    "fx",
+                    "--dir",
+                    out_dir,
+                    "ffx",
+                    *ffx_config_args,
+                ]
             env = os.environ
             if (
                 "XDG_RUNTIME_DIR" not in env
@@ -234,9 +327,29 @@ class ExecutionEnvironment:
     def fx_cmd_line(self, *args: str) -> list[str]:
         """Format the given arguments into a command line for `fx`.
 
+        When invoking `ffx` (or known host tools like `dldist` and
+        `test_list_tool`) and the built binary is already present in
+        `<out_dir>/host-tools`, invoke the binary directly to avoid `fx`
+        wrapper overhead.
+
         Returns:
             list[str]: The full command line to use.
         """
+        if args and args[0] == "ffx":
+            ffx_args = args[1:]
+            if direct_ffx := _resolve_direct_ffx_path(self.out_dir, ffx_args):
+                cmd = [direct_ffx]
+                if (target := os.environ.get("FUCHSIA_NODENAME")) and {
+                    "-t",
+                    "--target",
+                }.isdisjoint(args):
+                    cmd.extend(["-t", target])
+                return cmd + list(ffx_args)
+        elif args and args[0] in ("dldist", "test_list_tool"):
+            if direct_tool := _resolve_direct_host_tool_path(
+                self.out_dir, args[0]
+            ):
+                return [direct_tool] + list(args[1:])
 
         cmd = ["fx", "--dir", self.out_dir]
         if (target := os.environ.get("FUCHSIA_NODENAME")) and {

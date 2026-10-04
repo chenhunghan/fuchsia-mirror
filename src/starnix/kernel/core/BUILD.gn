@@ -294,6 +294,7 @@ _starnix_core_deps = [
   "//src/lib/replace-with",
   "//src/lib/shared-buffer",
   "//src/lib/trace/rust:trace",
+  "//src/lib/trace/rust:trace-observer",
   "//src/performance/lib/fxt/rust",
   "//src/performance/memory/attribution/server",
   "//src/starnix/kernel/vdso",

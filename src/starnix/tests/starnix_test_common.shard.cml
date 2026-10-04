@@ -56,6 +56,10 @@
             name: "cobalt",
             url: "fake_cobalt#meta/fake_cobalt.cm",
         },
+        {
+            name: "erofs",
+            url: "erofs#meta/erofs.cm",
+        },
     ],
     capabilities: [
         { protocol: "fuchsia.test.Suite" },
@@ -101,6 +105,11 @@
             to: [ "#kernel" ],
         },
         {
+            protocol: [ "fuchsia.erofs.Erofs" ],
+            from: "#erofs",
+            to: [ "#kernel" ],
+        },
+        {
             protocol: [ "fuchsia.power.broker.Topology" ],
             from: "#power-broker",
             to: [
@@ -138,7 +147,9 @@
                 "fuchsia.ui.composition.Flatland",
                 "fuchsia.ui.composition.FlatlandFactory",
                 "fuchsia.ui.display.singleton.Info",
+                "fuchsia.ui.input.DeviceListenerRegistry",
                 "fuchsia.ui.input3.Keyboard",
+                "fuchsia.ui.policy.DeviceListenerRegistry",
                 "fuchsia.ui.test.input.Registry",
             ],
             from: "#ui",

@@ -108,6 +108,7 @@ impl CounterDesc {
 ///
 /// This structure contains a pointer to the counter's static `Descriptor` layout in memory,
 /// and provides methods to directly query and manipulate the counter across per-CPU slots.
+#[derive(Copy, Clone)]
 pub struct Counter {
     descriptor: *const Descriptor,
 }
@@ -126,27 +127,27 @@ impl Counter {
     }
 
     #[inline]
-    fn index(&self) -> usize {
+    fn index(self) -> usize {
         let desc_addr = self.descriptor as usize;
         let begin_addr = CounterDesc::new().begin() as usize;
         (desc_addr - begin_addr) / size_of::<Descriptor>()
     }
 
     #[inline]
-    fn slot_for_cpu<'a>(&self, p: &'a PerCpu) -> &'a AtomicI64 {
+    fn slot_for_cpu(self, p: &PerCpu) -> &AtomicI64 {
         // SAFETY: `p.counters` points to this CPU's slice of the counters arena,
         // which contains an `int64_t` entry for each counter descriptor indexed by `index()`.
         unsafe { &*p.counters.add(self.index()).cast::<AtomicI64>() }
     }
 
     #[inline]
-    fn slot(&self) -> &AtomicI64 {
+    fn slot(self) -> &'static AtomicI64 {
         self.slot_for_cpu(PerCpu::get_current())
     }
 
     /// Return the sum of the per-cpu slots for this counter across all CPUs.
     #[inline]
-    pub fn sum_across_all_cpus(&self) -> i64 {
+    pub fn sum_across_all_cpus(self) -> i64 {
         let mut sum: i64 = 0;
         PerCpu::for_each(|_cpu_num, p| {
             sum = sum.wrapping_add(self.slot_for_cpu(p).load(Ordering::Relaxed));
@@ -156,7 +157,7 @@ impl Counter {
 
     /// Return the max of the per-cpu slots for this counter.
     #[inline]
-    pub fn max_across_all_cpus(&self) -> i64 {
+    pub fn max_across_all_cpus(self) -> i64 {
         let mut max_value = i64::MIN;
         PerCpu::for_each(|_cpu_num, p| {
             max_value = max(max_value, self.slot_for_cpu(p).load(Ordering::Relaxed));
@@ -166,7 +167,7 @@ impl Counter {
 
     /// Return the min of the per-cpu slots for this counter.
     #[inline]
-    pub fn min_across_all_cpus(&self) -> i64 {
+    pub fn min_across_all_cpus(self) -> i64 {
         let mut min_value = i64::MAX;
         PerCpu::for_each(|_cpu_num, p| {
             min_value = min(min_value, self.slot_for_cpu(p).load(Ordering::Relaxed));
@@ -176,19 +177,19 @@ impl Counter {
 
     /// Return the value of the calling cpu's slot for this counter.
     #[inline]
-    pub fn value_curr_cpu(&self) -> i64 {
+    pub fn value_curr_cpu(self) -> i64 {
         self.slot().load(Ordering::Relaxed)
     }
 
     /// Set the value of calling cpu's slot to `value`. No memory order is implied.
     #[inline]
-    pub fn set(&self, value: u64) {
+    pub fn set(self, value: u64) {
         self.slot().store(value as i64, Ordering::Relaxed);
     }
 
     /// Add the given delta value to the calling CPU's counter slot.
     #[inline]
-    pub fn add(&self, delta: i64) {
+    pub fn add(self, delta: i64) {
         let slot = self.slot();
         slot.store(slot.load(Ordering::Relaxed).wrapping_add(delta), Ordering::Relaxed);
     }
@@ -196,7 +197,7 @@ impl Counter {
     /// Update the calling CPU's counter slot to the minimum of its current value and the given
     /// value.
     #[inline]
-    pub fn min(&self, value: i64) {
+    pub fn min(self, value: i64) {
         let slot = self.slot();
         let current = slot.load(Ordering::Relaxed);
         if value < current {
@@ -207,7 +208,7 @@ impl Counter {
     /// Update the calling CPU's counter slot to the maximum of its current value and the given
     /// value.
     #[inline]
-    pub fn max(&self, value: i64) {
+    pub fn max(self, value: i64) {
         let slot = self.slot();
         let current = slot.load(Ordering::Relaxed);
         if value > current {
@@ -229,7 +230,7 @@ impl Counter {
 #[macro_export]
 macro_rules! define_kcounter {
     ($rust_var:ident, $name:expr, $type:ident) => {
-        pub static $rust_var: $crate::counters::Counter = {
+        pub const $rust_var: $crate::counters::Counter = {
             #[unsafe(link_section = concat!(".bss.kcounter.", $name))]
             #[used]
             static mut ARENA: [i64; $crate::counters::SMP_MAX_CPUS] =

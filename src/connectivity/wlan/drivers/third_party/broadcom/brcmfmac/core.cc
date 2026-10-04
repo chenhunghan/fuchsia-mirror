@@ -44,6 +44,7 @@
 #include "locks.h"
 #include "proto.h"
 #include "src/devices/lib/broadcom/commands.h"
+#include "wlan_interface.h"
 #include "workqueue.h"
 
 #define MAX_WAIT_FOR_8021X_TX_MSEC (950)
@@ -521,6 +522,15 @@ zx_status_t brcmf_net_attach(struct brcmf_if* ifp, bool rtnl_locked) {
 static void brcmf_net_detach(struct net_device* ndev, bool rtnl_locked) {
   // TODO(cphoenix): Make sure devices are removed and memory is freed properly. This code
   // is probably wrong. See https://fxbug.dev/42104452.
+  struct brcmf_if* ifp = ndev_to_if(ndev);
+  if (ifp && ifp->drvr && ifp->drvr->device) {
+    wlan::brcmfmac::WlanInterface* iface = (ifp->ifidx == 0)
+                                               ? ifp->drvr->device->GetClientInterface()
+                                               : ifp->drvr->device->GetSoftApInterface();
+    if (iface) {
+      iface->set_wdev(nullptr);
+    }
+  }
   brcmf_free_net_device_vif(ndev);
   brcmf_free_net_device(ndev);
 }

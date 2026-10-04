@@ -176,7 +176,6 @@
                 "Cgroup.ControllersMustBeInUniqueHierarchy",
                 "Cgroup.Create",
                 "Cgroup.CrossDirRenameNotAllowed",
-                "Cgroup.DirSetStat",
                 "Cgroup.DuplicateUnlinkOnDirFD",
                 "Cgroup.MigrateInvalidPID",
                 "Cgroup.MigrateToSubcontainer",
@@ -239,9 +238,6 @@
 
                 // exec_test
                 "ExecveatTest.MemfdScript",
-
-                // TODO(https://fxbug.dev/564606160)
-                "ExecTest.RunningBinaryIsNotWritable",
 
                 // Disable InterpreterScript because the script has the path /bin/bash which is not
                 // where bash is located on the Android system image.
@@ -611,7 +607,6 @@
                 "ProcPidFile.SubprocessRunning",
                 "ProcPidFile.SubprocessZombie",
                 "ProcPidFile.SubprocessExited",
-                "ProcSelfMaps.AnonNameSharedAnon",
 
                 // TODO(https://fxbug.dev/564605906)
                 "ProcSelfAuxv.EntryPresence",
@@ -746,9 +741,6 @@
                 "ShmTest.ShmCtlSet",
                 "ShmTest.ShmInfo",
                 "ShmTest.ShmStat",
-
-                // signalfd_test
-                "Signalfd.RtQueueDeliversPayload",
 
                 // sigaltstack_test - https://fxbug.dev/42159586
                 "SigaltstackTest.ResetByExecve",
@@ -901,20 +893,6 @@
                 "AllUnixDomainSockets/UnixSocketPeerCredTest.PeerCredAfterListen/0",
                 "AllUnixDomainSockets/UnixSocketPeerCredTest.PeerCredAfterListen/6",
 
-                // socket_unix_stream_test
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/0",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/1",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/2",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/3",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/4",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/5",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/6",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/7",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/8",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/9",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/10",
-                "AllUnixDomainSockets/StreamUnixSocketPairTest.PeerShutdownWakesHangupOnlyPoller/11",
-
                 // stat_test
                 "StatTest.StatxMntId",
 
@@ -979,10 +957,6 @@
                 "AllInetTests/RawPacketTest.SetSocketRecvBuf/0",
                 "AllInetTests/RawPacketTest.SetSocketRecvBuf/1",
 
-                // utimes_test
-                "FutimesatTest.OnNullPathWithOPath",
-                "UtimensatTest.AtEmptyPath",
-
                 // wait_test - https://fxbug.dev/297461294
                 "Waiters/WaitAnyChildTest.IgnoredChildRusage/*",
                 "Waiters/WaitSpecificChildTest.SiblingChildrenWNOTHREAD/0",
@@ -1017,7 +991,6 @@
                 // chown_test
                 // TODO(https://fxbug.dev/511265190): Fix and re-enable.
                 "ChownTest.ChownRemovesSecurityCapability",
-                "ChownTest.SetGroupIdBitDeniedWithoutCapFsetIdOrRelevantGroup",
 
                 // raw_socket_test
                 "RawSocketNoCapTest.CreationFailsWithEPERM",
@@ -1350,6 +1323,25 @@
                 // TODO(https://fxbug.dev/297440106): Races on child exit.
                 "AffinityTest.SetAffinityOtherUidRequiresCapSysNice",
                 "SetpriorityTest.OtherUidRequiresCapSysNice",
+
+                // TODO(https://fxbug.dev/566839951): Format ShdPnd as 16-digit hex and emit SigIgn/SigCgt in /proc/[pid]/status.
+                "ProcPidStatusTest.SignalMasks",
+
+                // TODO(https://fxbug.dev/566839792): Implement /proc/sys/user/max_user_namespaces and CLONE_NEWUSER.
+                "ProcSysUserMaxUserNamespaces.HasNumericValue",
+                "ProcSysUserMaxUserNamespaces.WriteUpdatesValue",
+                "ProcSysUserMaxUserNamespaces.RejectsNegativeValue",
+                "ProcSysUserMaxUserNamespaces.WriteRequiresCapSysResource",
+                "ProcSysUserMaxUserNamespaces.WriteDoesNotAffectParentNamespace",
+                "ProcSysUserMaxUserNamespaces.LimitBlocksNestedUserNamespace",
+                "ProcSysUserMaxUserNamespaces.RecursiveLimitBlocksGrandchild",
+                "ProcSysUserMaxUserNamespaces.ExitedNamespaceReleasesCharge",
+                "ProcSysUserMaxUserNamespaces.RefusedNestingReleasesPartialCharge",
+
+                // TODO(https://fxbug.dev/566839736): Flush replica input queue on TCSETSF and TCSETSF2.
+                "PtyTest.TCSETSFFlushesOnlyReplicaInput",
+                "PtyTest.TCSETSFOnMasterFlushesReplicaInput",
+                "PtyTest.TCSETSF2FlushesReplicaInput",
             ],
         },
     ],

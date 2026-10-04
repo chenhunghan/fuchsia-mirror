@@ -902,9 +902,10 @@ impl Associated {
     async fn on_timeout<D: DeviceOps>(&mut self, sta: &mut BoundClient<'_, D>) -> bool {
         if let Err(e) = sta.ctx.device.send_mlme_event(fidl_mlme::MlmeEvent::SignalReport {
             ind: fidl_internal::SignalReportIndication {
-                rssi_dbm: self.0.signal_strength_average.avg_dbm().0,
-                snr_db: 0,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(self.0.signal_strength_average.avg_dbm().0),
+                snr_db: Some(0),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             },
         }) {
             error!("Error sending MLME-SignalReport: {}", e)
@@ -3880,7 +3881,7 @@ mod tests {
             .expect("should see a signal report");
 
         // -128 is the default value, equivalent to 0 watt.
-        assert_eq!(signal_ind.rssi_dbm, -128);
+        assert_eq!(signal_ind.rssi_dbm, Some(-128));
 
         let beacon = [
             // Mgmt header
@@ -3910,6 +3911,6 @@ mod tests {
             .next_mlme_msg::<fidl_internal::SignalReportIndication>()
             .expect("should see a signal report");
 
-        assert_eq!(signal_ind.rssi_dbm, EXPECTED_DBM);
+        assert_eq!(signal_ind.rssi_dbm, Some(EXPECTED_DBM));
     }
 }

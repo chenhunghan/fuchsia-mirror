@@ -131,6 +131,8 @@ enum KernelServices {
     // LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go:starnix_panic_tefmo)
 )]
 async fn main() -> Result<(), Error> {
+    let _rcu_registration = fuchsia_rcu::register_thread();
+
     // Make sure that if this process panics in normal mode that the whole kernel's job is killed.
     fruntime::job_default()
         .set_critical(zx::JobCriticalOptions::RETCODE_NONZERO, &fruntime::process_self())

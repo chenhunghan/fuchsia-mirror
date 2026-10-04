@@ -45,7 +45,7 @@ type primitive_types = struct {
 };
 
 type zx_types = struct {
-    status zx.Status;
+    status zx.Result;
     time zx.Time;
     duration zx.Duration;
     ticks zx.Ticks;

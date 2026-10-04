@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "syncio",
+    srcs = [
+        "src/lib.rs",
+        "src/zxio.rs",
+    ],
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+    visibility = [
+        "//sdk/lib/zxio/tests:__pkg__",
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/lib:__subpackages__",
+        "//src/starnix/modules/fuse:__pkg__",
+        "//src/starnix/modules/overlayfs:__pkg__",
+        "//src/storage/lib/sync_io_client:__pkg__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        # GN needs extra link configs for zxio; see group("zxio_static") in
+        # BUILD.gn.
+        "//sdk/lib/zxio",  # @bazel2gn:path_overwrite::zxio_static
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:pin-weak",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

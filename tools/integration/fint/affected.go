@@ -6,25 +6,30 @@ package fint
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
-	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/build"
 	fintpb "go.fuchsia.dev/fuchsia/tools/integration/fint/proto"
-	"go.fuchsia.dev/fuchsia/tools/lib/hostplatform"
 	"go.fuchsia.dev/fuchsia/tools/lib/logger"
 )
 
-// Affected runs both the legacy ninja dry-run and the new build/api/client
-// affected_tests logic, comparing their results side-by-side.
-func Affected(ctx context.Context, staticSpec *fintpb.Static, contextSpec *fintpb.Context) (*fintpb.BuildArtifacts, error) {
-	platform, err := hostplatform.Name()
-	if err != nil {
-		return nil, err
+var (
+	// The following tests should never be considered affected. These tests use
+	// a system image as data, so they appear affected by a broad range of
+	// changes, but they're almost never actually sensitive to said changes.
+	// https://fxbug.dev/42146209 tracks generating this list automatically.
+	neverAffectedTestLabels = []string{
+		"//src/recovery/simulator:recovery_simulator_boot_test",
+		"//src/recovery/simulator:recovery_simulator_serial_test",
 	}
+)
+
+// Affected runs the build/api/client affected_tests tool to determine which tests
+// are affected by changed files.
+func Affected(ctx context.Context, contextSpec *fintpb.Context) (*fintpb.BuildArtifacts, error) {
 	modules, err := build.NewModules(contextSpec.BuildDir)
 	if err != nil {
 		return nil, err
@@ -33,11 +38,7 @@ func Affected(ctx context.Context, staticSpec *fintpb.Static, contextSpec *fintp
 	if err != nil {
 		return nil, err
 	}
-	ninjaTargets, _, err := constructNinjaTargets(modules, staticSpec, contextSpec, platform)
-	if err != nil {
-		return &fintpb.BuildArtifacts{}, err
-	}
-	artifacts, err := affectedImpl(ctx, newRunner(contextSpec), client, contextSpec, modules, platform, ninjaTargets)
+	artifacts, err := affectedImpl(ctx, client, contextSpec, modules)
 	if err != nil && artifacts != nil && artifacts.FailureSummary == "" {
 		// Fall back to using the error text as the failure summary if the
 		// failure summary is unset. It's better than failing without emitting
@@ -47,17 +48,13 @@ func Affected(ctx context.Context, staticSpec *fintpb.Static, contextSpec *fintp
 	return artifacts, err
 }
 
-// affectedImpl contains the business logic of finding affected tests.
-// It dual-runs both the legacy dry-run algorithm and the new build/api/client
-// tool, outputting a side-by-side comparison report to log_files.
+// affectedImpl contains the business logic of finding affected tests using the
+// build/api/client affected_tests tool.
 func affectedImpl(
 	ctx context.Context,
-	runner subprocessRunner,
 	client buildAPIClient,
 	contextSpec *fintpb.Context,
 	modules buildModules,
-	platform string,
-	ninjaTargets []string,
 ) (*fintpb.BuildArtifacts, error) {
 	artifacts := &fintpb.BuildArtifacts{}
 
@@ -65,129 +62,32 @@ func affectedImpl(
 		return artifacts, nil
 	}
 
-	// 1. Run legacy logic via ninja dry-runs.
-	ninjaPath, err := toolAbsPath(modules, platform, "ninja")
-	if err != nil {
-		return artifacts, err
-	}
-	r := ninjaRunner{
-		runner:    runner,
-		ninjaPath: ninjaPath,
-		buildDir:  contextSpec.BuildDir,
-		jobCount:  int(contextSpec.JobCount),
-	}
-
-	var tests []build.Test
-	for _, t := range modules.TestSpecs() {
-		tests = append(tests, t.Test)
-	}
-
-	startLegacy := time.Now()
-	legacyResult, err := affectedTestsNoWork(ctx, r, contextSpec, tests, ninjaTargets)
-	legacyDuration := time.Since(startLegacy)
-	if err != nil {
-		return artifacts, err
-	}
-
-	// 2. Run new logic via build/api/client affected_tests tool.
-	var newAffectedTests []string
-	var newBuildNotAffected bool
-	var newToolErr error
-	var newDuration time.Duration
-
 	filesListPath, cleanup, err := writeChangedFilesList(ctx, contextSpec.ArtifactDir, contextSpec.ChangedFiles)
 	if err != nil {
-		newToolErr = err
-	} else {
-		defer cleanup()
-		if client != nil {
-			startNew := time.Now()
-			outputLines, err := client.AffectedTests(ctx, filesListPath)
-			newDuration = time.Since(startNew)
-			if err != nil {
-				newToolErr = err
-			} else {
-				newAffectedTests = resolveAffectedTestNames(modules.TestSpecs(), outputLines)
-				newBuildNotAffected = len(newAffectedTests) == 0
-			}
-		}
+		return artifacts, err
+	}
+	defer cleanup()
+
+	if client == nil {
+		return artifacts, fmt.Errorf("buildAPIClient is nil")
 	}
 
-	// 3. Compare the two methods side-by-side.
-	legacySet := make(map[string]struct{})
-	for _, t := range legacyResult.affectedTests {
-		legacySet[t] = struct{}{}
-	}
-	newSet := make(map[string]struct{})
-	for _, t := range newAffectedTests {
-		newSet[t] = struct{}{}
+	res, err := client.AffectedTests(ctx, filesListPath)
+	if err != nil {
+		return artifacts, err
 	}
 
-	var onlyInLegacy, onlyInNew []string
-	for _, t := range legacyResult.affectedTests {
-		if _, ok := newSet[t]; !ok {
-			onlyInLegacy = append(onlyInLegacy, t)
-		}
-	}
-	for _, t := range newAffectedTests {
-		if _, ok := legacySet[t]; !ok {
-			onlyInNew = append(onlyInNew, t)
-		}
-	}
-
-	if legacyResult.affectedTests == nil {
-		legacyResult.affectedTests = []string{}
-	}
-	if newAffectedTests == nil {
-		newAffectedTests = []string{}
-	}
-	if onlyInLegacy == nil {
-		onlyInLegacy = []string{}
-	}
-	if onlyInNew == nil {
-		onlyInNew = []string{}
-	}
-
-	comparisonReport := map[string]any{
-		"legacy_affected_tests":     legacyResult.affectedTests,
-		"new_affected_tests":        newAffectedTests,
-		"only_in_legacy":            onlyInLegacy,
-		"only_in_new":               onlyInNew,
-		"legacy_build_not_affected": legacyResult.noWork,
-		"new_build_not_affected":    newBuildNotAffected,
-		"matches":                   len(onlyInLegacy) == 0 && len(onlyInNew) == 0 && (legacyResult.noWork == newBuildNotAffected),
-		"legacy_duration_seconds":   legacyDuration.Seconds(),
-		"new_duration_seconds":      newDuration.Seconds(),
-	}
-	if newToolErr != nil {
-		comparisonReport["new_tool_error"] = newToolErr.Error()
-	}
+	affectedTests := resolveAffectedTestNames(modules.TestSpecs(), res.Targets)
+	artifacts.AffectedTests = affectedTests
+	artifacts.BuildNotAffected = res.BuildNotAffected
 
 	logger.Infof(
 		ctx,
-		"Affected tests comparison: legacy_count=%d, new_count=%d, only_in_legacy=%d, only_in_new=%d, legacy_duration=%.2fs, new_duration=%.2fs",
-		len(legacyResult.affectedTests),
-		len(newAffectedTests),
-		len(onlyInLegacy),
-		len(onlyInNew),
-		legacyDuration.Seconds(),
-		newDuration.Seconds(),
+		"Found %d affected tests (build_not_affected=%t)",
+		len(affectedTests),
+		artifacts.BuildNotAffected,
 	)
 
-	if comparisonBytes, err := json.MarshalIndent(comparisonReport, "", "  "); err == nil {
-		if legacyResult.logs == nil {
-			legacyResult.logs = make(map[string]string)
-		}
-		legacyResult.logs["affected_tests_comparison.json"] = string(comparisonBytes)
-	}
-
-	if err := saveLogs(contextSpec.ArtifactDir, artifacts, legacyResult.logs); err != nil {
-		return artifacts, err
-	}
-
-	// Keep legacy result as source of truth for now during comparison phase.
-	artifacts.AffectedTests = legacyResult.affectedTests
-	artifacts.BuildNotAffected = legacyResult.noWork
 	return artifacts, nil
 }
 
@@ -229,7 +129,8 @@ func writeChangedFilesList(ctx context.Context, artifactDir string, changedFiles
 }
 
 // resolveAffectedTestNames maps the target labels returned by build/api/client affected_tests
-func resolveAffectedTestNames(testSpecs []build.TestSpec, outputLines []string) []string {
+// to the actual test names (test.Name) defined in testSpecs.
+func resolveAffectedTestNames(testSpecs []build.TestSpec, targetLabels []string) []string {
 	testsByLabel := make(map[string][]string)
 	testsByNoToolchainLabel := make(map[string][]string)
 
@@ -257,8 +158,7 @@ func resolveAffectedTestNames(testSpecs []build.TestSpec, outputLines []string) 
 	}
 
 	var affectedTests []string
-	for _, line := range outputLines {
-		targetLabel := strings.SplitN(line, ",", 2)[0]
+	for _, targetLabel := range targetLabels {
 		labelNoToolchain := strings.Split(targetLabel, "(")[0]
 		if slices.Contains(neverAffectedTestLabels, labelNoToolchain) {
 			continue

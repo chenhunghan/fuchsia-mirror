@@ -42,7 +42,7 @@ _DEFAULT_RBE_METRICS_TABLE = (
 )
 
 
-def msg(text: str):
+def msg(text: str) -> None:
     print(f"[{_SCRIPT_BASENAME}] {text}")
 
 
@@ -296,7 +296,7 @@ def main_single_logdir(
     metrics_table: str,
     logs_table: str,
     uuid_flag: str,
-    upload_batch_size: str,
+    upload_batch_size: int,
     print_sample: bool,
     dry_run: bool,
     verbose: bool,

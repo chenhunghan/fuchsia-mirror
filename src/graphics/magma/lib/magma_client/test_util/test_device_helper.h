@@ -5,7 +5,11 @@
 #ifndef SRC_GRAPHICS_MAGMA_LIB_MAGMA_CLIENT_TEST_UTIL_TEST_DEVICE_HELPER_H_
 #define SRC_GRAPHICS_MAGMA_LIB_MAGMA_CLIENT_TEST_UTIL_TEST_DEVICE_HELPER_H_
 
+#include <zircon/availability.h>
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
 #include <fidl/fuchsia.driver.development/cpp/fidl.h>
+#endif
 #include <fidl/fuchsia.gpu.magma/cpp/wire.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fidl/cpp/wire/channel.h>
@@ -87,6 +91,7 @@ class TestDeviceBase {
   }
 #endif
 
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   static void RestartDFv2Driver(const std::string& driver_url, uint32_t gpu_vendor_id) {
     auto manager = component::Connect<fuchsia_driver_development::Manager>();
 
@@ -140,6 +145,7 @@ class TestDeviceBase {
       zx::nanosleep(zx::deadline_after(zx::msec(10)));
     }
   }
+#endif
 
   const fidl::UnownedClientEnd<fuchsia_gpu_magma::TestDevice>& magma_channel() {
     return magma_channel_;

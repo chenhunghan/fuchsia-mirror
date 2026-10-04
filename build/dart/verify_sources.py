@@ -8,9 +8,10 @@ import argparse
 import os
 import pathlib
 import sys
+from typing import Iterable
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         "Verifies that all .dart files are included in sources, and sources don't include nonexsitent files"
     )
@@ -29,7 +30,7 @@ def main():
     )
     args = parser.parse_args()
 
-    actual_sources = set()
+    actual_sources: set[str] = set()
     # Get all dart sources from source directory.
     src_dir_path = pathlib.Path(args.source_dir)
     for dirpath, dirnames, filenames in os.walk(src_dir_path, topdown=True):
@@ -55,7 +56,7 @@ def main():
             stamp.write("Success!")
         return 0
 
-    def sources_to_abs_path(sources):
+    def sources_to_abs_path(sources: Iterable[str]) -> list[str]:
         return sorted(str(src_dir_path.joinpath(s)) for s in sources)
 
     missing_sources = actual_sources - expected_sources

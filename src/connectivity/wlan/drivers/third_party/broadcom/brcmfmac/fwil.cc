@@ -23,6 +23,8 @@
 #include <threads.h>
 #include <zircon/status.h>
 
+#include <mutex>
+
 #include "brcmu_utils.h"
 #include "brcmu_wifi.h"
 #include "bus.h"
@@ -47,12 +49,19 @@ const char* brcmf_fil_get_errstr(bcme_status_t err) {
 #undef F
 
 static zx_status_t brcmf_fil_cmd_data(struct brcmf_if* ifp, uint32_t cmd, void* data, uint32_t len,
-                                      bool set, bcme_status_t* fwerr_ptr) {
+                                      bool set, bcme_status_t* fwerr_ptr)
+    __TA_REQUIRES(ifp->drvr->proto_block) {
   struct brcmf_pub* drvr = ifp->drvr;
   zx_status_t err;
   bcme_status_t fwerr = BCME_OK;
 
   BRCMF_DBG(FIL, "%s iovar cmd %u len %u", set ? "set" : "get", cmd, len);
+
+  if (!drvr->proto) {
+    BRCMF_ERR(
+        "drvr->proto is missing. The driver may be in recovery or shutting down, skipping operation.");
+    return ZX_ERR_INTERNAL;
+  }
 
   if (drvr->bus_if->state != BRCMF_BUS_UP) {
     BRCMF_ERR("bus is down. we have nothing to do.");
@@ -94,55 +103,41 @@ static zx_status_t brcmf_fil_cmd_data(struct brcmf_if* ifp, uint32_t cmd, void* 
 
 zx_status_t brcmf_fil_cmd_data_set(struct brcmf_if* ifp, uint32_t cmd, const void* data,
                                    uint32_t len, bcme_status_t* fwerr_ptr) {
-  zx_status_t err;
-
-  ifp->drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
 
   BRCMF_DBG(FIL, "ifidx=%d, cmd=%d, len=%d", ifp->ifidx, cmd, len);
   BRCMF_DBG_HEX_DUMP(BRCMF_IS_ON(FIL), data, std::min<uint>(len, MAX_HEX_DUMP_LEN), "data");
 
-  err = brcmf_fil_cmd_data(ifp, cmd, (void*)data, len, true, fwerr_ptr);
-  ifp->drvr->proto_block.unlock();
-
-  return err;
+  return brcmf_fil_cmd_data(ifp, cmd, (void*)data, len, true, fwerr_ptr);
 }
 
 zx_status_t brcmf_fil_cmd_data_get(struct brcmf_if* ifp, uint32_t cmd, void* data, uint32_t len,
                                    bcme_status_t* fwerr_ptr) {
-  zx_status_t err;
-
-  ifp->drvr->proto_block.lock();
-  err = brcmf_fil_cmd_data(ifp, cmd, data, len, false, fwerr_ptr);
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
+  zx_status_t err = brcmf_fil_cmd_data(ifp, cmd, data, len, false, fwerr_ptr);
 
   BRCMF_DBG(FIL, "ifidx=%d, cmd=%d, len=%d", ifp->ifidx, cmd, len);
   BRCMF_DBG_HEX_DUMP(BRCMF_IS_ON(FIL), data, std::min<uint>(len, MAX_HEX_DUMP_LEN), "data");
-
-  ifp->drvr->proto_block.unlock();
 
   return err;
 }
 
 zx_status_t brcmf_fil_cmd_int_set(struct brcmf_if* ifp, uint32_t cmd, uint32_t data,
                                   bcme_status_t* fwerr_ptr) {
-  zx_status_t err;
   uint32_t data_le = data;
 
-  ifp->drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
   BRCMF_DBG(FIL, "ifidx=%d, cmd=%d, value=%d", ifp->ifidx, cmd, data);
-  err = brcmf_fil_cmd_data(ifp, cmd, &data_le, sizeof(data_le), true, fwerr_ptr);
-  ifp->drvr->proto_block.unlock();
-
-  return err;
+  return brcmf_fil_cmd_data(ifp, cmd, &data_le, sizeof(data_le), true, fwerr_ptr);
 }
 
 zx_status_t brcmf_fil_cmd_int_get(struct brcmf_if* ifp, uint32_t cmd, uint32_t* data,
                                   bcme_status_t* fwerr_ptr) {
-  zx_status_t err;
   uint32_t data_le = *data;
+  zx_status_t err;
 
-  ifp->drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
   err = brcmf_fil_cmd_data(ifp, cmd, &data_le, sizeof(data_le), false, fwerr_ptr);
-  ifp->drvr->proto_block.unlock();
   *data = data_le;
   BRCMF_DBG(FIL, "ifidx=%d, cmd=%d, value=%d", ifp->ifidx, cmd, *data);
 
@@ -176,7 +171,7 @@ zx_status_t brcmf_fil_iovar_data_set(struct brcmf_if* ifp, const char* name, con
   bcme_status_t fwerr;
   uint32_t buflen;
 
-  drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
   BRCMF_DBG(FIL, "ifidx=%d, name=%s, len=%d", ifp->ifidx, name, len);
   BRCMF_DBG_HEX_DUMP(BRCMF_IS_ON(FIL), data, std::min<uint>(len, MAX_HEX_DUMP_LEN), "data");
 
@@ -196,8 +191,6 @@ zx_status_t brcmf_fil_iovar_data_set(struct brcmf_if* ifp, const char* name, con
     BRCMF_ERR("create iovar %s error: %s", name, zx_status_get_string(err));
   }
 
-  drvr->proto_block.unlock();
-
   return err;
 }
 
@@ -207,7 +200,7 @@ zx_status_t brcmf_fil_iovar_data_get(struct brcmf_if* ifp, const char* name, voi
   zx_status_t err;
   bcme_status_t fwerr;
   uint32_t buflen;
-  drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
   buflen = brcmf_create_iovar(name, data, len, (char*)drvr->proto_buf, sizeof(drvr->proto_buf));
 
   if (buflen) {
@@ -230,7 +223,6 @@ zx_status_t brcmf_fil_iovar_data_get(struct brcmf_if* ifp, const char* name, voi
   BRCMF_DBG(FIL, "ifidx=%d, name=%s, len=%d", ifp->ifidx, name, len);
   BRCMF_DBG_HEX_DUMP(BRCMF_IS_ON(FIL), data, std::min<uint>(len, MAX_HEX_DUMP_LEN), "data");
 
-  drvr->proto_block.unlock();
   return err;
 }
 
@@ -304,7 +296,7 @@ zx_status_t brcmf_fil_bsscfg_data_set(struct brcmf_if* ifp, const char* name, co
   zx_status_t err;
   uint32_t buflen;
 
-  drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
 
   BRCMF_DBG(FIL, "ifidx=%d, bsscfgidx=%d, name=%s, len=%d", ifp->ifidx, ifp->bsscfgidx, name, len);
   BRCMF_DBG_HEX_DUMP(BRCMF_IS_ON(FIL), data, std::min<uint>(len, MAX_HEX_DUMP_LEN), "data");
@@ -318,7 +310,6 @@ zx_status_t brcmf_fil_bsscfg_data_set(struct brcmf_if* ifp, const char* name, co
     BRCMF_ERR("create bsscfg error: %s", zx_status_get_string(err));
   }
 
-  drvr->proto_block.unlock();
   return err;
 }
 
@@ -328,7 +319,7 @@ zx_status_t brcmf_fil_bsscfg_data_get(struct brcmf_if* ifp, const char* name, vo
   zx_status_t err;
   uint32_t buflen;
 
-  drvr->proto_block.lock();
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
 
   buflen = brcmf_create_bsscfg(ifp->bsscfgidx, name, data, len, (char*)drvr->proto_buf,
                                sizeof(drvr->proto_buf));
@@ -344,7 +335,6 @@ zx_status_t brcmf_fil_bsscfg_data_get(struct brcmf_if* ifp, const char* name, vo
   BRCMF_DBG(FIL, "ifidx=%d, bsscfgidx=%d, name=%s, len=%d", ifp->ifidx, ifp->bsscfgidx, name, len);
   BRCMF_DBG_HEX_DUMP(BRCMF_IS_ON(FIL), data, std::min<uint>(len, MAX_HEX_DUMP_LEN), "data");
 
-  drvr->proto_block.unlock();
   return err;
 }
 
@@ -373,5 +363,6 @@ zx_status_t brcmf_send_cmd_to_firmware(brcmf_pub* drvr, uint32_t ifidx, uint32_t
   if (!ifp)
     return ZX_ERR_UNAVAILABLE;
 
+  std::scoped_lock proto_lock(ifp->drvr->proto_block);
   return brcmf_fil_cmd_data(ifp, cmd, data, len, set, nullptr);
 }

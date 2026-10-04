@@ -49,7 +49,8 @@ def run(
 
     Raises:
         HoneydewTimeoutError: In case of command execution results in a timeout.
-        HostCmdError: In case of command execution results in a failure.
+        HostCmdError: In case of command execution results in a failure, or the
+            command cannot be run (e.g. the binary is not found).
     """
     stdout: int | None = None
     stderr: int | None = None
@@ -107,6 +108,12 @@ def run(
     except subprocess.TimeoutExpired as err:
         message = f"Command : '{cmd}' timed out after {timeout}sec"
         raise errors.HoneydewTimeoutError(message) from err
+    except OSError as err:
+        message = f"Could not execute the command '{cmd}': {err}"
+        raise errors.HostCmdError(message) from err
+    except subprocess.SubprocessError as err:
+        message = f"Unknown error occurred while running '{cmd}': {err}"
+        raise errors.HostCmdError(message) from err
 
 
 def popen(  # type: ignore[no-untyped-def]

@@ -30,13 +30,13 @@ TEST_P(ProcSelfMemProts, CanWriteToPrivateAnonymousMappings) {
     GTEST_SKIP() << "Cannot write to /proc/self/mem";
   }
 
-  uint8_t buf[16] = {0};
+  uint8_t buf[16] = {};
   int prot = GetParam();
 
   const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
   void* mapped = mmap(nullptr, page_size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   ASSERT_NE(mapped, MAP_FAILED) << "mmap: " << std::strerror(errno);
-  auto cleanup = fit::defer([mapped, page_size]() { EXPECT_EQ(munmap(mapped, page_size), 0); });
+  auto cleanup = fit::defer([mapped, page_size] { EXPECT_EQ(munmap(mapped, page_size), 0); });
 
   fbl::unique_fd fd = fbl::unique_fd(open("/proc/self/mem", O_RDWR));
   ASSERT_TRUE(fd.is_valid()) << "open /proc/self/mem: " << std::strerror(errno);
@@ -231,7 +231,7 @@ TEST_F(ProcTestBase, ProcSelfPagemapSharedMappingDeduplication) {
 
   // Create a shared memory fd (memfd).
   int memfd = SAFE_SYSCALL(memfd_create("pagemap_test_shm", 0));
-  auto close_fd = fit::defer([memfd]() { close(memfd); });
+  auto close_fd = fit::defer([memfd] { close(memfd); });
   ASSERT_EQ(ftruncate(memfd, page_size), 0);
 
   // Map the same shared page at two different virtual addresses.
@@ -287,12 +287,12 @@ TEST_F(ProcTestBase, ProcSelfPagemapMultipleMappingsAndHoles) {
 
   // Unmap the middle page to leave an unmapped hole at [base + 2 * page_size, base + 3 *
   // page_size).
-  void* hole = reinterpret_cast<void*>(base + 2 * page_size);
+  void* hole = reinterpret_cast<void*>(base + (2 * page_size));
   ASSERT_EQ(munmap(hole, page_size), 0) << "munmap hole: " << std::strerror(errno);
 
   // Mapping 2: 2 pages of shared memory (memfd) at [base + 3 * page_size, base + 5 * page_size).
   int memfd = SAFE_SYSCALL(memfd_create("pagemap_multi_shm", 0));
-  auto close_fd = fit::defer([memfd]() { close(memfd); });
+  auto close_fd = fit::defer([memfd] { close(memfd); });
   ASSERT_EQ(ftruncate(memfd, 2 * page_size), 0);
 
   auto map2 = ASSERT_RESULT_SUCCESS_AND_RETURN(
@@ -340,7 +340,7 @@ TEST_F(ProcTestBase, ProcSelfPagemapMultipleMappingsAndHoles) {
   // Also verify reading starting from the unmapped hole and continuing into mapping 2.
   std::vector<uint64_t> hole_entries(3);
   const off64_t hole_offset =
-      static_cast<off64_t>(((base + 2 * page_size) / page_size) * sizeof(uint64_t));
+      static_cast<off64_t>(((base + (2 * page_size)) / page_size) * sizeof(uint64_t));
   bytes_read =
       pread64(fd.get(), hole_entries.data(), hole_entries.size() * sizeof(uint64_t), hole_offset);
   ASSERT_EQ(bytes_read, static_cast<ssize_t>(hole_entries.size() * sizeof(uint64_t)))
@@ -348,6 +348,78 @@ TEST_F(ProcTestBase, ProcSelfPagemapMultipleMappingsAndHoles) {
   EXPECT_EQ(hole_entries[0], 0ULL);
   EXPECT_TRUE(hole_entries[1] & kPresentBit);
   EXPECT_TRUE(hole_entries[2] & kPresentBit);
+}
+
+TEST_F(ProcTestBase, ProcSelfPagemapReadIntoLazyMapping) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  // Set up target mappings with a hole so we can exercise all read paths in ProcPagemapFile::read:
+  // - [target_base, target_base + 2 * page_size): mapped
+  // - [target_base + 2 * page_size, target_base + 3 * page_size): unmapped hole
+  // - [target_base + 3 * page_size, target_base + 5 * page_size): mapped
+  auto target_map = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, 5 * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  const uintptr_t target_base = reinterpret_cast<uintptr_t>(target_map.mapping());
+  volatile char* target_pages = static_cast<volatile char*>(target_map.mapping());
+  target_pages[0] = 1;
+  target_pages[page_size] = 2;
+  target_pages[3 * page_size] = 3;
+  target_pages[4 * page_size] = 4;
+
+  ASSERT_EQ(munmap(reinterpret_cast<void*>(target_base + (2 * page_size)), page_size), 0)
+      << "munmap hole: " << std::strerror(errno);
+
+  // Allocate three output buffer pages separated by PROT_NONE guard pages so that RangeMap does
+  // not merge them with each other or with adjacent mappings. After fork(), these mappings are
+  // cloned with MappingMode::Lazy in the child and remain unmaterialized until written to by
+  // pread64 on /proc/self/pagemap.
+  auto dst_reservation = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, 7 * page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  const uintptr_t dst_base = reinterpret_cast<uintptr_t>(dst_reservation.mapping());
+
+  uint64_t* dst_single = reinterpret_cast<uint64_t*>(dst_base + (1 * page_size));
+  uint64_t* dst_single_mapping_chunk = reinterpret_cast<uint64_t*>(dst_base + (3 * page_size));
+  uint64_t* dst_multi_mapping_chunk = reinterpret_cast<uint64_t*>(dst_base + (5 * page_size));
+
+  ASSERT_EQ(mprotect(dst_single, page_size, PROT_READ | PROT_WRITE), 0);
+  ASSERT_EQ(mprotect(dst_single_mapping_chunk, page_size, PROT_READ | PROT_WRITE), 0);
+  ASSERT_EQ(mprotect(dst_multi_mapping_chunk, page_size, PROT_READ | PROT_WRITE), 0);
+
+  const off64_t pagemap_offset = static_cast<off64_t>((target_base / page_size) * sizeof(uint64_t));
+  const uint64_t kPresentBit = 1ULL << 63;
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    fbl::unique_fd fd(open("/proc/self/pagemap", O_RDONLY));
+    ASSERT_TRUE(fd.is_valid()) << "open /proc/self/pagemap: " << std::strerror(errno);
+
+    // 1. Single-entry read into an untouched lazy mapping (exercises single-page ultra-fast path).
+    ssize_t bytes_read = pread64(fd.get(), dst_single, sizeof(uint64_t), pagemap_offset);
+    ASSERT_EQ(bytes_read, static_cast<ssize_t>(sizeof(uint64_t)))
+        << "pread64 single entry: " << std::strerror(errno);
+    EXPECT_TRUE(dst_single[0] & kPresentBit);
+
+    // 2. Multi-entry read within a single mapping into an untouched lazy mapping (exercises
+    // single-mapping chunk fast path).
+    bytes_read = pread64(fd.get(), dst_single_mapping_chunk, 2 * sizeof(uint64_t), pagemap_offset);
+    ASSERT_EQ(bytes_read, static_cast<ssize_t>(2 * sizeof(uint64_t)))
+        << "pread64 single-mapping chunk: " << std::strerror(errno);
+    EXPECT_TRUE(dst_single_mapping_chunk[0] & kPresentBit);
+    EXPECT_TRUE(dst_single_mapping_chunk[1] & kPresentBit);
+
+    // 3. Multi-entry read spanning multiple mappings and a hole into an untouched lazy mapping
+    // (exercises multi-mapping general chunk path).
+    bytes_read = pread64(fd.get(), dst_multi_mapping_chunk, 5 * sizeof(uint64_t), pagemap_offset);
+    ASSERT_EQ(bytes_read, static_cast<ssize_t>(5 * sizeof(uint64_t)))
+        << "pread64 multi-mapping chunk: " << std::strerror(errno);
+    EXPECT_TRUE(dst_multi_mapping_chunk[0] & kPresentBit);
+    EXPECT_TRUE(dst_multi_mapping_chunk[1] & kPresentBit);
+    EXPECT_EQ(dst_multi_mapping_chunk[2], 0ULL);
+    EXPECT_TRUE(dst_multi_mapping_chunk[3] & kPresentBit);
+    EXPECT_TRUE(dst_multi_mapping_chunk[4] & kPresentBit);
+  });
+
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

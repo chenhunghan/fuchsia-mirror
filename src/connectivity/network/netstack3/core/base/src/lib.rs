@@ -65,8 +65,9 @@ pub use error::{
 pub use event::EventContext;
 pub use frame::{
     CoreTxMetadataContext, FrameDestination, GsoInfo, Ipv4IdMode, LocalFrameDestination,
-    NeverBuffer, ReceivableFrameMeta, RecvFrameContext, RecvIpFrameMeta, SendFrameContext,
-    SendFrameError, SendFrameErrorReason, SendableFrameMeta, TxMetadata, TxMetadataBindingsTypes,
+    MAX_GSO_PAYLOAD_LEN, NeverBuffer, ReceivableFrameMeta, RecvFrameContext, RecvIpFrameMeta,
+    SendFrameContext, SendFrameError, SendFrameErrorReason, SendableFrameMeta, TxMetadata,
+    TxMetadataBindingsTypes,
 };
 pub use inspect::{Inspectable, InspectableValue, Inspector, InspectorDeviceExt, InspectorExt};
 pub use ip::{

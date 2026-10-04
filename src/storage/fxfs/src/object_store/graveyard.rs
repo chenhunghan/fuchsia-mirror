@@ -3,16 +3,15 @@
 // found in the LICENSE file.
 
 use crate::errors::FxfsError;
-use crate::filesystem::TruncateGuard;
+use crate::filesystem::FxFilesystem;
 use crate::log::*;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
-use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
     ObjectAttributes, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
 };
-use crate::object_store::transaction::{Mutation, Options, Transaction};
+use crate::object_store::transaction::{Mutation, Transaction};
 use crate::object_store::{AttributeId, ObjectStore};
 use anyhow::{Context, Error, anyhow, bail};
 use fuchsia_async::{self as fasync};
@@ -22,8 +21,8 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use fxfs_trace::{TraceFutureExt, trace_future_args};
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 
 enum ReaperTask {
     None,
@@ -36,8 +35,12 @@ enum ReaperTask {
 /// that at mount time, any objects in the graveyard will get removed.  Each object store has a
 /// directory like object that contains a list of the objects within that store that are part of the
 /// graveyard.  A single instance of this Graveyard struct manages *all* stores.
+///
+/// Tombstoning (purging) an object or attribute in the graveyard deallocates its extents, removes
+/// its graveyard entry, and inserts an LSM-tree tombstone record (`ObjectValue::None`) that deletes
+/// all remaining records for the object or attribute during compaction.
 pub struct Graveyard {
-    object_manager: Arc<ObjectManager>,
+    filesystem: Weak<FxFilesystem>,
     reaper_task: Mutex<ReaperTask>,
     channel: UnboundedSender<Message>,
 }
@@ -58,10 +61,10 @@ enum Message {
 #[fxfs_trace::trace]
 impl Graveyard {
     /// Creates a new instance of the graveyard manager.
-    pub fn new(object_manager: Arc<ObjectManager>) -> Arc<Self> {
+    pub fn new(filesystem: Weak<FxFilesystem>) -> Arc<Self> {
         let (sender, receiver) = unbounded();
         Arc::new(Graveyard {
-            object_manager,
+            filesystem,
             reaper_task: Mutex::new(ReaperTask::Pending(receiver)),
             channel: sender,
         })
@@ -127,10 +130,11 @@ impl Graveyard {
         while let Some(message) = receiver.next().await {
             match message {
                 Message::Tombstone(store_id, object_id, attribute_id) => {
+                    let Some(fs) = self.filesystem.upgrade() else { return };
                     let res = if let Some(attribute_id) = attribute_id {
-                        self.tombstone_attribute(store_id, object_id, attribute_id).await
+                        fs.tombstone_attribute(store_id, object_id, attribute_id).await
                     } else {
-                        self.tombstone_object(store_id, object_id, None).await
+                        fs.tombstone_object(store_id, object_id, None).await
                     };
                     if let Err(e) = res {
                         error!(
@@ -143,7 +147,8 @@ impl Graveyard {
                     }
                 }
                 Message::Trim(store_id, object_id) => {
-                    if let Err(e) = self.trim(store_id, object_id).await {
+                    let Some(fs) = self.filesystem.upgrade() else { return };
+                    if let Err(e) = Self::trim(&fs, store_id, object_id).await {
                         error!(error:? = e, store_id, oid = object_id; "Tombstone error");
                     }
                 }
@@ -202,12 +207,14 @@ impl Graveyard {
         }
         Ok(count)
     }
-    /// Queues an object for tombstoning.
+    /// Queues an object in the graveyard for asynchronous tombstoning (see
+    /// [`FxFilesystem::tombstone_object`]).
     pub fn queue_tombstone_object(&self, store_id: u64, object_id: u64) {
         let _ = self.channel.unbounded_send(Message::Tombstone(store_id, object_id, None));
     }
 
-    /// Queues an object's attribute for tombstoning.
+    /// Queues an object's attribute in the graveyard for asynchronous tombstoning (see
+    /// [`FxFilesystem::tombstone_attribute`]).
     pub fn queue_tombstone_attribute(
         &self,
         store_id: u64,
@@ -232,70 +239,11 @@ impl Graveyard {
         receiver.await.unwrap();
     }
 
-    /// Immediately tombstones (discards) an object in the graveyard.
-    /// NB: Code should generally use |queue_tombstone| instead.
-    pub async fn tombstone_object(
-        &self,
-        store_id: u64,
-        object_id: u64,
-        truncate_guard: Option<&TruncateGuard<'_>>,
-    ) -> Result<(), Error> {
-        let store = self
-            .object_manager
+    async fn trim(fs: &FxFilesystem, store_id: u64, object_id: u64) -> Result<(), Error> {
+        let store = fs
+            .object_manager()
             .store(store_id)
             .with_context(|| format!("Failed to get store {}", store_id))?;
-        // For now, it's safe to assume that all objects in the root parent and root store should
-        // return space to the metadata reservation, but we might have to revisit that if we end up
-        // with objects that are in other stores.
-        let options = if store_id == self.object_manager.root_parent_store_object_id()
-            || store_id == self.object_manager.root_store_object_id()
-        {
-            Options {
-                borrow_metadata_space: true,
-                allocator_reservation: Some(self.object_manager.metadata_reservation()),
-                ..Default::default()
-            }
-        } else {
-            Options { borrow_metadata_space: true, ..Default::default() }
-        };
-        store.tombstone_object(object_id, options, truncate_guard).await
-    }
-
-    /// Immediately tombstones (discards) and attribute in the graveyard.
-    /// NB: Code should generally use |queue_tombstone| instead.
-    pub async fn tombstone_attribute(
-        &self,
-        store_id: u64,
-        object_id: u64,
-        attribute_id: AttributeId,
-    ) -> Result<(), Error> {
-        let store = self
-            .object_manager
-            .store(store_id)
-            .with_context(|| format!("Failed to get store {}", store_id))?;
-        // For now, it's safe to assume that all objects in the root parent and root store should
-        // return space to the metadata reservation, but we might have to revisit that if we end up
-        // with objects that are in other stores.
-        let options = if store_id == self.object_manager.root_parent_store_object_id()
-            || store_id == self.object_manager.root_store_object_id()
-        {
-            Options {
-                borrow_metadata_space: true,
-                allocator_reservation: Some(self.object_manager.metadata_reservation()),
-                ..Default::default()
-            }
-        } else {
-            Options { borrow_metadata_space: true, ..Default::default() }
-        };
-        store.tombstone_attribute(object_id, attribute_id, options).await
-    }
-
-    async fn trim(&self, store_id: u64, object_id: u64) -> Result<(), Error> {
-        let store = self
-            .object_manager
-            .store(store_id)
-            .with_context(|| format!("Failed to get store {}", store_id))?;
-        let fs = store.filesystem();
         let truncate_guard = fs.truncate_guard(store_id, object_id).await;
         store.trim(object_id, &truncate_guard).await.context("Failed to trim object")
     }

@@ -56,16 +56,22 @@ VALID_ACTION_TYPES = (
     ACTION_CPP_LINK,
 )
 
+# Supported Bazel configuration names for querying build commands.
+BAZEL_CONFIG_HOST = "host"
+BAZEL_CONFIG_FUCHSIA_PLATFORM = "fuchsia_platform"
+BAZEL_CONFIG_FUCHSIA_SDK = "fuchsia_sdk"
+
+VALID_BAZEL_CONFIGS = (
+    BAZEL_CONFIG_HOST,
+    BAZEL_CONFIG_FUCHSIA_PLATFORM,
+    BAZEL_CONFIG_FUCHSIA_SDK,
+)
+
 # An optional callable to receive debug messages
 DebugHook: T.TypeAlias = T.Optional[T.Callable[[str], None]]
 
 
-class GnCommandMap(dict[str, str]):
-    """A type mapping GN labels to the command generating their outputs."""
-
-
-class BazelCommandMap(dict[str, str]):
-    """A type mapping Bazel labels to the command generating their outputs."""
+JSONObject: T.TypeAlias = dict[str, T.Any]
 
 
 TV = T.TypeVar("TV")
@@ -107,6 +113,26 @@ def _validate_action_type(action_type: str) -> str:
     return action_type
 
 
+def _validate_bazel_config(bazel_config: str) -> str:
+    """Validate that bazel_config is one of the supported VALID_BAZEL_CONFIGS.
+
+    Args:
+        bazel_config: Bazel config string to validate. Supported values:
+            - "host": Build host artifacts.
+            - "fuchsia_platform": Build Fuchsia platform artifacts.
+            - "fuchsia_sdk": Build Fuchsia artifacts using the in-tree Bazel SDK.
+    Returns:
+        the input value.
+    Raises:
+        ValueError: If bazel_config is not in VALID_BAZEL_CONFIGS.
+    """
+    if bazel_config not in VALID_BAZEL_CONFIGS:
+        raise ValueError(
+            f"Invalid bazel_config '{bazel_config}'. Must be one of: {', '.join(VALID_BAZEL_CONFIGS)}"
+        )
+    return bazel_config
+
+
 def action_type_to_mnemonic(action_type: str) -> str:
     """Convert an action type to the corresponding Bazel action mnemonic.
 
@@ -126,22 +152,44 @@ def action_type_to_mnemonic(action_type: str) -> str:
     return action_type
 
 
+@dataclasses.dataclass(frozen=True)
+class ConfiguredBazelLabel:
+    """A Bazel target label with an associated --config value."""
+
+    label: str
+    config: str
+
+    def __post_init__(self) -> None:
+        _validate_bazel_config(self.config)
+
+
+class GnCommandMap(dict[str, str]):
+    """A type mapping GN labels to the command generating their outputs."""
+
+
+class BazelCommandMap(dict[ConfiguredBazelLabel, str]):
+    """A type mapping ConfiguredBazelLabel values to the command generating their outputs."""
+
+
 @dataclasses.dataclass
 class CompareCommandsQuery:
     """Specification for querying build commands from Ninja and/or Bazel.
 
-    At least one of `gn` or `bazel` must be set.
+    At least one of `gn` or `bazel` must be set. When `bazel` is set,
+    `bazel_config` must also be set to one of VALID_BAZEL_CONFIGS.
 
     Attributes:
         gn: Optional GN label (e.g. "//src/foo:bar"). Required for Ninja queries.
         bazel: Optional Bazel label (e.g. "//src/foo:bar"). Required for Bazel queries.
+        bazel_config: Optional Bazel config name (one of VALID_BAZEL_CONFIGS:
+            "host", "fuchsia_platform", or "fuchsia_sdk"). Required when `bazel` is set.
         action_type: Action type to query (one of VALID_ACTION_TYPES). Defaults to ACTION_RUSTC.
         source: Optional source file path to match for compilation actions.
         allow_differences: Optional bool, set to True to ignore differences in final report.
     """
 
     gn: str = ""
-    bazel: str = ""
+    bazel: None | ConfiguredBazelLabel = None
     action_type: str = ACTION_RUSTC
     source: T.Optional[str] = None
     allow_differences: bool = False
@@ -153,11 +201,43 @@ class CompareCommandsQuery:
             )
         _validate_action_type(self.action_type)
 
+    @property
+    def bazel_label(self) -> str:
+        """Return bazel label if provided or empty string."""
+        return self.bazel.label if (self.bazel is not None) else ""
+
+    @property
+    def bazel_config(self) -> str:
+        """Return bazel config if provided or empty string."""
+        return self.bazel.config if (self.bazel is not None) else ""
+
     @classmethod
-    def from_dict(cls, data: dict[str, T.Any]) -> "CompareCommandsQuery":
-        """Construct a CompareCommandsQuery from a dictionary."""
+    def from_dict(cls, data: JSONObject) -> "CompareCommandsQuery":
+        """Construct a CompareCommandsQuery from a dictionary.
+
+        Supported dictionary keys:
+            - "gn": Optional GN label string.
+            - "bazel": Optional Bazel label string.
+            - "bazel_config": Bazel configuration string (required when "bazel" is set).
+              Supported values are:
+                - "host": Build host artifacts.
+                - "fuchsia_platform": Build Fuchsia platform artifacts.
+                - "fuchsia_sdk": Build Fuchsia artifacts using the in-tree Bazel SDK.
+            - "type": Optional action type string (defaults to "rustc").
+              Supported values are: "rustc", "c_compile", "cpp_compile", "assemble", "cpp_link".
+            - "source": Optional source file path string.
+            - "allow_differences": Optional boolean (defaults to False).
+        """
         gn = _validate_value(data.get("gn", ""), str, "gn")
-        bazel = _validate_value(data.get("bazel", ""), str, "bazel")
+
+        bazel: None | ConfiguredBazelLabel = None
+        bazel_label = _validate_value(data.get("bazel", ""), str, "bazel")
+        if bazel_label:
+            bazel_config = _validate_value(
+                data.get("bazel_config", ""), str, "bazel_config"
+            )
+            bazel = ConfiguredBazelLabel(bazel_label, bazel_config)
+
         action_type = _validate_action_type(
             _validate_value(data.get("type", ACTION_RUSTC), str, "action type")
         )
@@ -177,6 +257,22 @@ class CompareCommandsQuery:
             source=source,
             allow_differences=allow_differences,
         )
+
+
+def _output_in_tokens(filepath: str, tokens: list[str]) -> bool:
+    """Returns True if Ninja-build-dir-relative |filepath| appears in |tokens|.
+
+    Unlike source files (which may be specified as suffixes like 'foo.cc'),
+    expected output paths from ninja_outputs.json are already relative to the
+    Ninja build directory (e.g. 'obj/foo/bar.o' vs 'host_x64/obj/foo/bar.o').
+    Matching by exact token (or flag value after '=' or '-o') avoids false
+    positives where a default-toolchain path ('obj/...') matches a
+    host-toolchain path ('host_x64/obj/...').
+    """
+    return any(
+        t == filepath or t.endswith(f"={filepath}") or t == f"-o{filepath}"
+        for t in tokens
+    )
 
 
 def _matches_compile_action(
@@ -228,7 +324,9 @@ def _matches_compile_action(
         obj_outputs = [
             out for out in expected_outputs if out.endswith((".o", ".obj"))
         ]
-        if obj_outputs and not any(_path_in_tokens(out) for out in obj_outputs):
+        if obj_outputs and not any(
+            _output_in_tokens(out, tokens) for out in obj_outputs
+        ):
             return False
 
     if source_file:
@@ -307,7 +405,9 @@ def _matches_action_type(
         # Link commands must not be compile actions (-c)
         if "-c" in tokens:
             return False
-        if expected_outputs and not any(out in cmd for out in expected_outputs):
+        if expected_outputs and not any(
+            _output_in_tokens(out, tokens) for out in expected_outputs
+        ):
             return False
 
     elif action_type == ACTION_RUSTC:
@@ -317,7 +417,9 @@ def _matches_action_type(
             t == source_file or t.endswith(f"/{source_file}") for t in tokens
         ):
             return False
-        if expected_outputs and not any(out in cmd for out in expected_outputs):
+        if expected_outputs and not any(
+            _output_in_tokens(out, tokens) for out in expected_outputs
+        ):
             return False
 
     return True
@@ -424,7 +526,11 @@ def query_bazel_commands(
     read_response_files: bool = False,
     debug: DebugHook = None,
 ) -> BazelCommandMap:
-    """Query Bazel for the command lines of target actions for multiple targets in a single invocation.
+    """Query Bazel for the command lines of target actions for multiple targets.
+
+    Queries are grouped by their `bazel.config` value (supported values: "host",
+    "fuchsia_platform", "fuchsia_sdk"), and a single Bazel invocation is performed
+    per configuration.
 
     Args:
         bazel_launcher: The BazelLauncher instance to use.
@@ -433,91 +539,98 @@ def query_bazel_commands(
         read_response_files: Whether to read response files directly from disk instead of using queries.
 
     Returns:
-        A BazelCommandMap mapping Bazel labels to their corresponding command lines.
+        A BazelCommandMap mapping (Bazel label, Bazel config) pairs to their corresponding command lines.
     """
     if not queries:
         return BazelCommandMap()
 
-    mnemonics: list[str] = []
-    for query in queries:
-        m = action_type_to_mnemonic(query.action_type)
-        if m not in mnemonics:
-            mnemonics.append(m)
-
-    mnemonic_expr = "|".join(mnemonics)
-    seen_labels: set[str] = set()
-    unique_labels: list[str] = []
+    queries_by_config: dict[str, list[CompareCommandsQuery]] = {}
     for query in queries:
         if not query.bazel:
             raise ValueError(
                 "CompareCommandsQuery 'bazel' label must be set for Bazel queries."
             )
-        l = _normalize_label(query.bazel)
-        if l not in seen_labels:
-            seen_labels.add(l)
-            unique_labels.append(l)
-
-    bazel_target = 'mnemonic("{}", {})'.format(
-        mnemonic_expr, " + ".join(unique_labels)
-    )
-    config_args = [
-        "--config=host",
-        "--config=quiet",
-        # Ensure that the labels returned by get_bazel_expanded_actions()
-        # have a canonical label, which means a @@// prefix for root workspace files.
-        "--consistent_labels",
-    ]
-    if debug:
-        debug(
-            f"Fetching expanded Bazel commands for targets using get_bazel_expanded_actions with target: {bazel_target}"
-        )
-    try:
-        expanded_actions = bazel_build_args.get_bazel_expanded_actions(
-            bazel_launcher=bazel_launcher,
-            bazel_execroot=str(bazel_execroot),
-            bazel_target=bazel_target,
-            config_args=config_args,
-            filter_mnemonics=mnemonics,
-            read_response_files=read_response_files,
-        )
-    except Exception as e:
-        raise ValueError(
-            f"Failed to run bazel action expansion for labels: {e}"
-        ) from e
-
-    # Group actions by normalized target label
-    target_actions_map: dict[str, list[bazel_build_args.ExpandedAction]] = {}
-    for action in expanded_actions:
-        norm_target = _normalize_label(action.target)
-        target_actions_map.setdefault(norm_target, []).append(action)
+        queries_by_config.setdefault(query.bazel.config, []).append(query)
 
     result = BazelCommandMap()
     missing_labels = []
 
-    for query in queries:
-        label = query.bazel
-        action_type = query.action_type
-        source_file = query.source
+    for bazel_config, config_queries in queries_by_config.items():
+        mnemonics: list[str] = []
+        seen_labels: set[str] = set()
+        unique_labels: list[str] = []
+        for query in config_queries:
+            m = action_type_to_mnemonic(query.action_type)
+            if m not in mnemonics:
+                mnemonics.append(m)
+            assert query.bazel  # make mypy happy
+            l = _normalize_label(query.bazel.label)
+            if l not in seen_labels:
+                seen_labels.add(l)
+                unique_labels.append(l)
 
-        norm_label = _normalize_label(label)
-        actions = target_actions_map.get(norm_label, [])
-        matched_cmd = None
+        mnemonic_expr = "|".join(mnemonics)
+        bazel_target = 'mnemonic("{}", {})'.format(
+            mnemonic_expr, " + ".join(unique_labels)
+        )
+        config_args = [
+            f"--config={bazel_config}",
+            "--config=quiet",
+            # Ensure that the labels returned by get_bazel_expanded_actions()
+            # have a canonical label, which means a @@// prefix for root workspace files.
+            "--consistent_labels",
+        ]
+        if debug:
+            debug(
+                f"Fetching expanded Bazel commands for targets (config={bazel_config}) using get_bazel_expanded_actions with target: {bazel_target}"
+            )
+        try:
+            expanded_actions = bazel_build_args.get_bazel_expanded_actions(
+                bazel_launcher=bazel_launcher,
+                bazel_execroot=str(bazel_execroot),
+                bazel_target=bazel_target,
+                config_args=config_args,
+                filter_mnemonics=mnemonics,
+                read_response_files=read_response_files,
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to run bazel action expansion for labels: {e}"
+            ) from e
 
-        for action in actions:
-            full_args = list(action.env_vars) + action.args
-            if not full_args:
-                continue
-            cmd_str = shlex.join(full_args)
-            if _matches_action_type(
-                cmd_str, action_type, source_file=source_file
-            ):
-                matched_cmd = cmd_str
-                break
+        # Group actions by normalized target label
+        target_actions_map: dict[
+            str, list[bazel_build_args.ExpandedAction]
+        ] = {}
+        for action in expanded_actions:
+            norm_target = _normalize_label(action.target)
+            target_actions_map.setdefault(norm_target, []).append(action)
 
-        if matched_cmd:
-            result[label] = matched_cmd
-        else:
-            missing_labels.append(label)
+        for query in config_queries:
+            assert query.bazel  # make mypy happy
+            label = query.bazel.label
+            action_type = query.action_type
+            source_file = query.source
+
+            norm_label = _normalize_label(label)
+            actions = target_actions_map.get(norm_label, [])
+            matched_cmd = None
+
+            for action in actions:
+                full_args = list(action.env_vars) + action.args
+                if not full_args:
+                    continue
+                cmd_str = shlex.join(full_args)
+                if _matches_action_type(
+                    cmd_str, action_type, source_file=source_file
+                ):
+                    matched_cmd = cmd_str
+                    break
+
+            if matched_cmd:
+                result[query.bazel] = matched_cmd
+            else:
+                missing_labels.append(label)
 
     if missing_labels:
         raise ValueError(f"Could not find command for labels: {missing_labels}")
@@ -610,11 +723,12 @@ def compare_gn_and_bazel_commands_for(
     result = []
     for query in target_queries:
         gn_label = query.gn
-        bazel_label = query.bazel
+        assert query.bazel
+        bazel_label = query.bazel.label
         action_type = query.action_type
 
         gn_cmd_raw = gn_cmds_map.get(gn_label, "")
-        bazel_cmd_raw = bazel_cmds_map.get(bazel_label, "")
+        bazel_cmd_raw = bazel_cmds_map.get(query.bazel, "")
 
         if not gn_cmd_raw or not bazel_cmd_raw:
             result.append(
@@ -632,10 +746,8 @@ def compare_gn_and_bazel_commands_for(
 
         if action_type == ACTION_RUSTC:
             tool_candidates = ["rustc"]
-            normalize_cmd = normalize_rustc_args.normalize_rustc_cmd
         else:
             tool_candidates = ["clang++", "clang", "ld.ldd", "lld", "llvm-ar"]
-            normalize_cmd = normalize_clang_args.normalize_clang_cmd
 
         gn_tool_cmd = gn_cmd
         for tool in tool_candidates:
@@ -653,10 +765,22 @@ def compare_gn_and_bazel_commands_for(
                 bazel_tool_cmd = tool_cmd
                 break
 
-        normalized_gn_args = normalize_cmd(str(gn_tool_cmd), gn_path_normalizer)
-        normalized_bazel_args = normalize_cmd(
-            str(bazel_tool_cmd), bazel_path_normalizer
-        )
+        if action_type == ACTION_RUSTC:
+            normalized_gn_args = normalize_rustc_args.normalize_rustc_cmd(
+                str(gn_tool_cmd), gn_path_normalizer
+            )
+            normalized_bazel_args = normalize_rustc_args.normalize_rustc_cmd(
+                str(bazel_tool_cmd), bazel_path_normalizer
+            )
+        else:
+            normalized_gn_args = normalize_clang_args.normalize_clang_cmd(
+                str(gn_tool_cmd), gn_path_normalizer, action_type=action_type
+            )
+            normalized_bazel_args = normalize_clang_args.normalize_clang_cmd(
+                str(bazel_tool_cmd),
+                bazel_path_normalizer,
+                action_type=action_type,
+            )
 
         result.append(
             CompareCommandsResult(

@@ -220,8 +220,14 @@ def force_raw_symlink(dst_path: FilePath, target_path: FilePath) -> None:
         dst_path: path to symlink file to write or update.
         target_path: raw symlink target path.
     """
-    if os.path.lexists(dst_path):
-        os.remove(dst_path)  # Remove previous symlink if it exists.
+    if os.path.islink(dst_path):
+        # Leave an up-to-date symlink alone so that its ctime doesn't change,
+        # which would cause Bazel to invalidate anything that depends on it.
+        if os.readlink(str(dst_path)) == str(target_path):
+            return
+        os.remove(dst_path)
+    elif os.path.lexists(dst_path):
+        os.remove(dst_path)
     dst_dir = os.path.dirname(dst_path)
     os.makedirs(dst_dir, exist_ok=True)
     try:

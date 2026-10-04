@@ -36,6 +36,7 @@ group("tests") {
     "extended_pstate:tests",
     "features:tests",
     "line_discipline:tests",
+    "linux_uapi:tests",
     "memory_pinning:tests",
     "page_buf:tests",
     "range_map:tests",

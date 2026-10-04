@@ -9,7 +9,7 @@ use std::cmp::min;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::range::Range;
-use zerocopy::{Immutable, IntoBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 struct BytesBox<T>(Box<[T]>);
 
@@ -103,15 +103,12 @@ enum Payload {
 
 impl Payload {
     fn from_segment(segment: &[u8]) -> Self {
-        // Safety:
-        // * All bit patterns are valid u32
-        // * Segment _should_ be u32 aligned and sized.
-        let (_, data, _) = unsafe { segment.align_to::<u32>() };
-        assert_eq!(
-            data.len() * std::mem::size_of::<u32>(),
-            segment.len(),
-            "Data segment length violation"
-        );
+        let data: &[u32] = if segment.is_empty() {
+            &[]
+        } else {
+            <[u32]>::ref_from_bytes(segment)
+                .unwrap_or_else(|_| panic!("Data segment length violation"))
+        };
         // If data.iter().next().is_none(),
         // we get a 0-length Fill data with a payload of 0,
         // which is a no-op.
@@ -340,6 +337,28 @@ mod test {
 
     use super::*;
     use crate::util::{U32_SIZE, multi_chain};
+
+    #[test]
+    fn test_payload_unaligned_empty_segment() {
+        let data = Bytes::from_owner(BytesBox(vec![0u32].into_boxed_slice()));
+        let empty = data.slice(1..1);
+        assert!(empty.is_empty());
+        assert!(!empty.as_ptr().cast::<u32>().is_aligned());
+        assert!(matches!(Payload::from_segment(empty.as_ref()), Payload::Fill(0)));
+    }
+
+    #[test]
+    fn test_payload_word_patterns() {
+        for (words, expected) in [
+            (vec![0u32], Payload::Fill(0)),
+            (vec![0x1234_5678; 3], Payload::Fill(0x1234_5678)),
+            (vec![u32::MAX; 2], Payload::Fill(u32::MAX)),
+            (vec![1, 2], Payload::Flash),
+        ] {
+            let data = Bytes::from_owner(BytesBox(words.into_boxed_slice()));
+            assert!(Payload::from_segment(data.as_ref()) == expected);
+        }
+    }
 
     #[fuchsia::test()]
     fn test_stream_command_generation_basic() {

@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/lib.rs",
+        "src/toolbox.rs",
+    ],
+    crate_name = "rcs",
+    edition = "2024",
+    target_compatible_with = HOST_CONSTRAINTS,
+    with_host_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust_fdomain",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
+        "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust",
+        "//src/developer/ffx/lib/timeout:lib",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

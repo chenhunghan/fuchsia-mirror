@@ -5,22 +5,25 @@
 use anyhow::{Error, Result};
 use assert_matches::assert_matches;
 use fidl::endpoints::{Proxy, create_endpoints, create_proxy};
+use fidl_fuchsia_feedback as ffeedback;
 use fidl_fuchsia_power_broker::{
     self as fpb, BinaryPowerLevel, ElementSchema, LeaseStatus, LevelDependency, StatusMarker,
     TopologyMarker, TopologyProxy,
 };
 use fuchsia_async as fasync;
-use fuchsia_component_test::{Capability, ChildOptions, RealmBuilder, RealmInstance, Ref, Route};
-use futures_util::TryStreamExt;
+use fuchsia_component_test::{
+    Capability, ChildOptions, LocalComponentHandles, RealmBuilder, RealmInstance, Ref, Route,
+};
+use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use power_broker_client::BINARY_POWER_LEVELS;
 use std::thread;
 use std::time::Duration;
 
 async fn build_power_broker_realm() -> Result<RealmInstance, Error> {
     let builder = RealmBuilder::new().await?;
-    let power_broker = builder
-        .add_child("power_broker", "power-broker#meta/power-broker.cm", ChildOptions::new())
-        .await?;
+    let power_broker =
+        builder.add_child("power_broker", "#meta/power-broker.cm", ChildOptions::new()).await?;
+
     builder
         .add_route(
             Route::new()
@@ -40,7 +43,9 @@ mod tests {
     use fpb::{
         ElementControlMarker, ElementRunnerMarker, ElementRunnerRequestStream, LessorMarker,
     };
+    use fuchsia_async::TimeoutExt;
     use futures_util::stream::TryNext;
+    use test_case::test_case;
 
     async fn handle_set_level(
         next: TryNext<'_, ElementRunnerRequestStream>,
@@ -3085,6 +3090,155 @@ mod tests {
             s_resp.send().unwrap();
             assert_eq!(s_status.watch_power_level().await.unwrap(), Ok(0));
         });
+
+        Ok(())
+    }
+
+    #[test_case(1; "enabled")]
+    #[test_case(0; "disabled")]
+    #[fuchsia::test]
+    async fn test_set_level_timeout_integration(timeout_seconds: u32) -> Result<(), Error> {
+        let builder = RealmBuilder::new().await?;
+
+        // Add Power Broker component.
+        let power_broker =
+            builder.add_child("power_broker", "#meta/power-broker.cm", ChildOptions::new()).await?;
+
+        // Override configuration capabilities for testing.
+        let mut decl = builder.get_component_decl(&power_broker).await?;
+        for cap in &mut decl.capabilities {
+            if let cm_rust::CapabilityDecl::Config(config_decl) = cap {
+                if config_decl.name.as_str() == "fuchsia.power.broker.SetLevelTimeoutSeconds" {
+                    config_decl.value = cm_rust::ConfigValue::Single(
+                        cm_rust::ConfigSingleValue::Uint32(timeout_seconds),
+                    );
+                }
+            }
+        }
+        builder.replace_component_decl(&power_broker, decl).await?;
+
+        // Add mock CrashReporter.
+        let (crash_tx, mut rx_crash) = futures::channel::mpsc::unbounded();
+        let crash_reporter_mock = builder
+            .add_local_child(
+                "crash_reporter",
+                move |handles: LocalComponentHandles| {
+                    let crash_tx = crash_tx.clone();
+                    Box::pin(async move {
+                        let mut fs = fuchsia_component::server::ServiceFs::new();
+                        fs.dir("svc").add_fidl_service(
+                            |stream: ffeedback::CrashReporterRequestStream| stream,
+                        );
+                        fs.serve_connection(handles.outgoing_dir).unwrap();
+                        fs.for_each_concurrent(None, move |mut stream| {
+                            let crash_tx = crash_tx.clone();
+                            async move {
+                                while let Ok(Some(request)) = stream.try_next().await {
+                                    match request {
+                                        ffeedback::CrashReporterRequest::FileReport {
+                                            report,
+                                            responder,
+                                        } => {
+                                            log::info!("Mock CrashReporter received report");
+                                            let _ = crash_tx.unbounded_send(report);
+                                            let _ = responder
+                                                .send(Ok(&ffeedback::FileReportResults::default()));
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                        .await;
+                        Ok(())
+                    })
+                },
+                ChildOptions::new(),
+            )
+            .await?;
+
+        // Route protocols.
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::protocol::<ffeedback::CrashReporterMarker>())
+                    .from(&crash_reporter_mock)
+                    .to(&power_broker),
+            )
+            .await?;
+
+        // Route Topology from Power Broker to test.
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::protocol::<fpb::TopologyMarker>())
+                    .from(&power_broker)
+                    .to(Ref::parent()),
+            )
+            .await?;
+
+        let instance = builder.build().await?;
+
+        let topology: fpb::TopologyProxy = instance.root.connect_to_protocol_at_exposed_dir()?;
+
+        let (element_runner_client, element_runner_server) =
+            create_endpoints::<fpb::ElementRunnerMarker>();
+        let mut element_runner = element_runner_server.into_stream();
+
+        topology
+            .add_element(fpb::ElementSchema {
+                element_name: Some("stuck_element".into()),
+                initial_current_level: Some(0),
+                valid_levels: Some(vec![0, 1]),
+                element_runner: Some(element_runner_client),
+                ..Default::default()
+            })
+            .await?
+            .unwrap();
+
+        // Wait for SetLevel request.
+        let Some(fpb::ElementRunnerRequest::SetLevel { level: _, responder: _responder }) =
+            element_runner.try_next().await?
+        else {
+            panic!("Expected SetLevel request");
+        };
+        log::info!("Received SetLevel, ignoring to simulate stuck state.");
+        // Do not call _responder.send()
+
+        if timeout_seconds > 0 {
+            // Wait for crash report.
+            let report = rx_crash
+                .next()
+                .on_timeout(fasync::MonotonicDuration::from_seconds(20), || None)
+                .await
+                .expect("Did not receive crash report");
+            assert_eq!(report.program_name, Some("power-broker".to_string()));
+            assert_eq!(
+                report.crash_signature,
+                Some("fuchsia-power-broker-set-level-stuck-stuck_element".to_string())
+            );
+            assert_eq!(report.is_fatal, Some(false));
+        } else {
+            // Since timeout is disabled (0), wait to confirm no crash report is dispatched.
+            fasync::Timer::new(fasync::MonotonicInstant::after(
+                fasync::MonotonicDuration::from_seconds(2),
+            ))
+            .await;
+            assert!(rx_crash.next().now_or_never().is_none());
+
+            // Verify Power Broker is still responsive.
+            let (second_runner_client, _second_runner_server) =
+                create_endpoints::<fpb::ElementRunnerMarker>();
+            let add_res = topology
+                .add_element(fpb::ElementSchema {
+                    element_name: Some("second_element".into()),
+                    initial_current_level: Some(0),
+                    valid_levels: Some(vec![0, 1]),
+                    element_runner: Some(second_runner_client),
+                    ..Default::default()
+                })
+                .await?;
+            assert!(add_res.is_ok());
+        }
 
         Ok(())
     }

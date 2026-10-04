@@ -227,3 +227,65 @@ impl<T: LayerObject + ?Sized> LayerObject for Box<T> {
         (**self).close().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::fake_object::{FakeObject, FakeObjectHandle};
+
+    #[fuchsia::test]
+    async fn test_object_handle_and_layer_object_defaults() {
+        let object = Arc::new(FakeObject::new());
+        let handle = FakeObjectHandle::new(object);
+
+        handle.set_trace(true);
+        assert_eq!(handle.as_slice(), None);
+        assert!(!handle.has_io_error());
+        handle.purge_cached_data();
+        handle.close().await;
+
+        let dyn_read: &dyn ReadObjectHandle = &handle;
+        assert_eq!(dyn_read.as_slice(), None);
+        assert!(!dyn_read.has_io_error());
+        dyn_read.purge_cached_data();
+        dyn_read.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_arc_forwarding_impls() {
+        let object = Arc::new(FakeObject::new());
+        let arc_handle: Arc<FakeObjectHandle> = Arc::new(FakeObjectHandle::new(object));
+
+        assert_eq!(arc_handle.object_id(), 0);
+        assert_eq!(arc_handle.block_size(), BlockSize::SIZE_512B);
+        arc_handle.set_trace(false);
+
+        let mut buf = arc_handle.allocate_buffer(512).await;
+        assert_eq!(arc_handle.get_size(), 0);
+        assert_eq!(arc_handle.read_aligned(0, buf.as_mut()).await.unwrap(), 0);
+
+        assert_eq!(arc_handle.as_slice(), None);
+        assert!(!arc_handle.has_io_error());
+        arc_handle.purge_cached_data();
+        arc_handle.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_box_forwarding_impls() {
+        let object = Arc::new(FakeObject::new());
+        let box_handle: Box<FakeObjectHandle> = Box::new(FakeObjectHandle::new(object));
+
+        assert_eq!(box_handle.object_id(), 0);
+        assert_eq!(box_handle.block_size(), BlockSize::SIZE_512B);
+        box_handle.set_trace(true);
+
+        let mut buf = box_handle.allocate_buffer(512).await;
+        assert_eq!(box_handle.get_size(), 0);
+        assert_eq!(box_handle.read_aligned(0, buf.as_mut()).await.unwrap(), 0);
+
+        assert_eq!(box_handle.as_slice(), None);
+        assert!(!box_handle.has_io_error());
+        box_handle.purge_cached_data();
+        box_handle.close().await;
+    }
+}

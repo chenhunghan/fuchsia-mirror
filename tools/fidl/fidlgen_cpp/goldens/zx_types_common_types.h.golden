@@ -125,6 +125,118 @@ constexpr inline auto ToUnderlying(::test_zxtypes::StatusEnumAlias value) -> int
   return static_cast<int32_t>(value);
 }
 
+}  // namespace fidl
+namespace test_zxtypes {
+
+class ResultEnum final {
+ private:
+  enum class EnumForSwitching_ : int32_t {
+
+    kOk = 0u,
+
+    _do_not_handle_this__write_a_default_case_instead = 0x7fffffff,
+  };
+
+  constexpr explicit ResultEnum(EnumForSwitching_ value) : value_(static_cast<int32_t>(value)) {}
+
+ public:
+  constexpr ResultEnum() : value_(static_cast<int32_t>(Unknown())) {}
+  constexpr explicit ResultEnum(int32_t value) : value_(value) {}
+  constexpr operator EnumForSwitching_() const { return static_cast<EnumForSwitching_>(value_); }
+  constexpr explicit operator int32_t() const { return value_; }
+
+  constexpr bool IsUnknown() const {
+    switch (value_) {
+      case 0u:
+
+        return false;
+    }
+    return true;
+  }
+
+  // Returns an enum corresponding to the member designated as @unknown in the
+  // FIDL schema if exists, or a compiler-reserved unknown value otherwise.
+  constexpr static ResultEnum Unknown() {
+    return ResultEnum(0x7fffffff);
+  }
+
+  static const ResultEnum kOk;
+
+ private:
+  int32_t value_;
+};
+constexpr const ::test_zxtypes::ResultEnum ResultEnum::kOk =
+    ::test_zxtypes::ResultEnum(0u);
+
+}  // namespace test_zxtypes
+
+template <>
+struct fidl::internal::DisplayError<::test_zxtypes::ResultEnum> {
+  static size_t Format(const ::test_zxtypes::ResultEnum& value, char* destination, size_t capacity);
+};
+
+namespace fidl {
+
+constexpr inline auto ToUnderlying(::test_zxtypes::ResultEnum value) -> int32_t {
+  return static_cast<int32_t>(value);
+}
+
+}  // namespace fidl
+namespace test_zxtypes {
+
+class ResultEnumAlias final {
+ private:
+  enum class EnumForSwitching_ : int32_t {
+
+    kOk = 0u,
+
+    _do_not_handle_this__write_a_default_case_instead = 0x7fffffff,
+  };
+
+  constexpr explicit ResultEnumAlias(EnumForSwitching_ value) : value_(static_cast<int32_t>(value)) {}
+
+ public:
+  constexpr ResultEnumAlias() : value_(static_cast<int32_t>(Unknown())) {}
+  constexpr explicit ResultEnumAlias(int32_t value) : value_(value) {}
+  constexpr operator EnumForSwitching_() const { return static_cast<EnumForSwitching_>(value_); }
+  constexpr explicit operator int32_t() const { return value_; }
+
+  constexpr bool IsUnknown() const {
+    switch (value_) {
+      case 0u:
+
+        return false;
+    }
+    return true;
+  }
+
+  // Returns an enum corresponding to the member designated as @unknown in the
+  // FIDL schema if exists, or a compiler-reserved unknown value otherwise.
+  constexpr static ResultEnumAlias Unknown() {
+    return ResultEnumAlias(0x7fffffff);
+  }
+
+  static const ResultEnumAlias kOk;
+
+ private:
+  int32_t value_;
+};
+constexpr const ::test_zxtypes::ResultEnumAlias ResultEnumAlias::kOk =
+    ::test_zxtypes::ResultEnumAlias(0u);
+
+}  // namespace test_zxtypes
+
+template <>
+struct fidl::internal::DisplayError<::test_zxtypes::ResultEnumAlias> {
+  static size_t Format(const ::test_zxtypes::ResultEnumAlias& value, char* destination, size_t capacity);
+};
+
+namespace fidl {
+
+constexpr inline auto ToUnderlying(::test_zxtypes::ResultEnumAlias value) -> int32_t {
+  return static_cast<int32_t>(value);
+}
+
 template <>
 struct IsFidlType<::test_zxtypes::StatusEnum> : public std::true_type {};
 template <>
@@ -134,6 +246,16 @@ template <>
 struct IsFidlType<::test_zxtypes::StatusEnumAlias> : public std::true_type {};
 template <>
 struct ContainsHandle<::test_zxtypes::StatusEnumAlias> : public std::false_type {};
+
+template <>
+struct IsFidlType<::test_zxtypes::ResultEnum> : public std::true_type {};
+template <>
+struct ContainsHandle<::test_zxtypes::ResultEnum> : public std::false_type {};
+
+template <>
+struct IsFidlType<::test_zxtypes::ResultEnumAlias> : public std::true_type {};
+template <>
+struct ContainsHandle<::test_zxtypes::ResultEnumAlias> : public std::false_type {};
 
 #pragma clang diagnostic pop
 

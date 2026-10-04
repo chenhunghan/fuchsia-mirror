@@ -23,6 +23,7 @@
 #include <zircon/errors.h>
 #include <zircon/status.h>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -32,9 +33,12 @@
 #include <fbl/hard_int.h>
 #include <fbl/intrusive_double_list.h>
 #include <fbl/null_lock.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 #include <usb/usb.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_hub {
 
@@ -109,23 +113,33 @@ class UsbHubDevice : public UsbHub, public ddk::UsbHubInterfaceProtocol<UsbHubDe
 
   zx::result<usb_hub_descriptor_t> GetUsbHubDescriptor(uint16_t type) {
     size_t length = sizeof(usb_hub_descriptor_t);
-    auto result = ControlIn(USB_TYPE_CLASS | USB_RECIP_DEVICE | USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
-                            static_cast<uint16_t>(type << 8), 0, length);
+    auto result =
+        ControlIn(kClassDeviceIn, fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor),
+                  usb_descriptor_w_value(type), 0, length);
     if (result.is_error()) {
       return zx::error(result.error_value());
     }
     size_t request_size = result.value().size();
-    usb_hub_descriptor_t hub_descriptor;
-    if (sizeof(hub_descriptor) < request_size) {
-      zxlogf(ERROR, "Size of hub descriptor less than request size");
-      return zx::error(ZX_ERR_NO_MEMORY);
+    constexpr size_t kHubHeaderSize = 7;
+    if (request_size < kHubHeaderSize) {
+      zxlogf(ERROR, "Size of hub descriptor less than minimum header size");
+      return zx::error(ZX_ERR_IO_REFUSED);
     }
-    memcpy(&hub_descriptor, result.value().data(), request_size);
-    auto* usb_descriptor = reinterpret_cast<usb_descriptor_header_t*>(&hub_descriptor);
-    if (usb_descriptor->b_length != request_size) {
-      zxlogf(ERROR, "Mismatched descriptor length");
-      return zx::error(ZX_ERR_BAD_STATE);
+    usb_hub_descriptor_t hub_descriptor{};
+    size_t copy_size = std::min(request_size, sizeof(hub_descriptor));
+    const auto* usb_descriptor =
+        reinterpret_cast<const usb_descriptor_header_t*>(result.value().data());
+    if (request_size > sizeof(hub_descriptor) || usb_descriptor->b_length != copy_size) {
+      zxlogf(ERROR, "Buffer too small or mismatched descriptor length");
+      return zx::error(ZX_ERR_BUFFER_TOO_SMALL);
     }
+    const auto* desc_header = reinterpret_cast<const usb_hub_descriptor_t*>(result.value().data());
+    size_t bitmap_bytes = 2 * ((desc_header->b_nbr_ports / 8) + 1);
+    if (request_size < kHubHeaderSize + bitmap_bytes) {
+      zxlogf(ERROR, "Size of hub descriptor less than minimum struct size");
+      return zx::error(ZX_ERR_IO_REFUSED);
+    }
+    memcpy(&hub_descriptor, result.value().data(), copy_size);
     return zx::ok(hub_descriptor);
   }
 

@@ -108,7 +108,7 @@ closed protocol EthernetImpl {
     strict Query(struct {
         options uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         info EthernetInfo;
     });
 
@@ -121,7 +121,7 @@ closed protocol EthernetImpl {
     strict Start(resource struct {
         ifc client_end:EthernetIfc;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Request transmission of the packet in netbuf. The driver takes ownership of the netbuf and
@@ -143,7 +143,7 @@ closed protocol EthernetImpl {
         @in_out
         netbuf EthernetNetbuf;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         @mutable
         netbuf EthernetNetbuf;
     });
@@ -163,7 +163,7 @@ closed protocol EthernetImpl {
         @buffer
         data vector<uint8>:MAX;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Get the BTI handle (needed to pin DMA memory) for this device.

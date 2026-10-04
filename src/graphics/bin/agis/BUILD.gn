@@ -80,7 +80,7 @@ fuchsia_test_package("agis-test") {
   deps = [
     ":agis-cmp",
     "//build/validate:non_production_tag",
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
   ]
 }
 

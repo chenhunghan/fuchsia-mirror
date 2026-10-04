@@ -61,7 +61,7 @@ pub use state::{
 pub mod testutil {
     pub use crate::logic::testutil::NoopImpl;
     pub use crate::packets::testutil::new_filter_egress_ip_packet;
-    pub use crate::state::FakePacketMetadata;
+    pub use crate::state::testutil::FakePacketMetadata;
     use net_types::ip::IpVersion;
     use packet::FragmentedByteSlice;
 

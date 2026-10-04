@@ -6,6 +6,7 @@
 
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <lib/fit/defer.h>
+#include <lib/zx/time.h>
 
 #include <algorithm>
 #include <memory>
@@ -13,11 +14,14 @@
 
 #include <audio-proto-utils/format-utils.h>
 #include <fbl/algorithm.h>
+#include <usb/descriptors.h>
 #include <usb/usb.h>
 
 #include "debug-logging.h"
 #include "usb-audio-device.h"
 #include "usb-audio-path.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace audio {
 namespace usb {
@@ -85,8 +89,10 @@ zx_status_t UsbAudioStreamInterface::AddInterface(DescriptorListMemory::Iterator
   // is probably meant to be selected when this streaming interface is idle
   // and should not be using any bus resources.
   auto next_hdr = iter->hdr_as<usb_audio_desc_header>();
-  if ((next_hdr != nullptr) && (next_hdr->bDescriptorType == USB_AUDIO_CS_INTERFACE) &&
-      (next_hdr->bDescriptorSubtype == USB_AUDIO_AS_GENERAL)) {
+  if ((next_hdr != nullptr) &&
+      (next_hdr->bDescriptorType == fdescriptor::DescriptorType::kCsInterface) &&
+      (next_hdr->bDescriptorSubtype ==
+       static_cast<uint8_t>(fdescriptor::AudioAsDescriptorSubtype::kGeneral))) {
     auto aud_hdr = iter->hdr_as<usb_audio_as_header_desc>();
     iter->Next();
 
@@ -204,7 +210,7 @@ zx_status_t UsbAudioStreamInterface::BuildFormatMap() {
     // format.
     //
     auto tag = fmt.format_tag();
-    if (tag == USB_AUDIO_AS_FT_PCM8) {
+    if (tag == static_cast<uint16_t>(fdescriptor::AudioFormatTag::kPcm8)) {
       if ((fmt.bit_resolution() != 8) || (fmt.subframe_bytes() != 1)) {
         LOG(WARNING, "Skipping PCM8 format with invalid bit res/subframe size (%u/%u)",
             fmt.bit_resolution(), fmt.subframe_bytes());
@@ -212,14 +218,14 @@ zx_status_t UsbAudioStreamInterface::BuildFormatMap() {
       }
       range.sample_formats = static_cast<audio_sample_format_t>(AUDIO_SAMPLE_FORMAT_8BIT |
                                                                 AUDIO_SAMPLE_FORMAT_FLAG_UNSIGNED);
-    } else if (tag == USB_AUDIO_AS_FT_IEEE_FLOAT) {
+    } else if (tag == static_cast<uint16_t>(fdescriptor::AudioFormatTag::kIeeeFloat)) {
       if ((fmt.bit_resolution() != 32) || (fmt.subframe_bytes() != 4)) {
         LOG(WARNING, "Skipping IEEE_FLOAT format with invalid bit res/subframe size (%u/%u)",
             fmt.bit_resolution(), fmt.subframe_bytes());
         continue;
       }
       range.sample_formats = AUDIO_SAMPLE_FORMAT_32BIT_FLOAT;
-    } else if (tag == USB_AUDIO_AS_FT_PCM) {
+    } else if (tag == static_cast<uint16_t>(fdescriptor::AudioFormatTag::kPcm)) {
       switch (fmt.bit_resolution()) {
         case 8:
         case 16:
@@ -396,10 +402,13 @@ zx_status_t UsbAudioStreamInterface::ActivateFormat(size_t ndx, uint32_t frames_
     buffer[0] = static_cast<uint8_t>(frames_per_second);
     buffer[1] = static_cast<uint8_t>(frames_per_second >> 8);
     buffer[2] = static_cast<uint8_t>(frames_per_second >> 16);
-    status =
-        usb_control_out(&parent_.usb_proto(), USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_ENDPOINT,
-                        USB_AUDIO_SET_CUR, USB_AUDIO_SAMPLING_FREQ_CONTROL << 8, f.ep_addr_,
-                        ZX_TIME_INFINITE, reinterpret_cast<uint8_t*>(&buffer), sizeof(buffer));
+    status = usb_control_out(
+        &parent_.usb_proto(), kClassEndpointOut,
+        fidl::ToUnderlying(fdescriptor::AudioRequest::kSetCur),
+        static_cast<uint16_t>(
+            fidl::ToUnderlying(fdescriptor::AudioEndpointControlSelector::kSamplingFreq))
+            << 8,
+        f.ep_addr_, ZX_TIME_INFINITE, reinterpret_cast<uint8_t*>(&buffer), sizeof(buffer));
     if (status != ZX_OK) {
       if (status == ZX_ERR_IO_REFUSED || status == ZX_ERR_IO_INVALID) {
         // clear the stall/error
@@ -440,10 +449,10 @@ zx_status_t UsbAudioStreamInterface::Format::Init(DescriptorListMemory::Iterator
   // Skip formats tags that we currently do not support or know how to deal
   // with.  Right now, we only deal with the linear PCM forms of Type I audio
   // formats.
-  switch (class_hdr_->wFormatTag) {
-    case USB_AUDIO_AS_FT_PCM:
-    case USB_AUDIO_AS_FT_PCM8:
-    case USB_AUDIO_AS_FT_IEEE_FLOAT:
+  switch (static_cast<fdescriptor::AudioFormatTag>(class_hdr_->wFormatTag)) {
+    case fdescriptor::AudioFormatTag::kPcm:
+    case fdescriptor::AudioFormatTag::kPcm8:
+    case fdescriptor::AudioFormatTag::kIeeeFloat:
       break;
 
     default:
@@ -474,10 +483,12 @@ zx_status_t UsbAudioStreamInterface::Format::Init(DescriptorListMemory::Iterator
       break;
     }
 
-    if (hdr->b_descriptor_type == USB_AUDIO_CS_INTERFACE) {
+    if (hdr->b_descriptor_type == fdescriptor::DescriptorType::kCsInterface) {
       // Stop parsing if this is not an audio format type descriptor
       auto ihdr = iter->hdr_as<usb_audio_desc_header>();
-      if ((ihdr == nullptr) || (ihdr->bDescriptorSubtype != USB_AUDIO_AS_FORMAT_TYPE)) {
+      if ((ihdr == nullptr) ||
+          (ihdr->bDescriptorSubtype !=
+           static_cast<uint8_t>(fdescriptor::AudioAsDescriptorSubtype::kFormatType))) {
         break;
       }
 
@@ -486,7 +497,7 @@ zx_status_t UsbAudioStreamInterface::Format::Init(DescriptorListMemory::Iterator
         break;
       }
 
-      if (fmt_hdr->bFormatType != USB_AUDIO_FORMAT_TYPE_I) {
+      if (fmt_hdr->bFormatType != static_cast<uint8_t>(fdescriptor::AudioFormatType::kTypeI)) {
         LOG(ERROR,
             "Unsupported format type (%u) in class specific audio stream format type "
             "interface (iid %u, alt_id %u)",
@@ -506,7 +517,8 @@ zx_status_t UsbAudioStreamInterface::Format::Init(DescriptorListMemory::Iterator
       // Stash the pointer, we'll sanity check a bit more once we are finished finding
       // headers.
       fmt_desc_ = fmt_desc;
-    } else if (hdr->b_descriptor_type == USB_DT_ENDPOINT) {
+    } else if (hdr->b_descriptor_type ==
+               fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint)) {
       auto ep_desc = iter->hdr_as<usb_endpoint_descriptor_t>();
       if (ep_desc == nullptr) {
         LOG(ERROR,
@@ -529,8 +541,8 @@ zx_status_t UsbAudioStreamInterface::Format::Init(DescriptorListMemory::Iterator
             "interface (iid %u, alt_id %u, ep_addr %u)",
             interface_hdr_->b_interface_number, alt_id(), ep_desc->b_endpoint_address);
       } else {
-        if ((usb_ep_type(ep_desc) != fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous) ||
-            (usb_ep_sync_type(ep_desc) == USB_ENDPOINT_NO_SYNCHRONIZATION)) {
+        if ((usb_ep_type(ep_desc) != fdescriptor::EndpointType::kIsochronous) ||
+            (usb_ep_sync_type(ep_desc) == fdescriptor::SynchronizationType::kNoSynchronization)) {
           LOG(WARNING,
               "Skipping endpoint descriptor with unsupported attributes "
               "interface (iid %u, alt_id %u, ep_attr 0x%02x)",
@@ -539,10 +551,12 @@ zx_status_t UsbAudioStreamInterface::Format::Init(DescriptorListMemory::Iterator
           ep_desc_ = ep_desc;
         }
       }
-    } else if (hdr->b_descriptor_type == USB_AUDIO_CS_ENDPOINT) {
+    } else if (hdr->b_descriptor_type == fdescriptor::DescriptorType::kCsEndpoint) {
       // Stop parsing if this is not a class specific AS isochronous endpoint descriptor
       auto ihdr = iter->hdr_as<usb_audio_desc_header>();
-      if ((ihdr == nullptr) || (ihdr->bDescriptorSubtype != USB_AUDIO_EP_GENERAL)) {
+      if ((ihdr == nullptr) ||
+          (ihdr->bDescriptorSubtype !=
+           static_cast<uint8_t>(fdescriptor::AudioEpDescriptorSubtype::kGeneral))) {
         break;
       }
 

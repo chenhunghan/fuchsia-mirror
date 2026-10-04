@@ -800,3 +800,15 @@ TEST(TEST_SUITE, test_trace_observer) {
   rs_wait_trace_state_is(TRACE_STOPPED);
   EXPECT_EQ(0, rs_check_trace_state());
 }
+
+TEST(TEST_SUITE, test_flush_buffer) {
+  BEGIN_TRACE_TEST_ETC(kAttachToThread, TRACE_BUFFERING_MODE_STREAMING, DEFAULT_BUFFER_SIZE_BYTES);
+
+  // When stopped, flush_buffer returns ZX_ERR_BAD_STATE (-20).
+  EXPECT_EQ(ZX_ERR_BAD_STATE, rs_test_flush_buffer());
+
+  fixture_initialize_and_start_tracing();
+
+  // When started, flush_buffer succeeds (ZX_OK = 0).
+  EXPECT_EQ(ZX_OK, rs_test_flush_buffer());
+}

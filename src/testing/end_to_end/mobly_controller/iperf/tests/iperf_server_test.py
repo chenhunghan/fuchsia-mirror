@@ -15,7 +15,7 @@ from iperf.iperf_server import (
     IPerfServerOverSsh,
     _get_port_from_ss_output,
 )
-from libs.ssh import settings
+from libs.ssh import connection, settings
 from libs.types import ControllerConfig
 
 MOCK_LOGFILE_PATH = "/tmp/mock_iperf_log.log"
@@ -65,6 +65,30 @@ class IPerfServerModuleTest(unittest.TestCase):
         self.assertEqual(server.port, 5201)
         self.assertEqual(server.test_interface, "lan")
 
+    @mock.patch("libs.ssh.connection.SshConnection")
+    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
+    @mock.patch(
+        "libs.commands.command.LinuxCommand.available", return_value=False
+    )
+    def test_create_creates_server_over_ssh_with_default_port(
+        self, _mock_cmd: mock.Mock, _mock_net: mock.Mock, _mock_ssh: mock.Mock
+    ) -> None:
+        cfg: ControllerConfig = {
+            "ssh_config": {
+                "user": "root",
+                "host": "192.168.1.1",
+                "identity_file": "/dev/null",
+            },
+            "test_interface": "lan",
+        }
+        servers = iperf_server.create([cfg])
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertIsInstance(server, IPerfServerOverSsh)
+        assert isinstance(server, IPerfServerOverSsh)
+        self.assertEqual(server.port, 5201)
+        self.assertEqual(server.test_interface, "lan")
+
     def test_create_raises_value_error_on_invalid_config(self) -> None:
         with self.assertRaises(ValueError):
             iperf_server.create([{"invalid_key": "val"}])
@@ -88,10 +112,11 @@ class IPerfServerModuleTest(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             _get_port_from_ss_output(ss_output, 1234)
 
-    def test_destroy_calls_stop(self) -> None:
+    def test_destroy_calls_stop_and_close(self) -> None:
         mock_server = mock.create_autospec(IPerfServerOverSsh)
         iperf_server.destroy([mock_server])
         mock_server.stop.assert_called_once()
+        mock_server.close_ssh.assert_called_once()
 
 
 class IPerfResultTest(unittest.TestCase):
@@ -165,27 +190,50 @@ class IPerfServerLocalTest(unittest.TestCase):
         ):
             server.start()
             self.assertTrue(server.started)
+            mock_job.assert_called_with("ss -l -p -n | grep iperf")
 
             log_path = server.stop()
             self.assertFalse(server.started)
             self.assertEqual(log_path, MOCK_LOGFILE_PATH)
             mock_proc.terminate.assert_called_once()
 
+    @mock.patch("builtins.open")
+    @mock.patch("subprocess.Popen")
+    @mock.patch("libs.proc.job.run")
+    def test_start_retries_when_grep_initially_finds_no_match(
+        self, mock_job: mock.Mock, mock_popen: mock.Mock, _mock_open: mock.Mock
+    ) -> None:
+        mock_proc = mock.Mock()
+        mock_proc.pid = 1234
+        mock_popen.return_value = mock_proc
+
+        first_res = mock.Mock()
+        first_res.stdout = b""
+        second_res = mock.Mock()
+        second_res.stdout = (
+            b'tcp LISTEN 0 5 *:5201 *:* users:(("iperf3",pid=1234,fd=3))'
+        )
+        mock_job.side_effect = [first_res, second_res]
+
+        server = IPerfServer(5201)
+        with (
+            mock.patch.object(
+                iperf_server,
+                "_get_port_from_ss_output",
+                side_effect=[ProcessLookupError("not found"), "5201"],
+            ),
+            mock.patch.object(
+                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+            ),
+        ):
+            server.start()
+            self.assertTrue(server.started)
+            self.assertEqual(server.port, 5201)
+            self.assertEqual(mock_job.call_count, 2)
+
 
 class IPerfServerOverSshTest(unittest.TestCase):
-    """Tests remote IPerfServerOverSsh execution."""
-
-    def setUp(self) -> None:
-        patcher_net = mock.patch(
-            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
-        )
-        patcher_cmd = mock.patch(
-            "libs.commands.command.LinuxCommand.available", return_value=False
-        )
-        patcher_net.start()
-        patcher_cmd.start()
-        self.addCleanup(patcher_net.stop)
-        self.addCleanup(patcher_cmd.stop)
+    """Tests remote IPerfServerOverSsh execution on both Raspi and OpenWrt-One."""
 
     def _create_ssh_settings(self, user: str = "root") -> settings.SshSettings:
         return settings.from_config(
@@ -196,89 +244,202 @@ class IPerfServerOverSshTest(unittest.TestCase):
             }
         )
 
-    @mock.patch("libs.ssh.connection.SshConnection")
-    def test_start_makes_started_true(self, mock_conn: mock.Mock) -> None:
-        ssh_cfg = self._create_ssh_settings()
-        server = IPerfServerOverSsh(ssh_cfg, 5201, "eth0")
-        server._ssh_session = mock.Mock()
-        with (
-            mock.patch.object(server, "_cleanup_iperf_port"),
-            mock.patch.object(
-                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
-            ),
+    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
+    def test_raspberry_pi_setup_with_nmcli_and_journalctl(
+        self, _mock_net: mock.Mock
+    ) -> None:
+        """Verifies Raspberry Pi behavior: nmcli and journalctl are present and used."""
+        ssh_cfg = self._create_ssh_settings(user="pi")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+        mock_ssh.run.return_value.stdout = b""
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=True
         ):
-            server.start()
-            self.assertTrue(server.started)
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="eth0",
+                use_killall=False,
+                ssh_session=mock_ssh,
+            )
+            self.assertIsNotNone(server._nmcli)
+            self.assertIsNotNone(server._journalctl)
+            assert server._journalctl is not None
+
+            with mock.patch.object(
+                server._journalctl, "logs", return_value="systemd log content"
+            ):
+                self.assertEqual(
+                    server.get_systemd_journal(), "systemd log content"
+                )
+
+    def test_openwrt_one_setup_without_nmcli_or_journalctl(self) -> None:
+        """Verifies OpenWrt-One behavior: nmcli and journalctl are absent, handled gracefully."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=False
+        ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="lan",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+            self.assertIsNone(server._nmcli)
+            self.assertIsNone(server._journalctl)
+            self.assertEqual(
+                server.get_systemd_journal(), "journalctl not available"
+            )
 
     @mock.patch("builtins.open")
-    @mock.patch("libs.ssh.connection.SshConnection")
-    def test_start_stop_makes_started_false(
-        self, mock_conn: mock.Mock, _mock_open: mock.Mock
+    def test_openwrt_one_start_stop_with_killall(
+        self, _mock_open: mock.Mock
     ) -> None:
-        ssh_cfg = self._create_ssh_settings()
-        server = IPerfServerOverSsh(ssh_cfg, 5201, "eth0")
-        server._ssh_session = mock.Mock()
-        with (
-            mock.patch.object(server, "_cleanup_iperf_port"),
-            mock.patch.object(
-                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
-            ),
+        """Verifies OpenWrt-One start and stop lifecycle using killall iperf3."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+        mock_job = mock.Mock()
+        mock_job.stdout = b"5678"
+        mock_ssh.run_async.return_value = mock_job
+        mock_ssh.run.return_value.stdout = b'{"end": {}}'
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=False
         ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="lan",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+            with mock.patch.object(
+                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+            ):
+                server.start()
+                self.assertTrue(server.started)
+                mock_ssh.run.assert_any_call(
+                    "killall iperf3", ignore_status=True
+                )
+
+                log = server.stop()
+                self.assertFalse(server.started)
+                self.assertEqual(log, MOCK_LOGFILE_PATH)
+                mock_ssh.run.assert_any_call(
+                    ["killall", "iperf3"], ignore_status=True
+                )
+                mock_ssh.run.assert_any_call(
+                    ["cat", "/tmp/iperf_server_port5201.log"],
+                    ignore_status=True,
+                )
+                mock_ssh.run.assert_any_call(
+                    ["rm", "-f", "/tmp/iperf_server_port5201.log"],
+                    ignore_status=True,
+                )
+
+    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
+    @mock.patch("antlion.utils.renew_linux_ip_address")
+    def test_renew_test_interface_ip_address(
+        self, mock_renew: mock.Mock, _mock_net: mock.Mock
+    ) -> None:
+        ssh_cfg = self._create_ssh_settings(user="pi")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+        mock_ssh.run.return_value.stdout = b""
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=False
+        ):
+            # Raspberry Pi (eth0, even with use_killall=True) calls renew_linux_ip_address
+            server_raspi = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="eth0",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+            server_raspi.renew_test_interface_ip_address()
+            mock_renew.assert_called_once_with(mock_ssh, "eth0")
+
+            # OpenWrt (test_interface="br-lan") is a no-op
+            mock_renew.reset_mock()
+            server_openwrt = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="br-lan",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+            server_openwrt.renew_test_interface_ip_address()
+            mock_renew.assert_not_called()
+
+    def test_start_exec_and_pid_parsing(self) -> None:
+        """Verifies start() uses exec and correctly parses numeric vs non-numeric PID."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+        mock_job = mock.Mock()
+        mock_ssh.run_async.return_value = mock_job
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=False
+        ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="lan",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+
+            # Valid PID
+            mock_job.stdout = b"12345\n"
             server.start()
-            server.stop()
-            self.assertFalse(server.started)
+            self.assertEqual(server._iperf_pid, "12345")
+            mock_ssh.run_async.assert_called_with(
+                "exec iperf3 -s -J -p 5201  > /tmp/iperf_server_port5201.log"
+            )
 
-    @mock.patch("builtins.open")
-    @mock.patch("libs.ssh.connection.SshConnection")
-    def test_stop_returns_expected_log_file(
-        self, mock_conn: mock.Mock, _mock_open: mock.Mock
-    ) -> None:
-        ssh_cfg = self._create_ssh_settings()
-        server = IPerfServerOverSsh(ssh_cfg, 5201, "eth0")
-        server._ssh_session = mock.Mock()
-        server._iperf_pid = "1234"
-        with (
-            mock.patch.object(server, "_cleanup_iperf_port"),
-            mock.patch.object(
-                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
-            ),
-        ):
-            log_file = server.stop()
-            self.assertEqual(log_file, MOCK_LOGFILE_PATH)
-
-    @mock.patch("libs.ssh.connection.SshConnection")
-    def test_start_does_not_run_two_concurrent_processes(
-        self, mock_conn: mock.Mock
-    ) -> None:
-        ssh_cfg = self._create_ssh_settings()
-        server = IPerfServerOverSsh(ssh_cfg, 5201, "eth0")
-        server._ssh_session = mock.Mock()
-        server._iperf_pid = "1234"
-        with (
-            mock.patch.object(server, "_cleanup_iperf_port"),
-            mock.patch.object(
-                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
-            ),
-        ):
+            # Reset for non-numeric PID test
+            server._iperf_pid = None
+            mock_job.stdout = b"error: command not found\n"
             server.start()
-            self.assertFalse(server._ssh_session.run_async.called)
+            self.assertIsNone(server._iperf_pid)
 
-    @mock.patch("libs.ssh.connection.SshConnection")
-    def test_stop_exits_early_if_no_process_has_started(
-        self, mock_conn: mock.Mock
-    ) -> None:
-        ssh_cfg = self._create_ssh_settings()
-        server = IPerfServerOverSsh(ssh_cfg, 5201, "eth0")
-        server._ssh_session = mock.Mock()
-        server._iperf_pid = None
-        with (
-            mock.patch.object(server, "_cleanup_iperf_port"),
-            mock.patch.object(
-                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
-            ),
-        ):
-            server.stop()
-            self.assertFalse(server._ssh_session.run_async.called)
+    def test_get_ssh_refreshes_runners(self) -> None:
+        """Verifies _get_ssh refreshes _journalctl and _ss when _ssh_session was closed."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=True
+        ), mock.patch(
+            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
+        ), mock.patch(
+            "libs.ssh.connection.SshConnection"
+        ) as mock_ssh_cls:
+            mock_new_ssh = mock.Mock()
+            mock_new_ssh.run.return_value.stdout = b""
+            mock_ssh_cls.return_value = mock_new_ssh
+
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="eth0",
+                ssh_session=mock_ssh,
+            )
+            old_journal = server._journalctl
+            old_ss = server._ss
+
+            server.close_ssh()
+            self.assertIsNone(server._ssh_session)
+
+            new_ssh = server._get_ssh()
+            self.assertEqual(new_ssh, mock_new_ssh)
+            self.assertIsNotNone(server._journalctl)
+            self.assertIsNotNone(server._ss)
+            self.assertIsNot(server._journalctl, old_journal)
+            self.assertIsNot(server._ss, old_ss)
 
 
 if __name__ == "__main__":

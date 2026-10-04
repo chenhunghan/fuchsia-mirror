@@ -4,7 +4,7 @@
 
 use crate::errors::FxfsError;
 use crate::log::*;
-use crate::object_store::object_record::EncryptionKeys;
+use crate::object_store::object_record::{EncryptionKey, EncryptionKeys};
 use crate::object_store::{FSCRYPT_KEY_ID, VOLUME_DATA_KEY_ID};
 use anyhow::Error;
 use event_listener::Event;
@@ -105,12 +105,44 @@ impl<V> Cache<V> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum FscryptFileKey {
+    InoLblk32([u8; 16]),
+    InoLblk64([u8; 16]),
+}
+
+impl FscryptFileKey {
+    fn from_encryption_key(key: &EncryptionKey) -> Option<Self> {
+        match key {
+            EncryptionKey::FscryptInoLblk32File { key_identifier } => {
+                Some(Self::InoLblk32(*key_identifier))
+            }
+            EncryptionKey::FscryptInoLblk64File { key_identifier } => {
+                Some(Self::InoLblk64(*key_identifier))
+            }
+            _ => None,
+        }
+    }
+
+    fn key_identifier(&self) -> [u8; 16] {
+        match self {
+            Self::InoLblk32(id) | Self::InoLblk64(id) => *id,
+        }
+    }
+}
+
 pub struct KeyManager {
     inner: Arc<Mutex<Inner>>,
 }
 
 struct Inner {
     keys: Cache<Arc<CipherSet>>,
+    /// Cache of unwrapped `EncryptionKey::FscryptInoLblk32File` and
+    /// `EncryptionKey::FscryptInoLblk64File` ciphers keyed by policy mode and `key_identifier`.
+    /// Because fscrypt inline encryption file ciphers are independent of `object_id`, files
+    /// sharing the same fscrypt policy and `key_identifier` can reuse the same `Arc<dyn Cipher>`
+    /// without repeating `Crypt.UnwrapKey` FIDL requests.
+    fscrypt_file_ciphers: BTreeMap<FscryptFileKey, Arc<dyn Cipher>>,
     unwrapping: BTreeMap<u64, Arc<UnwrapResult>>,
     purge_task: Option<fasync::Task<()>>,
 }
@@ -158,6 +190,7 @@ impl UnwrapResult {
         inner: &Arc<Mutex<Inner>>,
         object_id: u64,
         permanent: bool,
+        keys_to_unwrap: &[(u64, EncryptionKey)],
         result: Result<Option<Arc<CipherSet>>, zx::Status>,
     ) -> bool {
         let mut guard = inner.lock();
@@ -180,6 +213,25 @@ impl UnwrapResult {
                 o.remove();
                 if !cancelled {
                     if let Ok(Some(keys)) = &result {
+                        for (key_id, key) in keys_to_unwrap {
+                            if let Some(fscrypt_key) = FscryptFileKey::from_encryption_key(key) {
+                                match keys.find_key(*key_id) {
+                                    FindKeyResult::Key(cipher) => {
+                                        guard.fscrypt_file_ciphers.insert(fscrypt_key, cipher);
+                                    }
+                                    FindKeyResult::Unavailable => {
+                                        let id = fscrypt_key.key_identifier();
+                                        guard
+                                            .fscrypt_file_ciphers
+                                            .remove(&FscryptFileKey::InoLblk32(id));
+                                        guard
+                                            .fscrypt_file_ciphers
+                                            .remove(&FscryptFileKey::InoLblk64(id));
+                                    }
+                                    FindKeyResult::NotFound => {}
+                                }
+                            }
+                        }
                         guard.keys.insert(object_id, keys.clone(), permanent);
                         guard.start_purge_task(inner);
                     }
@@ -198,6 +250,7 @@ impl KeyManager {
     pub fn new() -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             keys: Cache::new(),
+            fscrypt_file_ciphers: BTreeMap::new(),
             unwrapping: BTreeMap::new(),
             purge_task: None,
         }));
@@ -285,7 +338,7 @@ impl KeyManager {
 
         // Use a guard in case we're dropped.
         let mut result = scopeguard::guard(Ok(None), |result| {
-            unwrap_result.set(&inner, object_id, permanent, result);
+            unwrap_result.set(&inner, object_id, permanent, &[], result);
         });
 
         let encryption_keys = match encryption_keys.take().unwrap()().await {
@@ -297,11 +350,47 @@ impl KeyManager {
             }
         };
 
-        match crypt.unwrap_keys(&encryption_keys, object_id).await {
-            Ok(cipher_set) => {
+        let mut cached_ciphers = BTreeMap::new();
+        let mut keys_to_unwrap = Vec::new();
+        if force {
+            keys_to_unwrap.extend_from_slice(&encryption_keys);
+        } else {
+            let inner = inner.lock();
+            for (key_id, key) in encryption_keys.iter() {
+                if let Some(fscrypt_key) = FscryptFileKey::from_encryption_key(key) {
+                    if let Some(cipher) = inner.fscrypt_file_ciphers.get(&fscrypt_key) {
+                        cached_ciphers.insert(*key_id, CipherHolder::Cipher(cipher.clone()));
+                        continue;
+                    }
+                }
+                keys_to_unwrap.push((*key_id, key.clone()));
+            }
+        }
+
+        if keys_to_unwrap.is_empty() {
+            let keys = Arc::new(CipherSet::from(cached_ciphers));
+            let _ = ScopeGuard::into_inner(result);
+            if unwrap_result.set(&inner, object_id, permanent, &[], Ok(Some(keys.clone()))) {
+                return Err(zx::Status::CANCELED.into());
+            } else {
+                return Ok(keys);
+            }
+        }
+
+        match crypt.unwrap_keys(&keys_to_unwrap, object_id).await {
+            Ok(mut cipher_set) => {
+                for (key_id, cipher) in cached_ciphers {
+                    cipher_set.add_key(key_id, cipher);
+                }
                 let keys = Arc::new(cipher_set);
                 let _ = ScopeGuard::into_inner(result);
-                if unwrap_result.set(&inner, object_id, permanent, Ok(Some(keys.clone()))) {
+                if unwrap_result.set(
+                    &inner,
+                    object_id,
+                    permanent,
+                    &keys_to_unwrap,
+                    Ok(Some(keys.clone())),
+                ) {
                     Err(zx::Status::CANCELED.into())
                 } else {
                     Ok(keys)
@@ -434,6 +523,14 @@ impl KeyManager {
         inner.start_purge_task(&self.inner);
     }
 
+    /// If `key` is an fscrypt file key (`FscryptInoLblk32File` or `FscryptInoLblk64File`), inserts
+    /// its unwrapped `cipher` into the shared fscrypt file cipher cache.
+    pub fn insert_fscrypt_file_cipher(&self, key: &EncryptionKey, cipher: Arc<dyn Cipher>) {
+        if let Some(fscrypt_key) = FscryptFileKey::from_encryption_key(key) {
+            self.inner.lock().fscrypt_file_ciphers.insert(fscrypt_key, cipher);
+        }
+    }
+
     /// This merges into the cache.  `merge` is a callback that receives the existing keys, if any,
     /// as an argument.  It's unspecified what happens if keys for the object are currently being
     /// unwrapped.
@@ -475,6 +572,7 @@ impl KeyManager {
     pub fn clear(&self) {
         let mut inner = self.inner.lock();
         inner.keys.clear();
+        inner.fscrypt_file_ciphers.clear();
         inner.unwrapping.clear();
     }
 
@@ -482,7 +580,13 @@ impl KeyManager {
     pub fn clear_cached_keys(&self) {
         let mut inner = self.inner.lock();
         inner.keys.clear_cached();
+        inner.fscrypt_file_ciphers.clear();
         inner.purge_task.take();
+    }
+
+    /// Alias for [`Self::clear_cached_keys`].
+    pub fn clear_cached(&self) {
+        self.clear_cached_keys();
     }
 }
 
@@ -518,7 +622,7 @@ mod tests {
     const ERROR_COUNTER: u8 = 0xff;
 
     fn unwrapped_key(counter: u8) -> UnwrappedKey {
-        UnwrappedKey::new([counter; FXFS_KEY_SIZE].to_vec())
+        UnwrappedKey::new_with_slot([counter; FXFS_KEY_SIZE].to_vec(), Some(counter))
     }
     fn cipher(counter: u8) -> Arc<dyn Cipher> {
         Arc::new(FxfsCipher::new(&unwrapped_key(counter)))
@@ -584,6 +688,7 @@ mod tests {
             _owner: u64,
             _wrapping_key_id: WrappingKeyId,
             _object_type: ObjectType,
+            _flags: fidl_fuchsia_io::FscryptPolicyFlags,
         ) -> Result<(fxfs_crypto::EncryptionKey, UnwrappedKey), zx::Status> {
             unimplemented!("Not used in tests");
         }
@@ -872,5 +977,83 @@ mod tests {
         assert!(manager.get(1).await.expect("get failed").is_some());
         assert!(manager.get(2).await.expect("get failed").is_none());
         assert!(manager.get(3).await.expect("get failed").is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_fscrypt_file_keys_cached_across_objects() {
+        let crypt = TestCrypt::with_unwrap_delay(0, std::time::Duration::ZERO);
+        let manager = Arc::new(KeyManager::new());
+        let key_identifier = [0x42; 16];
+        let lblk32_keys = || -> EncryptionKeys {
+            vec![(1, EncryptionKey::FscryptInoLblk32File { key_identifier })].into()
+        };
+        let lblk64_keys = || -> EncryptionKeys {
+            vec![(1, EncryptionKey::FscryptInoLblk64File { key_identifier })].into()
+        };
+
+        // Unwrap LBLK32 keys for distinct object_ids 1, 2, and 3 that share the same fscrypt
+        // key_identifier.
+        let mut lblk32_ciphers = Vec::new();
+        for object_id in [1u64, 2, 3] {
+            let cipher_set = manager
+                .get_keys(
+                    object_id,
+                    crypt.as_ref(),
+                    &mut Some(async || Ok(lblk32_keys())),
+                    false,
+                    false,
+                )
+                .await
+                .expect("get_keys failed");
+            let cipher = to_result(cipher_set.find_key(1)).expect("missing fscrypt key");
+            assert!(cipher.supports_inline_encryption());
+            let (dun, slot) = cipher.crypt_ctx(object_id, 0, 0).expect("missing crypt_ctx");
+            assert_eq!(slot, 0);
+            assert!(dun <= u32::MAX as u64);
+            lblk32_ciphers.push(cipher);
+        }
+
+        // `crypt.unwrap_key` must only have been invoked once across all 3 LBLK32 objects, and all
+        // objects must share the cached cipher instance.
+        assert_eq!(crypt.counter.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(&lblk32_ciphers[0], &lblk32_ciphers[1]));
+        assert!(Arc::ptr_eq(&lblk32_ciphers[0], &lblk32_ciphers[2]));
+
+        // Unwrapping LBLK64 keys with the SAME `key_identifier` must NOT collide with the cached
+        // LBLK32 cipher, and must cache and share the LBLK64 cipher across objects 10 and 11.
+        let mut lblk64_ciphers = Vec::new();
+        for object_id in [10u64, 11] {
+            let cipher_set = manager
+                .get_keys(
+                    object_id,
+                    crypt.as_ref(),
+                    &mut Some(async || Ok(lblk64_keys())),
+                    false,
+                    false,
+                )
+                .await
+                .expect("get_keys for lblk64 failed");
+            let cipher = to_result(cipher_set.find_key(1)).expect("missing lblk64 fscrypt key");
+            assert!(cipher.supports_inline_encryption());
+            let (dun, slot) = cipher.crypt_ctx(object_id, 0, 3 * 4096).expect("missing crypt_ctx");
+            assert_eq!(slot, 1);
+            assert_eq!(dun, (object_id << 32) | 3);
+            lblk64_ciphers.push(cipher);
+        }
+        assert_eq!(crypt.counter.load(Ordering::Relaxed), 2);
+        assert!(Arc::ptr_eq(&lblk64_ciphers[0], &lblk64_ciphers[1]));
+        assert!(!Arc::ptr_eq(&lblk32_ciphers[0], &lblk64_ciphers[0]));
+
+        // Clearing cached keys must also evict the cached fscrypt file ciphers so subsequent
+        // `get_keys` calls invoke `crypt.unwrap_key` again.
+        manager.clear_cached();
+        let cipher_set = manager
+            .get_keys(4, crypt.as_ref(), &mut Some(async || Ok(lblk32_keys())), false, false)
+            .await
+            .expect("get_keys after clear_cached failed");
+        let cipher = to_result(cipher_set.find_key(1)).expect("missing fscrypt key");
+        assert_eq!(crypt.counter.load(Ordering::Relaxed), 3);
+        let (_dun, slot) = cipher.crypt_ctx(4, 0, 0).expect("missing crypt_ctx");
+        assert_eq!(slot, 2);
     }
 }

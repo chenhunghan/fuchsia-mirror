@@ -21,6 +21,7 @@ rustc_binary("bin") {
 
   deps = [
     ":config_lib",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
     "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
@@ -47,6 +48,7 @@ rustc_binary("bin") {
     "//src/lib/include_str_from_working_dir",
     "//src/lib/mapped-vmo",
     "//src/sys/lib/fidl-fuchsia-pkg-ext",
+    "//src/sys/lib/fuchsia_backoff",
     "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
     "//src/sys/pkg/lib/async-generator",
     "//src/sys/pkg/lib/blobfs",
@@ -80,11 +82,13 @@ rustc_binary("bin") {
   test_deps = [
     "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/sys/pkg/lib/fuchsia-pkg-testing",
+    "//src/sys/pkg/testing/mock-crash-reporter:lib",
     "//src/sys/pkg/testing/mock-paver",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:omaha_client",
     "//third_party/rust_crates:pretty_assertions",
     "//third_party/rust_crates:proptest",
+    "//third_party/rust_crates:test-case",
   ]
 
   sources = [
@@ -93,6 +97,7 @@ rustc_binary("bin") {
     "src/main.rs",
     "src/update.rs",
     "src/update/config.rs",
+    "src/update/crash_report.rs",
     "src/update/environment.rs",
     "src/update/genutil.rs",
     "src/update/history.rs",

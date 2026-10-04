@@ -50,7 +50,16 @@ _UnlicensedTargetInfo = provider(
 def _is_target_in_ignore_policy(target):
     check_is_target(target)
     label = target.label
-    if label.workspace_name in ignore_policy.workspaces:
+    workspace_name = label.workspace_name
+
+    # Repos created by the root module have canonical names starting with "+"
+    # (the root module's own name is empty), e.g. "+_repo_rules<N>+internal_sdk".
+    # Only those are matched by apparent name, so a same-named repo from some
+    # other module isn't silently exempted from license checks.
+    if workspace_name in ignore_policy.workspaces or (
+        workspace_name.startswith("+") and
+        workspace_name.split("+")[-1] in ignore_policy.workspaces
+    ):
         return True
     label_str = to_label_str(label)
     if label_str in ignore_policy.targets:

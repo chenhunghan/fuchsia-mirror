@@ -86,7 +86,10 @@ class BuildArtifactsTest(unittest.TestCase):
             )
             host = fint_build.HostProperties(os="linux", cpu="x64")
             ctx = fint_build.BuildContext(
-                static_spec, context_spec, host, verbose=False
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
             )
 
             ctx.produce_build_artifacts(42)
@@ -113,7 +116,10 @@ class BuildArtifactsTest(unittest.TestCase):
             )
             host = fint_build.HostProperties(os="linux", cpu="x64")
             ctx = fint_build.BuildContext(
-                static_spec, context_spec, host, verbose=False
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
             )
 
             ctx.produce_build_artifacts(42, failure_summary="test failure")
@@ -149,7 +155,10 @@ class BuildArtifactsTest(unittest.TestCase):
             )
             host = fint_build.HostProperties(os="linux", cpu="x64")
             ctx = fint_build.BuildContext(
-                static_spec, context_spec, host, verbose=False
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
             )
 
             ctx.produce_build_artifacts(42)
@@ -172,6 +181,228 @@ class BuildArtifactsTest(unittest.TestCase):
                 manifest_content.get("logFiles", {}).get("debug_symbols.json"),
                 str(symbols_dest),
             )
+
+    @mock.patch.object(subprocess, "run")
+    def test_produce_build_artifacts_with_ninja_traces(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Verifies that produce_build_artifacts generates and copies ninja traces."""
+        mock_run.return_value.returncode = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            build_dir = temp_path / "build"
+            artifact_dir = temp_path / "artifact"
+            build_dir.mkdir()
+            artifact_dir.mkdir()
+
+            # Create fake raw ninja_build_trace.json.gz
+            raw_trace = build_dir / fint_build.NINJA_BUILD_TRACE_GZ
+            raw_trace.write_text("raw-trace-content")
+
+            # Create fake tool paths file to provide ninjatrace_prebuilt and buildstats_prebuilt
+            tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
+            tool_paths_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "ninjatrace_prebuilt",
+                            "path": "prebuilt/ninjatrace",
+                            "os": "linux",
+                            "cpu": "x64",
+                        },
+                        {
+                            "name": "buildstats_prebuilt",
+                            "path": "prebuilt/buildstats",
+                            "os": "linux",
+                            "cpu": "x64",
+                        },
+                    ]
+                )
+            )
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(
+                build_dir=str(build_dir),
+                artifact_dir=str(artifact_dir),
+            )
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
+            )
+
+            # We must stub subprocess.run to touch the files they generate, since they are mocked
+            def side_effect(
+                cmd: list[str],
+            ) -> subprocess.CompletedProcess[bytes]:
+                if "ninjatrace" in cmd[0]:
+                    (build_dir / fint_build.NINJATRACE_JSON_GZ).write_text(
+                        "processed-trace"
+                    )
+                elif "buildstats" in cmd[0]:
+                    (build_dir / fint_build.BUILDSTATS_JSON_GZ).write_text(
+                        "processed-stats"
+                    )
+                return subprocess.CompletedProcess(cmd, 0)
+
+            mock_run.side_effect = side_effect
+
+            ctx.produce_build_artifacts(42)
+
+            # Verify that ninjatrace.json.gz was copied to artifact_dir
+            trace_dest = artifact_dir / fint_build.NINJATRACE_JSON_GZ
+            self.assertTrue(trace_dest.exists())
+            self.assertEqual(trace_dest.read_text(), "processed-trace")
+
+            # Verify that buildstats.json.gz was copied to artifact_dir
+            stats_dest = artifact_dir / fint_build.BUILDSTATS_JSON_GZ
+            self.assertTrue(stats_dest.exists())
+            self.assertEqual(stats_dest.read_text(), "processed-stats")
+
+            # Verify that ninjatrace_json_files list is populated in the manifest
+            manifest_path = artifact_dir / fint_build.BUILD_ARTIFACTS_JSON
+            manifest_content = json.loads(manifest_path.read_text())
+            self.assertEqual(
+                manifest_content.get("ninjatraceJsonFiles"),
+                [str(trace_dest)],
+            )
+
+            # Verify that buildstats_json_files list is populated in the manifest
+            self.assertEqual(
+                manifest_content.get("buildstatsJsonFiles"),
+                [str(stats_dest)],
+            )
+
+    def test_produce_build_artifacts_with_ninja_traces_missing_tool_paths(
+        self,
+    ) -> None:
+        """Verifies that a warning is logged when raw trace exists but tool_paths is missing."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            build_dir = temp_path / "build"
+            artifact_dir = temp_path / "artifact"
+            build_dir.mkdir()
+            artifact_dir.mkdir()
+
+            # Create raw trace but NO tool_paths.json
+            raw_trace = build_dir / fint_build.NINJA_BUILD_TRACE_GZ
+            raw_trace.write_text("raw-trace-content")
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(
+                build_dir=str(build_dir),
+                artifact_dir=str(artifact_dir),
+            )
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
+            )
+
+            # Execution should succeed, but print warning using contextlib redirect_stderr
+            f = io.StringIO()
+            with contextlib.redirect_stderr(f):
+                ctx.produce_build_artifacts(42)
+
+            self.assertIn(
+                "Warning: Skipping Ninja trace analysis: tool_paths.json is missing or empty.",
+                f.getvalue(),
+            )
+
+    def test_produce_build_artifacts_with_ninja_traces_missing_ninjatrace_tool(
+        self,
+    ) -> None:
+        """Verifies that a warning is logged when raw trace exists but ninjatrace tool is missing."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            build_dir = temp_path / "build"
+            artifact_dir = temp_path / "artifact"
+            build_dir.mkdir()
+            artifact_dir.mkdir()
+
+            # Create raw trace
+            raw_trace = build_dir / fint_build.NINJA_BUILD_TRACE_GZ
+            raw_trace.write_text("raw-trace-content")
+
+            # Create a non-empty tool_paths.json list missing ninjatrace_prebuilt
+            tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
+            tool_paths_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "some_other_tool",
+                            "path": "prebuilt/some_other_tool",
+                            "os": "linux",
+                            "cpu": "x64",
+                        }
+                    ]
+                )
+            )
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(
+                build_dir=str(build_dir),
+                artifact_dir=str(artifact_dir),
+            )
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
+            )
+
+            # Execution should succeed, but print warning using contextlib redirect_stderr
+            f = io.StringIO()
+            with contextlib.redirect_stderr(f):
+                ctx.produce_build_artifacts(42)
+
+            self.assertIn(
+                "Warning: Skipping Ninja trace analysis: ninjatrace_prebuilt tool path not found in tool paths.",
+                f.getvalue(),
+            )
+
+    def test_resolve_targets_generated_sources_warning_missing(self) -> None:
+        """Verifies a warning is logged when include_generated_sources is enabled but generated_sources.json is missing."""
+        static_spec = static_pb2.Static(include_generated_sources=True)
+        context_spec = context_pb2.Context(
+            checkout_dir="fake_checkout", build_dir="fake_dir"
+        )
+        host = fint_build.HostProperties(os="linux", cpu="x64")
+        ctx = fint_build.BuildContext(static_spec, context_spec, host)
+
+        f = io.StringIO()
+        with contextlib.redirect_stderr(f):
+            targets = list(ctx._generated_source_targets())
+
+        self.assertEqual(targets, [])
+        self.assertIn(
+            "Warning: include_generated_sources is enabled, but generated_sources.json is missing on disk.",
+            f.getvalue(),
+        )
+
+    def test_resolve_targets_prebuilt_binaries_warning_missing(self) -> None:
+        """Verifies a warning is logged when include_prebuilt_binary_manifests is enabled but prebuilt_binaries.json is missing."""
+        static_spec = static_pb2.Static(include_prebuilt_binary_manifests=True)
+        context_spec = context_pb2.Context(
+            checkout_dir="fake_checkout", build_dir="fake_dir"
+        )
+        host = fint_build.HostProperties(os="linux", cpu="x64")
+        ctx = fint_build.BuildContext(static_spec, context_spec, host)
+
+        f = io.StringIO()
+        with contextlib.redirect_stderr(f):
+            targets = list(ctx._prebuilt_binary_manifests())
+
+        self.assertEqual(targets, [])
+        self.assertIn(
+            f"Warning: include_prebuilt_binary_manifests is enabled, but {fint_build.PREBUILT_BINARY_SETS_JSON} is missing on disk.",
+            f.getvalue(),
+        )
 
 
 class ExportDebugSymbolsTest(unittest.TestCase):
@@ -1017,6 +1248,52 @@ class FintBuildMainTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn(
             "Error: --context is required with --print-artifact-dir",
+            f_stderr.getvalue(),
+        )
+
+    def test_main_print_job_count_success(self) -> None:
+        """Verifies that --print-job-count outputs the correct job count."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            context_file = tmp_path / "context.textproto"
+            context_file.write_text("job_count: 32\n")
+
+            # Redirect stdout to capture the printed job count
+            f_stdout = io.StringIO()
+            with contextlib.redirect_stdout(f_stdout):
+                exit_code = fint_build.main(
+                    ["--context", str(context_file), "--print-job-count"]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(f_stdout.getvalue().strip(), "32")
+
+    def test_main_print_job_count_default_zero(self) -> None:
+        """Verifies that --print-job-count outputs 0 when job_count is omitted."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            context_file = tmp_path / "context.textproto"
+            context_file.write_text('checkout_dir: "/mock/checkout"\n')
+
+            # Redirect stdout to capture the printed job count
+            f_stdout = io.StringIO()
+            with contextlib.redirect_stdout(f_stdout):
+                exit_code = fint_build.main(
+                    ["--context", str(context_file), "--print-job-count"]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(f_stdout.getvalue().strip(), "0")
+
+    def test_main_print_job_count_missing_context(self) -> None:
+        """Verifies that using --print-job-count without --context returns an error."""
+        f_stderr = io.StringIO()
+        with contextlib.redirect_stderr(f_stderr):
+            exit_code = fint_build.main(["--print-job-count"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn(
+            "Error: --context is required with --print-job-count",
             f_stderr.getvalue(),
         )
 

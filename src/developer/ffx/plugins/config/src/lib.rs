@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use errors::{ffx_bail, ffx_bail_with_code};
 use ffx_config::api::ConfigError;
 use ffx_config::{
@@ -44,7 +44,7 @@ impl std::fmt::Display for ConfigToolMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::Message(message) => message.to_owned(),
-            Self::Data(data) => format!("{}", data),
+            Self::Data(data) => serde_json::to_string_pretty(&data).map_err(|_| std::fmt::Error)?,
         };
         write!(f, "{}", message)
     }
@@ -62,7 +62,7 @@ impl FfxMain for ConfigTool {
                 exec_check_ssh_keys(&self.ctx, check_ssh_cmd, &mut writer).await
             }
             SubCommand::Env(env) => exec_env(&self.ctx, env, writer).await,
-            SubCommand::Get(get_cmd) => exec_get(&self.ctx, get_cmd, writer),
+            SubCommand::Get(get_cmd) => exec_get(&self.ctx, get_cmd, &mut writer),
             SubCommand::Set(set_cmd) => exec_set(&self.ctx, set_cmd).await,
             SubCommand::Remove(remove_cmd) => exec_remove(&self.ctx, remove_cmd).await,
             SubCommand::Add(add_cmd) => exec_add(&self.ctx, add_cmd).await,
@@ -72,28 +72,28 @@ impl FfxMain for ConfigTool {
     }
 }
 
-fn output<W: Write>(mut writer: W, value: Option<Value>) -> Result<()> {
+fn output(
+    writer: &mut VerifiedMachineWriter<ConfigToolMessage>,
+    value: Option<Value>,
+) -> Result<()> {
     match value {
-        Some(v) => writeln!(writer, "{}", serde_json::to_string_pretty(&v).unwrap())
-            .map_err(|e| anyhow!("{}", e)),
+        Some(v) => writer.item(&ConfigToolMessage::Data(v)).map_err(Into::into),
         // Use 2 error code so wrapper scripts don't need check for the string to differentiate
         // errors.
         None => ffx_bail_with_code!(2, "Value not found"),
     }
 }
 
-fn output_array<W: Write>(
-    mut writer: W,
+fn output_array(
+    writer: &mut VerifiedMachineWriter<ConfigToolMessage>,
     values: std::result::Result<Vec<Value>, ConfigError>,
 ) -> Result<()> {
     match values {
-        Ok(v) => {
+        Ok(mut v) => {
             if v.len() == 1 {
-                writeln!(writer, "{}", serde_json::to_string_pretty(&v[0]).unwrap())
-                    .map_err(|e| anyhow!("{}", e))
+                output(writer, v.pop())
             } else {
-                writeln!(writer, "{}", serde_json::to_string_pretty(&Value::Array(v)).unwrap())
-                    .map_err(|e| anyhow!("{}", e))
+                output(writer, Some(Value::Array(v)))
             }
         }
         // Use 2 error code so wrapper scripts don't need check for the string to differentiate
@@ -102,25 +102,24 @@ fn output_array<W: Write>(
     }
 }
 
-fn output_first_element<W: Write>(mut writer: W, value: Option<Value>) -> Result<()> {
+fn output_first_element(
+    writer: &mut VerifiedMachineWriter<ConfigToolMessage>,
+    value: Option<Value>,
+) -> Result<()> {
     match value {
-        Some(Value::Array(vals)) => {
-            if !vals.is_empty() {
-                writeln!(writer, "{}", serde_json::to_string_pretty(&vals[0]).unwrap())
-                    .map_err(|e| anyhow!("{}", e))
-            } else {
-                ffx_bail_with_code!(2, "Value not found")
-            }
-        }
-        Some(v) => writeln!(writer, "{}", serde_json::to_string_pretty(&v).unwrap())
-            .map_err(|e| anyhow!("{}", e)),
+        Some(Value::Array(vals)) => output(writer, vals.into_iter().next()),
+        Some(v) => output(writer, Some(v)),
         // Use 2 error code so wrapper scripts don't need check for the string to differentiate
         // errors.
         None => ffx_bail_with_code!(2, "Value not found"),
     }
 }
 
-fn exec_get<W: Write>(ctx: &EnvironmentContext, get_cmd: &GetCommand, writer: W) -> Result<()> {
+fn exec_get(
+    ctx: &EnvironmentContext,
+    get_cmd: &GetCommand,
+    writer: &mut VerifiedMachineWriter<ConfigToolMessage>,
+) -> Result<()> {
     match get_cmd.name.as_ref() {
         Some(_) => match get_cmd.process {
             MappingMode::Raw => {
@@ -136,7 +135,14 @@ fn exec_get<W: Write>(ctx: &EnvironmentContext, get_cmd: &GetCommand, writer: W)
                 output_first_element(writer, value)
             }
         },
-        None => print_config(ctx, writer).map_err(anyhow::Error::from),
+        None => {
+            if writer.is_machine() {
+                let value = Value::from(ctx);
+                output(writer, Some(value))
+            } else {
+                print_config(ctx, writer).map_err(anyhow::Error::from)
+            }
+        }
     }
 }
 
@@ -336,9 +342,104 @@ mod test {
             select: ffx_config::SelectMode::First,
         };
 
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
         exec_get(&test_env.context, &get_cmd, &mut writer).expect("getting value");
-        assert_eq!(String::from_utf8(writer).unwrap(), "\"a value\"\n".to_string());
+        assert_eq!(buffers.into_stdout_str(), "\"a value\"\n".to_string());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_key_machine_json() {
+        let test_env =
+            test_env().user_config("some-key", "a value").build().expect("test env initialized");
+
+        let get_cmd = GetCommand {
+            name: Some("some-key".into()),
+            process: MappingMode::Substitute,
+            select: ffx_config::SelectMode::First,
+        };
+
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(Some(Format::Json), &buffers);
+        exec_get(&test_env.context, &get_cmd, &mut writer).expect("getting value");
+        let output = buffers.into_stdout_str();
+        let expected = format!(
+            "{}\n",
+            serde_json::to_string(&ConfigToolMessage::Data(json!("a value"))).unwrap()
+        );
+        assert_eq!(output, expected);
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        <ConfigTool as FfxMain>::Writer::verify_schema(&parsed).expect("schema should be valid");
+    }
+
+    #[fuchsia::test]
+    async fn test_get_missing_key_machine_json() {
+        let test_env = test_env().build().expect("test env initialized");
+
+        let get_cmd = GetCommand {
+            name: Some("nonexistent-key".into()),
+            process: MappingMode::Substitute,
+            select: ffx_config::SelectMode::First,
+        };
+
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(Some(Format::Json), &buffers);
+        let err = exec_get(&test_env.context, &get_cmd, &mut writer)
+            .expect_err("expected missing key error");
+        let ffx_err = err.downcast_ref::<FfxError>().expect("expected FfxError");
+        assert_eq!(ffx_err.to_string(), "Value not found");
+        assert_eq!(ffx_err.exit_code(), 2);
+        assert!(buffers.into_stdout_str().is_empty());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_no_key_machine_json() {
+        let test_env = test_env()
+            .user_config("some-key", "user-value")
+            .user_config("nested.user_val", "from_user")
+            .runtime_config("some-key", "runtime-value")
+            .runtime_config("nested.runtime_val", "from_runtime")
+            .build()
+            .expect("test env initialized");
+
+        let get_cmd = GetCommand {
+            name: None,
+            process: MappingMode::Substitute,
+            select: ffx_config::SelectMode::First,
+        };
+
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(Some(Format::Json), &buffers);
+        exec_get(&test_env.context, &get_cmd, &mut writer).expect("getting merged config");
+        let output = buffers.into_stdout_str();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        <ConfigTool as FfxMain>::Writer::verify_schema(&parsed).expect("schema should be valid");
+
+        let data = parsed.get("data").expect("data field in ConfigToolMessage");
+        assert_eq!(data.get("some-key"), Some(&json!("runtime-value")));
+        assert_eq!(data.pointer("/nested/user_val"), Some(&json!("from_user")));
+        assert_eq!(data.pointer("/nested/runtime_val"), Some(&json!("from_runtime")));
+        assert_eq!(data, &Value::from(&test_env.context));
+    }
+
+    #[fuchsia::test]
+    async fn test_get_no_key_human() {
+        let test_env =
+            test_env().user_config("some-key", "user-value").build().expect("test env initialized");
+
+        let get_cmd = GetCommand {
+            name: None,
+            process: MappingMode::Substitute,
+            select: ffx_config::SelectMode::First,
+        };
+
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
+        exec_get(&test_env.context, &get_cmd, &mut writer).expect("getting human config");
+        let output = buffers.into_stdout_str();
+        let mut expected = Vec::new();
+        print_config(&test_env.context, &mut expected).expect("print_config");
+        assert_eq!(output, String::from_utf8(expected).unwrap());
     }
 
     #[fuchsia::test]
@@ -362,7 +463,8 @@ mod test {
 
         test_env.reload_context().unwrap();
 
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
         match exec_get(&test_env.context, &get_cmd, &mut writer) {
             Ok(_) => panic!("Expected error getting removed key"),
             Err(e) => assert_eq!(e.to_string(), "Value not found"),
@@ -394,7 +496,8 @@ mod test {
     async fn test_list_processed_by_raw() {
         let mut builder = test_env();
         let isolate_root = builder.isolate_root();
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
 
         let private_path1 = isolate_root.join("privatekey1");
         let private_path2 = isolate_root.join("privatekey2");
@@ -422,7 +525,7 @@ mod test {
             &mut writer,
         )
         .expect("exec_get");
-        let got = String::from_utf8_lossy(&writer);
+        let got = buffers.into_stdout_str();
         let want = serde_json::to_string_pretty(&json!([
             "$ENV_PATH_THAT_IS_NOT_SET_2",
             private_path1,
@@ -436,7 +539,8 @@ mod test {
     async fn test_list_processed_by_substitute() {
         let mut builder = test_env();
         let isolate_root = builder.isolate_root();
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
 
         let private_path1 = isolate_root.join("privatekey1");
         let private_path2 = isolate_root.join("privatekey2");
@@ -464,7 +568,7 @@ mod test {
             &mut writer,
         )
         .expect("exec_get");
-        let got = String::from_utf8_lossy(&writer);
+        let got = buffers.into_stdout_str();
         let want = serde_json::to_string_pretty(&json!([private_path1, private_path2]))
             .expect("json output");
         assert_eq!(got, format!("{}\n", want));
@@ -481,7 +585,8 @@ mod test {
 
         let mut builder = test_env().env_var("ENV_SSH_PATH_FOR_TESTING_", "private_path1");
         let isolate_root = builder.isolate_root();
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
 
         let private_path1 = isolate_root.join("privatekey1");
         let private_path2 = isolate_root.join("privatekey2");
@@ -506,7 +611,7 @@ mod test {
             &mut writer,
         )
         .expect("exec_get");
-        let got = String::from_utf8_lossy(&writer);
+        let got = buffers.into_stdout_str();
         let want = serde_json::to_string_pretty(&json!(["private_path1", private_path2]))
             .expect("json output");
         assert_eq!(got, format!("{}\n", want));
@@ -516,7 +621,8 @@ mod test {
     async fn test_list_single_by_file() {
         let mut builder = test_env();
         let isolate_root = builder.isolate_root();
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
 
         let private_path1 = isolate_root.join("privatekey1");
         fs::write(&private_path1, "path1").expect("key 1 written");
@@ -536,7 +642,7 @@ mod test {
             &mut writer,
         )
         .expect("exec_get");
-        let got = String::from_utf8_lossy(&writer);
+        let got = buffers.into_stdout_str();
         assert_eq!(got, format!("{}\n", json!(private_path1)));
     }
 
@@ -544,7 +650,8 @@ mod test {
     async fn test_list_processed_by_file() {
         let mut builder = test_env();
         let isolate_root = builder.isolate_root();
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
 
         let private_path1 = isolate_root.join("privatekey1");
         let private_path2 = isolate_root.join("privatekey2");
@@ -572,7 +679,7 @@ mod test {
             &mut writer,
         )
         .expect("exec_get");
-        let got = String::from_utf8_lossy(&writer);
+        let got = buffers.into_stdout_str();
         assert_eq!(got, format!("{}\n", json!(private_path1)));
     }
 
@@ -589,7 +696,8 @@ mod test {
         let mut builder = test_env()
             .env_var("ENV_SSH_PATH_FOR_TESTING_2", private_path1.path().to_str().unwrap());
         let isolate_root = builder.isolate_root();
-        let mut writer = Vec::<u8>::new();
+        let buffers = TestBuffers::default();
+        let mut writer = <ConfigTool as FfxMain>::Writer::new_test(None, &buffers);
 
         let private_path2 = isolate_root.join("privatekey2");
         fs::write(&private_path2, "path2").expect("key 2 written");
@@ -612,7 +720,7 @@ mod test {
             &mut writer,
         )
         .expect("exec_get");
-        let got = String::from_utf8_lossy(&writer);
+        let got = buffers.into_stdout_str();
         assert_eq!(got, format!("{}\n", json!(private_path1.path())));
     }
 

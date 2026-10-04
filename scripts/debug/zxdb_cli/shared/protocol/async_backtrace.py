@@ -12,7 +12,7 @@ COMMAND_NAME: Final = "async-backtrace"
 
 
 class AsyncBacktraceResponse(BaseModel):
-    """Response containing cached async tasks for a process."""
+    """Response containing async tasks for a process."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -21,7 +21,7 @@ class AsyncBacktraceResponse(BaseModel):
 
 
 class AsyncBacktraceRequest(BaseRequest[AsyncBacktraceResponse]):
-    """Request asynchronous backtrace (cached async task tree) for a process."""
+    """Request asynchronous backtrace (async task tree) for a process."""
 
     command: Literal["async-backtrace"] = COMMAND_NAME
     pid: int | None = None

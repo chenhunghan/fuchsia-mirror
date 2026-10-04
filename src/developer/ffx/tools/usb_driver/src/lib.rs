@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use argh::{ArgsInfo, FromArgs, SubCommand};
-use fho::subtool::{StandaloneFhoHandler, StandaloneToolCommand};
+use fho::subtool::{MetadataCmd, StandaloneFhoHandler, StandaloneToolCommand};
 use fho::{FfxContext, Result};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
@@ -10,9 +10,13 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
+use usb_driver_impl::UnixListener;
 
 /// Number of log file rotations to keep.
 const LOG_ROTATIONS: usize = 5;
+
+/// Default SDK version reported to analytics when no SDK is configured.
+const UNKNOWN_SDK: &str = "Unknown SDK";
 
 // [START command_struct]
 #[derive(ArgsInfo, FromArgs, Debug, PartialEq)]
@@ -34,13 +38,58 @@ pub struct UsbDriverCommand {
 }
 // [END command_struct]
 
-pub async fn run() {
+#[derive(Debug)]
+pub enum Action {
+    ExitStatus(ExitStatus),
+    MetadataCommand(MetadataCmd),
+    RunDriver(UnixListener, String, Option<String>),
+}
+
+/// Runs the USB driver tool.
+///
+/// # Safety
+///
+/// This function may daemonize the process, and thus can only be safely called
+/// when it is known to be safe to fork the process without violating Rust's
+/// invariants (e.g. no background threads or async executors are running that
+/// would be invalidated by a fork).
+pub unsafe fn run() {
     let mut env_context = None;
+    let mut analytics_config = None;
     let mut logging_enabled = false;
     let result = match ffx_command::init_cmd(ffx_config::environment::ExecutableKind::Subtool) {
         Ok(c) => {
+            let enabled = c.context.analytics_enabled();
+            let path = c.context.get_analytics_path();
+            let build_info = c.context.build_info();
+            let invoker = c.context.get("fuchsia.analytics.ffx_invoker").unwrap_or(None);
+            let sdk_version = if enabled {
+                c.context
+                    .get_sdk()
+                    .ok()
+                    .and_then(|sdk| sdk.get_version_string())
+                    .unwrap_or_else(|| UNKNOWN_SDK.to_string())
+            } else {
+                UNKNOWN_SDK.to_string()
+            };
+            analytics_config = Some((enabled, path, build_info, invoker, sdk_version));
             env_context = Some(c.context.clone());
-            implementation(c, &mut logging_enabled).await
+            // SAFETY:
+            // Obligation: `implementation` requires that no background threads or
+            // async executors are running (because it may fork).
+            // Artifact facts:
+            // - A1: `run` is marked unsafe with the precondition that the caller
+            //   guarantees no background threads or async executors are running.
+            // Semantic premises:
+            // - S1: Operations yielding `analytics_config` (`analytics_enabled`,
+            //   `get_sdk`, etc.) are synchronous context lookups that do not spawn
+            //   threads.
+            // Derivation:
+            // - A1 establishes the invariant on entry.
+            // - S1 establishes the invariant is preserved until `implementation`.
+            // Result:
+            // - The process fulfills the safe-to-fork precondition of `implementation`.
+            unsafe { implementation(c, &mut logging_enabled) }
         }
         Err(e) => Err(e),
     };
@@ -58,13 +107,39 @@ pub async fn run() {
             }
         }
     };
-    ffx_command::exit(env_context, result, should_format).await;
+
+    // We have to defer launching the Tokio runtime until here otherwise
+    // daemonizing might break its thread pools.
+    fuchsia_async::LocalExecutorBuilder::new().build().run_singlethreaded(async move {
+        let result = match result {
+            Ok(Action::ExitStatus(status)) => Ok(status),
+            Ok(Action::MetadataCommand(cmd)) => cmd.run(UsbDriverCommand::COMMAND).await,
+            Ok(Action::RunDriver(listener, log_path, serial)) => {
+                if let Some((enabled, path, build_info, invoker, sdk_version)) = analytics_config {
+                    ffx_metrics::init_metrics_svc(path, build_info, invoker, sdk_version).await;
+                    if !enabled {
+                        if let Err(e) = analytics::opt_out_for_this_invocation().await {
+                            log::warn!("Could not opt out of analytics for this invocation: {e}");
+                        }
+                    }
+                }
+                usb_driver_impl::HostDriver::run(listener, log_path, serial).await;
+                Ok(ExitStatus::from_raw(0))
+            }
+            Err(e) => Err(e),
+        };
+        ffx_command::exit(env_context, result, should_format).await;
+    })
 }
 
-async fn implementation(
+/// # Safety
+///
+/// This function can only be safely called when it is known to be safe to fork
+/// the process without violating Rust's invariants.
+unsafe fn implementation(
     icmd: ffx_command::InitializedCmd,
     logging_enabled: &mut bool,
-) -> Result<ExitStatus> {
+) -> Result<Action> {
     let ffx_command::InitializedCmd { cmd: ffx, context: ctx, help_state } = icmd;
 
     match help_state {
@@ -76,7 +151,7 @@ async fn implementation(
                 ffx_command::MachineFormat::Raw => Ok(format!("{args_info:#?}")),
             };
             println!("{}", output.bug_context("Error serializing args")?);
-            return Ok(ExitStatus::from_raw(0));
+            return Ok(Action::ExitStatus(ExitStatus::from_raw(0)));
         }
         ffx_command::HelpState::ReturnHelp { command, output, code } => {
             return Err(fho::Error::Help { command, output, code });
@@ -93,7 +168,7 @@ async fn implementation(
 
     let command = match command.subcommand {
         StandaloneFhoHandler::Metadata(metadata_cmd) => {
-            return metadata_cmd.run(UsbDriverCommand::COMMAND).await;
+            return Ok(Action::MetadataCommand(metadata_cmd));
         }
         StandaloneFhoHandler::Standalone(cmd) => cmd,
     };
@@ -164,13 +239,6 @@ async fn implementation(
         )
     };
 
-    struct Filter;
-    impl logging::Filter for Filter {
-        fn should_emit(&self, _record: &log::Metadata<'_>) -> bool {
-            true
-        }
-    }
-
     if ffx.global.machine.is_some() {
         return Err(ffx_command::Error::User(anyhow::anyhow!(
             "The machine flag is not supported for this subcommand"
@@ -193,12 +261,12 @@ async fn implementation(
         )));
     }
 
-    let listener = usb_driver_impl::remove_and_bind_socket(socket_path.to_path_buf()).await;
+    let listener = usb_driver_impl::remove_and_bind_socket(socket_path);
 
     if command.background
         && let Err(usb_driver_impl::RemoveAndBindError::InUse(_)) = listener
     {
-        return Ok(ExitStatus::from_raw(0));
+        return Ok(Action::ExitStatus(ExitStatus::from_raw(0)));
     }
 
     let logger = logging::FfxLog::new(
@@ -224,7 +292,9 @@ async fn implementation(
         // SAFETY: This shouldn't do much of anything to memory state. If it
         // succeeds we've effectively just been shuffled around the process
         // table. If it fails then it likely has no side effects at all, but
-        // even if it does we're going to exit as fast as we can anyway.
+        // even if it does we're going to exit as fast as we can anyway. It
+        // will, of course, fork the process, which is why we the caller must be
+        // marked unsafe.
         match unsafe { libc::daemon(0, 0) } {
             0 => (),
             x => return Err(fho::Error::Unexpected(std::io::Error::from_raw_os_error(x).into())),
@@ -236,6 +306,48 @@ async fn implementation(
     if let Some(serial) = &command.serial {
         log::info!("Only interacting with devices with serial {serial}");
     }
-    usb_driver_impl::HostDriver::run(listener, log_path, command.serial).await;
-    Ok(ExitStatus::from_raw(0))
+    Ok(Action::RunDriver(listener, log_path, command.serial))
+}
+
+struct Filter;
+impl logging::Filter for Filter {
+    fn should_emit(&self, record: &log::Metadata<'_>) -> bool {
+        // The logs from hyper are very noisy
+        !record.target().starts_with("hyper")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use logging::Filter as _;
+
+    #[test]
+    fn test_usb_driver_command_from_args() {
+        let cmd = UsbDriverCommand::from_args(
+            &["usb-driver"],
+            &["--background", "--log-dir", "/tmp/usb_logs", "--serial", "SER123"],
+        )
+        .unwrap();
+        assert!(cmd.background);
+        assert_eq!(cmd.log_dir.as_deref(), Some("/tmp/usb_logs"));
+        assert_eq!(cmd.serial.as_deref(), Some("SER123"));
+    }
+
+    #[test]
+    fn test_filter_suppresses_hyper_logs() {
+        let filter = Filter;
+        let hyper_meta =
+            log::Metadata::builder().level(log::Level::Debug).target("hyper::proto::h1").build();
+        let hyper_util_meta = log::Metadata::builder()
+            .level(log::Level::Debug)
+            .target("hyper_util::client::legacy")
+            .build();
+        let driver_meta =
+            log::Metadata::builder().level(log::Level::Debug).target("usb_driver_impl").build();
+
+        assert!(!filter.should_emit(&hyper_meta));
+        assert!(!filter.should_emit(&hyper_util_meta));
+        assert!(filter.should_emit(&driver_meta));
+    }
 }

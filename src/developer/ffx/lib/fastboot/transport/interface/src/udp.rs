@@ -48,11 +48,6 @@ impl<B: SplitByteSlice> Packet<B> {
         Some(Self { header, data })
     }
 
-    #[allow(dead_code)]
-    fn is_continuation(&self) -> bool {
-        self.header.flags & 0x001 != 0
-    }
-
     fn packet_type(&self) -> Result<PacketType, crate::FastbootTransportError> {
         match self.header.id {
             0x00 => Ok(PacketType::Error),
@@ -439,7 +434,6 @@ mod test {
         assert_eq!(packet.header.flags, 0x00);
         assert_eq!(packet.header.sequence.get(), 0x0000);
         assert_eq!(packet.packet_type().unwrap(), PacketType::Query);
-        assert!(!packet.is_continuation());
         assert_eq!(packet.data, &[0x12, 0x34]);
 
         // Fastboot continuation packet
@@ -449,7 +443,6 @@ mod test {
         assert_eq!(packet.header.flags, 0x01);
         assert_eq!(packet.header.sequence.get(), 42);
         assert_eq!(packet.packet_type().unwrap(), PacketType::Fastboot);
-        assert!(packet.is_continuation());
         assert_eq!(packet.data, b"test");
 
         // Error packet

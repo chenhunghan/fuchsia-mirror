@@ -76,7 +76,7 @@ closed protocol Device {
     strict SetConfig(struct {
         config Config;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Reads data from the serial port.

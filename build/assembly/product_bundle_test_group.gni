@@ -46,6 +46,9 @@ import("//build/python/python_action.gni")
 #     [list of scopes] The environments to run these tests on.
 #     See //docs/contribute/testing/environments.md.
 #
+#   build_only (optional; default = false)
+#     [bool] If true, the tests in this group are built but not run.
+#
 #   override_test_environments (optional; default = true)
 #     [bool] If true, override the environments set by individual tests with
 #     the environments specified for this group. If false, the group's
@@ -82,9 +85,16 @@ template("product_bundle_test_group") {
       _product_bundle_name = target_name
     }
 
-    _environments = []
-    if (defined(invoker.environments)) {
-      _environments = invoker.environments
+    _build_only = defined(invoker.build_only) && invoker.build_only
+    if (_build_only) {
+      assert(!defined(invoker.environments),
+             "build_only test groups should not specify environments")
+      _environments = []
+    } else {
+      _environments = []
+      if (defined(invoker.environments)) {
+        _environments = invoker.environments
+      }
     }
 
     _override_test_environments = true
@@ -93,6 +103,42 @@ template("product_bundle_test_group") {
     }
 
     _tests_json = "${target_out_dir}/${target_name}/tests.json"
+    _bazel_target_test_suites =
+        "${target_out_dir}/${target_name}/bazel_target_test_suites.txt"
+
+    _deps = _product_bundle_deps
+    if (defined(invoker.tests)) {
+      _deps += invoker.tests
+    }
+    if (defined(invoker.target_tests)) {
+      _deps += invoker.target_tests
+    }
+    if (defined(invoker.host_tests)) {
+      foreach(host_test, invoker.host_tests) {
+        host_test_label = get_label_info(host_test, "label_no_toolchain") +
+                          "($host_toolchain)"
+        _deps += [ host_test_label ]
+      }
+    }
+
+    generated_file("${target_name}.bazel_target_test_suites") {
+      visibility = [ ":*" ]
+      testonly = true
+      data_keys = [ "bazel_target_test_suite" ]
+      walk_keys = [
+        "bazel_target_test_suite_barrier",
+        "tests_barrier",
+      ]
+      outputs = [ _bazel_target_test_suites ]
+      output_conversion = "list lines"
+      deps = _deps
+
+      metadata = {
+        # Avoid walking `_deps` a second time through this helper target.
+        tests_barrier = []
+        bazel_target_test_suite_barrier = []
+      }
+    }
 
     generated_file(target_name) {
       testonly = true
@@ -101,29 +147,19 @@ template("product_bundle_test_group") {
       outputs = [ _tests_json ]
       output_conversion = "json"
 
-      deps = _product_bundle_deps
-      if (defined(invoker.tests)) {
-        deps += invoker.tests
-      }
-      if (defined(invoker.target_tests)) {
-        deps += invoker.target_tests
-      }
-      if (defined(invoker.host_tests)) {
-        foreach(host_test, invoker.host_tests) {
-          host_test_label = get_label_info(host_test, "label_no_toolchain") +
-                            "($host_toolchain)"
-          deps += [ host_test_label ]
-        }
-      }
+      deps = _deps + [ ":${target_name}.bazel_target_test_suites" ]
 
       metadata = {
         tests_barrier = []
         pb_test_groups = [
           {
             product_bundle_name = _product_bundle_name
+            build_only = _build_only
             environments = _environments
             override_test_environments = _override_test_environments
             tests_json = rebase_path(_tests_json, root_build_dir)
+            bazel_target_test_suites =
+                rebase_path(_bazel_target_test_suites, root_build_dir)
           },
         ]
       }

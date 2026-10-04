@@ -19,7 +19,9 @@ use crate::object_store::transaction::{
     TRANSACTION_METADATA_MAX_AMOUNT, Transaction, WriteGuard, lock_keys,
 };
 use crate::object_store::volume::{VOLUMES_DIRECTORY, root_volume};
-use crate::object_store::{DataObjectHandle, NewChildStoreOptions, ObjectStore, StoreOptions};
+use crate::object_store::{
+    AttributeId, DataObjectHandle, NewChildStoreOptions, ObjectStore, StoreOptions,
+};
 use crate::range::RangeExt;
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Context, Error, anyhow, bail};
@@ -512,7 +514,7 @@ impl FxFilesystemBuilder {
                 background_tasks: fasync::Scope::new(),
                 closed: AtomicBool::new(true),
                 trace: self.trace,
-                graveyard: Graveyard::new(objects.clone()),
+                graveyard: Graveyard::new(weak.clone()),
                 completed_transactions: metrics::detail().create_uint("completed_transactions", 0),
                 options: filesystem_options,
                 in_flight_transactions: AtomicU64::new(0),
@@ -1108,6 +1110,75 @@ impl FxFilesystem {
         object_id: u64,
     ) -> TruncateGuard<'static> {
         self.truncate_guard(store_id, object_id).await.into_owned(self.clone())
+    }
+
+    /// Immediately tombstones (purges) an object in the graveyard, deallocating its extents,
+    /// removing its graveyard entry, and inserting an LSM-tree tombstone record
+    /// (`ObjectValue::None`) that deletes all remaining records for the object during compaction.
+    ///
+    /// Use this when space should be reclaimed immediately (e.g. when deleting a volume or
+    /// unlinking a file with no open references) or when the background graveyard reaper is not
+    /// running. Use [`Graveyard::queue_tombstone_object`] instead when tombstoning from a
+    /// non-async context (such as `Drop`) or when work can be deferred to the background (such as
+    /// initial mount-time reaping).
+    pub async fn tombstone_object(
+        &self,
+        store_id: u64,
+        object_id: u64,
+        truncate_guard: Option<&TruncateGuard<'_>>,
+    ) -> Result<(), Error> {
+        let store = self
+            .objects
+            .store(store_id)
+            .with_context(|| format!("Failed to get store {}", store_id))?;
+        // For now, it's safe to assume that all objects in the root parent and root store should
+        // return space to the metadata reservation, but we might have to revisit that if we end up
+        // with objects that are in other stores.
+        let options = if store_id == self.objects.root_parent_store_object_id()
+            || store_id == self.objects.root_store_object_id()
+        {
+            transaction::Options {
+                borrow_metadata_space: true,
+                allocator_reservation: Some(self.objects.metadata_reservation()),
+                ..Default::default()
+            }
+        } else {
+            transaction::Options { borrow_metadata_space: true, ..Default::default() }
+        };
+        store.tombstone_object(object_id, options, truncate_guard).await
+    }
+
+    /// Immediately tombstones (purges) an attribute in the graveyard, deallocating its extents,
+    /// removing its graveyard entry, and inserting an LSM-tree tombstone record
+    /// (`ObjectValue::None`) that deletes the attribute record during compaction.
+    ///
+    /// See [`FxFilesystem::tombstone_object`] for when to use this vs.
+    /// [`Graveyard::queue_tombstone_attribute`].
+    pub async fn tombstone_attribute(
+        &self,
+        store_id: u64,
+        object_id: u64,
+        attribute_id: AttributeId,
+    ) -> Result<(), Error> {
+        let store = self
+            .objects
+            .store(store_id)
+            .with_context(|| format!("Failed to get store {}", store_id))?;
+        // For now, it's safe to assume that all objects in the root parent and root store should
+        // return space to the metadata reservation, but we might have to revisit that if we end up
+        // with objects that are in other stores.
+        let options = if store_id == self.objects.root_parent_store_object_id()
+            || store_id == self.objects.root_store_object_id()
+        {
+            transaction::Options {
+                borrow_metadata_space: true,
+                allocator_reservation: Some(self.objects.metadata_reservation()),
+                ..Default::default()
+            }
+        } else {
+            transaction::Options { borrow_metadata_space: true, ..Default::default() }
+        };
+        store.tombstone_attribute(object_id, attribute_id, options).await
     }
 
     async fn populate_stores_node(&self) -> Result<Inspector, Error> {

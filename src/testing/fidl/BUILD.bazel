@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "placeholders",
+    srcs = ["placeholders.test.fidl"],
+    enable_hlcpp = True,
+    library_name = "test.placeholders",
+    visibility = [
+        "//sdk/lib/sys/component/cpp/tests:__pkg__",
+        "//sdk/lib/sys/cpp/tests:__pkg__",
+        "//sdk/lib/vfs/cpp:__pkg__",
+        "//src/devices/misc/drivers/compat:__pkg__",
+        "//src/graphics/tests/libvulkan:__pkg__",
+        "//src/lib/fidl/rust/fidl_test_util:__pkg__",
+        "//src/lib/ui/carnelian:__pkg__",
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/storage/conformance:__subpackages__",
+        "//src/storage/lib/vfs/rust:__pkg__",
+        "//src/testing/fidl/echo_realm_placeholder/echo_client:__pkg__",
+        "//src/testing/fidl/echo_realm_placeholder/echo_server:__pkg__",
+        "//src/tests/end_to_end/fidlcat:__pkg__",
+        "//src/virtualization/bin/guest_manager:__pkg__",
+    ],
+)
+
+# Workaround for //build/bazel/rules/fidl:fidl_rust_library.bzl using
+# fidl_library_name instead of name for the _rust_common dependency.
+# @bazel2gn:skip
+package_group(
+    name = "fidl_macro_visibility",
+    packages = ["//build/bazel/rules/fidl"],
+)
+
+# @bazel2gn:skip
+alias(
+    name = "test.placeholders_rust_common",
+    actual = ":placeholders_rust_common",
+    visibility = [":fidl_macro_visibility"],
+)

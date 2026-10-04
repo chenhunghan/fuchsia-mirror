@@ -112,6 +112,16 @@ class PathNormalizerTest(unittest.TestCase):
             ),
             "{BAZEL_OUT}/k8-fastbuild/bin/foo",
         )
+        # In-tree source file symlinked into bazel-out bin directory
+        test_src = self.fuchsia_dir / "src" / "bar.rs"
+        test_src.parent.mkdir(parents=True, exist_ok=True)
+        test_src.write_text("// test")
+        self.assertEqual(
+            self.bazel_normalizer.normalize_path(
+                "bazel-out/k8-fastbuild/bin/src/bar.rs"
+            ),
+            "{SOURCE_ROOT}/src/bar.rs",
+        )
         self.assertEqual(
             self.bazel_normalizer.normalize_path(
                 "external/+rules_rust+rules_rust/foo.rs"

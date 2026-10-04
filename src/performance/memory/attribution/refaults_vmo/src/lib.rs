@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 pub mod atomic_vec;
-pub use atomic_vec::AtomicBitVec;
+pub use atomic_vec::{AtomicBitVec, Growable, NoOverflow, Overflow};
 
 use memory_mapped_vmo::MemoryMappedVmo;
 use std::sync::atomic::{AtomicU64, Ordering};

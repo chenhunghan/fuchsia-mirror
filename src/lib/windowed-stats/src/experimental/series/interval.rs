@@ -5,7 +5,7 @@
 //! Sampling rate and aggregation intervals.
 
 use itertools::Itertools;
-use num::Integer;
+use num_integer::Integer;
 use std::cmp;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::marker::PhantomData;

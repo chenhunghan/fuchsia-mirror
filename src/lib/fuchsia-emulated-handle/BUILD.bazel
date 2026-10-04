@@ -23,8 +23,7 @@ rustc_library(
     version = "0.1.0",
     with_host_unit_tests = True,
     deps = [
-        "//sdk/rust/zx-status",
-        "//sdk/rust/zx-status-ext",
+        "//sdk/rust/zx",
         "//sdk/rust/zx-types",
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:bitflags",

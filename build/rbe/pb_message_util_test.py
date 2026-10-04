@@ -13,28 +13,28 @@ import pb_message_util
 # upload_reproxy_logs.py uses, and it is very stable.
 from api.log import log_pb2
 from go.api.command import command_pb2
-from google.protobuf import timestamp_pb2
+from google.protobuf import timestamp_pb2  # type: ignore[import-untyped]
 
 
 class ProtoMessageToBQDictTest(unittest.TestCase):
-    def test_empty_log(self):
+    def test_empty_log(self) -> None:
         log = log_pb2.LogDump()
         converted_log = pb_message_util.proto_message_to_bq_dict(log)
         self.assertEqual(str(converted_log), "{}")
 
-    def test_one_record(self):
+    def test_one_record(self) -> None:
         log = log_pb2.LogDump(records=[log_pb2.LogRecord()])
         converted_log = pb_message_util.proto_message_to_bq_dict(log)
         self.assertEqual(str(converted_log), "{'records': [{}]}")
 
-    def test_two_records(self):
+    def test_two_records(self) -> None:
         log = log_pb2.LogDump(
             records=[log_pb2.LogRecord(), log_pb2.LogRecord()]
         )
         converted_log = pb_message_util.proto_message_to_bq_dict(log)
         self.assertEqual(str(converted_log), "{'records': [{}, {}]}")
 
-    def test_nested_message_strings(self):
+    def test_nested_message_strings(self) -> None:
         log = log_pb2.LogDump(
             records=[
                 log_pb2.LogRecord(
@@ -51,7 +51,7 @@ class ProtoMessageToBQDictTest(unittest.TestCase):
             "{'records': [{'command': {'exec_root': '/home', 'args': ['echo', 'hello']}}]}",
         )
 
-    def test_nested_message_map_string_string(self):
+    def test_nested_message_map_string_string(self) -> None:
         """Exercises protobuf.containers.ScalarMap"""
         log = log_pb2.LogDump(
             records=[
@@ -68,7 +68,7 @@ class ProtoMessageToBQDictTest(unittest.TestCase):
             "{'records': [{'command': {'platform': [{'key': 'baz', 'value': 'quux'}, {'key': 'foo', 'value': 'bar'}]}}]}",
         )
 
-    def test_nested_message_map_string_message(self):
+    def test_nested_message_map_string_message(self) -> None:
         """Exercises protobuf.containers.MessageMap"""
         log = log_pb2.LogDump(
             records=[
@@ -92,7 +92,7 @@ class ProtoMessageToBQDictTest(unittest.TestCase):
             "{'records': [{'remote_metadata': {'event_times': [{'key': 'birth', 'value': {'to': '2020-09-30T01:15:37Z'}}, {'key': 'death', 'value': {'to': '2020-09-30T04:24:00Z'}}]}}]}",
         )
 
-    def test_nested_message_enum(self):
+    def test_nested_message_enum(self) -> None:
         """Make sure enum name (not number) is printed."""
         log = log_pb2.LogDump(
             records=[
@@ -107,7 +107,7 @@ class ProtoMessageToBQDictTest(unittest.TestCase):
             "{'records': [{'completion_status': 'STATUS_CACHE_HIT'}]}",
         )
 
-    def test_timestamp(self):
+    def test_timestamp(self) -> None:
         """Make sure timestamp is formatted, and not (seconds, nanos)"""
         log = command_pb2.TimeInterval(
             to=timestamp_pb2.Timestamp(seconds=1661472513, nanos=114242156)

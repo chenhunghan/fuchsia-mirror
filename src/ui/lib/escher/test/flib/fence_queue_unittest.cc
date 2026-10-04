@@ -6,6 +6,7 @@
 
 #include <lib/async-testing/test_loop.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/counter.h>
 
 #include <gtest/gtest.h>
 
@@ -36,7 +37,7 @@ TEST(FenceQueueTest, QueueTaskWithFence) {
 
   auto fence_queue = std::make_shared<FenceQueue>();
 
-  std::vector<zx::event> events;
+  std::vector<zx::handle> events;
   zx::event fence;
   zx::event::create(0, &fence);
   events.emplace_back(CopyEvent(fence));
@@ -62,7 +63,7 @@ TEST(FenceQueueTest, QueueTaskWithMultipleFences) {
 
   auto fence_queue = std::make_shared<FenceQueue>();
 
-  std::vector<zx::event> events;
+  std::vector<zx::handle> events;
   zx::event fence1;
   zx::event::create(0, &fence1);
   events.emplace_back(CopyEvent(fence1));
@@ -97,7 +98,7 @@ TEST(FenceQueueTest, QueueMultipleTasksWithFences_SignalledInOrder) {
 
   zx::event fence1;
   {
-    std::vector<zx::event> events;
+    std::vector<zx::handle> events;
     zx::event::create(0, &fence1);
     events.emplace_back(CopyEvent(fence1));
     fence_queue->QueueTask([&task1_complete] { task1_complete = true; }, std::move(events));
@@ -105,7 +106,7 @@ TEST(FenceQueueTest, QueueMultipleTasksWithFences_SignalledInOrder) {
 
   zx::event fence2;
   {
-    std::vector<zx::event> events;
+    std::vector<zx::handle> events;
     zx::event::create(0, &fence2);
     events.emplace_back(CopyEvent(fence2));
     fence_queue->QueueTask([&task2_complete] { task2_complete = true; }, std::move(events));
@@ -138,7 +139,7 @@ TEST(FenceQueueTest, QueueMultipleTasksWithFences_SignalledOutOfOrder) {
 
   zx::event fence1;
   {
-    std::vector<zx::event> events;
+    std::vector<zx::handle> events;
     zx::event::create(0, &fence1);
     events.emplace_back(CopyEvent(fence1));
     fence_queue->QueueTask([&task1_complete] { task1_complete = true; }, std::move(events));
@@ -146,7 +147,7 @@ TEST(FenceQueueTest, QueueMultipleTasksWithFences_SignalledOutOfOrder) {
 
   zx::event fence2;
   {
-    std::vector<zx::event> events;
+    std::vector<zx::handle> events;
     zx::event::create(0, &fence2);
     events.emplace_back(CopyEvent(fence2));
     fence_queue->QueueTask([&task2_complete] { task2_complete = true; }, std::move(events));
@@ -211,6 +212,68 @@ TEST(FenceQueueTest, DestroyFenceQueueBeforeTask) {
 
   loop.RunUntilIdle();
   EXPECT_FALSE(task_complete);
+}
+
+TEST(FenceQueueTest, QueueTaskWithCounterFence) {
+  async::TestLoop loop;
+
+  bool task_complete = false;
+  auto task = [&task_complete] { task_complete = true; };
+
+  auto fence_queue = std::make_shared<FenceQueue>();
+
+  std::vector<zx::handle> handles;
+  zx::counter counter;
+  ASSERT_EQ(zx::counter::create(0, &counter), ZX_OK);
+  zx::counter counter_copy;
+  ASSERT_EQ(counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_copy), ZX_OK);
+  handles.emplace_back(std::move(counter));
+  fence_queue->QueueTask(std::move(task), std::move(handles));
+
+  EXPECT_FALSE(task_complete);
+  loop.RunUntilIdle();
+  EXPECT_FALSE(task_complete);
+
+  counter_copy.signal(0u, ZX_COUNTER_SIGNALED);
+  loop.RunUntilIdle();
+
+  EXPECT_TRUE(task_complete);
+}
+
+TEST(FenceQueueTest, QueueTaskWithEventAndCounterFences) {
+  async::TestLoop loop;
+
+  bool task_complete = false;
+  auto task = [&task_complete] { task_complete = true; };
+
+  auto fence_queue = std::make_shared<FenceQueue>();
+
+  std::vector<zx::handle> handles;
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  handles.emplace_back(CopyEvent(fence));
+
+  zx::counter counter;
+  ASSERT_EQ(zx::counter::create(0, &counter), ZX_OK);
+  zx::counter counter_copy;
+  ASSERT_EQ(counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_copy), ZX_OK);
+  handles.emplace_back(std::move(counter));
+
+  fence_queue->QueueTask(std::move(task), std::move(handles));
+
+  EXPECT_FALSE(task_complete);
+  loop.RunUntilIdle();
+  EXPECT_FALSE(task_complete);
+
+  // Signal only the event fence: still not complete.
+  fence.signal(0u, ZX_EVENT_SIGNALED);
+  loop.RunUntilIdle();
+  EXPECT_FALSE(task_complete);
+
+  // Signal the counter fence: complete.
+  counter_copy.signal(0u, ZX_COUNTER_SIGNALED);
+  loop.RunUntilIdle();
+  EXPECT_TRUE(task_complete);
 }
 
 }  // namespace test

@@ -3,14 +3,13 @@
 # found in the LICENSE file.
 
 import asyncio
-import csv
 import html
 import json
 import logging
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Literal, TypedDict, overload
+from typing import Any, Literal, TypedDict, get_args, overload
 
 import fidl_fuchsia_wlan_internal as fidl_security
 import fuchsia_wlan_base_test
@@ -50,10 +49,108 @@ logger = logging.getLogger(__name__)
 
 IPERF_DURATION: timedelta = timedelta(seconds=10)
 
+LinkMetricKey = Literal[
+    "ap_rssi",
+    "ap_snr",
+    "ap_tx_rate_mbps",
+    "ap_rx_rate_mbps",
+    "dut_rssi",
+    "dut_tx_rate_mbps",
+    "dut_rx_rate_mbps",
+]
+LINK_METRIC_KEYS: tuple[LinkMetricKey, ...] = get_args(LinkMetricKey)
+
+StatKey = Literal["avg", "min", "max"]
+STAT_KEYS: tuple[StatKey, ...] = get_args(StatKey)
+
+
+# ---------------------------------------------------------------------------
+# JSON Artifact Schema (schema_version: 1)
+# ---------------------------------------------------------------------------
+
+
+class MetricStatsDict(TypedDict):
+    avg: float | None
+    min: float | int | None
+    max: float | int | None
+
+
+class LinkMetricsDict(TypedDict):
+    ap_rssi: MetricStatsDict
+    ap_snr: MetricStatsDict
+    ap_tx_rate_mbps: MetricStatsDict
+    ap_rx_rate_mbps: MetricStatsDict
+    dut_rssi: MetricStatsDict
+    dut_tx_rate_mbps: MetricStatsDict
+    dut_rx_rate_mbps: MetricStatsDict
+
+
+class TcpIperfDetails(TypedDict):
+    server_cpu_utilization_percent: float
+    raw_bps: float | int
+
+
+class UdpIperfDetails(TypedDict):
+    server_cpu_utilization_percent: float
+    raw_bps: float | int
+    corrected_bps: float
+    loss_percent: float | int
+
+
+class MeasurementRecord(TypedDict):
+    """Common link quality and throughput metrics for a measurement.
+
+    Note:
+        `direction` is always relative to the DUT:
+        - "tx": DUT transmits to AP (iperf client upload).
+        - "rx": DUT receives from AP (iperf client download via --reverse).
+    """
+
+    direction: Literal["tx", "rx"]
+    throughput_mbps: float
+    phy_mode: str | None
+    nss: int | None
+    link_metrics: LinkMetricsDict
+
+
+class TcpMeasurementRecord(MeasurementRecord):
+    protocol: Literal["tcp"]
+    iperf_details: TcpIperfDetails
+
+
+class UdpMeasurementRecord(MeasurementRecord):
+    protocol: Literal["udp"]
+    iperf_details: UdpIperfDetails
+
+
+class MeasurementsByDirection(TypedDict):
+    tcp_tx: TcpMeasurementRecord
+    tcp_rx: TcpMeasurementRecord
+    udp_tx: UdpMeasurementRecord
+    udp_rx: UdpMeasurementRecord
+
+
+class TestCaseRecord(TypedDict):
+    security: str
+    channel: int
+    channel_bandwidth: int
+    band: str
+    measurements: MeasurementsByDirection
+
+
+class ThroughputReportJson(TypedDict):
+    schema_version: int
+    test_cases: list[TestCaseRecord]
+
+
+# ---------------------------------------------------------------------------
+# Link Quality & Rate Sampling Classes (In-Memory)
+# ---------------------------------------------------------------------------
+
 
 @dataclass
-class LinkMetrics:
-    """Represents link quality and rate metrics perceived by AP and DUT."""
+class LinkMetricSample:
+    """Represents link quality and rate metrics perceived by AP and DUT at a single point in time."""
 
     ap_rssi: int | None = None
     ap_snr: int | None = None
@@ -85,6 +182,13 @@ class MetricStats:
             max=max(valid),
         )
 
+    def to_dict(self) -> MetricStatsDict:
+        return {
+            "avg": self.avg,
+            "min": self.min,
+            "max": self.max,
+        }
+
 
 @dataclass
 class LinkMetricSummary:
@@ -99,10 +203,12 @@ class LinkMetricSummary:
     dut_rx_rate_mbps: MetricStats
     phy_mode: str | None
     nss: int | None
-    samples: list[LinkMetrics]
+    samples: list[LinkMetricSample]
 
     @classmethod
-    def from_samples(cls, samples: list[LinkMetrics]) -> "LinkMetricSummary":
+    def from_samples(
+        cls, samples: list[LinkMetricSample]
+    ) -> "LinkMetricSummary":
         # Find the most recent valid phy_mode and nss from the collected samples,
         # reflecting the steady-state negotiated configuration under load.
         phy_mode: str | None = None
@@ -212,53 +318,38 @@ class LinkMetricSummary:
             for prefix, cells in rows
         ]
 
-    def to_csv_strings(self) -> list[str]:
-        def fmt_avg(val: int | float | None) -> str:
-            if val is None:
-                return ""
-            return f"{val:.1f}"
+    def to_link_metrics_dict(self) -> LinkMetricsDict:
+        return {
+            "ap_rssi": self.ap_rssi.to_dict(),
+            "ap_snr": self.ap_snr.to_dict(),
+            "ap_tx_rate_mbps": self.ap_tx_rate_mbps.to_dict(),
+            "ap_rx_rate_mbps": self.ap_rx_rate_mbps.to_dict(),
+            "dut_rssi": self.dut_rssi.to_dict(),
+            "dut_tx_rate_mbps": self.dut_tx_rate_mbps.to_dict(),
+            "dut_rx_rate_mbps": self.dut_rx_rate_mbps.to_dict(),
+        }
 
-        def fmt_val(val: int | float | None) -> str:
-            if val is None:
-                return ""
-            if isinstance(val, float) and val.is_integer():
-                return str(int(val))
-            return str(val)
 
-        def fmt_rate(val: int | float | None) -> str:
-            if val is None:
-                return ""
-            return f"{val:.1f}"
-
-        vals: list[str] = []
-        for s in [self.ap_rssi, self.ap_snr]:
-            vals.extend([fmt_avg(s.avg), fmt_val(s.min), fmt_val(s.max)])
-        for s in [self.ap_tx_rate_mbps, self.ap_rx_rate_mbps]:
-            vals.extend([fmt_rate(s.avg), fmt_rate(s.min), fmt_rate(s.max)])
-        for s in [self.dut_rssi]:
-            vals.extend([fmt_avg(s.avg), fmt_val(s.min), fmt_val(s.max)])
-        for s in [self.dut_tx_rate_mbps, self.dut_rx_rate_mbps]:
-            vals.extend([fmt_rate(s.avg), fmt_rate(s.min), fmt_rate(s.max)])
-        return vals
+# ---------------------------------------------------------------------------
+# iperf3 Controller Models
+# ---------------------------------------------------------------------------
 
 
 class IperfUdpResult(TypedDict):
-    udp_bps_uncorrected: int
-    udp_bps_corrected: int
-    udp_loss_percent: float
+    udp_bps_uncorrected: float | int
+    udp_bps_corrected: float
+    udp_loss_percent: float | int
     server_cpu_utilization_percent: float
 
 
 class IperfTcpResult(TypedDict):
-    tcp_bps: int
+    tcp_bps: float | int
     server_cpu_utilization_percent: float
 
 
-class IperfResult(TypedDict):
-    tcp_tx: IperfTcpResult
-    tcp_rx: IperfTcpResult
-    udp_tx: IperfUdpResult
-    udp_rx: IperfUdpResult
+# ---------------------------------------------------------------------------
+# Test Execution Parameters
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -275,10 +366,13 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     def __init__(self, configs: TestRunConfig) -> None:
         super().__init__(configs)
-        self.csv_file_path: str = os.path.join(self.log_path, "throughput.csv")
+        self.json_file_path: str = os.path.join(
+            self.log_path, "throughput.json"
+        )
         self.html_file_path: str = os.path.join(
             self.log_path, "throughput.html"
         )
+        self.test_cases: list[TestCaseRecord] = []
 
     async def pre_run(self) -> None:
         tests: list[tuple[TestParams]] = []
@@ -340,18 +434,8 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             raise signals.TestError("Requires at least one iperf server")
         self.iperf_server.start()
 
-        with open(self.csv_file_path, "w", encoding="utf-8") as csv_file:
-            csv_file.write(
-                "security,channel,bandwidth,phy_mode,nss,"
-                + "udp_or_tcp,dut_tx_or_rx,result_mbps,"
-                + "ap_rssi_avg,ap_rssi_min,ap_rssi_max,"
-                + "ap_snr_avg,ap_snr_min,ap_snr_max,"
-                + "ap_tx_rate_mbps_avg,ap_tx_rate_mbps_min,ap_tx_rate_mbps_max,"
-                + "ap_rx_rate_mbps_avg,ap_rx_rate_mbps_min,ap_rx_rate_mbps_max,"
-                + "dut_rssi_avg,dut_rssi_min,dut_rssi_max,"
-                + "dut_tx_rate_mbps_avg,dut_tx_rate_mbps_min,dut_tx_rate_mbps_max,"
-                + "dut_rx_rate_mbps_avg,dut_rx_rate_mbps_min,dut_rx_rate_mbps_max\n"
-            )
+        self.test_cases = []
+        self._write_json_report()
 
     async def setup_test(self) -> None:
         await super().setup_test()
@@ -368,8 +452,8 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def _measure_link_metrics(
         self, iface: wlan_core.ClientIface, dut_mac: MacAddress, band: Band
-    ) -> LinkMetrics:
-        metrics = LinkMetrics()
+    ) -> LinkMetricSample:
+        metrics = LinkMetricSample()
 
         # 1. Query AP perspective
         ap_status: OpenWrtStationStatus | HostapdStationStatus
@@ -506,7 +590,7 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         )
 
         start_time = asyncio.get_running_loop().time()
-        samples: list[LinkMetrics] = []
+        samples: list[LinkMetricSample] = []
         try:
             loop = asyncio.get_running_loop()
             # Sample link metrics once every second during the test run, starting at
@@ -692,8 +776,12 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             dut_mac=dut_mac,
             band=band,
         )
-        tcp_tx_mbps = self.bps_to_mbps(tcp_tx["tcp_bps"])
-        self._log_measurement_result("TCP TX", tcp_tx_mbps, tcp_tx_metrics)
+        tcp_tx_record = self._build_tcp_measurement_record(
+            "tx", tcp_tx, tcp_tx_metrics
+        )
+        self._log_measurement_result(
+            "TCP TX", tcp_tx_record["throughput_mbps"], tcp_tx_metrics
+        )
 
         tcp_rx, tcp_rx_metrics = await self.get_iperf_throughput_bps(
             iperf_server_address,
@@ -703,8 +791,12 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             dut_mac=dut_mac,
             band=band,
         )
-        tcp_rx_mbps = self.bps_to_mbps(tcp_rx["tcp_bps"])
-        self._log_measurement_result("TCP RX", tcp_rx_mbps, tcp_rx_metrics)
+        tcp_rx_record = self._build_tcp_measurement_record(
+            "rx", tcp_rx, tcp_rx_metrics
+        )
+        self._log_measurement_result(
+            "TCP RX", tcp_rx_record["throughput_mbps"], tcp_rx_metrics
+        )
 
         udp_tx, udp_tx_metrics = await self.get_iperf_throughput_bps(
             iperf_server_address,
@@ -715,9 +807,13 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             band=band,
             bandwidth=udp_bandwidth,
         )
-        udp_tx_mbps = self.bps_to_mbps(udp_tx["udp_bps_corrected"])
+        udp_tx_record = self._build_udp_measurement_record(
+            "tx", udp_tx, udp_tx_metrics
+        )
         self._log_udp_correction("UDP TX", udp_tx, udp_bandwidth)
-        self._log_measurement_result("UDP TX", udp_tx_mbps, udp_tx_metrics)
+        self._log_measurement_result(
+            "UDP TX", udp_tx_record["throughput_mbps"], udp_tx_metrics
+        )
 
         udp_rx, udp_rx_metrics = await self.get_iperf_throughput_bps(
             iperf_server_address,
@@ -728,30 +824,104 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             band=band,
             bandwidth=udp_bandwidth,
         )
-        udp_rx_mbps = self.bps_to_mbps(udp_rx["udp_bps_corrected"])
+        udp_rx_record = self._build_udp_measurement_record(
+            "rx", udp_rx, udp_rx_metrics
+        )
         self._log_udp_correction("UDP RX", udp_rx, udp_bandwidth)
-        self._log_measurement_result("UDP RX", udp_rx_mbps, udp_rx_metrics)
+        self._log_measurement_result(
+            "UDP RX", udp_rx_record["throughput_mbps"], udp_rx_metrics
+        )
 
+        measurements: MeasurementsByDirection = {
+            "tcp_tx": tcp_tx_record,
+            "tcp_rx": tcp_rx_record,
+            "udp_tx": udp_tx_record,
+            "udp_rx": udp_rx_record,
+        }
+        test_case_record = self._build_test_case_record(test, measurements)
+        self.test_cases.append(test_case_record)
+        self._write_json_report()
+
+    @staticmethod
+    def _format_band(band: Band) -> str:
+        match band:
+            case Band.BAND_2G:
+                return "2.4GHz"
+            case Band.BAND_5G:
+                return "5GHz"
+            case _:
+                return str(band)
+
+    @classmethod
+    def _build_tcp_measurement_record(
+        cls,
+        direction: Literal["tx", "rx"],
+        iperf_res: IperfTcpResult,
+        metrics: LinkMetricSummary,
+    ) -> TcpMeasurementRecord:
+        raw_bps = iperf_res["tcp_bps"]
+        return {
+            "protocol": "tcp",
+            "direction": direction,
+            "throughput_mbps": cls.bps_to_mbps(raw_bps),
+            "phy_mode": metrics.phy_mode,
+            "nss": metrics.nss,
+            "link_metrics": metrics.to_link_metrics_dict(),
+            "iperf_details": {
+                "server_cpu_utilization_percent": iperf_res[
+                    "server_cpu_utilization_percent"
+                ],
+                "raw_bps": raw_bps,
+            },
+        }
+
+    @classmethod
+    def _build_udp_measurement_record(
+        cls,
+        direction: Literal["tx", "rx"],
+        iperf_res: IperfUdpResult,
+        metrics: LinkMetricSummary,
+    ) -> UdpMeasurementRecord:
+        return {
+            "protocol": "udp",
+            "direction": direction,
+            "throughput_mbps": cls.bps_to_mbps(iperf_res["udp_bps_corrected"]),
+            "phy_mode": metrics.phy_mode,
+            "nss": metrics.nss,
+            "link_metrics": metrics.to_link_metrics_dict(),
+            "iperf_details": {
+                "server_cpu_utilization_percent": iperf_res[
+                    "server_cpu_utilization_percent"
+                ],
+                "raw_bps": iperf_res["udp_bps_uncorrected"],
+                "corrected_bps": iperf_res["udp_bps_corrected"],
+                "loss_percent": iperf_res["udp_loss_percent"],
+            },
+        }
+
+    @classmethod
+    def _build_test_case_record(
+        cls,
+        test: TestParams,
+        measurements: MeasurementsByDirection,
+    ) -> TestCaseRecord:
         sec_name = ConfigMapper.to_hostapd_security(test.security_mode).value
-        with open(self.csv_file_path, "a", encoding="utf-8") as csv_file:
-            for proto, direction, metrics, mbps in [
-                ("tcp", "tx", tcp_tx_metrics, tcp_tx_mbps),
-                ("tcp", "rx", tcp_rx_metrics, tcp_rx_mbps),
-                ("udp", "tx", udp_tx_metrics, udp_tx_mbps),
-                ("udp", "rx", udp_rx_metrics, udp_rx_mbps),
-            ]:
-                row = [
-                    sec_name,
-                    str(test.channel),
-                    str(test.channel_bandwidth),
-                    metrics.phy_mode or "",
-                    str(metrics.nss) if metrics.nss is not None else "",
-                    proto,
-                    direction,
-                    str(mbps),
-                    *metrics.to_csv_strings(),
-                ]
-                csv_file.write(",".join(row) + "\n")
+        return {
+            "security": sec_name,
+            "channel": test.channel,
+            "channel_bandwidth": test.channel_bandwidth,
+            "band": cls._format_band(test.band),
+            "measurements": measurements,
+        }
+
+    def _write_json_report(self) -> None:
+        payload: ThroughputReportJson = {
+            "schema_version": 1,
+            "test_cases": self.test_cases,
+        }
+        with open(self.json_file_path, "w", encoding="utf-8") as json_file:
+            json.dump(payload, json_file, indent=2)
+            json_file.write("\n")
 
     @staticmethod
     def get_target_udp_bandwidth(channel_bandwidth: int) -> str:
@@ -797,18 +967,54 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         return round(throughput_mbps, 2)
 
     def _update_html_report(self) -> None:
-        """Renders throughput.csv into a clean, human-readable HTML table."""
-        if not os.path.exists(self.csv_file_path):
+        """Renders throughput.json test cases into a clean, human-readable HTML table."""
+        test_cases = self.test_cases
+        if not test_cases and os.path.exists(self.json_file_path):
+            with open(self.json_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                test_cases = data.get("test_cases", [])
+
+        if not test_cases:
             return
 
-        with open(self.csv_file_path, "r", encoding="utf-8") as f:
-            rows = list(csv.reader(f))
+        header_row = [
+            "security",
+            "band",
+            "channel",
+            "bandwidth",
+            "phy_mode",
+            "nss",
+            "udp_or_tcp",
+            "dut_tx_or_rx",
+            "result_mbps",
+            *(f"{m}_{s}" for m in LINK_METRIC_KEYS for s in STAT_KEYS),
+        ]
 
-        if not rows:
-            return
-
-        header_row = rows[0]
-        data_rows = rows[1:]
+        data_rows: list[list[Any]] = []
+        for test_case in test_cases:
+            measurements = test_case["measurements"]
+            for proto, measurement in (
+                ("tcp", measurements["tcp_tx"]),
+                ("tcp", measurements["tcp_rx"]),
+                ("udp", measurements["udp_tx"]),
+                ("udp", measurements["udp_rx"]),
+            ):
+                link_metrics = measurement["link_metrics"]
+                row: list[Any] = [
+                    test_case["security"],
+                    test_case["band"],
+                    test_case["channel"],
+                    test_case["channel_bandwidth"],
+                    measurement["phy_mode"],
+                    measurement["nss"],
+                    proto,
+                    measurement["direction"],
+                    measurement["throughput_mbps"],
+                ]
+                for m_key in LINK_METRIC_KEYS:
+                    stat = link_metrics[m_key]
+                    row.extend(stat[s] for s in STAT_KEYS)
+                data_rows.append(row)
 
         html_lines: list[str] = [
             "<!DOCTYPE html>",
@@ -880,17 +1086,15 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         for row in data_rows:
             html_lines.append("      <tr>")
             for cell in row:
-                cell_str = cell.strip()
-                if not cell_str:
+                if cell is None or cell == "":
                     html_lines.append('        <td class="na">N/A</td>')
-                else:
-                    try:
-                        float(cell_str)
-                        cls = "num"
-                    except ValueError:
-                        cls = "str"
+                elif isinstance(cell, (int, float)):
                     html_lines.append(
-                        f'        <td class="{cls}">{html.escape(cell_str)}</td>'
+                        f'        <td class="num">{html.escape(str(cell))}</td>'
+                    )
+                else:
+                    html_lines.append(
+                        f'        <td class="str">{html.escape(str(cell))}</td>'
                     )
             html_lines.append("      </tr>")
 

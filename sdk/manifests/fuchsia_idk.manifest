@@ -205,8 +205,8 @@ fidl_library://fidl/fuchsia.diagnostics
 fidl_library://fidl/fuchsia.diagnostics.system
 fidl_library://fidl/fuchsia.diagnostics.types
 fidl_library://fidl/fuchsia.driver.debug (unstable)
-fidl_library://fidl/fuchsia.driver.development
-fidl_library://fidl/fuchsia.driver.framework
+fidl_library://fidl/fuchsia.driver.development (unstable)
+fidl_library://fidl/fuchsia.driver.framework (unstable)
 fidl_library://fidl/fuchsia.driver.metadata (unstable)
 fidl_library://fidl/fuchsia.driver.registrar
 fidl_library://fidl/fuchsia.driver.test
@@ -248,7 +248,7 @@ fidl_library://fidl/fuchsia.hardware.pci
 fidl_library://fidl/fuchsia.hardware.pin
 fidl_library://fidl/fuchsia.hardware.pinimpl
 fidl_library://fidl/fuchsia.hardware.platform.bus (unstable)
-fidl_library://fidl/fuchsia.hardware.platform.device
+fidl_library://fidl/fuchsia.hardware.platform.device (unstable)
 fidl_library://fidl/fuchsia.hardware.power (unstable)
 fidl_library://fidl/fuchsia.hardware.power.battery (unstable)
 fidl_library://fidl/fuchsia.hardware.power.charger (unstable)

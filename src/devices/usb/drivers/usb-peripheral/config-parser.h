@@ -5,6 +5,7 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_USB_PERIPHERAL_CONFIG_PARSER_H_
 #define SRC_DEVICES_USB_DRIVERS_USB_PERIPHERAL_CONFIG_PARSER_H_
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire_types.h>
 #include <lib/driver/logging/cpp/logger.h>
@@ -17,12 +18,14 @@
 #include <vector>
 
 #include <usb/cdc.h>
+#include <usb/descriptors.h>
 #include <usb/peripheral.h>
 #include <usb/usb.h>
 
 namespace usb_peripheral {
 
 namespace peripheral = fuchsia_hardware_usb_peripheral;
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 // clang-format off
 constexpr uint8_t kCdcMask         = 1 << 0;
@@ -65,43 +68,43 @@ constexpr std::string_view kVsockBridgeProductDescription = "VSOCK Bridge";
 constexpr std::string_view kFastbootProductDescription = "Fastboot";
 
 constexpr peripheral::wire::FunctionDescriptor kCDCFunctionDescriptor = {
-    .interface_class = USB_CLASS_COMM,
-    .interface_subclass = USB_CDC_SUBCLASS_ETHERNET,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+    .interface_subclass = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
     .interface_protocol = 0,
 };
 
 constexpr peripheral::wire::FunctionDescriptor kUMSFunctionDescriptor = {
-    .interface_class = USB_CLASS_MSC,
-    .interface_subclass = USB_SUBCLASS_MSC_SCSI,
-    .interface_protocol = USB_PROTOCOL_MSC_BULK_ONLY,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kMsc),
+    .interface_subclass = fidl::ToUnderlying(fdescriptor::MscSubclass::kScsi),
+    .interface_protocol = fidl::ToUnderlying(fdescriptor::MscProtocol::kBulkOnly),
 };
 
 constexpr peripheral::wire::FunctionDescriptor kRNDISFunctionDescriptor = {
-    .interface_class = USB_CLASS_MISC,
-    .interface_subclass = USB_SUBCLASS_MSC_RNDIS,
-    .interface_protocol = USB_PROTOCOL_MSC_RNDIS_ETHERNET,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kMisc),
+    .interface_subclass = fidl::ToUnderlying(fdescriptor::MiscSubclass::kRndis),
+    .interface_protocol = fidl::ToUnderlying(fdescriptor::MiscProtocol::kRndisEthernet),
 };
 
 constexpr peripheral::wire::FunctionDescriptor kADBFunctionDescriptor = {
-    .interface_class = USB_CLASS_VENDOR,
-    .interface_subclass = USB_SUBCLASS_ADB,
-    .interface_protocol = USB_PROTOCOL_ADB,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
+    .interface_subclass = fidl::ToUnderlying(fdescriptor::VendorSubclass::kAdbFastboot),
+    .interface_protocol = fidl::ToUnderlying(fdescriptor::AdbFastbootProtocol::kAdb),
 };
 
 constexpr peripheral::wire::FunctionDescriptor kFfxFunctionDescriptor = {
-    .interface_class = USB_CLASS_VENDOR,
-    .interface_subclass = USB_SUBCLASS_VSOCK_BRIDGE,
-    .interface_protocol = USB_PROTOCOL_VSOCK_BRIDGE,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
+    .interface_subclass = fidl::ToUnderlying(fdescriptor::VendorSubclass::kVsockBridge),
+    .interface_protocol = fidl::ToUnderlying(fdescriptor::VsockProtocol::kVsockBridge),
 };
 
 constexpr peripheral::wire::FunctionDescriptor kFastbootFunctionDescriptor = {
-    .interface_class = USB_CLASS_VENDOR,
-    .interface_subclass = USB_SUBCLASS_FASTBOOT,
-    .interface_protocol = USB_PROTOCOL_FASTBOOT,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
+    .interface_subclass = fidl::ToUnderlying(fdescriptor::VendorSubclass::kAdbFastboot),
+    .interface_protocol = fidl::ToUnderlying(fdescriptor::AdbFastbootProtocol::kFastboot),
 };
 
 constexpr peripheral::wire::FunctionDescriptor kTestFunctionDescriptor = {
-    .interface_class = USB_CLASS_VENDOR,
+    .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
     .interface_subclass = 0,
     .interface_protocol = 0,
 };

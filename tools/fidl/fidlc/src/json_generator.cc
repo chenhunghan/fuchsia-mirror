@@ -75,6 +75,17 @@ void JSONGenerator::Generate(Nullability value) {
   }
 }
 
+void JSONGenerator::Generate(Zeroability value) {
+  switch (value) {
+    case Zeroability::kZeroable:
+      EmitBoolean(true);
+      break;
+    case Zeroability::kNotZeroable:
+      EmitBoolean(false);
+      break;
+  }
+}
+
 void JSONGenerator::Generate(Strictness value) { EmitBoolean(value == Strictness::kStrict); }
 
 void JSONGenerator::Generate(Openness value) {
@@ -178,6 +189,8 @@ void JSONGenerator::Generate(const Type* value) {
       case Type::Kind::kPrimitive: {
         const auto* type = static_cast<const PrimitiveType*>(value);
         GenerateObjectMember("subtype", type->name);
+        if (type->zeroability != Zeroability::kZeroable)
+          GenerateObjectMember("zeroable", type->zeroability);
         break;
       }
       case Type::Kind::kInternal: {

@@ -9,24 +9,42 @@
 
 extern "C" {
 
-void cpp_dispatcher_on_zero_handles(Dispatcher* disp) { disp->on_zero_handles(); }
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dispatcher_on_zero_handles(Dispatcher* disp) { disp->on_zero_handles(); }
 
-void cpp_dispatcher_clear_signals(Dispatcher* disp, zx_signals_t signals) {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dispatcher_clear_signals(Dispatcher* disp, zx_signals_t signals) {
   disp->ClearSignals(signals);
 }
 
-void cpp_dispatcher_update_state(Dispatcher* disp, zx_signals_t clear_mask, zx_signals_t set_mask,
-                                 zx_signals_t strobe_mask) {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dispatcher_update_state(Dispatcher* disp, zx_signals_t clear_mask,
+                                                   zx_signals_t set_mask,
+                                                   zx_signals_t strobe_mask) {
   disp->UpdateState(clear_mask, set_mask, strobe_mask);
 }
 
-void cpp_dispatcher_update_state_locked(Dispatcher* disp, zx_signals_t clear_mask,
-                                        zx_signals_t set_mask,
-                                        zx_signals_t strobe_mask) TA_NO_THREAD_SAFETY_ANALYSIS {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dispatcher_update_state_locked(
+    Dispatcher* disp, zx_signals_t clear_mask, zx_signals_t set_mask,
+    zx_signals_t strobe_mask) TA_NO_THREAD_SAFETY_ANALYSIS {
   disp->UpdateStateLocked(clear_mask, set_mask, strobe_mask);
 }
 
-zx_signals_t cpp_dispatcher_signals_state_locked(const Dispatcher* disp)
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_signals_t cpp_dispatcher_raise_signals_locked(
+    Dispatcher* disp, zx_signals_t signals) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return disp->RaiseSignalsLocked(signals);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dispatcher_notify_observers_locked(
+    Dispatcher* disp, zx_signals_t signals, void* queue_to_own) TA_NO_THREAD_SAFETY_ANALYSIS {
+  disp->NotifyObserversLocked(signals, static_cast<OwnedWaitQueue*>(queue_to_own));
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_signals_t cpp_dispatcher_signals_state_locked(const Dispatcher* disp)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   return disp->GetSignalsStateLocked();
 }
@@ -85,6 +103,16 @@ FFI_ALWAYS_INLINE zx_status_t cpp_dispatcher_set_name(Dispatcher* disp, const ch
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE uint32_t cpp_dispatcher_current_handle_count(const Dispatcher* disp) {
   return disp->current_handle_count();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_dispatcher_is_waitable(const Dispatcher* disp) {
+  return disp->is_waitable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dispatcher_cancel(Dispatcher* disp, const void* handle) {
+  disp->Cancel(handle);
 }
 
 }  // extern "C"

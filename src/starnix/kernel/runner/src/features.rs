@@ -5,7 +5,7 @@
 use crate::ContainerStartInfo;
 use anyhow::{Context, Error, anyhow};
 use fidl_fuchsia_ui_composition as fuicomposition;
-use fidl_fuchsia_ui_input3 as fuiinput;
+use fidl_fuchsia_ui_input3 as fuiinput3;
 use fidl_fuchsia_ui_policy as fuipolicy;
 use fidl_fuchsia_ui_views as fuiviews;
 use starnix_consent_sync::init as consent_sync_init;
@@ -26,8 +26,9 @@ use starnix_modules_gralloc::gralloc_device_init;
 use starnix_modules_hvdcp_opti::hvdcp_opti_init;
 use starnix_modules_input::uinput::register_uinput_device;
 use starnix_modules_input::{
-    DEFAULT_KEYBOARD_DEVICE_ID, DEFAULT_TOUCH_DEVICE_ID, EventProxyMode, InputDevice,
-    new_input_relay,
+    DEFAULT_KEYBOARD_DEVICE_ID, DEFAULT_MOUSE_DEVICE_ID, DEFAULT_TOUCH_DEVICE_ID, EventProxyMode,
+    InputDevice, InputDeviceInfo, KEYBOARD_INPUT_ID, MOUSE_INPUT_ID, StartRelaysArgs,
+    TOUCH_INPUT_ID, new_input_relay,
 };
 use starnix_modules_kgsl::kgsl_device_init;
 use starnix_modules_magma::magma_device_init;
@@ -142,6 +143,9 @@ pub struct Features {
 
     /// Whether to initialize Android-compatible USB monitoring sysfs logic.
     pub android_usb: bool,
+
+    /// Whether to initialize unified tracing with a Fuchsia trace observer.
+    pub unified_tracing: bool,
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -209,9 +213,11 @@ impl Features {
                 wakeup_test,
                 mmcblk_stub,
                 android_usb,
+                unified_tracing,
                 initial_view_id_annotation,
             } => {
                 inspect_node.record_bool("selinux", selinux.enabled);
+                inspect_node.record_bool("unified_tracing", *unified_tracing);
                 inspect_node.record_bool("ashmem", *ashmem);
                 inspect_node.record_bool("boot_notifier", *boot_notifier);
                 inspect_node.record_string(
@@ -409,6 +415,7 @@ pub fn parse_features(
             }
             (Feature::Nanohub, _) => features.nanohub = true,
             (Feature::Fastrpc, _) => features.fastrpc = true,
+            (Feature::UnifiedTracing, _) => features.unified_tracing = true,
             (Feature::NetworkManager, _) => features.network_manager = true,
             (Feature::Gfxstream, _) => features.gfxstream = true,
             (Feature::Bpf, Some(version)) => features.kernel.bpf_v2 = version == "v2",
@@ -531,7 +538,7 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
         let view_ref = fuchsia_scenic::duplicate_view_ref(&view_identity.view_ref)
             .expect("Failed to dup view ref.");
         let keyboard =
-            fuchsia_component::client::connect_to_protocol_sync::<fuiinput::KeyboardMarker>()
+            fuchsia_component::client::connect_to_protocol_sync::<fuiinput3::KeyboardMarker>()
                 .expect("Failed to connect to keyboard");
         let registry_proxy = fuchsia_component::client::connect_to_protocol_sync::<
             fuipolicy::DeviceListenerRegistryMarker,
@@ -554,30 +561,56 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
             (framebuffer_info.xres as i32, framebuffer_info.yres as i32)
         };
 
-        let touch_device =
-            InputDevice::new_touch(display_width, display_height, &kernel.inspect_node);
-        let keyboard_device = InputDevice::new_keyboard(&kernel.inspect_node);
-        let mouse_device = InputDevice::new_mouse(&kernel.inspect_node);
+        let touch_device = InputDevice::new_touch(
+            display_width,
+            display_height,
+            InputDeviceInfo::new(TOUCH_INPUT_ID, "starnix_touch".to_string()),
+            "touch_device",
+            &kernel.inspect_node,
+        );
+        let keyboard_device = InputDevice::new_keyboard(
+            InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_buttons".to_string()),
+            "keyboard_device",
+            &kernel.inspect_node,
+        );
+        let mouse_device = InputDevice::new_mouse(
+            InputDeviceInfo::new(MOUSE_INPUT_ID, "starnix_mouse".to_string()),
+            "mouse_device",
+            &kernel.inspect_node,
+        );
 
         touch_device.clone().register(kernel, DEFAULT_TOUCH_DEVICE_ID)?;
         keyboard_device.clone().register(kernel, DEFAULT_KEYBOARD_DEVICE_ID)?;
         // Prefer to lazily register the mouse device on first mouse event, rather than on
         // initialization here, to avoid drawing a cursor eagerly.
 
-        let (input_events_relay, input_events_relay_handle) = new_input_relay();
+        let (mut input_events_relay, input_events_relay_handle) = new_input_relay();
+        input_events_relay.add_touch_device(
+            DEFAULT_TOUCH_DEVICE_ID,
+            touch_device.open_files,
+            Some(touch_device.inspect_status),
+        );
+        input_events_relay.add_keyboard_device(
+            DEFAULT_KEYBOARD_DEVICE_ID,
+            keyboard_device.open_files,
+            Some(keyboard_device.inspect_status),
+        );
+        input_events_relay.add_pending_mouse_device(
+            kernel.clone(),
+            mouse_device,
+            DEFAULT_MOUSE_DEVICE_ID,
+        );
+
         input_events_relay.start_relays(
             &kernel,
-            EventProxyMode::WakeContainer,
-            touch_source_client,
-            keyboard,
-            mouse_source_client,
-            view_ref,
-            registry_proxy,
-            touch_device.open_files.clone(),
-            keyboard_device.open_files.clone(),
-            Some(mouse_device),
-            Some(touch_device.inspect_status),
-            Some(keyboard_device.inspect_status),
+            StartRelaysArgs {
+                event_proxy_mode: EventProxyMode::WakeContainer,
+                touch_source_client_end: touch_source_client,
+                keyboard_proxy: keyboard,
+                mouse_source_client_end: mouse_source_client,
+                view_ref,
+                registry_proxy,
+            },
         );
 
         register_uinput_device(kernel, input_events_relay_handle)?;
@@ -615,6 +648,9 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
     if let Some(socket_path) = features.perfetto.clone() {
         start_perfetto_consumer_thread(kernel, socket_path)
             .context("Failed to start perfetto consumer thread")?;
+    }
+    if features.unified_tracing {
+        kernel.trace_event_manager.init_trace_observer(kernel);
     }
     if features.ashmem {
         ashmem_device_init(kernel);

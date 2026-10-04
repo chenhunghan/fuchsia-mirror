@@ -11,8 +11,7 @@ use futures::prelude::*;
 use futures::ready;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use zx_status;
-use zx_status_ext::StatusExt;
+use zx::{self as zx, StatusExt};
 
 /// An I/O object representing a `Socket`.
 pub struct Socket {
@@ -55,19 +54,19 @@ impl Socket {
         &self,
         cx: &mut Context<'_>,
         out: &mut Vec<u8>,
-    ) -> Poll<Result<usize, zx_status::Status>> {
+    ) -> Poll<Result<usize, zx::Status>> {
         let avail = self.socket.outstanding_read_bytes()?;
         let len = out.len();
         out.resize(len + avail, 0);
         let (_, tail) = out.split_at_mut(len);
         match ready!(self.socket.poll_read(tail, cx)) {
-            Err(zx_status::Status::PEER_CLOSED) => Poll::Ready(Ok(0)),
+            Err(zx::Status::PEER_CLOSED) => Poll::Ready(Ok(0)),
             Err(e) => Poll::Ready(Err(e)),
             Ok(bytes) => {
                 if bytes == avail {
                     Poll::Ready(Ok(bytes))
                 } else {
-                    Poll::Ready(Err(zx_status::Status::BAD_STATE))
+                    Poll::Ready(Err(zx::Status::BAD_STATE))
                 }
             }
         }
@@ -80,16 +79,13 @@ impl Socket {
         &self,
         cx: &mut Context<'_>,
         out: &mut [u8],
-    ) -> Poll<Result<usize, zx_status::Status>> {
+    ) -> Poll<Result<usize, zx::Status>> {
         self.socket.poll_read(out, cx)
     }
 
     /// Reads the next datagram that becomes available onto the end of |out|.  Note: Using this
     /// multiple times concurrently is an error and the first one will never complete.
-    pub async fn read_datagram<'a>(
-        &'a self,
-        out: &'a mut Vec<u8>,
-    ) -> Result<usize, zx_status::Status> {
+    pub async fn read_datagram<'a>(&'a self, out: &'a mut Vec<u8>) -> Result<usize, zx::Status> {
         poll_fn(move |cx| self.poll_datagram(cx, out)).await
     }
 }
@@ -160,7 +156,7 @@ impl AsyncRead for Socket {
         bytes: &mut [u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         match ready!(self.socket.poll_read(bytes, cx)) {
-            Err(zx_status::Status::PEER_CLOSED) => Poll::Ready(Ok(0)),
+            Err(zx::Status::PEER_CLOSED) => Poll::Ready(Ok(0)),
             Ok(x) => {
                 assert_ne!(x, 0);
                 Poll::Ready(Ok(x))
@@ -201,7 +197,7 @@ impl AsyncRead for &'_ Socket {
         bytes: &mut [u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         match ready!(self.socket.poll_read(bytes, cx)) {
-            Err(zx_status::Status::PEER_CLOSED) => Poll::Ready(Ok(0)),
+            Err(zx::Status::PEER_CLOSED) => Poll::Ready(Ok(0)),
             Ok(x) => {
                 assert_ne!(x, 0);
                 Poll::Ready(Ok(x))

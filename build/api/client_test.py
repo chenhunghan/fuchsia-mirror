@@ -398,6 +398,53 @@ class ClientTest(ClientTestBase):
             json.dumps(expected, indent=2) + "\n",
         )
 
+    def test_print_debug_symbols_last_build_only(self) -> None:
+        self.maxDiff = None
+        self._build_ninja_path.write_text(
+            """
+rule whatever
+  command = ignored
+
+build obj/src/foo/lib_shared/libfoo.so.unstripped: whatever
+build obj/src/bar/binary.unstripped: whatever
+
+build $:default: phony obj/src/foo/lib_shared/libfoo.so.unstripped
+"""
+        )
+        debug_symbols = json.loads(self._debug_symbols_json) + [
+            {
+                "breakpad": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.sym",
+                "cpu": "x64",
+                "debug": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.debug",
+                "elf_build_id": "b29e5a6d40fb2c76081f0d86fe458e33ba253cfe",
+                "label": "//build/toolchain/runtime:shared-rust-libstd-deps(//build/toolchain/fuchsia:x64-shared)",
+                "os": "fuchsia",
+            }
+        ]
+        _write_json(self._build_dir / "debug_symbols.json", debug_symbols)
+
+        expected = [
+            {
+                "cpu": "x64",
+                "debug": "obj/src/foo/lib_shared/libfoo.so.unstripped",
+                "elf_build_id": "00000000000000001",
+                "label": "//src/foo:lib_shared",
+                "os": "fuchsia",
+            },
+            {
+                "breakpad": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.sym",
+                "cpu": "x64",
+                "debug": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.debug",
+                "elf_build_id": "b29e5a6d40fb2c76081f0d86fe458e33ba253cfe",
+                "label": "//build/toolchain/runtime:shared-rust-libstd-deps(//build/toolchain/fuchsia:x64-shared)",
+                "os": "fuchsia",
+            },
+        ]
+        self.assert_output(
+            ["print_debug_symbols", "--last-build-only"],
+            json.dumps(expected) + "\n",
+        )
+
     def test_print_debug_symbols_with_build_id_resolution(self) -> None:
         self.maxDiff = None
         expected = [
@@ -813,8 +860,9 @@ with open(args.out_file, "wt") as f:
 
         export_dir = self._top_dir / "exported_debug_symbols"
 
-        expected_err = """MISSING build-id FOR {'cpu': 'x64', 'debug': 'obj/src/zoo/binary.unstripped', 'label': '//src/zoo:binary', 'os': 'fuchsia'}
-"""
+        # obj/src/zoo/binary.unstripped has no build-id, so it should be
+        # silently skipped.
+        expected_err = ""
 
         expected_out = f"""Creating {export_dir}/build-ids.json
 Creating {export_dir}/build-ids.txt

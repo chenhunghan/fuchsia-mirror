@@ -59,7 +59,7 @@ class ResourceDispatcher final : public Dispatcher {
 
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_RESOURCE; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
-  bool is_waitable() const final { return false; }
+  bool is_waitable() const final { return ZX_DEFAULT_RESOURCE_RIGHTS & ZX_RIGHT_WAIT; }
 
   // Returns a null-terminated name.
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final {

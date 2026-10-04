@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Lets dependents use the shorthand //src/lib/testing/loop_fixture label
+# instead of naming the library, which is called :gtest.
+alias(
+    name = "loop_fixture",
+    actual = ":gtest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
+    # visibility is limited to actual Bazel dependents.
+    visibility = [
+        "//src/developer/build_info:__pkg__",
+    ],  # @bazel2gn:raw_overwrite:[ "//*" ]
+)
+
+# Deprecated - new targets should instead depend on:
+# //sdk/lib/testing/loop_fixture (for RealLoop) or
+# //src/lib/testing/loop_fixture (for TestLoop or RealLoopFixture)
+cc_library(
+    name = "gtest",
+    srcs = ["test_loop.cc"],
+    hdrs = [
+        "real_loop_fixture.h",
+        "test_loop.h",
+        "test_loop_fixture.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    # Bazel dependents should use the :loop_fixture alias instead.
+    visibility = [],  # @bazel2gn:raw_overwrite:[ "//*" ]
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/async-loop-testing/cpp",
+        "//sdk/lib/async-testing",
+        "//sdk/lib/fit",
+        "//src/lib/fxl:cli",
+        "//zircon/system/ulib/zx",
+        # GN's //third_party/googletest:gtest is testonly, unlike Bazel's, and
+        # some GN dependents of this library are not testonly.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gtest_no_testonly
+    ],
+    alwayslink = True,
+)

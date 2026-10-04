@@ -389,10 +389,11 @@ void DeviceHost::RegisterVirtualAudioDrivers() {
     for (const auto& spec : specs_to_add) {
       fuchsia_driver_development::TestNodeAddArgs args;
       args.name(spec.name);
-      args.properties(std::vector<fuchsia_driver_framework::NodeProperty>{
-          fuchsia_driver_framework::NodeProperty{{
-              fuchsia_driver_framework::NodePropertyKey::WithStringValue(bind_fuchsia::COMPATIBLE),
-              fuchsia_driver_framework::NodePropertyValue::WithStringValue(spec.compatible),
+      args.properties(std::vector<fuchsia_driver_framework::NodeProperty2>{
+          fuchsia_driver_framework::NodeProperty2{{
+              .key = bind_fuchsia::COMPATIBLE,
+              .value =
+                  fuchsia_driver_framework::NodePropertyValue::WithStringValue(spec.compatible),
           }},
       });
       auto add_res = mgr->AddTestNode({{.args = std::move(args)}});

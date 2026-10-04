@@ -30,6 +30,8 @@
 
 #include "src/lib/listnode/listnode.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 constexpr int EVENT_REQ_COUNT = 8;
 constexpr int ACL_READ_REQ_COUNT = 8;
 constexpr int ACL_WRITE_REQ_COUNT = 10;
@@ -183,15 +185,15 @@ zx_status_t Device::Bind() {
 
   usb_endpoint_descriptor_t* endp = usb_desc_iter_next_endpoint(&config_desc_iter);
   while (endp) {
-    if (usb_ep_direction(endp) == USB_ENDPOINT_OUT) {
-      if (usb_ep_type(endp) == fuchsia_hardware_usb_descriptor::EndpointType::kBulk) {
+    if (usb_ep_is_out(endp)) {
+      if (usb_ep_is_bulk(endp)) {
         bulk_out_endp_desc_ = *endp;
       }
     } else {
-      ZX_ASSERT(usb_ep_direction(endp) == USB_ENDPOINT_IN);
-      if (usb_ep_type(endp) == fuchsia_hardware_usb_descriptor::EndpointType::kBulk) {
+      ZX_ASSERT(usb_ep_is_in(endp));
+      if (usb_ep_is_bulk(endp)) {
         bulk_in_endp_desc_ = *endp;
-      } else if (usb_ep_type(endp) == fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt) {
+      } else if (usb_ep_is_int(endp)) {
         intr_endp_desc_ = *endp;
       }
     }
@@ -535,11 +537,11 @@ void Device::ReadIsocInterfaces(usb_desc_iter_t* config_desc_iter) {
     usb_endpoint_descriptor_t* out = nullptr;
     usb_endpoint_descriptor_t* endp = usb_desc_iter_next_endpoint(config_desc_iter);
     while (endp) {
-      if (usb_ep_type(endp) == fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous) {
-        if (usb_ep_direction(endp) == USB_ENDPOINT_OUT) {
+      if (usb_ep_is_isoch(endp)) {
+        if (usb_ep_is_out(endp)) {
           out = endp;
         } else {
-          ZX_ASSERT(usb_ep_direction(endp) == USB_ENDPOINT_IN);
+          ZX_ASSERT(usb_ep_is_in(endp));
           in = endp;
         }
       }
@@ -1199,9 +1201,9 @@ void Device::Send(SendRequest& request, SendCompleter::Sync& completer) {
         break;
       }
 
-      zx_status_t control_status = usb_control_out(
-          &usb_, USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_DEVICE, 0, 0, 0, ZX_TIME_INFINITE,
-          request.command().value().data(), request.command().value().size());
+      zx_status_t control_status =
+          usb_control_out(&usb_, kClassDeviceOut, 0, 0, 0, ZX_TIME_INFINITE,
+                          request.command().value().data(), request.command().value().size());
       if (control_status != ZX_OK) {
         zxlogf(ERROR, "usb_control_out failed: %s", zx_status_get_string(control_status));
         break;

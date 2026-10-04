@@ -12,6 +12,8 @@ from .models import (
     AttachRequestArguments,
     ContinueArguments,
     ContinueResponse,
+    DataBreakpointInfoArguments,
+    DataBreakpointInfoResponse,
     DisconnectArguments,
     EvaluateArguments,
     EvaluateResponse,
@@ -25,6 +27,8 @@ from .models import (
     ScopesResponse,
     SetBreakpointsArguments,
     SetBreakpointsResponse,
+    SetDataBreakpointsArguments,
+    SetDataBreakpointsResponse,
     StackTraceArguments,
     StackTraceResponse,
     StepInArguments,
@@ -551,6 +555,34 @@ class DapClient:
         """
         resp = await self._send_request("setBreakpoints", args)
         return SetBreakpointsResponse.model_validate(resp)
+
+    async def data_breakpoint_info(
+        self, args: DataBreakpointInfoArguments
+    ) -> DataBreakpointInfoResponse:
+        """Sends a dataBreakpointInfo request.
+
+        Args:
+            args: Arguments for the dataBreakpointInfo request.
+
+        Returns:
+            The dataBreakpointInfo response model.
+        """
+        resp = await self._send_request("dataBreakpointInfo", args)
+        return DataBreakpointInfoResponse.model_validate(resp)
+
+    async def set_data_breakpoints(
+        self, args: SetDataBreakpointsArguments
+    ) -> SetDataBreakpointsResponse:
+        """Sends a setDataBreakpoints request.
+
+        Args:
+            args: Arguments for the setDataBreakpoints request.
+
+        Returns:
+            The setDataBreakpoints response model.
+        """
+        resp = await self._send_request("setDataBreakpoints", args)
+        return SetDataBreakpointsResponse.model_validate(resp)
 
     async def _read_message(
         self, reader: asyncio.StreamReader

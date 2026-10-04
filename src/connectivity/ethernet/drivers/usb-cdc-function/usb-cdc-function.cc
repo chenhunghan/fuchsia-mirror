@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <usb-endpoint/usb-endpoint-client.h>
+#include <usb/descriptors.h>
 #include <usb/request-fidl.h>
 
 namespace usb_cdc_function {
@@ -126,22 +127,27 @@ void UsbCdcFunction::DiscardPendingTxBuffers(zx_status_t status) {
     return;
   }
   if (!netdevice_ifc_.is_valid()) {
-    while (!tx_completion_queue_.empty()) {
-      tx_completion_queue_.pop();
+    for (auto &id : tx_completion_queue_) {
+      id.reset();
     }
     return;
   }
 
   fdf::Arena arena(kArenaTag);
-  const size_t count = tx_completion_queue_.size();
-  fidl::VectorView<fnetdev::wire::TxResult> results(arena, count);
-  for (size_t i = 0; i < count; ++i) {
-    uint32_t id = tx_completion_queue_.front();
-    tx_completion_queue_.pop();
-    results[i] = {.id = id, .status = status};
+  fidl::VectorView<fnetdev::wire::TxResult> results(arena, tx_completion_queue_.size());
+  size_t results_count = 0;
+  for (auto &id : tx_completion_queue_) {
+    if (id.has_value()) {
+      results[results_count++] = {.id = *id, .status = status};
+      id.reset();
+    }
+  }
+  if (results_count == 0) {
+    return;
   }
 
-  fidl::OneWayStatus fidl_status = netdevice_ifc_.buffer(arena)->CompleteTx(results);
+  fidl::OneWayStatus fidl_status = netdevice_ifc_.buffer(arena)->CompleteTx(
+      fidl::VectorView<fnetdev::wire::TxResult>::FromExternal(results.data(), results_count));
   if (!fidl_status.ok()) {
     fdf::error("Failed to complete tx: {}", fidl_status.FormatDescription());
   }
@@ -211,8 +217,8 @@ void UsbCdcFunction::CdcSendNotifications() {
     return;
   }
   usb_cdc_notification_t network_notification = {
-      .bmRequestType = USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-      .bNotification = USB_CDC_NC_NETWORK_CONNECTION,
+      .bmRequestType = kClassInterfaceIn,
+      .bNotification = fidl::ToUnderlying(fdescriptor::CdcNotification::kNetworkConnection),
       .wValue = online_,
       .wIndex = descriptors_.cdc_intf_0.b_interface_number,
       .wLength = 0,
@@ -221,8 +227,9 @@ void UsbCdcFunction::CdcSendNotifications() {
   usb_cdc_speed_change_notification_t speed_notification = {
       .notification =
           {
-              .bmRequestType = USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-              .bNotification = USB_CDC_NC_CONNECTION_SPEED_CHANGE,
+              .bmRequestType = kClassInterfaceIn,
+              .bNotification =
+                  fidl::ToUnderlying(fdescriptor::CdcNotification::kConnectionSpeedChange),
               .wValue = 0,
               .wIndex = descriptors_.cdc_intf_0.b_interface_number,
               .wLength = 2 * sizeof(uint32_t),
@@ -443,6 +450,9 @@ void UsbCdcFunction::CdcTxComplete(std::vector<fendpoint::Completion> completion
   if (unbound_.load()) {
     for (auto &completion : completions) {
       bulk_in_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
+      if (!tx_completion_queue_.empty()) {
+        tx_completion_queue_.pop_front();
+      }
     }
     CheckStopComplete();
     return;
@@ -466,9 +476,11 @@ void UsbCdcFunction::CdcTxComplete(std::vector<fendpoint::Completion> completion
       fdf::error("received tx completion without pending tx");
       continue;
     }
-    const uint32_t tx_id = tx_completion_queue_.front();
-    results[results_count++] = {.id = tx_id, .status = status};
-    tx_completion_queue_.pop();
+    const std::optional<uint32_t> tx_id = tx_completion_queue_.front();
+    tx_completion_queue_.pop_front();
+    if (tx_id.has_value()) {
+      results[results_count++] = {.id = *tx_id, .status = status};
+    }
   }
   if (results_count > 0 && netdevice_ifc_.is_valid()) {
     fidl::OneWayStatus status = netdevice_ifc_.buffer(arena)->CompleteTx(
@@ -495,15 +507,16 @@ void UsbCdcFunction::Control(ControlRequest &request, ControlCompleter::Sync &co
       w_length);
   TRACE_DURATION("cdc_eth", __func__);
 
-  if (setup.bm_request_type() == (USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-      setup.b_request() == USB_CDC_SET_ETHERNET_PACKET_FILTER) {
+  if (setup.bm_request_type() == kClassInterfaceOut &&
+      setup.b_request() == fdescriptor::CdcRequest::kSetEthernetPacketFilter) {
     fdf::debug("setting packet filter not supported");
     completer.Reply(zx::ok(std::vector<uint8_t>{}));
     return;
   }
 
-  if (setup.bm_request_type() == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
-      setup.b_request() == USB_REQ_CLEAR_FEATURE && setup.w_value() == USB_ENDPOINT_HALT) {
+  if (setup.bm_request_type() == kStandardEndpointOut &&
+      setup.b_request() == fdescriptor::StandardRequest::kClearFeature &&
+      setup.w_value() == fidl::ToUnderlying(fdescriptor::FeatureSelector::kEndpointHalt)) {
     fdf::debug("clearing endpoint-halt not supported");
     completer.Reply(zx::ok(std::vector<uint8_t>{}));
     return;
@@ -579,7 +592,6 @@ struct UsbCdcFunction::SetConfiguredSharedState
               return;
             }
             self_shared->self->DiscardPendingTxBuffers(ZX_ERR_CANCELED);
-            self_shared->self->ReturnPendingRxSpace();
             self_shared->self->DrainRxCompletionQueue();
             self_shared->self->speed_ = fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined;
             self_shared->self->configured_ = false;
@@ -592,7 +604,6 @@ struct UsbCdcFunction::SetConfiguredSharedState
       // Host-initiated soft reset (true -> true):
       // All pending requests from the previous session have returned. Discard remaining buffers.
       self->DiscardPendingTxBuffers(ZX_ERR_CANCELED);
-      self->ReturnPendingRxSpace();
       self->DrainRxCompletionQueue();
 
       if (!self->async_function_.is_valid()) {
@@ -755,7 +766,7 @@ void UsbCdcFunction::SetConfigured(SetConfiguredRequest &request,
   state->target_speed = speed;
   set_configured_state_ = state;
 
-  if (!intr_ep_.client().is_valid() || intr_ep_.RequestsFull()) {
+  if (!intr_ep_.client().is_valid()) {
     state->intr_cancelled = true;
   } else {
     intr_ep_->CancelAll().Then(
@@ -768,7 +779,7 @@ void UsbCdcFunction::SetConfigured(SetConfiguredRequest &request,
         });
   }
 
-  if (!bulk_out_ep_.client().is_valid() || bulk_out_ep_.RequestsFull()) {
+  if (!bulk_out_ep_.client().is_valid()) {
     state->bulk_out_cancelled = true;
   } else {
     bulk_out_ep_->CancelAll().Then(
@@ -781,7 +792,7 @@ void UsbCdcFunction::SetConfigured(SetConfiguredRequest &request,
         });
   }
 
-  if (!bulk_in_ep_.client().is_valid() || bulk_in_ep_.RequestsFull()) {
+  if (!bulk_in_ep_.client().is_valid()) {
     state->bulk_in_cancelled = true;
   } else {
     bulk_in_ep_->CancelAll().Then(
@@ -887,7 +898,6 @@ struct UsbCdcFunction::SetInterfaceSharedState
               disable_state->pending_calls--;
               if (disable_state->pending_calls == 0) {
                 self_shared->self->DiscardPendingTxBuffers(ZX_ERR_CANCELED);
-                self_shared->self->ReturnPendingRxSpace();
                 self_shared->self->DrainRxCompletionQueue();
                 zx_status_t reply_status = disable_state->status;
                 if (self_shared->self->set_interface_state_ == self_shared) {
@@ -899,7 +909,6 @@ struct UsbCdcFunction::SetInterfaceSharedState
       }
     } else {
       self->DiscardPendingTxBuffers(ZX_ERR_CANCELED);
-      self->ReturnPendingRxSpace();
       self->DrainRxCompletionQueue();
 
       StepDisableBulkOut();
@@ -1130,7 +1139,7 @@ void UsbCdcFunction::SetInterface(SetInterfaceRequest &request,
   state->self = this;
   set_interface_state_ = state;
 
-  if (!bulk_out_ep_.client().is_valid() || bulk_out_ep_.RequestsFull()) {
+  if (!bulk_out_ep_.client().is_valid()) {
     state->bulk_out_cancelled = true;
   } else {
     bulk_out_ep_.client()->CancelAll().Then(
@@ -1143,7 +1152,7 @@ void UsbCdcFunction::SetInterface(SetInterfaceRequest &request,
         });
   }
 
-  if (!bulk_in_ep_.client().is_valid() || bulk_in_ep_.RequestsFull()) {
+  if (!bulk_in_ep_.client().is_valid()) {
     state->bulk_in_cancelled = true;
   } else {
     bulk_in_ep_.client()->CancelAll().Then(
@@ -1400,6 +1409,7 @@ void UsbCdcFunction::Stop(fdf::StopCompleter completer) {
 
   DrainRxCompletionQueue();
   online_ = false;
+  netdevice_started_ = false;
 
   DiscardPendingTxBuffers(ZX_ERR_CANCELED);
   ReturnPendingRxSpace();
@@ -1556,11 +1566,13 @@ void UsbCdcFunction::Init(fnetdev::wire::NetworkDeviceImplInitRequest *request, 
 }
 
 void UsbCdcFunction::Start(fdf::Arena &arena, StartCompleter::Sync &completer) {
+  netdevice_started_ = true;
   UpdatePortStatus();
   completer.buffer(arena).Reply(ZX_OK);
 }
 
 void UsbCdcFunction::Stop(fdf::Arena &arena, StopCompleter::Sync &completer) {
+  netdevice_started_ = false;
   DiscardPendingTxBuffers(ZX_ERR_CANCELED);
   ReturnPendingRxSpace();
   completer.buffer(arena).Reply();
@@ -1687,7 +1699,7 @@ void UsbCdcFunction::QueueTx(fnetdev::wire::NetworkDeviceImplQueueTxRequest *req
       }
     } else {
       for (size_t i = 0; i < reqs_count; ++i) {
-        tx_completion_queue_.push(queued_ids[i]);
+        tx_completion_queue_.push_back(queued_ids[i]);
       }
     }
   }
@@ -1696,7 +1708,7 @@ void UsbCdcFunction::QueueTx(fnetdev::wire::NetworkDeviceImplQueueTxRequest *req
 
 void UsbCdcFunction::QueueRxSpace(fnetdev::wire::NetworkDeviceImplQueueRxSpaceRequest *request,
                                   fdf::Arena &arena, QueueRxSpaceCompleter::Sync &completer) {
-  if (unbound_.load() || !online_) {
+  if (unbound_.load() || !netdevice_started_) {
     const size_t count = request->buffers.size();
     fidl::VectorView<fnetdev::wire::RxBuffer> rx_buffers(arena, count);
     fidl::VectorView<fnetdev::wire::RxBufferPart> rx_buffers_parts(arena, count);

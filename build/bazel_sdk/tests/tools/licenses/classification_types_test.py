@@ -5,15 +5,21 @@
 
 import unittest
 
-from fuchsia.tools.licenses.classification_types import *
+from fuchsia.tools.licenses.classification_types import (
+    AsterixStringExpression,
+    IdentifiedSnippet,
+    LicenseClassification,
+    LicensesClassifications,
+    StringMatcher,
+)
 
 
 class TestClassificationTypes(unittest.TestCase):
-    def test_StringMatcher_to_json(self):
+    def test_StringMatcher_to_json(self) -> None:
         sm = StringMatcher.create(["foo", "bar"])
         self.assertEqual(sm.to_json(), ["foo", "bar"])
 
-    def test_StringMatcher_exact_matches(self):
+    def test_StringMatcher_exact_matches(self) -> None:
         sm = StringMatcher.create(["foo", "bar"])
 
         self.assertTrue(sm.matches("foo"))
@@ -31,27 +37,27 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertFalse(sm.matches_all(["foo", "bar", "baz"]))
         self.assertFalse(sm.matches_all(["baz"]))
 
-    def test_AsterixStringExpression_asterix_matches_everything(self):
+    def test_AsterixStringExpression_asterix_matches_everything(self) -> None:
         exp = AsterixStringExpression.create("*")
 
         self.assertTrue(exp.matches(""))
         self.assertTrue(exp.matches("foo"))
 
-    def test_AsterixStringExpression_asterix_prefix(self):
+    def test_AsterixStringExpression_asterix_prefix(self) -> None:
         exp = AsterixStringExpression.create("*foo")
 
         self.assertTrue(exp.matches("foo"))
         self.assertTrue(exp.matches("  foo"))
         self.assertFalse(exp.matches("foo  "))
 
-    def test_AsterixStringExpression_asterix_suffix(self):
+    def test_AsterixStringExpression_asterix_suffix(self) -> None:
         exp = AsterixStringExpression.create("foo*")
 
         self.assertTrue(exp.matches("foo"))
         self.assertTrue(exp.matches("foo  "))
         self.assertFalse(exp.matches("  foo"))
 
-    def test_AsterixStringExpression_asterix_middle(self):
+    def test_AsterixStringExpression_asterix_middle(self) -> None:
         exp = AsterixStringExpression.create("fo*o")
 
         self.assertTrue(exp.matches("foo"))
@@ -59,7 +65,7 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertFalse(exp.matches("fo   o  "))
         self.assertFalse(exp.matches(" fo   o"))
 
-    def test_AsterixStringExpression_mulitple_asterix(self):
+    def test_AsterixStringExpression_mulitple_asterix(self) -> None:
         exp = AsterixStringExpression.create("b*a*r")
 
         self.assertTrue(exp.matches("bar"))
@@ -88,7 +94,7 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertTrue(exp.matches("b a r "))
         self.assertTrue(exp.matches(" b a r "))
 
-    def test_StringMatcher_asterix_matches(self):
+    def test_StringMatcher_asterix_matches(self) -> None:
         sm = StringMatcher.create(["fo*o", "*bar", "baz*", "*w*a*z*"])
 
         self.assertTrue(sm.matches("foo"))
@@ -118,7 +124,7 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertTrue(sm.matches("XwYaZz"))
         self.assertTrue(sm.matches("wXaYzZ"))
 
-    def test_StringMatcher_asterix_matches_greedily(self):
+    def test_StringMatcher_asterix_matches_greedily(self) -> None:
         sm = StringMatcher.create(["ba*r"])
 
         self.assertTrue(sm.matches("bar"))
@@ -126,7 +132,7 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertTrue(sm.matches("barr"))
         self.assertTrue(sm.matches("barbarr"))
 
-    def test_select_majority_identifications_clear_majority(self):
+    def test_select_majority_identifications_clear_majority(self) -> None:
         mit_snippet = IdentifiedSnippet(
             identified_as="MIT",
             confidence=1.0,
@@ -152,7 +158,9 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertEqual(len(winning_snippets), 1)
         self.assertEqual(winning_snippets[0].identified_as, "MIT")
 
-    def test_select_majority_identifications_unidentified_majority(self):
+    def test_select_majority_identifications_unidentified_majority(
+        self,
+    ) -> None:
         mit_snippet = IdentifiedSnippet(
             identified_as="MIT",
             confidence=1.0,
@@ -181,7 +189,9 @@ class TestClassificationTypes(unittest.TestCase):
             IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
         )
 
-    def test_select_majority_identifications_tie_breaks_toward_identified(self):
+    def test_select_majority_identifications_tie_breaks_toward_identified(
+        self,
+    ) -> None:
         unid_snippet = IdentifiedSnippet(
             identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
             confidence=0.0,
@@ -213,7 +223,7 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(winning_snippets[0].identified_as, "MIT")
 
-    def test_replace_classifications(self):
+    def test_replace_classifications(self) -> None:
         c1 = LicenseClassification(
             license_id="lic1",
             identifications=[
@@ -268,7 +278,7 @@ class TestClassificationTypes(unittest.TestCase):
             "Apache-2.0",
         )
 
-    def test_retry_failing_files_sequential_majority(self):
+    def test_retry_failing_files_sequential_majority(self) -> None:
         import os
         import stat
         import sys

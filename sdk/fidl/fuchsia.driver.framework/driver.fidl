@@ -14,7 +14,6 @@ using fuchsia.power.broker;
 /// Once the driver has closed its server end, the Driver Framework will initiate the shutdown
 /// of all dispatchers belonging to this driver.
 @transport("Driver")
-@available(added=15)
 open protocol Driver {
     /// Starts the driver with the given |start_args|.
     ///

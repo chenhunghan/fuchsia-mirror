@@ -117,9 +117,8 @@ fpromise::promise<inspect::Inspector> PlatformDevice::InspectNodeCallback() cons
   inspect::Inspector inspector;
   auto interrupt_vectors =
       inspector.GetRoot().CreateUintArray("interrupt_vectors", interrupt_vectors_.size());
-  size_t i = 0;
-  for (const auto& vector : interrupt_vectors_) {
-    interrupt_vectors.Set(i++, vector);
+  for (auto const& [i, vector] : std::views::enumerate(interrupt_vectors_)) {
+    interrupt_vectors.Set(i, vector);
   }
   inspector.emplace(std::move(interrupt_vectors));
   return fpromise::make_result_promise(fpromise::ok(std::move(inspector)));
@@ -141,7 +140,7 @@ zx::result<PlatformDevice::Mmio> PlatformDevice::GetMmio(uint32_t index) const {
   }
 
   const auto& mmio = node_.mmio().value()[index];
-  if (unlikely(!IsValid(mmio))) {
+  if (!IsValid(mmio)) [[unlikely]] {
     return zx::error(ZX_ERR_INTERNAL);
   }
   if (mmio.base() == std::nullopt) {
@@ -180,7 +179,7 @@ void PlatformDevice::GetInterrupt(uint32_t index, uint32_t flags, GetInterruptCa
   }
 
   const auto& irq = node_.irq().value()[index];
-  if (unlikely(!IsValid(irq))) {
+  if (!IsValid(irq)) [[unlikely]] {
     callback(zx::error(ZX_ERR_INTERNAL));
     return;
   }
@@ -200,7 +199,7 @@ void PlatformDevice::GetInterrupt(uint32_t index, uint32_t flags, GetInterruptCa
   }
 
   // If the driver chose "default" for the IRQ mode, use the configuration we have instead.
-  const uint32_t cfg_mode = static_cast<uint32_t>(irq.mode().value()) & ZX_INTERRUPT_MODE_MASK;
+  const uint32_t cfg_mode = std::to_underlying(irq.mode().value()) & ZX_INTERRUPT_MODE_MASK;
   const uint32_t drv_mode = flags & ZX_INTERRUPT_MODE_MASK;
 
   if (drv_mode == ZX_INTERRUPT_MODE_DEFAULT) {
@@ -266,7 +265,7 @@ zx::result<zx::bti> PlatformDevice::GetBti(uint32_t index) const {
   }
 
   const auto& bti = node_.bti().value()[index];
-  if (unlikely(!IsValid(bti))) {
+  if (!IsValid(bti)) [[unlikely]] {
     return zx::error(ZX_ERR_INTERNAL);
   }
 
@@ -279,7 +278,7 @@ zx::result<zx::resource> PlatformDevice::GetSmc(uint32_t index) const {
   }
 
   const auto& smc = node_.smc().value()[index];
-  if (unlikely(!IsValid(smc))) {
+  if (!IsValid(smc)) [[unlikely]] {
     return zx::error(ZX_ERR_INTERNAL);
   }
 
@@ -354,12 +353,14 @@ zx::result<> PlatformDevice::CreateNode() {
       fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.platform.device.Service"),
   };
   if (const auto& node_props = node_.properties(); node_props.has_value()) {
-    std::copy(node_props->cbegin(), node_props->cend(), std::back_inserter(props));
+    props.append_range(*node_props);
   }
 
   auto add_props = [&props](const auto& resource, const std::string& count_key,
                             const char* resource_key_prefix) {
-    const uint32_t count = resource.has_value() ? static_cast<uint32_t>(resource->size()) : 0u;
+    const uint32_t count =
+        resource.transform([](const auto& r) { return static_cast<uint32_t>(r.size()); })
+            .value_or(0u);
     props.emplace_back(fdf::MakeProperty2(count_key, count));
 
     for (uint32_t i = 0; i < count; i++) {
@@ -686,8 +687,7 @@ void PlatformDevice::GetInterruptByName(GetInterruptByNameRequestView request,
 
 void PlatformDevice::GetBtiById(GetBtiByIdRequestView request,
                                 GetBtiByIdCompleter::Sync& completer) {
-  zx::result bti = GetBti(request->index);
-  if (bti.is_ok()) {
+  if (zx::result bti = GetBti(request->index); bti.is_ok()) {
     completer.ReplySuccess(std::move(bti.value()));
   } else {
     completer.ReplyError(bti.status_value());
@@ -703,8 +703,7 @@ void PlatformDevice::GetBtiByName(GetBtiByNameRequestView request,
   if (!index.has_value()) {
     return completer.ReplyError(ZX_ERR_OUT_OF_RANGE);
   }
-  zx::result bti = GetBti(index.value());
-  if (bti.is_ok()) {
+  if (zx::result bti = GetBti(index.value()); bti.is_ok()) {
     completer.ReplySuccess(std::move(bti.value()));
   } else {
     completer.ReplyError(bti.status_value());
@@ -713,8 +712,7 @@ void PlatformDevice::GetBtiByName(GetBtiByNameRequestView request,
 
 void PlatformDevice::GetSmcById(GetSmcByIdRequestView request,
                                 GetSmcByIdCompleter::Sync& completer) {
-  zx::result smc = GetSmc(request->index);
-  if (smc.is_ok()) {
+  if (zx::result smc = GetSmc(request->index); smc.is_ok()) {
     completer.ReplySuccess(std::move(smc.value()));
   } else {
     completer.ReplyError(smc.status_value());
@@ -730,8 +728,7 @@ void PlatformDevice::GetSmcByName(GetSmcByNameRequestView request,
   if (!index.has_value()) {
     return completer.ReplyError(ZX_ERR_OUT_OF_RANGE);
   }
-  zx::result smc = GetSmc(index.value());
-  if (smc.is_ok()) {
+  if (zx::result smc = GetSmc(index.value()); smc.is_ok()) {
     completer.ReplySuccess(std::move(smc.value()));
   } else {
     completer.ReplyError(smc.status_value());

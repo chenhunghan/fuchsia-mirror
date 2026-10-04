@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "util",
+    srcs = [
+        "src/fast_copy.rs",
+        "src/insert_unique.rs",
+        "src/lib.rs",
+        "src/named_map.rs",
+        "src/paths.rs",
+    ],
+    crate_name = "assembly_util",
+    edition = "2024",
+    test_deps = [
+        "//third_party/rust_crates/vendor:serial_test",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+    visibility = [
+        "//build/assembly/tools/assembly:__pkg__",
+        "//build/assembly/tools/assembly_config:__pkg__",
+        "//build/assembly/tools/mos_tool:__pkg__",
+        "//src/developer/ffx/plugins:__subpackages__",
+        "//src/lib/assembly:__subpackages__",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:pathdiff",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:walkdir",
+        "//third_party/rust_crates/vendor:xattr",
+    ],
+)

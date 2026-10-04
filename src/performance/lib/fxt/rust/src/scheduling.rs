@@ -393,8 +393,8 @@ mod tests {
                 .atom(1024u64.to_le_bytes())
                 .atom(5u64.to_le_bytes())
                 .atom(8u64.to_le_bytes())
-                .atom(FxtBuilder::new(first_arg_header).atom(first_arg_name).build())
-                .atom(FxtBuilder::new(second_arg_header).atom(second_arg_name).build())
+                .atom_words(FxtBuilder::new(first_arg_header).atom(first_arg_name).build())
+                .atom_words(FxtBuilder::new(second_arg_header).atom(second_arg_name).build())
                 .build(),
             RawTraceRecord::Scheduling(RawSchedulingRecord::ContextSwitch(RawContextSwitchEvent {
                 cpu_id: 6,
@@ -432,7 +432,7 @@ mod tests {
             FxtBuilder::new(header)
                 .atom(1024u64.to_le_bytes())
                 .atom(5u64.to_le_bytes())
-                .atom(FxtBuilder::new(arg_header).atom(arg_name).build())
+                .atom_words(FxtBuilder::new(arg_header).atom(arg_name).build())
                 .build(),
             RawTraceRecord::Scheduling(RawSchedulingRecord::ThreadWakeup(RawThreadWakeupEvent {
                 cpu_id: 6,

@@ -543,6 +543,74 @@ class TestBazelRustAnalyzerUtils(unittest.TestCase):
                 ],
             )
 
+    def test_consolidate_crate_proc_macro_prefer_unsuffixed_exec(
+        self,
+    ) -> None:
+        crate_specs: list[CrateSpec] = [
+            CrateSpec(
+                aliases={},
+                crate_id="ID-myproc_macro.rs",
+                display_name="myproc_macro",
+                edition="2018",
+                root_module="myproc_macro.rs",
+                is_workspace_member=True,
+                deps=[],
+                proc_macro_dylib_path=None,
+                source=None,
+                cfg=["test", "debug_assertions"],
+                env={},
+                target="x86_64-uknown-linux-gnu",
+                crate_type="proc-macro",
+                is_test=False,
+                build=None,
+            ),
+            CrateSpec(
+                aliases={},
+                crate_id="ID-myproc_macro.rs",
+                display_name="myproc_macro",
+                edition="2018",
+                root_module="myproc_macro.rs",
+                is_workspace_member=True,
+                deps=[],
+                proc_macro_dylib_path="bazel-out/k8-opt-exec/bin/myproc_macro/libmyproc_macro-12345.so",
+                source=None,
+                cfg=["test", "debug_assertions"],
+                env={},
+                target="x86_64-uknown-linux-gnu",
+                crate_type="proc-macro",
+                is_test=False,
+                build=None,
+            ),
+        ]
+
+        for perm in itertools.permutations(crate_specs):
+            input_crate_specs = (
+                bazel_rust_analyzer_utils.consolidate_crate_specs(perm)
+            )
+
+            self.assertListEqual(
+                input_crate_specs,
+                [
+                    CrateSpec(
+                        aliases={},
+                        crate_id="ID-myproc_macro.rs",
+                        display_name="myproc_macro",
+                        edition="2018",
+                        root_module="myproc_macro.rs",
+                        is_workspace_member=True,
+                        deps=[],
+                        proc_macro_dylib_path="bazel-out/k8-opt-exec/bin/myproc_macro/libmyproc_macro-12345.so",
+                        source=None,
+                        cfg=["test", "debug_assertions"],
+                        env={},
+                        target="x86_64-uknown-linux-gnu",
+                        crate_type="proc-macro",
+                        is_test=False,
+                        build=None,
+                    ),
+                ],
+            )
+
     def test_consolidate_create_spec_with_aliases(self) -> None:
         crate_specs: list[CrateSpec] = [
             CrateSpec(

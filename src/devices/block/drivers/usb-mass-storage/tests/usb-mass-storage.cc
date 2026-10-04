@@ -32,13 +32,35 @@ using usb_descriptor = std::variant<usb_interface_descriptor_t, usb_endpoint_des
 
 const usb_descriptor kDescriptors[] = {
     // Interface descriptor
-    usb_interface_descriptor_t{sizeof(usb_descriptor), USB_DT_INTERFACE, 0, 0, 2, 8, 7, 0x50, 0},
+    usb_interface_descriptor_t{sizeof(usb_descriptor),
+                               fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface), 0, 0, 2,
+                               8, 7, 0x50, 0},
     // IN endpoint
-    usb_endpoint_descriptor_t{sizeof(usb_descriptor), USB_DT_ENDPOINT, USB_DIR_IN,
-                              static_cast<uint8_t>(fdescriptor::EndpointType::kBulk), 64, 0},
+    usb_endpoint_descriptor_t{sizeof(usb_descriptor),
+                              fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+                              fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn),
+                              fidl::ToUnderlying(fdescriptor::EndpointType::kBulk), 64, 0},
     // OUT endpoint
-    usb_endpoint_descriptor_t{sizeof(usb_descriptor), USB_DT_ENDPOINT, USB_DIR_OUT,
-                              static_cast<uint8_t>(fdescriptor::EndpointType::kBulk), 64, 0}};
+    usb_endpoint_descriptor_t{sizeof(usb_descriptor),
+                              fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+                              fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut),
+                              fidl::ToUnderlying(fdescriptor::EndpointType::kBulk), 64, 0}};
+
+const usb_descriptor kDescriptorsInterface1[] = {
+    // Interface descriptor
+    usb_interface_descriptor_t{sizeof(usb_descriptor),
+                               fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface), 1, 0, 2,
+                               8, 7, 0x50, 0},
+    // IN endpoint
+    usb_endpoint_descriptor_t{sizeof(usb_descriptor),
+                              fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+                              fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn),
+                              fidl::ToUnderlying(fdescriptor::EndpointType::kBulk), 64, 0},
+    // OUT endpoint
+    usb_endpoint_descriptor_t{sizeof(usb_descriptor),
+                              fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+                              fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut),
+                              fidl::ToUnderlying(fdescriptor::EndpointType::kBulk), 64, 0}};
 
 struct Packet;
 struct Packet : fbl::DoublyLinkedListable<fbl::RefPtr<Packet>>, fbl::RefCounted<Packet> {
@@ -86,6 +108,7 @@ struct Context {
   fit::function<void(usb_request_t*)> on_request_queue;
   fit::function<void(const ums_cbw_t&)> on_cbw;
   std::optional<uint8_t> tur_csw_status;
+  uint16_t last_get_max_lun_index = 0;
 };
 
 class UsbBanjoServer : public ddk::UsbProtocol<UsbBanjoServer> {
@@ -109,7 +132,8 @@ class UsbBanjoServer : public ddk::UsbProtocol<UsbBanjoServer> {
                            int64_t timeout, uint8_t* out_read_buffer, size_t read_size,
                            size_t* out_read_actual) {
     switch (request) {
-      case USB_REQ_GET_MAX_LUN: {
+      case fidl::ToUnderlying(fdescriptor::MscRequest::kGetMaxLun): {
+        context_->last_get_max_lun_index = index;
         if (!read_size) {
           *out_read_actual = 0;
           return ZX_OK;
@@ -125,9 +149,9 @@ class UsbBanjoServer : public ddk::UsbProtocol<UsbBanjoServer> {
 
   size_t UsbGetMaxTransferSize(uint8_t ep) {
     switch (ep) {
-      case USB_DIR_OUT:
+      case fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut):
         __FALLTHROUGH;
-      case USB_DIR_IN:
+      case fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn):
         // 10MB transfer size (to test large transfers)
         // (is this even possible in real hardware?)
         return 1000 * 1000 * 10;
@@ -152,7 +176,8 @@ class UsbBanjoServer : public ddk::UsbProtocol<UsbBanjoServer> {
       complete_cb->callback(complete_cb->ctx, usb_request);
       return;
     }
-    if ((usb_request->header.ep_address & USB_ENDPOINT_DIR_MASK) == USB_ENDPOINT_IN) {
+    if ((usb_request->header.ep_address & fdescriptor::kEndpointDirectionMask) ==
+        fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn)) {
       if (context_->pending_packets.begin() == context_->pending_packets.end()) {
         usb_request->response.status = ZX_OK;
         complete_cb->callback(complete_cb->ctx, usb_request);
@@ -1069,6 +1094,16 @@ TEST_F(UmsTest, NewRequestsFailDuringLunShutdown) {
   check_thread.join();
 
   EXPECT_EQ(driver_->block_devs()[1], nullptr);
+}
+
+TEST_F(UmsTest, GetMaxLunRoutesToCorrectInterface) {
+  driver_test().RunInEnvironmentTypeContext([&](Environment& env) {
+    env.context().descs = kDescriptorsInterface1;
+    env.context().desc_length = sizeof(kDescriptorsInterface1);
+  });
+  StartDriver();
+  driver_test().RunInEnvironmentTypeContext(
+      [&](Environment& env) { EXPECT_EQ(1u, env.context().last_get_max_lun_index); });
 }
 
 FUCHSIA_DRIVER_EXPORT2(TestUsbMassStorageDevice);

@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Executes a command, then rewrites the depfile, converts all absolute paths to relative"
     )
@@ -31,6 +31,7 @@ def main():
             lines.append(" ".join(os.path.relpath(p) for p in line.split()))
     with open(args.depfile, "w") as f:
         f.write("\n".join(lines))
+    return 0
 
 
 if __name__ == "__main__":

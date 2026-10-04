@@ -1,0 +1,221 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_dylib", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+_SRCS = [
+    "src/common.rs",
+    "src/directory.rs",
+    "src/directory/common.rs",
+    "src/directory/connection.rs",
+    "src/directory/dirents_sink.rs",
+    "src/directory/entry.rs",
+    "src/directory/entry_container.rs",
+    "src/directory/helper.rs",
+    "src/directory/immutable.rs",
+    "src/directory/immutable/connection.rs",
+    "src/directory/immutable/simple.rs",
+    "src/directory/immutable/simple/tests.rs",
+    "src/directory/mutable.rs",
+    "src/directory/mutable/connection.rs",
+    "src/directory/read_dirents.rs",
+    "src/directory/simple.rs",
+    "src/directory/test_utils.rs",
+    "src/directory/traversal_position.rs",
+    "src/directory/watchers.rs",
+    "src/directory/watchers/event_producers.rs",
+    "src/directory/watchers/watcher.rs",
+    "src/execution_scope.rs",
+    "src/file.rs",
+    "src/file/common.rs",
+    "src/file/connection.rs",
+    "src/file/simple.rs",
+    "src/file/simple/tests.rs",
+    "src/file/vmo.rs",
+    "src/file/vmo/tests.rs",
+    "src/lib.rs",
+    "src/node.rs",
+    "src/object_request.rs",
+    "src/path.rs",
+    "src/protocols.rs",
+    "src/remote.rs",
+    "src/remote/tests.rs",
+    "src/request_handler.rs",
+    "src/service.rs",
+    "src/service/tests.rs",
+    "src/service/tests/direct_connection.rs",
+    "src/service/tests/node_reference.rs",
+    "src/symlink.rs",
+    "src/temp_clone.rs",
+    "src/test_utils.rs",
+    "src/test_utils/assertions.rs",
+    "src/token_registry.rs",
+    "src/tree_builder.rs",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    "//sdk/rust/zx-status",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-sync",
+    "//src/storage/lib/trace",
+    "//src/storage/lib/vfs/rust/name",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:itertools",
+    "//third_party/rust_crates/vendor:libc",
+    "//third_party/rust_crates/vendor:pin-project",
+    "//third_party/rust_crates/vendor:slab",
+    "//third_party/rust_crates/vendor:static_assertions",
+    "//third_party/rust_crates/vendor:thiserror",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_PROC_MACRO_DEPS = [
+    "//third_party/rust_crates/vendor:paste",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_TEST_DEPS = [
+    "//src/lib/fuchsia",
+    "//third_party/rust_crates/vendor:assert_matches",
+    "//third_party/rust_crates/vendor:bitflags",
+]
+
+# @bazel2gn:transformer=deps
+_FUCHSIA_DEPS = [
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
+    "//sdk/rust/zx",
+    "//src/lib/fdomain/client:flex_fidl",
+]
+
+# @bazel2gn:transformer=deps
+_FUCHSIA_TEST_DEPS = [
+    "//src/lib/fdomain/local:local_fidl_flex",
+    "//src/lib/fuchsia-fs",
+    "//src/testing/fidl:placeholders_rust",
+]
+
+# On Fuchsia, `:vfs` is a Rust dylib (libvfs_rust.so) shared by all the
+# components that use it. Rust dylibs are only supported on Fuchsia, so on
+# host it is a regular Rust library.
+alias(
+    name = "vfs",
+    actual = select({
+        "@platforms//os:fuchsia": ":vfs_dylib",
+        "//conditions:default": ":vfs_host",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# NOTE: This does not depend on the log crate on purpose. Doing so would make
+# this dylib the source of the global logger, which can cause problems for
+# things that dynamically link Rust libraries (like drivers) and cause link
+# errors at worst, or incorrect log attribution at best.
+rustc_dylib(
+    name = "vfs_dylib",
+    srcs = _SRCS,
+    build_flags = ["//build/config/rust:bootfs"],
+    crate_name = "vfs",
+    edition = "2024",
+    output_name = "vfs_rust",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    public_deps = [
+        # TODO(https://fxbug.dev/42137337): Figure out why this is not properly
+        # propagated to dependents in GN.
+        #
+        # Without this public dep, libtrace-engine doesn't seem to be properly
+        # propagated to dependents even it's a transitive dependency. E.g. There's
+        # the following dep path.
+        #
+        #   //src/storage/lib/vfs/rust:vfs_dylib --[public]-->
+        #   //src/storage/lib/vfs/rust:vfs_dylib.actual --[private]-->
+        #   //src/storage/lib/trace:trace --[public]-->
+        #   //src/storage/lib/trace:trace.actual --[private]-->
+        #   //src/lib/trace/rust:trace --[public]-->
+        #   //src/lib/trace/rust:trace.actual --[private]-->
+        #   //zircon/system/ulib/trace-engine:trace-engine
+        #
+        "//zircon/system/ulib/trace-engine",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    test_deps = _COMMON_TEST_DEPS + _FUCHSIA_TEST_DEPS + [
+        "//src/testing/fidl:placeholders_rust_flex",
+        "//third_party/rust_crates/vendor:log",
+    ],
+    version = "0.1.0",
+    visibility = [":__pkg__"],
+    with_unit_tests = True,
+    deps = _COMMON_DEPS + _FUCHSIA_DEPS,
+)
+
+# Statically linked version of the vfs.
+#
+# Filesystems interact frequently with the vfs. Due to this heavy usage,
+# linking them against the dynamically linked vfs introduces significant
+# performance overhead. To avoid this, filesystems should use this static
+# version. Other components should use the dynamically linked vfs.
+rustc_library(
+    name = "vfs_static",
+    srcs = _SRCS,
+    build_flags = ["//build/config/rust:bootfs"],
+    crate_features = ["use_log"],
+    crate_name = "vfs",
+    edition = "2024",
+    # Keeps the GN output at its pre-migration path (libvfs_rust.rlib). With a
+    # different name, a stale libvfs_rust.rlib left in incremental GN build
+    # directories would also match rustc's search for the `vfs` crate.
+    output_name = "vfs_rust",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    version = "0.1.0",
+    visibility = [
+        "//src/storage/fxfs:__subpackages__",
+        "//src/storage/lib/pseudo_fs:__subpackages__",
+    ],
+    deps = _COMMON_DEPS + _FUCHSIA_DEPS + [
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_library(
+    name = "vfs_host",
+    srcs = _SRCS,
+    crate_features = [
+        "use_log",
+        "fdomain",
+    ],
+    crate_name = "vfs",
+    edition = "2024",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    target_compatible_with = HOST_CONSTRAINTS,
+    test_deps = _COMMON_TEST_DEPS + [
+        "//src/lib/fdomain/local",
+        "//src/lib/fdomain/local:local_fdomain_flex",
+        "//src/lib/fuchsia-fs:fuchsia-fs_fdomain",
+        "//src/testing/fidl:placeholders_rust_fdomain_flex",
+    ],
+    version = "0.1.0",
+    # Use `:vfs` instead.
+    #
+    # Before the Bazel migration, the GN host library had a visibility
+    # allowlist to avoid proliferation of host users. That can't be expressed
+    # here: dependents go through the `:vfs` alias, which must be public for
+    # Fuchsia users, and Bazel's `visibility` attribute is not configurable, so
+    # the alias can't use a different allowlist on host. Restricting this
+    # target doesn't help either, since Bazel checks its visibility against
+    # the alias's package, not the package that depends on the alias.
+    visibility = [":__pkg__"],
+    with_unit_tests = True,
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/fuchsia-emulated-handle",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

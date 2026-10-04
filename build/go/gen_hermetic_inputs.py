@@ -14,9 +14,9 @@ import sys
 from gen_library_metadata import get_sources
 
 
-def go_dep_files_inputs(go_dep_files, is_test):
+def go_dep_files_inputs(go_dep_files: list[str], is_test: bool) -> list[str]:
     """Collect all inputs from go_dep files."""
-    inputs = []
+    inputs: list[str] = []
     for _, src in get_sources(go_dep_files).items():
         if not os.path.exists(src):
             raise ValueError(f'source "{src}" in go_deps file does not exist')
@@ -69,7 +69,7 @@ GO_SRC_EXTS = {
 }
 
 
-def goroot_inputs(goroot):
+def goroot_inputs(goroot: str) -> list[str]:
     """Collect all inputs from goroot."""
 
     # The Go compiler is an input, it's used by the build script.
@@ -88,7 +88,7 @@ def goroot_inputs(goroot):
     return inputs
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--go-dep-files",
@@ -119,6 +119,8 @@ def main():
     inputs += goroot_inputs(args.go_root)
     with open(args.output, "w") as f:
         f.write("\n".join(sorted(inputs)))
+
+    return 0
 
 
 if __name__ == "__main__":

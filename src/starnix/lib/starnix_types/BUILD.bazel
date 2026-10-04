@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_types",
+    srcs = [
+        "src/arch.rs",
+        "src/atomic.rs",
+        "src/augmented.rs",
+        "src/convert.rs",
+        "src/errors.rs",
+        "src/futex_address.rs",
+        "src/lib.rs",
+        "src/math.rs",
+        "src/ownership.rs",
+        "src/stats.rs",
+        "src/string.rs",
+        "src/thread_start_info.rs",
+        "src/time.rs",
+        "src/user_buffer.rs",
+        "src/vfs.rs",
+    ],
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = ["//src/lib/fuchsia"],
+    visibility = [
+        "//src/starnix/kernel/core:__subpackages__",
+        "//src/starnix/kernel/runner:__pkg__",
+        "//src/starnix/lib:__subpackages__",
+        "//src/starnix/modules:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.starnix.binder:fuchsia.starnix.binder_rust",
+        "//sdk/rust/zx",
+        "//src/starnix/lib/linux_uapi",
+        "//src/starnix/lib/starnix_uapi",
+        "//src/starnix/lib/syncio",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:cfg-if",
+        "//third_party/rust_crates/vendor:memoffset",
+        "//third_party/rust_crates/vendor:smallvec",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

@@ -4,7 +4,7 @@
 
 use anyhow::{Error, bail};
 use mundane::hash::Sha256;
-use num::FromPrimitive;
+use num_traits::FromPrimitive;
 use wlan_common::ie::rsn::akm::{self, Akm};
 
 use crate::boringssl::{Bignum, EcGroupId, EcPoint};

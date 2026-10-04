@@ -64,7 +64,7 @@ struct RawSpinlockStorage(zr::OpaqueBytes<RAW_SPINLOCK_SIZE>);
 #[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct RawSpinlock {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     class_id: *const c_void,
     storage: RawSpinlockStorage,
 }
@@ -75,7 +75,7 @@ impl RawSpinlock {
     /// Statically initializes a RawSpinlock in constant context.
     pub const fn const_init(_class_id: *const c_void) -> Self {
         Self {
-            #[cfg(feature = "lock_dep")]
+            #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
             class_id: _class_id,
             storage: RawSpinlockStorage(zr::OpaqueBytes::new([0u8; RAW_SPINLOCK_SIZE])),
         }
@@ -98,7 +98,7 @@ zr::unsafe_pinned_drop_ffi!(RawSpinlock, cpp_spinlock_destroy);
 #[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct RawMonitoredSpinlock {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     class_id: *const c_void,
     storage: RawSpinlockStorage,
 }
@@ -109,7 +109,7 @@ impl RawMonitoredSpinlock {
     /// Statically initializes a RawMonitoredSpinlock in constant context.
     pub const fn const_init(_class_id: *const c_void) -> Self {
         Self {
-            #[cfg(feature = "lock_dep")]
+            #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
             class_id: _class_id,
             storage: RawSpinlockStorage(zr::OpaqueBytes::new([0u8; RAW_SPINLOCK_SIZE])),
         }
@@ -350,9 +350,9 @@ impl crate::RawLock for RawMonitoredSpinlock {
 }
 
 const _: () = {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     const BASE_SIZE: usize = 8;
-    #[cfg(not(feature = "lock_dep"))]
+    #[cfg(not(any(feature = "lock_dep", feature = "lock_metadata_only")))]
     const BASE_SIZE: usize = 0;
 
     const EXPECTED_SPINLOCK_SIZE: usize = BASE_SIZE + if RAW_SPINLOCK_SIZE == 4 { 8 } else { 16 };

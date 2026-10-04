@@ -7,10 +7,6 @@
 
 // clang-format off
 
-// control request values
-#define USB_REQ_RESET               0xFF
-#define USB_REQ_GET_MAX_LUN         0xFE
-
 // error codes for CSW processing
 typedef uint32_t csw_status_t;
 #define CSW_SUCCESS      ((csw_status_t)0)

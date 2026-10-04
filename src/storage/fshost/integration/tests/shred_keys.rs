@@ -296,3 +296,41 @@ async fn data_formatted_keymint_upgrade_on_unseal_with_power_failure() {
 
     fixture.tear_down().await.unwrap();
 }
+
+#[fuchsia::test]
+async fn keymint_unavailable_does_not_wipe_data() {
+    let mut builder = new_builder().with_crypt_policy(crypt_policy::Policy::Keymint);
+    let keymint = builder.keymint();
+    let data_spec = DataSpec { crypt_policy: crypt_policy::Policy::Keymint, ..data_fs_spec() };
+    builder.with_disk().format_volumes(volumes_spec()).format_data(data_spec);
+    let fixture = builder.build().await;
+    fixture.check_fs_type("data", data_fs_type()).await;
+    fixture.check_test_data_file().await;
+    let disk = fixture.tear_down().await.unwrap();
+
+    // Start fshost with keymint unavailable; fshost should panic (forcing a reboot) without
+    // wiping /data.
+    let fixture = new_builder()
+        .with_crypt_policy(crypt_policy::Policy::Keymint)
+        .with_disk_from(disk)
+        .no_keymint()
+        .build()
+        .await;
+    let data_dir = fixture.dir("data", fio::PERM_READABLE);
+    data_dir
+        .query_filesystem()
+        .await
+        .expect_err("Opening connection to data should have failed if fshost panicked");
+    let disk = fixture.tear_down().await.unwrap();
+
+    // Boot again with keymint available and verify /data was not wiped.
+    let fixture = new_builder()
+        .with_crypt_policy(crypt_policy::Policy::Keymint)
+        .with_keymint_instance(keymint)
+        .with_disk_from(disk)
+        .build()
+        .await;
+    fixture.check_fs_type("data", data_fs_type()).await;
+    fixture.check_test_data_file().await;
+    fixture.tear_down().await;
+}

@@ -300,10 +300,13 @@ WEAVE_ERROR WeaveConfigManager::SetConfiguration(const std::string& path,
        it != default_config.MemberEnd(); ++it) {
     rapidjson::Value::MemberIterator config_it = config_.FindMember(it->name);
     if (config_it == config_.MemberEnd()) {
-      config_.AddMember(it->name, it->value, config_.GetAllocator());
+      rapidjson::Value name;
+      name.CopyFrom(it->name, config_.GetAllocator());
+      rapidjson::Value value;
+      value.CopyFrom(it->value, config_.GetAllocator());
+      config_.AddMember(name, value, config_.GetAllocator());
     } else if (should_replace) {
-      config_.RemoveMember(config_it->name);
-      config_.AddMember(it->name, it->value, config_.GetAllocator());
+      config_it->value.CopyFrom(it->value, config_.GetAllocator());
     }
   }
   return CommitKVPairs();

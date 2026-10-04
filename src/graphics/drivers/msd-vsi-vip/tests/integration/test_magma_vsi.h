@@ -76,7 +76,7 @@ class MagmaVsi {
   void ContextCreate() {
     ASSERT_NE(connection_, 0u);
     ASSERT_EQ(context_id_, 0u);
-    magma_connection_create_context(connection_, &(context_id_));
+    magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM, &(context_id_));
     EXPECT_NE(context_id_, 0u);
   }
 

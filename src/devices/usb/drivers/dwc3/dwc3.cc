@@ -494,7 +494,7 @@ class IrisExtension final : public PlatformExtension {
 
  private:
   zx::result<> VoteBandwidth(uint32_t bandwidth) {
-    if (!interconnect_client_.is_valid()) {
+    if (!interconnect_client_.is_valid() || current_bandwidth_ == bandwidth) {
       return zx::ok();
     }
     fhi::BandwidthRequest request{{
@@ -509,10 +509,12 @@ class IrisExtension final : public PlatformExtension {
                            ? result.error_value().domain_error()
                            : result.error_value().framework_error().status());
     }
+    current_bandwidth_ = bandwidth;
     return zx::ok();
   }
 
   fdescriptor::UsbSpeed speed_{kDefaultSpeed};
+  std::optional<uint32_t> current_bandwidth_{kDefaultBandwidthBps};
   fidl::SyncClient<fhi::Path> interconnect_client_;
 };
 
@@ -995,7 +997,7 @@ zx_status_t Dwc3::Init() {
   has_pinned_memory_ = true;
 
   zx_status_t status = dma_buffer::CreateBufferFactory()->CreateContiguous(
-      bti_, kEp0BufferSize, 12, dma_buffer::CacheOptions::kDisabled, &ep0_.buffer);
+      bti_, kEp0BufferSize, kAlignmentLog2, dma_buffer::CacheOptions::kDisabled, &ep0_.buffer);
   if (status != ZX_OK) {
     fdf::error("ep0_buffer init failed: {}", zx_status_get_string(status));
     return status;
@@ -1122,6 +1124,10 @@ zx_status_t Dwc3::ResetHw() {
     }
   }
 
+  // Mask event interrupts immediately after reset to prevent level interrupt storms
+  // while the controller is unconfigured or stopped.
+  GEVNTSIZ::Get(0).FromValue(0).set_EVNTINTRPTMASK(1).WriteTo(mmio);
+
   // Fuchsia's dwc3.cc doesn't parse snps,incr-burst-type-adjustment yet.
   GSBUSCFG0::Get().FromValue(0).set_INCR4BRSTENA(1).WriteTo(mmio);
 
@@ -1140,6 +1146,14 @@ zx_status_t Dwc3::ResetHw() {
     }
     gfladj.WriteTo(mmio);
   }
+
+  ep0_.out.stale_starts_to_end = 0;
+  ep0_.in.stale_starts_to_end = 0;
+  for (UserEndpoint& uep : user_endpoints_) {
+    uep.ep.stale_starts_to_end = 0;
+    uep.ep.stale_cancels_to_ignore = 0;
+  }
+  CancelAllEndpointIdleCallbacks();
 
   return ZX_OK;
 }
@@ -1198,19 +1212,13 @@ void Dwc3::StartPeripheralMode() {
   Ep0Start();
 
   // Set the run/stop bit to start the controller
-  DCTL::Get().FromValue(0).set_RUN_STOP(1).WriteTo(mmio);
+  DCTL::Get().ReadFrom(mmio).set_RUN_STOP(1).WriteTo(mmio);
 }
 
 void Dwc3::ResetConfiguration() {
   TRACE_DURATION("dwc3", "Dwc3::ResetConfiguration");
-  auto* mmio = get_mmio();
-  // disable all endpoints except EP0_OUT and EP0_IN
-  DALEPENA::Get().FromValue(0).EnableEp(kEp0Out).EnableEp(kEp0In).WriteTo(mmio);
-
+  CancelAllEndpointIdleCallbacks();
   for (UserEndpoint& uep : user_endpoints_) {
-    // Disabled above.
-    uep.ep.enabled = false;
-    uep.ep.stalled = false;
     UserEpReset(uep);
   }
 
@@ -1240,13 +1248,18 @@ void Dwc3::HandleResetEvent() {
   TRACE_DURATION("dwc3", "Dwc3::HandleResetEvent");
   fdf::info("Dwc3::HandleResetEvent");
 
+  CancelAllEndpointIdleCallbacks();
   ResetEndpoints();
   SetDeviceAddress(0);
-  Ep0Start();
-
   connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
-
   SetDeviceState(fpolicy::DeviceState::kDefault);
+
+  WaitForAllUserEndpointsIdle([this](bool idle) {
+    if (!idle || !power_on_ || ep0_.out.enabled) {
+      return;
+    }
+    Ep0Start();
+  });
 
   if (dci_intf_.is_valid()) {
     fidl::Arena arena;
@@ -1296,13 +1309,6 @@ void Dwc3::HandleConnectionDoneEvent() {
   }
 
   if (ep0_max_packet) {
-    std::array eps{&ep0_.out, &ep0_.in};
-    for (Endpoint* ep : eps) {
-      ep->type = fdescriptor::EndpointType::kControl;
-      ep->interval = 0;
-      ep->max_packet_size = ep0_max_packet;
-      CmdEpSetConfig(*ep, true);
-    }
     ep0_.cur_speed = new_speed;
     connection_speed_ = new_speed;
     if (platform_extension_) {
@@ -1312,6 +1318,24 @@ void Dwc3::HandleConnectionDoneEvent() {
       }
     }
   }
+
+  WaitForAllUserEndpointsIdle([this, ep0_max_packet](bool idle) {
+    if (!idle || !power_on_) {
+      return;
+    }
+    if (!ep0_.out.enabled) {
+      Ep0Start();
+    }
+    if (ep0_max_packet && ep0_.out.enabled) {
+      std::array eps{&ep0_.out, &ep0_.in};
+      for (Endpoint* ep : eps) {
+        ep->type = fdescriptor::EndpointType::kControl;
+        ep->interval = 0;
+        ep->max_packet_size = ep0_max_packet;
+        CmdEpSetConfig(*ep, true);
+      }
+    }
+  });
 
   std::ostringstream buf;
   buf << "USB Connection Done (Speed: "
@@ -1349,6 +1373,7 @@ void Dwc3::HandleDisconnectedEvent() {
         });
   }
 
+  CancelAllEndpointIdleCallbacks();
   ResetEndpoints();
 
   connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
@@ -1463,8 +1488,9 @@ void Dwc3::StartController(StartControllerCompleter::Sync& completer) {
 
 void Dwc3::StopController(StopControllerCompleter::Sync& completer) {
   TRACE_DURATION("dwc3", "Dwc3::StopController");
+  CancelAllEndpointIdleCallbacks();
+  ResetEndpoints(/*force=*/true);
   controller_started_ = false;
-  ResetEndpoints();
 
   if (power_on_) {
     StopEvents();
@@ -1497,9 +1523,8 @@ void Dwc3::ConfigureEndpoint(ConfigureEndpointRequest& request,
     return;
   }
 
-  auto ep_type = usb_ep_type2(request.ep_descriptor());
-
-  if (ep_type == fdescriptor::EndpointType::kIsochronous) {
+  auto ep_type = usb_ep_type(request.ep_descriptor());
+  if (usb_ep_is_isoch(request.ep_descriptor())) {
     fdf::error("isochronous endpoints are not supported");
     completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
     return;
@@ -1512,15 +1537,14 @@ void Dwc3::ConfigureEndpoint(ConfigureEndpointRequest& request,
     return;
   }
 
-  uint16_t max_packet_size = usb_ep_max_packet2(request.ep_descriptor());
+  uint16_t max_packet_size = usb_ep_max_packet(request.ep_descriptor());
 
   auto* const mmio = get_mmio();
   const uint32_t mdwidth = GHWPARAMS0::Get().ReadFrom(mmio).DWC_USB31_MDWIDTH();
   const uint32_t ram_width_bytes = 4 << mdwidth;
   uint32_t depth = 0;
 
-  const bool is_in =
-      usb_ep_direction2(request.ep_descriptor().b_endpoint_address()) == USB_ENDPOINT_IN;
+  const bool is_in = usb_ep_is_in(request.ep_descriptor());
   if (is_in) {
     // IN endpoint.
     const uint8_t fifo_num = ep_num >> 1;
@@ -1544,36 +1568,53 @@ void Dwc3::ConfigureEndpoint(ConfigureEndpointRequest& request,
     return;
   }
 
-  // TODO(https://fxbug.dev/527137302): When queuing many TRBs we need to use uncached memory
-  // because we don't currently have a way to align TRB dumps to cache line
-  // sizes.
-  const bool cached = !AllowEnqueueManyTRBs(ep_type);
-  if (zx::result result = uep->fifo.Init(bti_, cached); result.is_error()) {
-    fdf::error("fifo init failed {}", result);
-    completer.Reply(result.take_error());
-    return;
+  if (uep->server.has_value() && (!uep->server->active_reqs.empty() || !IsEndpointIdle(*uep))) {
+    uep->server->CancelAll(ZX_ERR_CANCELED, /*force=*/false);
   }
 
-  uep->ep.max_packet_size = max_packet_size;
-  uep->ep.type = ep_type;
-  uep->ep.interval = request.ep_descriptor().b_interval();
-  uep->ep.usb_endpoint_address = request.ep_descriptor().b_endpoint_address();
-  // TODO(voydanoff) USB3 support
+  const uint8_t b_interval = request.ep_descriptor().b_interval();
+  const uint8_t b_endpoint_address = request.ep_descriptor().b_endpoint_address();
+  const uint64_t config_gen = ++uep->configure_generation;
+  WaitForEndpointIdle(*uep, [this, uep, ep_type, max_packet_size, b_interval, b_endpoint_address,
+                             config_gen, async_completer = completer.ToAsync()](bool idle) mutable {
+    if (!idle || !power_on_ || uep->configure_generation != config_gen) {
+      async_completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
+      return;
+    }
+    if (uep->ep.enabled) {
+      fdf::error("Endpoint({}) already configured!", uep->ep.ep_num);
+      async_completer.Reply(zx::ok());
+      return;
+    }
 
-  EpSetConfig(uep->ep, true);
-  UserEpQueueNext(*uep);
+    // TODO(https://fxbug.dev/527137302): When queuing many TRBs we need to use uncached memory
+    // because we don't currently have a way to align TRB dumps to cache line
+    // sizes.
+    const bool cached = !AllowEnqueueManyTRBs(ep_type);
+    if (zx::result result = uep->fifo.Init(bti_, cached); result.is_error()) {
+      fdf::error("fifo init failed {}", result);
+      async_completer.Reply(result.take_error());
+      return;
+    }
 
-  completer.Reply(zx::ok());
+    uep->ep.max_packet_size = max_packet_size;
+    uep->ep.type = ep_type;
+    uep->ep.interval = b_interval;
+    uep->ep.usb_endpoint_address = b_endpoint_address;
+    uep->ep.stalled = false;
+    uep->ep.got_not_ready = false;
+    // TODO(voydanoff) USB3 support
+
+    EpSetConfig(uep->ep, true);
+    UserEpQueueNext(*uep);
+
+    async_completer.Reply(zx::ok());
+  });
 }
 
 void Dwc3::DisableEndpoint(DisableEndpointRequest& request,
                            DisableEndpointCompleter::Sync& completer) {
   TRACE_DURATION("dwc3", "Dwc3::DisableEndpoint");
-  if (!power_on_) {
-    completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
-    return;
-  }
-
   const uint8_t ep_num = UsbAddressToEpNum(request.ep_address());
   UserEndpoint* const uep = get_user_endpoint(ep_num);
 
@@ -1582,8 +1623,19 @@ void Dwc3::DisableEndpoint(DisableEndpointRequest& request,
     return;
   }
 
+  ++uep->configure_generation;
   uep->server->CancelAll(ZX_ERR_IO_NOT_PRESENT);
+  uep->ep.got_not_ready = false;
+  if (!power_on_) {
+    uep->ep.enabled = false;
+    uep->ep.stalled = false;
+    completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
+    return;
+  }
+
+  EpSetStall(uep->ep, false);
   EpSetConfig(uep->ep, false);
+  uep->ep.stalled = false;
 
   completer.Reply(zx::ok());
 }
@@ -1739,42 +1791,111 @@ void Dwc3::EpServer::CancelAll(CancelAllCompleter::Sync& completer) {
 
 void Dwc3::EpReset(Endpoint& ep) {
   TRACE_DURATION("dwc3", "Dwc3::EpReset", "ep_num", ep.ep_num);
-  if (!power_on_) {
-    return;
+  if (power_on_) {
+    EpSetStall(ep, false);
+    EpSetConfig(ep, false);
   }
-
-  EpSetStall(ep, false);
-  EpSetConfig(ep, false);
+  ep.enabled = false;
+  ep.stalled = false;
   ep.got_not_ready = false;
 }
 
-void Dwc3::UserEpReset(UserEndpoint& uep) {
+void Dwc3::UserEpReset(UserEndpoint& uep, bool force) {
   TRACE_DURATION("dwc3", "Dwc3::UserEpReset", "ep_num", uep.ep.ep_num);
-  uep.server->CancelAll(ZX_ERR_IO_NOT_PRESENT);
+  ++uep.configure_generation;
+  if (uep.server.has_value()) {
+    uep.server->CancelAll(ZX_ERR_IO_NOT_PRESENT, force);
+  }
   EpReset(uep.ep);
 }
 
 void Dwc3::Ep0Reset() {
   TRACE_DURATION("dwc3", "Dwc3::Ep0Reset");
-  if (ep0_.out.TransferStateIsActive() && ep0_.out.rsrc_id != Endpoint::kInvalidResourceId) {
-    CmdEpEndTransfer(ep0_.out);
+  if (is_active()) {
+    for (Endpoint* ep : {&ep0_.out, &ep0_.in}) {
+      if (ep->transfer_state == Endpoint::TransferState::kStartingSingle) {
+        ep->stale_starts_to_end++;
+      } else if (ep->TransferStateIsActive() && ep->rsrc_id != Endpoint::kInvalidResourceId) {
+        CmdEpEndTransfer(*ep, /*cmd_ioc=*/false);
+      }
+    }
   }
-  if (ep0_.in.TransferStateIsActive() && ep0_.in.rsrc_id != Endpoint::kInvalidResourceId) {
-    CmdEpEndTransfer(ep0_.in);
-  }
+  ep0_.out.transfer_state = Endpoint::TransferState::kIdle;
+  ep0_.out.rsrc_id = Endpoint::kInvalidResourceId;
+  ep0_.in.transfer_state = Endpoint::TransferState::kIdle;
+  ep0_.in.rsrc_id = Endpoint::kInvalidResourceId;
   EpReset(ep0_.out);
   EpReset(ep0_.in);
   ep0_.cur_setup = {};
-  ep0_.cur_speed = fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kUndefined;
+  ep0_.cur_speed = fdescriptor::wire::UsbSpeed::kUndefined;
   ep0_.state = Ep0::State::None;
   ep0_.shared_fifo.Clear();
 }
 
-void Dwc3::ResetEndpoints() {
+bool Dwc3::IsEndpointIdle(const UserEndpoint& uep) const {
+  return !is_active() || (uep.ep.transfer_state == Endpoint::TransferState::kIdle &&
+                          uep.ep.stale_starts_to_end == 0);
+}
+
+void Dwc3::WaitForEndpointIdle(UserEndpoint& uep, fit::callback<void(bool)> callback) {
+  if (IsEndpointIdle(uep)) {
+    callback(true);
+    return;
+  }
+  uep.on_idle_callbacks.push_back(std::move(callback));
+}
+
+void Dwc3::WaitForAllUserEndpointsIdle(fit::callback<void(bool)> callback) {
+  struct Barrier {
+    explicit Barrier(fit::callback<void(bool)> cb) : callback(std::move(cb)) {}
+    void CompleteOne(bool idle) {
+      if (!idle) {
+        aborted = true;
+      }
+      if (--pending == 0 && callback) {
+        callback(!aborted);
+      }
+    }
+    fit::callback<void(bool)> callback;
+    size_t pending = 1;
+    bool aborted = false;
+  };
+  auto barrier = std::make_shared<Barrier>(std::move(callback));
+  for (UserEndpoint& uep : user_endpoints_) {
+    if (!IsEndpointIdle(uep)) {
+      ++barrier->pending;
+      WaitForEndpointIdle(uep, [barrier](bool idle) { barrier->CompleteOne(idle); });
+    }
+  }
+  barrier->CompleteOne(true);
+}
+
+void Dwc3::NotifyEndpointIdle(UserEndpoint& uep) {
+  if (!IsEndpointIdle(uep) || uep.on_idle_callbacks.empty()) {
+    return;
+  }
+  auto callbacks = std::move(uep.on_idle_callbacks);
+  for (auto& cb : callbacks) {
+    cb(true);
+  }
+}
+
+void Dwc3::CancelAllEndpointIdleCallbacks() {
+  for (UserEndpoint& uep : user_endpoints_) {
+    if (!uep.on_idle_callbacks.empty()) {
+      auto callbacks = std::move(uep.on_idle_callbacks);
+      for (auto& cb : callbacks) {
+        cb(false);
+      }
+    }
+  }
+}
+
+void Dwc3::ResetEndpoints(bool force) {
   TRACE_DURATION("dwc3", "Dwc3::ResetEndpoints");
   Ep0Reset();
   for (UserEndpoint& uep : user_endpoints_) {
-    UserEpReset(uep);
+    UserEpReset(uep, force);
   }
 }
 
@@ -1803,8 +1924,8 @@ void Dwc3::OnConnectStatusChanged(
     wake_lease = std::move(result->wake_lease());
     // TODO: b/550476536 to revert this workaround
     // Workaround: max77779 PMIC does not yet provide wake lease via USB PHY driver on connection
-    // This hack forces DWC3 to generate its own lease to prevent suspends while plugged in.
-    if (!wake_lease.is_valid()) {
+    // This hack forces Dwc3 to generate its own lease to prevent suspends while plugged in.
+    if (result->connected() && !wake_lease.is_valid()) {
       wake_lease = AcquireWakeLease();
     }
   } else {
@@ -1827,14 +1948,15 @@ void Dwc3::OnConnectStatusChanged(
         fdf::warn("Failed to set provisional speed on connect: {}", result.status_string());
       }
     }
-    if (!power_on_ &&
-        (!platform_extension_ || !platform_extension_->PowersDownCoreOnDisconnect())) {
-      // For platforms that do not power down the core via external reset controller,
-      // perform a software core reset (CSFTRST) when transitioning from powered-off to
-      // ensure the controller state machine and internal FIFOs start in a clean state.
-      if (zx_status_t status = ResetHw(); status != ZX_OK) {
-        fdf::error("Failed to reset hardware on connect: {}", zx_status_get_string(status));
-        return;
+    if (!power_on_) {
+      if (!platform_extension_ || !platform_extension_->PowersDownCoreOnDisconnect()) {
+        // For platforms that do not power down the core via external reset controller,
+        // perform a software core reset (CSFTRST) when transitioning from powered-off to
+        // ensure the controller state machine and internal FIFOs start in a clean state.
+        if (zx_status_t status = ResetHw(); status != ZX_OK) {
+          fdf::error("Failed to reset hardware on connect: {}", zx_status_get_string(status));
+          return;
+        }
       }
     }
     power_on_ = true;
@@ -1855,8 +1977,36 @@ void Dwc3::OnConnectStatusChanged(
   } else {
     fdf::debug("OnConnectStatusChanged: now disconnected");
 
-    // Cancel all pending requests.
-    ResetEndpoints();
+    // Because `StopEvents()` and `power_on_ = false` immediately follow below, an asynchronous
+    // `DEPEVT_CMD_CMPL` (`CMDIOC=1`, `TransferState::kCanceling`) would never be delivered on the
+    // event FIFO. Pass `force=true` (`CMDIOC=0`) so active endpoints synchronously wait for
+    // `DEPCMD.CMDACT` to clear, transition to `kIdle`, and immediately clear `DALEPENA` in
+    // `EpReset()` while the controller and PHY clocks are still active.
+    CancelAllEndpointIdleCallbacks();
+    ResetEndpoints(/*force=*/true);
+
+    if (controller_started_) {
+      StopEvents();
+    } else {
+      ep0_.out.stale_starts_to_end = 0;
+      ep0_.in.stale_starts_to_end = 0;
+      for (UserEndpoint& uep : user_endpoints_) {
+        uep.ep.stale_starts_to_end = 0;
+        uep.ep.stale_cancels_to_ignore = 0;
+      }
+    }
+
+    if (power_on_ && (!platform_extension_ || !platform_extension_->PowersDownCoreOnDisconnect())) {
+      // For platforms that do not power down the core via external reset controller,
+      // perform a software core reset on disconnect while still powered to safely halt
+      // active DMA transfers and deassert level-triggered interrupts.
+      if (zx_status_t status = ResetHw(); status != ZX_OK) {
+        fdf::warn("Failed to reset hardware on disconnect: {}", zx_status_get_string(status));
+      }
+      // As defensive cleanup, ensure event queue is stopped and masked even if
+      // ResetHw() hit an error or timeout before masking GEVNTSIZ.
+      StopEvents();
+    }
 
     connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
     if (platform_extension_) {
@@ -1866,45 +2016,39 @@ void Dwc3::OnConnectStatusChanged(
       }
     }
 
-    if (controller_started_) {
-      StopEvents();
+    if (power_on_) {
+      if (platform_extension_) {
+        if (zx::result result = platform_extension_->Suspend(); result.is_error()) {
+          fdf::error("Failed to suspend PHY: {}", result.status_string());
+        }
+      }
+      power_on_ = false;
+      metrics_.RecordEvent("Power Off / Suspend (PHY Suspended)");
     }
 
     SetDeviceState(fpolicy::DeviceState::kNotAttached);
-
-    if (platform_extension_) {
-      if (zx::result result = platform_extension_->Suspend(); result.is_error()) {
-        return;
-      }
-    }
-    if (power_on_ && (!platform_extension_ || !platform_extension_->PowersDownCoreOnDisconnect())) {
-      // For platforms that do not power down the core via external reset controller,
-      // perform a software core reset on disconnect while still powered to safely halt
-      // active DMA transfers and deassert level-triggered interrupts.
-      if (zx_status_t status = ResetHw(); status != ZX_OK) {
-        fdf::warn("Failed to reset hardware on disconnect: {}", zx_status_get_string(status));
-      }
-    }
-    power_on_ = false;
-    metrics_.RecordEvent("Power Off / Suspend (PHY Suspended)");
   }
 
+  const uint64_t connect_status_generation = ++connect_status_generation_;
   if (dci_intf_.is_valid()) {
+    const bool connected = result->connected();
     fidl::Arena arena;
-    dci_intf_.buffer(arena)
-        ->SetConnected(result->connected())
-        .Then([](fidl::WireUnownedResult<fuchsia_hardware_usb_dci::UsbDciInterface::SetConnected>&
-                     result) {
-          if (!result.ok()) {
+    dci_intf_.buffer(arena)->SetConnected(connected).Then(
+        [this, connected, connect_status_generation](
+            fidl::WireUnownedResult<fuchsia_hardware_usb_dci::UsbDciInterface::SetConnected>&
+                set_connected_result) {
+          if (!set_connected_result.ok()) {
             fdf::error("(framework) SetConnected() (OnConnectStatusChanged): {}",
-                       result.FormatDescription());
-          } else if (result->is_error()) {
-            fdf::error("SetConnected(): {}", zx_status_get_string(result->error_value()));
+                       set_connected_result.FormatDescription());
+          } else if (set_connected_result->is_error()) {
+            fdf::error("SetConnected(): {}",
+                       zx_status_get_string(set_connected_result->error_value()));
+          }
+          if (!connected && !power_on_ && connect_status_generation == connect_status_generation_) {
+            connection_lease_.reset();
           }
         });
-  }
-
-  if (!power_on_) {
+  } else if (!power_on_) {
     connection_lease_.reset();
   }
 }

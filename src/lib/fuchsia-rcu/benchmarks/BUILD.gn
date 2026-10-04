@@ -26,7 +26,7 @@ rustc_binary("bin_rseq") {
   sources = [ "src/main.rs" ]
   deps = [
     "//src/developer/fuchsia-criterion",
-    "//src/lib/fuchsia-rcu:fuchsia-rcu-rseq",
+    "//src/lib/fuchsia-rcu",
   ]
   check_cfgs = [ "rcu_backend, values(\"rseq\", \"atomic\")" ]
   rustflags = [ "--cfg=rcu_backend=\"rseq\"" ]
@@ -40,7 +40,7 @@ rustc_binary("bin_atomic") {
   sources = [ "src/main.rs" ]
   deps = [
     "//src/developer/fuchsia-criterion",
-    "//src/lib/fuchsia-rcu",
+    "//src/lib/fuchsia-rcu:fuchsia-rcu-atomic",
   ]
   check_cfgs = [ "rcu_backend, values(\"rseq\", \"atomic\")" ]
   rustflags = [ "--cfg=rcu_backend=\"atomic\"" ]

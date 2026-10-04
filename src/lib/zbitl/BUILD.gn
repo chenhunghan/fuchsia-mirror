@@ -41,6 +41,7 @@ library_headers("headers") {
     "lib/zbitl/image.h",
     "lib/zbitl/item.h",
     "lib/zbitl/items/bootfs.h",
+    "lib/zbitl/items/bootloader-file.h",
     "lib/zbitl/items/cpu-topology.h",
     "lib/zbitl/items/debugdata.h",
     "lib/zbitl/items/graphics.h",

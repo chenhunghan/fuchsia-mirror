@@ -6,6 +6,7 @@
 
 //! Restricted execution mode state management, transitions, and register handling for RISC-V 64.
 
+use super::vm::is_user_accessible;
 use debug::ltracef;
 use zx_status::Status;
 use zx_types::{zx_restricted_state_t, zx_status_t, zx_thread_state_general_regs_t};
@@ -66,7 +67,7 @@ zr::static_assert!(core::mem::align_of::<SyscallRegs>() == core::mem::align_of::
 /// Validates that register state is safe prior to restricted mode entry.
 pub fn validate_state_pre_restricted_entry(state: &zx_restricted_state_t) -> Result<(), Status> {
     // Validate that PC is within userspace.
-    if !super::user_copy::is_user_accessible(state.pc as usize) {
+    if !is_user_accessible(state.pc as usize) {
         ltracef!("fail due to bad PC {:#x}\n", state.pc);
         return Err(Status::BAD_STATE);
     }
@@ -328,15 +329,6 @@ mod tests {
     use unittest::assert_true;
     use zx_status::Status;
     use zx_types::zx_restricted_state_t;
-
-    /// Test user address accessibility in restricted mode.
-    #[test]
-    fn test_is_user_accessible() {
-        assert_true!(super::super::user_copy::is_user_accessible(0x00000000_00100000));
-        assert_true!(super::super::user_copy::is_user_accessible(0x0000003f_ffffffff));
-        assert_true!(!super::super::user_copy::is_user_accessible(0x00000040_00000000));
-        assert_true!(!super::super::user_copy::is_user_accessible(0xffffffff_80000000));
-    }
 
     /// Test validation of PC register before entering restricted execution.
     #[test]

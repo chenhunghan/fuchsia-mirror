@@ -60,6 +60,8 @@ import("//build/toolchain/restat.gni")
 #     Builds unit tests associated with the library. This will create a
 #     `<name>_test` test file in the output directory. Equivalent to adding a
 #     `rustc_test` target with that name and the same source_root.
+#     Accepts a boolean or "host" (equivalent to `true`). Since procedural
+#     macros only run on the host, "fuchsia" and "both" are not allowed.
 #
 #   source_root (optional)
 #     Location of the crate root (e.g. `src/main.rs` or `src/lib.rs`).
@@ -127,6 +129,19 @@ template("rustc_macro") {
   # avoid conflicts, the outputs of the original (host) artifact are built with
   # a `_proc_macro` suffix added onto the end, which is removed when they're
   # copied into the final target directory.
+
+  # Resolve `with_unit_tests`. Procedural macros only build and run on the
+  # host, so the only accepted string value is "host".
+  # See https://fxbug.dev/515405864.
+  _with_unit_tests = false
+  if (defined(invoker.with_unit_tests)) {
+    _with_unit_tests_value = invoker.with_unit_tests
+    assert(_with_unit_tests_value == true || _with_unit_tests_value == false ||
+               _with_unit_tests_value == "host",
+           "rustc_macro only supports host, with_unit_tests must be a " +
+               "boolean or \"host\", got: ${_with_unit_tests_value}")
+    _with_unit_tests = _with_unit_tests_value != false
+  }
 
   if (current_toolchain == host_toolchain) {
     if (defined(invoker.original_target_name)) {
@@ -234,11 +249,10 @@ template("rustc_macro") {
       }
     }
 
-    # If "with_unit_tests" is set to true, generate an additional rust test
-    # target. Since the parent rule is used to compile macros, which only run on
-    # the host, only run the test code for the macros on the host.
-    # TODO(https://fxbug.dev/42152447): accept a string.
-    if (defined(invoker.with_unit_tests) && invoker.with_unit_tests) {
+    # If unit tests are requested, generate an additional rust test target.
+    # Since the parent rule is used to compile macros, which only run on the
+    # host, only run the test code for the macros on the host.
+    if (_with_unit_tests) {
       rustc_test("${target_name}_test") {
         name = target_name
         if (defined(invoker.name)) {
@@ -279,7 +293,7 @@ template("rustc_macro") {
                              ])
     }
 
-    if (defined(invoker.with_unit_tests) && invoker.with_unit_tests) {
+    if (_with_unit_tests) {
       # For convenience, create a forwarding target that points to the on-host
       # test target. This allows developers to list "${target_name}_test" in a
       # test group instead of "${target_name}_test($host_toolchain)" to

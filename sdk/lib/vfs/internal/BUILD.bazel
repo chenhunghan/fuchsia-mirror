@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_prebuilt_library.bzl", "idk_cc_shared_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/428229472): This library keeps a hand-written BUILD.gn
+# because bazel2gn can't yet handle a library whose only headers are internal
+# SDK headers.
+
+# **WARNING**: The purpose of this library is to provide a stable API to the
+# in-tree C++ VFS, and is not intended for general use. The only clients of this
+# target should be storage-owned libraries that provide safe constructs for
+# pseudo filesystem functionality.
+#
+# Targets that require pseudo filesystem functionality *must* use the C++ SDK
+# library in //sdk/lib/vfs/cpp or the in-tree C+ VFS in
+# //src/storage/lib/vfs/cpp.
+#
+# Test coverage for this library is satisfied by the unit tests in
+# //sdk/lib/vfs/cpp and the fuchsia.io conformance test suite in
+# //src/storage/conformance.
+idk_cc_shared_library(
+    name = "vfs_internal",
+    srcs = ["libvfs.cc"],
+    # TODO(https://fxbug.dev/428229472): Move to `hdrs_for_internal_use` and
+    # enable `bazel2gn` once `idk_cc_shared_library` supports libraries whose
+    # only headers are `hdrs_for_internal_use`.
+    hdrs = ["include/lib/vfs/internal/libvfs_private.h"],
+    api_area = "Storage",
+    # This library must be published as a partner SDK in order for it to be used
+    # by the partner libraries we currently ship, similar to how //sdk/lib/svc is
+    # used by //sdk/lib/component. All symbol names are prefixed with
+    # `vfs_internal_` which should discourage general usage.
+    #
+    # The intention is to allow changes to this library to be made in a
+    # transparent manner as it should only be a transitive dependency of clients.
+    # This allows for easier iteration to this library while still complying with
+    # Fuchsia API guidelines and versioning requirements.
+    category = "partner",
+    idk_name = "vfs_internal",
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    libcxx_linkage = "static",
+    public_configs = [
+        ":include",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    #  ________  _________  ________  ________
+    # |\   ____\|\___   ___\\   __  \|\   __  \
+    # \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+    #  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+    #   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+    #     ____\_\  \   \ \__\ \ \_______\ \__\
+    #    |\_________\   \|__|  \|_______|\|__|
+    #    \|_________|
+    #
+    # This target should *only* be used within //sdk/lib/vfs. Do not add entries
+    # to this visibility list.
+    #
+    # BUILD.gn's other visibility entries are omitted: the same package is always
+    # visible in Bazel, the IDK macros add //sdk:__pkg__ to the atom, and the
+    # //build/sdk and driver_manager entries are GN-only. If driver_manager is
+    # migrated to Bazel, see BUILD.gn for why it needs access.
+    visibility = [
+        "//sdk/lib/vfs/cpp:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/async",
+    ],
+)

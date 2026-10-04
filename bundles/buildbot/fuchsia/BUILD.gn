@@ -2,6 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/assembly/product_bundle_test_group.gni")
+import("//build/testing/environments.gni")
+
+declare_args() {
+  # True if we are running in postsubmit, false if we are running in presubmit.
+  # Some tests are only run in postsubmit, but are always built in presubmit.
+  # Some hardware platforms are skipped in presubmit, but always run in
+  # postsubmit
+  is_postsubmit = false
+}
+
 group("fuchsia") {
   testonly = true
   deps = [
@@ -9,11 +20,135 @@ group("fuchsia") {
     # The test targets currently build some migrated targets as well, so we do
     # not want to run them on bots that take longer than this one.
     "//build/bazel/rules/tests:all",
+
+    # Contains additional targets to be built that are NOT tests, but need
+    # to be built.
+    # This allows bots to ensure buildable targets do not regress even if they
+    # are not being run by another bot (i.e., during bringup of a new CPU
+    # architecture).
+    ":additional_build_targets",
   ]
-  if (current_cpu == "arm64") {
-    deps += [ "//bundles/buildbot/minimal/arm64($host_toolchain)" ]
+  if (target_cpu == "arm64") {
+    deps += [
+      ":minimal.arm64",
+      ":minimal.arm64-hermetic_examples",
+    ]
   }
   if (target_cpu == "x64") {
-    deps += [ "//bundles/buildbot/workbench/x64" ]
+    deps += [
+      ":minimal.x64",
+      ":minimal.x64-ui_tests",
+      ":workbench_eng.x64",
+    ]
+  }
+}
+
+# Contains additional targets to be built that are not needed for tests.
+# This allows bots to ensure buildable targets do not regress even if they are
+# not being run by another bot (i.e., during bringup of a new CPU architecture).
+group("additional_build_targets") {
+  testonly = true
+  metadata = {
+    # This group needs to not be included in test metadata as this builder
+    # doesn't have a default product bundle defined, and so cannot run any
+    # non-host tests that aren't explicitly listed in a
+    # product_bundle_test_group().
+    tests_barrier = []
+  }
+  deps = [ "//examples" ]
+}
+
+########
+# Tests to build or run on minimal.
+
+minimal_target_tests = [
+  "//examples:tests",
+  "//examples:hermetic_tests",
+  "//src/sys/component_manager:hermetic_tests",
+  "//src/sys/pkg:hermetic_tests",
+  "//sdk:tests",
+  "//src/connectivity/network:tests",
+  "//src/bringup:tests",
+  "//src/devices:tests",
+  "//src/diagnostics:tests",
+  "//src/fonts:tests",
+  "//src/hwinfo:tests",
+  "//src/intl:tests",
+  "//src/lib:tests",
+  "//src/media/audio/drivers/tests:admin",
+  "//src/media/audio/drivers/tests:basic",
+  "//src/performance:tests",
+  "//src/power:tests",
+  "//src/starnix:tests",
+  "//src/storage:tests",
+  "//src/sys:tests",
+  "//src/zircon:tests",
+
+  # reboot_hang is a non-hermetic e2e test. It is added to minimal because
+  # iris only has bringup and minimal builders in infra. Execution is
+  # restricted to iris_env.
+  "//src/tests/end_to_end/reboot_hang:tests",
+]
+
+if (target_cpu == "arm64") {
+  product_bundle_test_group("minimal.arm64") {
+    product_bundle_name = "minimal.arm64"
+
+    # TODO(https://fxbug.dev/407825733): Re-enable running these tests on
+    # `c4a_env` in postsubmit (`is_postsubmit`). The host tests pulled in by
+    # `minimal_target_tests` inherit `c4a_env` and get scheduled onto arm64 C4A
+    # bots, where the x64 host binaries fail with "exec format error". Keep
+    # this group build-only until host tests are excluded from this group or
+    # given a Linux x64 host environment.
+    build_only = true
+
+    target_tests = minimal_target_tests + [ "//src/ui:tests" ]
+  }
+
+  # Included so that there are _some_ tests to run on
+  product_bundle_test_group("minimal.arm64-hermetic_examples") {
+    product_bundle_name = "minimal.arm64"
+    environments = [ c4a_env ]
+    target_tests = [ "//examples:hermetic_tests" ]
+  }
+}
+if (target_cpu == "x64") {
+  product_bundle_test_group("minimal.x64") {
+    product_bundle_name = "minimal.x64"
+    if (is_postsubmit) {
+      environments = [ aemu_env ]
+      override_test_environments = false
+    } else {
+      build_only = true
+    }
+    target_tests = minimal_target_tests
+  }
+
+  product_bundle_test_group("minimal.x64-ui_tests") {
+    product_bundle_name = "minimal.x64"
+
+    # The integration tests that require WebEngine fail when run. See
+    # https://fxbug.dev/42083237. Since they are only run on x64 (the test spec
+    # requires AEMU), disable them only for that architecture
+    build_only = true
+    target_tests = [ "//src/ui:tests" ]
+  }
+}
+
+########
+# Workbench.
+
+if (target_cpu == "x64") {
+  product_bundle_test_group("workbench_eng.x64") {
+    product_bundle_name = "workbench_eng.x64"
+    if (is_postsubmit) {
+      environments = [ aemu_env ]
+      override_test_environments = false
+    } else {
+      build_only = true
+    }
+
+    # No tests run on Workbench, but we want to always build the product bundle.
+    target_tests = []
   }
 }

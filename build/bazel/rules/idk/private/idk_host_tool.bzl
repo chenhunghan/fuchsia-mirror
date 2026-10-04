@@ -248,7 +248,10 @@ def _idk_rustc_binary_host_tool_impl(
         category,
         api_area,
         target_compatible_with,
+        visibility,
         **kwargs):
+    if "idk" in name or "sdk" in name:
+        fail('`name`s must not include "idk" or "sdk".')
     if target_compatible_with != HOST_OS_CONSTRAINTS:
         fail("`target_compatible_with` must be `HOST_OS_CONSTRAINTS`.")
 
@@ -257,6 +260,7 @@ def _idk_rustc_binary_host_tool_impl(
     rustc_binary_host_tool(
         name = binary_name,
         target_compatible_with = HOST_OS_CONSTRAINTS,
+        visibility = visibility,
         **kwargs
     )
 
@@ -267,6 +271,7 @@ def _idk_rustc_binary_host_tool_impl(
         api_area = api_area,
         tool = binary_name,
         target_compatible_with = HOST_OS_CONSTRAINTS,
+        visibility = visibility,
     )
 
 idk_rustc_binary_host_tool = macro(

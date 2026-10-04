@@ -5,6 +5,8 @@
 """Prepare a Fuchsia checkout for 'fx bazel'. This is a temporary measure
 until all requirements are properly managed with 'jiri'."""
 
+from __future__ import annotations
+
 import argparse
 import os
 import shutil
@@ -13,6 +15,8 @@ import sys
 import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
+from types import TracebackType
+from typing import Callable, Literal
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 
@@ -38,17 +42,17 @@ def get_host_arch() -> str:
         return host_arch
 
 
-def get_host_tag():
+def get_host_tag() -> str:
     """Return host tag, following Fuchsia conventions."""
     return "%s-%s" % (get_host_platform(), get_host_arch())
 
 
-def write_file(path, content):
+def write_file(path: str, content: str) -> None:
     with open(path, "w") as f:
         f.write(content)
 
 
-def clone_git_branch(git_url, git_branch, dst_dir):
+def clone_git_branch(git_url: str, git_branch: str, dst_dir: str) -> None:
     subprocess.check_call(
         ["git", "clone", "--branch", git_branch, "--depth=1", git_url, dst_dir],
         stdout=subprocess.PIPE,
@@ -56,8 +60,8 @@ def clone_git_branch(git_url, git_branch, dst_dir):
     )
 
 
-def clone_git_commit(git_url, git_commit, dst_dir):
-    def git_cmd(args):
+def clone_git_commit(git_url: str, git_commit: str, dst_dir: str) -> None:
+    def git_cmd(args: list[str]) -> None:
         subprocess.check_call(
             ["git", "-C", dst_dir] + args,
             stdout=subprocess.PIPE,
@@ -90,7 +94,7 @@ def get_bazel_download_url(version: str) -> str:
     return f"https://github.com/bazelbuild/bazel/releases/download/{version}/bazel-{version}-{host_os}-{host_cpu}{ext}"
 
 
-def get_bazel_version(bazel_launcher):
+def get_bazel_version(bazel_launcher: str) -> str | None:
     """Return version of a given Bazel binary."""
     output = subprocess.check_output(
         [bazel_launcher, "version"], stderr=subprocess.DEVNULL, text=True
@@ -102,14 +106,16 @@ def get_bazel_version(bazel_launcher):
     return None
 
 
-def ignore_log(message):
+def ignore_log(message: str) -> None:
     pass
 
 
 _FALLBACK_BAZEL_VERSION = "5.3.0"
 
 
-def get_jiri_bazel_version(fuchsia_dir, log=ignore_log):
+def get_jiri_bazel_version(
+    fuchsia_dir: str, log: Callable[[str], None] = ignore_log
+) -> str:
     # The location of the file that contains the Jiri Bazel package definition
     prebuilts_file = os.path.join(
         fuchsia_dir, "integration", "fuchsia", "prebuilts"
@@ -154,26 +160,31 @@ def get_jiri_bazel_version(fuchsia_dir, log=ignore_log):
 
 
 class InstallDirectory(object):
-    def __init__(self, path):
+    def __init__(self, path: str) -> None:
         self._tmp_dir = path + ".tmp"
         self._dst_dir = path
         self._old_dir = path + ".old"
 
     @property
-    def path(self):
+    def path(self) -> str:
         return self._tmp_dir
 
     @property
-    def final_path(self):
+    def final_path(self) -> str:
         return self._dst_dir
 
-    def __enter__(self):
+    def __enter__(self) -> InstallDirectory:
         if os.path.exists(self._tmp_dir):
             shutil.rmtree(self._tmp_dir)
         os.makedirs(self._tmp_dir)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> Literal[False]:
         if exc_type is not None:
             # An exception occurred, cleanup temp dir.
             shutil.rmtree(self._tmp_dir)
@@ -185,7 +196,7 @@ class InstallDirectory(object):
         return False
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--fuchsia-dir", help="Path to Fuchsia checkout directory."
@@ -199,7 +210,7 @@ def main():
 
     args = parser.parse_args()
 
-    def log(message):
+    def log(message: str) -> None:
         if not args.quiet:
             print(message, flush=True)
 

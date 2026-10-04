@@ -13,5 +13,10 @@ sapphire-async = { path = "../sapphire-async" }
 sapphire-sync = { path = "../sapphire-sync" }
 sapphire-collections = { path = "../sapphire-collections" }
 sapphire-rpc-macro = { path = "../sapphire-rpc-macro" }
+sapphire-emboss = { path = "../sapphire-emboss" }
 thiserror = { version = "2.0.18", default-features = false }
 futures = { version = "=0.3.34", default-features = false, features = ["async-await"] }
+
+[dev-dependencies]
+sapphire-async = { path = "../sapphire-async", features = ["testing"] }
+sapphire-collections = { path = "../sapphire-collections", features = ["std"] }

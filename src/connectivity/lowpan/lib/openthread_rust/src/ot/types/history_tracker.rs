@@ -58,7 +58,7 @@ pub enum HistoryTrackerNeighborEvent {
 
 impl From<otHistoryTrackerNeighborEvent> for HistoryTrackerNeighborEvent {
     fn from(x: otHistoryTrackerNeighborEvent) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x)
             .unwrap_or_else(|| panic!("Unknown otHistoryTrackerNeighborEvent value: {x}"))
     }
@@ -136,7 +136,7 @@ pub enum HistoryTrackerRouterEvent {
 
 impl From<otHistoryTrackerRouterEvent> for HistoryTrackerRouterEvent {
     fn from(x: otHistoryTrackerRouterEvent) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x)
             .unwrap_or_else(|| panic!("Unknown otHistoryTrackerRouterEvent value: {x}"))
     }
@@ -193,7 +193,7 @@ pub enum HistoryTrackerNetDataEvent {
 
 impl From<otHistoryTrackerNetDataEvent> for HistoryTrackerNetDataEvent {
     fn from(x: otHistoryTrackerNetDataEvent) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x)
             .unwrap_or_else(|| panic!("Unknown otHistoryTrackerNetDataEvent value: {x}"))
     }

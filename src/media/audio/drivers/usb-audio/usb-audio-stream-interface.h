@@ -100,11 +100,14 @@ class UsbAudioStreamInterface
   uint8_t ep_attr() const { return ep_attr_; }
 
   Direction direction() const {
-    return (ep_addr() & USB_ENDPOINT_DIR_MASK) ? Direction::Input : Direction::Output;
+    return (ep_addr() & fuchsia_hardware_usb_descriptor::kEndpointDirectionMask)
+               ? Direction::Input
+               : Direction::Output;
   }
 
   EndpointSyncType ep_sync_type() const {
-    return static_cast<EndpointSyncType>(ep_attr() & USB_ENDPOINT_SYNCHRONIZATION_MASK);
+    return static_cast<EndpointSyncType>(
+        (ep_attr() & fuchsia_hardware_usb_descriptor::kSynchronizationTypeMask) >> 2);
   }
 
   // Accessor for debug logging.

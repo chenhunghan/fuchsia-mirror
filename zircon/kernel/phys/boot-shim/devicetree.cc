@@ -41,8 +41,7 @@ namespace {
 // ranges.
 constexpr size_t kDevicetreeMaxMemoryRanges = 512;
 
-ktl::optional<linux_boot_config::LinuxBootConfig> GetBootConfig(
-    ktl::span<const ktl::byte> ramdisk) {
+linux_boot_config::LinuxBootConfig GetBootConfig(ktl::span<const ktl::byte> ramdisk) {
   auto boot_config = linux_boot_config::LinuxBootConfig::Create(ramdisk);
   if (boot_config.is_error()) {
     // UART is already set up.
@@ -55,7 +54,7 @@ ktl::optional<linux_boot_config::LinuxBootConfig> GetBootConfig(
     } else {
       printf("\n");
     }
-    return ktl::nullopt;
+    return {};
   }
 
   // An empty boot config is perfectly valid.
@@ -75,7 +74,7 @@ ktl::optional<linux_boot_config::LinuxBootConfig> GetBootConfig(
 
   if (!ac.check()) {
     printf("%s: Failed to allocate BOOTCONFIG temporary space.", ProgramName());
-    return ktl::nullopt;
+    return {};
   }
 
   memcpy(boot_config_view.data(), boot_config->contents().data(), boot_config->size_bytes());

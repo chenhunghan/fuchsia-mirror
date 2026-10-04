@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/host:defs.bzl", "cc_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_library(
+    name = "common",
+    srcs = [
+        "netprotocol.c",
+        "netprotocol.h",
+    ],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = ["//src/bringup/lib/netboot"],
+)
+
+cc_binary_host_tool(
+    name = "netruncmd",
+    srcs = ["netruncmd.c"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [":common"],
+)
+
+cc_binary_host_tool(
+    name = "netcp",
+    srcs = ["netcp.c"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [
+        ":common",
+        "//zircon/system/ulib/tftp",
+    ],
+)
+
+cc_binary_host_tool(
+    name = "netls",
+    srcs = ["netls.c"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [":common"],
+)
+
+cc_binary_host_tool(
+    name = "netaddr",
+    srcs = ["netaddr.c"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [":common"],
+)

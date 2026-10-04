@@ -131,6 +131,14 @@ class BuildApiModulesFilterTest(unittest.TestCase):
                             "cpu": "x64",
                             "label": "//prebuilt/third_party/zoom(//build/toolchain:host_x64)",
                         },
+                        {
+                            "breakpad": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.sym",
+                            "cpu": "arm64",
+                            "debug": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.debug",
+                            "elf_build_id": "b29e5a6d40fb2c76081f0d86fe458e33ba253cfe",
+                            "label": "//build/toolchain/runtime:shared-rust-libstd-deps(//build/toolchain/fuchsia:arm64-shared)",
+                            "os": "fuchsia",
+                        },
                     ],
                     [
                         {
@@ -149,6 +157,14 @@ class BuildApiModulesFilterTest(unittest.TestCase):
                             "debug": "../../prebuilt/third_party/zoom/bin",
                             "label": "//prebuilt/third_party/zoom(//build/toolchain:host_x64)",
                             "os": "linux",
+                        },
+                        {
+                            "breakpad": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.sym",
+                            "cpu": "arm64",
+                            "debug": "../../prebuilt/third_party/rust/linux-x64/lib/debug/.build-id/b2/9e5a6d40fb2c76081f0d86fe458e33ba253cfe.debug",
+                            "elf_build_id": "b29e5a6d40fb2c76081f0d86fe458e33ba253cfe",
+                            "label": "//build/toolchain/runtime:shared-rust-libstd-deps(//build/toolchain/fuchsia:arm64-shared)",
+                            "os": "fuchsia",
                         },
                     ],
                 ),

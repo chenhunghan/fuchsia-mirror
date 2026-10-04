@@ -15,6 +15,7 @@ source_set("object") {
     "bus_transaction_initiator_dispatcher.cc",
     "bus_transaction_initiator_dispatcher_ffi.cc",
     "channel_dispatcher.cc",
+    "channel_dispatcher_ffi.cc",
     "clock_dispatcher.cc",
     "clock_dispatcher_ffi.cc",
     "counter_dispatcher.cc",
@@ -34,6 +35,7 @@ source_set("object") {
     "fifo_dispatcher_ffi.cc",
     "futex_context.cc",
     "guest_dispatcher.cc",
+    "guest_dispatcher_ffi.cc",
     "handle.cc",
     "handle_table.cc",
     "interrupt_dispatcher.cc",
@@ -79,7 +81,6 @@ source_set("object") {
     "thread_dispatcher.cc",
     "thread_dispatcher_ffi.cc",
     "timer_dispatcher.cc",
-    "user_handles.cc",
     "vcpu_dispatcher.cc",
     "virtual_interrupt_dispatcher.cc",
     "vm_address_region_dispatcher.cc",
@@ -181,6 +182,30 @@ group("kernel-tests") {
   deps = [ ":tests" ]
 }
 
+kernel_bindgen_crate("process-dispatcher-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/object/process_dispatcher_ffi.h" ]
+  non_rust_deps = [ ":headers" ]
+  output_name = "process_dispatcher_bindings.rs"
+  cpp = true
+  notice_year = 2026
+  function_allowlist = [
+    "cpp_process_dispatcher_normal_aspace",
+    "cpp_process_dispatcher_restricted_aspace",
+  ]
+  type_allowlist = [ "ProcessDispatcher" ]
+  opaque_types = [ "ProcessDispatcher" ]
+  function_blocklist = [ "ProcessDispatcher_.*" ]
+  type_blocklist = [ "VmAspace" ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+
+  edition = "2024"
+  raw_lines = [
+    "#![no_std]",
+    "pub type VmAspace = core::ffi::c_void;",
+  ]
+}
+
 kernel_rust_mod("object-rs") {
   output_name = "object"
   source_root = "object.rs"
@@ -189,6 +214,8 @@ kernel_rust_mod("object-rs") {
     "buffer_chain.rs",
     "bus_transaction_initiator_dispatcher.rs",
     "bus_transaction_initiator_dispatcher_ffi.rs",
+    "channel_dispatcher.rs",
+    "channel_dispatcher_ffi.rs",
     "clock_dispatcher.rs",
     "clock_dispatcher_ffi.rs",
     "counter_dispatcher.rs",
@@ -201,6 +228,9 @@ kernel_rust_mod("object-rs") {
     "event_pair_dispatcher_ffi.rs",
     "fifo_dispatcher.rs",
     "fifo_dispatcher_ffi.rs",
+    "guest.rs",
+    "guest_dispatcher.rs",
+    "guest_dispatcher_ffi.rs",
     "handle.rs",
     "io_buffer_dispatcher.rs",
     "io_buffer_dispatcher_ffi.rs",
@@ -225,6 +255,7 @@ kernel_rust_mod("object-rs") {
     "pinned_memory_token_dispatcher.rs",
     "pinned_memory_token_dispatcher_ffi.rs",
     "pmt.rs",
+    "port_dispatcher.rs",
     "process_dispatcher.rs",
     "process_dispatcher_ffi.rs",
     "profile_dispatcher.rs",
@@ -247,6 +278,7 @@ kernel_rust_mod("object-rs") {
     "thread_dispatcher_ffi.rs",
     "timer_dispatcher.rs",
     "timer_dispatcher_ffi.rs",
+    "user_handles.rs",
     "vm_address_region_dispatcher.rs",
     "vm_address_region_dispatcher_ffi.rs",
     "vm_object_dispatcher.rs",
@@ -255,6 +287,7 @@ kernel_rust_mod("object-rs") {
   ]
 
   deps = [
+    ":process-dispatcher-bindings",
     "//sdk/rust/iob",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",

@@ -68,6 +68,8 @@ class FakeUsbAx88179Function
 
   // Hooks:
   void SetOnline(SetOnlineRequestView request, SetOnlineCompleter::Sync& completer) override;
+  void SetFailShortRead(SetFailShortReadRequestView request,
+                        SetFailShortReadCompleter::Sync& completer) override;
 
  private:
   void DevfsConnect(fidl::ServerEnd<fuchsia_hardware_ax88179::Hooks> req);
@@ -98,6 +100,7 @@ class FakeUsbAx88179Function
   fidl::ServerBindingGroup<fuchsia_hardware_ax88179::Hooks> bindings_;
   fidl::WireSyncClient<fuchsia_driver_framework::NodeController> child_;
   driver_devfs::Connector<fuchsia_hardware_ax88179::Hooks> connector_;
+  bool fail_short_read_ TA_GUARDED(mtx_) = false;
 };
 
 void FakeUsbAx88179Function::SetOnline(SetOnlineRequestView request,
@@ -125,42 +128,49 @@ void FakeUsbAx88179Function::SetOnline(SetOnlineRequestView request,
   completer.Reply(ZX_OK);
 }
 
+void FakeUsbAx88179Function::SetFailShortRead(SetFailShortReadRequestView request,
+                                              SetFailShortReadCompleter::Sync& completer) {
+  fbl::AutoLock lock(&mtx_);
+  fail_short_read_ = request->fail_short_read;
+  completer.Reply(ZX_OK);
+}
+
 zx::result<> FakeUsbAx88179Function::Start(fdf::DriverContext context) {
   fbl::AutoLock lock(&mtx_);
 
   descriptor_size_ = sizeof(descriptor_);
   descriptor_.interface = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = 0,
       .b_alternate_setting = 0,
       .b_num_endpoints = 3,
-      .b_interface_class = USB_CLASS_COMM,
-      .b_interface_sub_class = USB_CDC_SUBCLASS_ETHERNET,
+      .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+      .b_interface_sub_class = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
       .b_interface_protocol = 1,
       .i_interface = 0,
   };
   descriptor_.bulk_in = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
-      .b_endpoint_address = USB_ENDPOINT_IN,  // set later
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+      .b_endpoint_address = fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn),  // set later
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = htole16(BULK_MAX_PACKET),
       .b_interval = 0,
   };
   descriptor_.bulk_out = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
-      .b_endpoint_address = USB_ENDPOINT_OUT,  // set later
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+      .b_endpoint_address = fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut),  // set later
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = htole16(BULK_MAX_PACKET),
       .b_interval = 0,
   };
   descriptor_.intr_ep = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = 0,  // set later
-      .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kInterrupt),
+      .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kInterrupt),
       .w_max_packet_size = htole16(INTR_MAX_PACKET),
       .b_interval = 8,
   };
@@ -252,7 +262,7 @@ zx::result<> FakeUsbAx88179Function::Start(fdf::DriverContext context) {
   devfs_args.connector(std::move(*connector));
   devfs_args.class_name("test-asix-function");
 
-  std::vector<fuchsia_driver_framework::NodeProperty> props{};
+  std::vector<fuchsia_driver_framework::NodeProperty2> props{};
   std::vector offers{fdf::MakeOffer2<fuchsia_hardware_ax88179::Service>()};
 
   zx::result child = AddChild(name(), devfs_args, props, offers);
@@ -291,7 +301,16 @@ void FakeUsbAx88179Function::DevfsConnect(fidl::ServerEnd<fuchsia_hardware_ax881
 }
 
 void FakeUsbAx88179Function::Control(ControlRequest& request, ControlCompleter::Sync& completer) {
-  completer.Reply(zx::ok(std::vector<uint8_t>{}));
+  fbl::AutoLock lock(&mtx_);
+  if (usb_request_is_in(request.setup().bm_request_type())) {
+    if (fail_short_read_ && request.setup().w_length() > 1) {
+      completer.Reply(zx::ok(std::vector<uint8_t>(1, 0)));
+      return;
+    }
+    completer.Reply(zx::ok(std::vector<uint8_t>(request.setup().w_length(), 0)));
+  } else {
+    completer.Reply(zx::ok(std::vector<uint8_t>{}));
+  }
 }
 
 void FakeUsbAx88179Function::SetConfigured(SetConfiguredRequest& request,

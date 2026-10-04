@@ -15,6 +15,8 @@ template <bool manage_lifetime, typename gtest_base>
 class TestFixture;
 
 static inline const uint32_t kBufferSize = zx_system_get_page_size();
+// 12 corresponds to 4KiB page alignment (1 << 12).
+static inline constexpr uint32_t kAlignmentLog2 = 12;
 
 template <typename T>
 class Fifo {
@@ -23,23 +25,7 @@ class Fifo {
 
  public:
   virtual zx::result<> Init(zx::bti& bti, bool cached) {
-    if (!buffer_) {
-      zx_status_t status = dma_buffer::CreateBufferFactory()->CreateContiguous(
-          bti, kBufferSize, 12,
-          cached ? dma_buffer::CacheOptions::kEnabled : dma_buffer::CacheOptions::kDisabled,
-          &buffer_);
-      if (status != ZX_OK) {
-        fdf::error("dma_buffer init fails: {}", zx_status_get_string(status));
-        return zx::error(status);
-      }
-
-      first_ = static_cast<T*>(buffer_->virt());
-      last_ = first_ + (kBufferSize / sizeof(T));
-    }
-
-    write_ = first_;
-    read_ = write_;
-    return zx::ok();
+    return zx::make_result(InitBuffer(bti, cached).status_value());
   }
   void Clear() { read_ = write_; }
   void Release() {
@@ -131,6 +117,30 @@ class Fifo {
   }
 
  protected:
+  zx::result<bool> InitBuffer(zx::bti& bti, bool cached) {
+    const dma_buffer::CacheOptions cache_options =
+        cached ? dma_buffer::CacheOptions::kEnabled : dma_buffer::CacheOptions::kDisabled;
+    if (buffer_ && buffer_->cache_options() != cache_options) {
+      Release();
+    }
+    const bool allocated = !buffer_;
+    if (allocated) {
+      zx_status_t status = dma_buffer::CreateBufferFactory()->CreateContiguous(
+          bti, kBufferSize, kAlignmentLog2, cache_options, &buffer_);
+      if (status != ZX_OK) {
+        fdf::error("dma_buffer init fails: {}", zx_status_get_string(status));
+        return zx::error(status);
+      }
+
+      first_ = static_cast<T*>(buffer_->virt());
+      last_ = first_ + (kBufferSize / sizeof(T));
+    }
+
+    write_ = first_;
+    read_ = write_;
+    return zx::ok(allocated);
+  }
+
   zx_paddr_t GetPhys(T* ptr) const {
     ZX_ASSERT((ptr >= first_) && (ptr <= last_));
     return buffer_->phys() + ((ptr - first_) * sizeof(T));

@@ -135,6 +135,11 @@ class MockBlockDevice final : public fidl::testing::WireTestBase<fuchsia_storage
       });
     }
 
+    void RegisterKey(RegisterKeyRequestView request,
+                     RegisterKeyCompleter::Sync& completer) override {
+      completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+    }
+
     void Close(CloseCompleter::Sync& completer) override {
       fifo_.reset();
       peer_fifo_.reset();

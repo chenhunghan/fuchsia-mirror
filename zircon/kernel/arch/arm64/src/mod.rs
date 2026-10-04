@@ -17,6 +17,8 @@ pub struct ArchSavedNormalState {
 zr::static_assert!(core::mem::size_of::<ArchSavedNormalState>() == 16);
 zr::static_assert!(core::mem::align_of::<ArchSavedNormalState>() == 8);
 
+pub mod vm;
+
 use crate::kernel::types::cpu_num_t;
 use arch_arm64_aspace_bindings as aspace_bindings;
 use core::fmt::Write;
@@ -159,16 +161,6 @@ zr::static_assert!(core::mem::offset_of!(Iframe, usp) == 264);
 #[allow(unused_imports)]
 pub use arch_types_bindings::{GeneralRegsSource, UserEntryState};
 
-/// Check if a virtual address is accessible to user space on aarch64.
-///
-/// [arm/v8]: D5.2.6 Virtual address splits / TTBR0_EL1 selection bit (VA[55] == 0).
-#[inline]
-pub fn is_user_accessible(va: usize) -> bool {
-    const HIGH_VA_BIT: usize = 55;
-    const USER_BIT_MASK: usize = 1usize << HIGH_VA_BIT;
-    (va & USER_BIT_MASK) == 0
-}
-
 /// Virtual address where the kernel address space begins.
 /// Below this is the user address space.
 pub const KERNEL_ASPACE_BASE: usize = 0xffff000000000000;
@@ -202,19 +194,6 @@ zr::static_assert!(
 /// size due to the 40-bit physical address range on Cortex-A53.
 pub const MMU_GUEST_SIZE_SHIFT: usize = aspace_bindings::MMU_GUEST_SIZE_SHIFT as usize;
 
-/// Returns whether `va` is within the kernel address space.
-#[inline]
-pub fn is_kernel_address(va: usize) -> bool {
-    va >= KERNEL_ASPACE_BASE && va.wrapping_sub(KERNEL_ASPACE_BASE) < KERNEL_ASPACE_SIZE
-}
-
-/// Userspace threads can only set an entry point to userspace addresses, or
-/// the null pointer (for testing a thread that will always fail).
-#[inline]
-pub fn is_valid_user_pc(pc: usize) -> bool {
-    (pc == 0) || (is_user_accessible(pc) && !is_kernel_address(pc))
-}
-
 /// Validate that the restricted state is safe and well-formed before entering restricted mode.
 ///
 /// Ensures that the program counter (`pc`) is within user address space, verifies alignment
@@ -223,7 +202,7 @@ pub fn is_valid_user_pc(pc: usize) -> bool {
 /// [arm/v8]: C5.2.19 CPSR / D13.2.112 SPSR_EL1
 pub fn validate_state_pre_restricted_entry(state: &zx_restricted_state_t) -> Result<(), Status> {
     // Validate that PC is within userspace.
-    if !is_user_accessible(state.pc as usize) {
+    if !vm::is_user_accessible(state.pc as usize) {
         ltracef!("fail due to bad PC {:#x}\n", state.pc);
         return Err(Status::BAD_STATE);
     }
@@ -592,6 +571,7 @@ pub unsafe extern "C" fn rust_arch_enter_full(
 /// Architecture unit tests for arm64.
 #[unittest::suite(name = "arm64")]
 mod arm64_tests {
+    use super::vm::{is_kernel_address, is_user_accessible, is_valid_user_pc};
     use unittest::{assert_err, assert_false, assert_ok, assert_true};
 
     /// Tests `is_user_accessible`.

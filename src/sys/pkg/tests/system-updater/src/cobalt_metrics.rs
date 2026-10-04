@@ -146,3 +146,69 @@ async fn succeeds_even_if_metrics_fail_to_send_packageless() {
         Reboot,
     ]));
 }
+
+#[test_case(UPDATE_PKG_URL)]
+#[test_case(MANIFEST_URL)]
+#[fuchsia::test]
+async fn test_installation_error_files_crash_report(update_url: &str) {
+    let (send, mut recv) = futures::channel::mpsc::unbounded();
+    let env = TestEnv::builder()
+        .ota_manifest_raw(b"invalid manifest")
+        .crash_reporter(MockCrashReporterService::new(move |report| {
+            send.unbounded_send(report).unwrap();
+            Ok(ffeedback::FileReportResults::default())
+        }))
+        .build()
+        .await;
+
+    let result = env.run_update_with_options(update_url, default_options()).await;
+    assert!(result.is_err(), "system updater succeeded when it should fail");
+
+    assert_matches!(
+        recv.next().await.unwrap(),
+        ffeedback::CrashReport {
+            crash_signature: Some(signature),
+            program_name: Some(program),
+            program_uptime: Some(_),
+            is_fatal: Some(false),
+            ..
+        } if signature == "fuchsia-installation-error" && program == "system"
+    );
+}
+
+#[test_case(UPDATE_PKG_URL)]
+#[test_case(MANIFEST_URL)]
+#[fuchsia::test]
+async fn test_excessive_update_duration_files_crash_report(update_url: &str) {
+    let (send, mut recv) = futures::channel::mpsc::unbounded();
+    let env = TestEnv::builder()
+        .ota_manifest(make_manifest([]))
+        .excessive_update_duration_seconds(1)
+        .crash_reporter(MockCrashReporterService::new(move |report| {
+            send.unbounded_send(report).unwrap();
+            Ok(ffeedback::FileReportResults::default())
+        }))
+        .build()
+        .await;
+
+    env.resolver
+        .register_package("update", "upd4t3")
+        .add_file("packages.json", make_packages_json([]))
+        .add_file("images.json", make_images_json_zbi())
+        .add_file("epoch.json", make_current_epoch_json());
+
+    env.cache_service.set_sync_delay(std::time::Duration::from_millis(1100));
+
+    env.run_update_with_options(update_url, default_options()).await.expect("run system updater");
+
+    assert_matches!(
+        recv.next().await.unwrap(),
+        ffeedback::CrashReport {
+            crash_signature: Some(signature),
+            program_name: Some(program),
+            program_uptime: Some(_),
+            is_fatal: Some(false),
+            ..
+        } if signature == "fuchsia-excessive-update-duration" && program == "system"
+    );
+}

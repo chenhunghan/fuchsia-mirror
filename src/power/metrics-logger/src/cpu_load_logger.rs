@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::MIN_INTERVAL_FOR_SYSLOG_MS;
+use crate::{MIN_INTERVAL_FOR_SYSLOG_MS, round_for_syslog};
 use anyhow::{Result, format_err};
 use fidl_fuchsia_boot as fboot;
 use fidl_fuchsia_kernel as fkernel;
@@ -213,7 +213,11 @@ impl CpuLoadLogger {
                             );
 
                             if self.output_samples_to_syslog {
-                                info!(max_perf_scale = cluster.max_perf_scale, cpu_usage; "");
+                                info!(
+                                    max_perf_scale = round_for_syslog(cluster.max_perf_scale),
+                                    cpu_usage = round_for_syslog(cpu_usage);
+                                    ""
+                                );
                             }
 
                             fuchsia_trace::counter!(
@@ -238,7 +242,7 @@ impl CpuLoadLogger {
                         );
 
                         if self.output_samples_to_syslog {
-                            info!(cpu_usage; "");
+                            info!(cpu_usage = round_for_syslog(cpu_usage); "");
                         }
 
                         fuchsia_trace::counter!(

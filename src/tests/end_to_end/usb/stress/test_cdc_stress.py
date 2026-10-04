@@ -42,8 +42,19 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 # 64KB chunk size for streaming payload into target shell builtins
 _TRANSFER_CHUNK_SIZE_BYTES: int = 65536
 
-# Timeout for CDC Ethernet interface and route discovery under CQ / virtualization load.
+# Timeout for CDC Ethernet interface and route discovery under CQ /
+# virtualization load.
 _CDC_ROUTING_TIMEOUT_SEC: float = 60.0
+
+# Timeout for each transient SSH probe during reconnection polling.
+_SSH_PROBE_TIMEOUT_SEC: float = 10.0
+
+# Timeout for SSH readiness check during network settle verification.
+_NETWORK_SETTLED_SSH_TIMEOUT_SEC: float = 10.0
+
+# Maximum time to wait for target to re-enumerate and come online after
+# a USB VBUS power cycle.
+_POWER_RECOVERY_TIMEOUT_SEC: float = 180.0
 
 
 class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
@@ -52,32 +63,123 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """Called once before running test cases in the class."""
         await super().setup_class()
+        self._cdc_iface_name: str | None = None
+        self._reconnect_failed: bool = False
         await self._wait_for_network_settled()
 
+    async def setup_test(self) -> None:
+        """Called before each test case."""
+        await super().setup_test()
+        self._reconnect_failed = False
+
+    async def teardown_test(self) -> None:
+        """Called after each test case."""
+        if self._reconnect_failed:
+            _LOGGER.warning(
+                "Skipping FuchsiaBaseTest teardown checks because DUT failed "
+                "to come back online."
+            )
+            return
+        await super().teardown_test()
+
+    async def _wait_for_online_bounded(
+        self, timeout_sec: float, failure_msg: str
+    ) -> None:
+        """Waits for the target to come online with a strict timeout.
+
+        Uses ``ffx target wait --timeout`` directly instead of
+        ``self.dut.wait_for_online()`` (which passes ``--timeout 0``) so that a
+        timed-out wait terminates the underlying subprocess cleanly instead of
+        leaving a background worker thread blocked until process exit. Also
+        marks ``self._reconnect_failed = True`` on failure so ``teardown_test``
+        skips ``FuchsiaBaseTest.health_check()`` on an unreachable device.
+
+        Args:
+            timeout_sec: Maximum time in seconds to wait for the target to come
+                online.
+            failure_msg: Prefix message for the test failure assertion if the
+                target does not come online within ``timeout_sec``.
+
+        Raises:
+            mobly.signals.TestFailure: If the target fails to come online
+                within ``timeout_sec`` seconds.
+        """
+        try:
+            await asyncio.to_thread(
+                self.dut.ffx.run,
+                ["target", "wait", "--timeout", str(int(timeout_sec))],
+                timeout=timeout_sec + 5.0,
+                log_status_on_failure=False,
+                disable_controlmaster=True,
+            )
+        except Exception as e:
+            self._reconnect_failed = True
+            asserts.fail(f"{failure_msg}: {e}")
+
     async def _wait_for_ssh_ready(self, timeout_sec: float = 60.0) -> None:
-        """Actively polls until the target SSH daemon accepts a new connection."""
+        """Actively polls until the target SSH daemon accepts a new connection.
+
+        Uses ``log_status_on_failure=False`` and a short per-probe timeout to
+        bypass Honeydew's default failure triage routine (which runs a 30s
+        ``ffx target status`` command on every failed probe and would otherwise
+        exhaust the polling window on a single transient failure).
+
+        Args:
+            timeout_sec: Maximum time in seconds to poll for SSH readiness.
+
+        Raises:
+            TimeoutError: If the target SSH daemon does not accept connections
+                within ``timeout_sec`` seconds.
+        """
         start_time = asyncio.get_running_loop().time()
         while asyncio.get_running_loop().time() - start_time < timeout_sec:
             try:
-                await asyncio.to_thread(self.dut.ffx.run_ssh_cmd, ":")
+                await asyncio.to_thread(
+                    self.dut.ffx.run,
+                    ["target", "ssh", ":"],
+                    timeout=_SSH_PROBE_TIMEOUT_SEC,
+                    log_status_on_failure=False,
+                    machine=MachineFormat.RAW,
+                )
                 return
             except Exception:
-                # Brief sleep before retrying SSH connection to avoid hammering sshd during reconnection.
+                # Brief sleep before retrying SSH connection to avoid hammering
+                # sshd during reconnection.
                 await asyncio.sleep(0.5)
         raise TimeoutError(
-            f"Timed out after {timeout_sec}s waiting for target SSH daemon to accept connections."
+            f"Timed out after {timeout_sec}s waiting for target SSH daemon "
+            "to accept connections."
         )
 
     async def _wait_for_network_settled(
         self, timeout_sec: float = 30.0
     ) -> None:
-        """Actively waits until Netstack registers the CDC Ethernet interface and verifies connectivity."""
+        """Waits until Netstack registers the CDC interface and SSH is ready.
+
+        Args:
+            timeout_sec: Maximum time in seconds to wait for Netstack to
+                report an active CDC Ethernet interface with IP addresses.
+
+        Raises:
+            TimeoutError: If the CDC Ethernet interface or SSH transport fails
+                to stabilize within the configured timeout.
+            mobly.signals.TestFailure: If the device fails to come online
+                before polling Netstack.
+        """
         _LOGGER.info(
-            "Waiting for CDC Ethernet interface and network stack to stabilize..."
+            "Waiting for CDC Ethernet interface and network stack to "
+            "stabilize..."
         )
-        await self.dut.wait_for_online()
+        await self._wait_for_online_bounded(
+            timeout_sec=_POWER_RECOVERY_TIMEOUT_SEC,
+            failure_msg=(
+                f"Device {self.dut.device_name} did not come online within "
+                f"{_POWER_RECOVERY_TIMEOUT_SEC}s during network settle check"
+            ),
+        )
         self.dut.health_check()
         start_time = asyncio.get_running_loop().time()
+        cdc_ready = False
         while asyncio.get_running_loop().time() - start_time < timeout_sec:
             try:
                 interfaces = await asyncio.wait_for(
@@ -89,24 +191,35 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                     for iface in interfaces
                 )
                 if cdc_ready:
-                    await asyncio.to_thread(self.dut.ffx.run_ssh_cmd, ":")
-                    _LOGGER.info(
-                        "CDC Ethernet interface and SSH transport stabilized."
-                    )
-                    return
+                    break
             except Exception:
                 pass
             # Brief sleep before polling again to allow Netstack to update.
             await asyncio.sleep(0.5)
-        raise TimeoutError(
-            f"Timed out after {timeout_sec}s waiting for CDC Ethernet interface to stabilize."
+
+        if not cdc_ready:
+            raise TimeoutError(
+                f"Timed out after {timeout_sec}s waiting for CDC Ethernet "
+                "interface to stabilize."
+            )
+
+        await self._wait_for_ssh_ready(
+            timeout_sec=_NETWORK_SETTLED_SSH_TIMEOUT_SEC
         )
+        _LOGGER.info("CDC Ethernet interface and SSH transport stabilized.")
 
     async def _verify_cdc_routing(self) -> None:
-        """Verifies via FIDL that active FFX SSH traffic traverses the USB CDC Ethernet adapter."""
-        await self.dut.wait_for_online()
+        """Verifies via FIDL that FFX SSH traffic uses the USB CDC adapter."""
+        await self._wait_for_online_bounded(
+            timeout_sec=_POWER_RECOVERY_TIMEOUT_SEC,
+            failure_msg=(
+                f"Device {self.dut.device_name} did not come online within "
+                f"{_POWER_RECOVERY_TIMEOUT_SEC}s during CDC routing check"
+            ),
+        )
         cdc_ips: list[str] = []
         wlan_ips: list[str] = []
+        cdc_iface_name: str | None = None
         start_time = asyncio.get_running_loop().time()
         while (
             asyncio.get_running_loop().time() - start_time
@@ -115,6 +228,7 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
             interfaces = await self.dut.netstack.list_interfaces()
             cdc_ips = []
             wlan_ips = []
+            cdc_iface_name = None
             for iface in interfaces:
                 if iface.name != "lo":
                     ip_strs = [
@@ -123,8 +237,10 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                     ]
                     if iface.port_class == PortClass.ETHERNET:
                         cdc_ips.extend(ip_strs)
+                        cdc_iface_name = iface.name
                         _LOGGER.info(
-                            "Verified CDC Ethernet interface '%s' (ID: %s, MAC: %s, IPs: %s)",
+                            "Verified CDC Ethernet interface '%s' (ID: %s, "
+                            "MAC: %s, IPs: %s)",
                             iface.name,
                             iface.id_,
                             iface.mac,
@@ -134,13 +250,16 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                         wlan_ips.extend(ip_strs)
             if cdc_ips:
                 break
-            # Brief sleep before re-querying interfaces to allow Netstack to complete IP address assignment.
+            # Brief sleep before re-querying interfaces to allow Netstack to
+            # complete IP address assignment.
             await asyncio.sleep(0.5)
 
         asserts.assert_true(
             bool(cdc_ips),
-            "Pre-flight check failed: No active CDC USB Ethernet IP addresses detected via FIDL.",
+            "Pre-flight check failed: No active CDC USB Ethernet IP addresses "
+            "detected via FIDL.",
         )
+        self._cdc_iface_name = cdc_iface_name
 
         ssh_addr = self.dut.ffx.get_target_ssh_address()
         asserts.assert_is_not_none(
@@ -159,7 +278,9 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
         asserts.assert_in(
             raw_ssh_ip,
             cdc_ips,
-            f"Pre-flight check failed: SSH IP '{raw_ssh_ip}' does not match CDC Ethernet ({cdc_ips}). Traffic might be leaking over WLAN ({wlan_ips})!",
+            f"Pre-flight check failed: SSH IP '{raw_ssh_ip}' does not match "
+            f"CDC Ethernet ({cdc_ips}). Traffic might be leaking over WLAN "
+            f"({wlan_ips})!",
         )
 
     # TODO(b/528457918): Add `test_vsock_sustained_packet_transfer` suite once FFX and
@@ -253,7 +374,6 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                 i,
                 actual_bytes,
             )
-            await self._wait_for_ssh_ready()
 
         _LOGGER.info(
             "Successfully completed %d iterations of CDC Target->Host large file transfer stress.",
@@ -343,8 +463,6 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                         f"CDC network stack failed during Host->Target large file transfer iteration {i}: {e}"
                     )
 
-                await self._wait_for_ssh_ready()
-
         _LOGGER.info(
             "Successfully completed %d iterations of CDC Host->Target large file transfer stress.",
             num_iterations,
@@ -377,10 +495,14 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
         # Execute ICMP bursts across all block sizes in a single SSH session on target
         # to avoid repeated connection setup/teardown overhead while stressing CDC-NCM MTU/aggregation.
         sizes_str = " ".join(str(bs) for bs in packet_sizes)
+        iface_flag = (
+            f"-I {self._cdc_iface_name} " if self._cdc_iface_name else ""
+        )
         batch_script = (
             'host_ip="${SSH_CONNECTION%% *}"\n'
             f"for bs in {sizes_str}; do\n"
-            f'    out=$(ping -c {burst_count} -i 200 -s $bs -t 5000 "$host_ip" 2>&1)\n'
+            f"    out=$(ping -c {burst_count} -i 200 -s $bs -t 5000 "
+            f'{iface_flag}"$host_ip" 2>&1)\n'
             "    status=$?\n"
             "    if [ $status -ne 0 ]; then\n"
             '        echo "FAIL: bs=$bs status=$status output=$out"\n'
@@ -521,6 +643,8 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
             self.user_params.get("disconnect_duration_sec", 5)
         )
 
+        await self._verify_cdc_routing()
+
         _LOGGER.info(
             "Starting CDC USB power cycle stress test across %d iterations.",
             num_iterations,
@@ -528,7 +652,14 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
         for i in range(1, num_iterations + 1):
             _LOGGER.info("Power cycle iteration %d/%d", i, num_iterations)
-            await self.dut.wait_for_online()
+            await self._wait_for_online_bounded(
+                timeout_sec=_POWER_RECOVERY_TIMEOUT_SEC,
+                failure_msg=(
+                    f"Iteration {i}: Device {self.dut.device_name} was not "
+                    f"online within {_POWER_RECOVERY_TIMEOUT_SEC}s before "
+                    "power cycle"
+                ),
+            )
 
             try:
                 # Cut physical VBUS power via hardware USB hub
@@ -541,19 +672,31 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                 await asyncio.to_thread(self.dut.wait_for_offline)
 
                 if disconnect_duration > 0:
-                    # Keep VBUS power removed for the configured duration to simulate a sustained physical disconnect.
+                    # Keep VBUS power removed for the configured duration to
+                    # simulate a sustained physical disconnect.
                     await asyncio.sleep(disconnect_duration)
             finally:
-                # Restore VBUS power and verify CDC Ethernet network re-enumeration
+                # Restore VBUS power and verify CDC Ethernet network
+                # re-enumeration
                 hub.power_on(port=port)
                 _LOGGER.info(
-                    "Powered on USB port %s. Waiting for CDC network recovery...",
+                    "Powered on USB port %s. Waiting for CDC network "
+                    "recovery...",
                     port,
                 )
-                await self.dut.wait_for_online()
+                await self._wait_for_online_bounded(
+                    timeout_sec=_POWER_RECOVERY_TIMEOUT_SEC,
+                    failure_msg=(
+                        f"Iteration {i}: Device {self.dut.device_name} failed "
+                        f"to re-enumerate and come online within "
+                        f"{_POWER_RECOVERY_TIMEOUT_SEC}s after restoring USB "
+                        "VBUS power"
+                    ),
+                )
                 await self.dut.on_device_boot()
 
-            # Wait for network interface and SSH transport to settle after recovery
+            # Wait for network interface and SSH transport to settle after
+            # recovery
             await self._wait_for_network_settled()
 
             # Verify network connectivity is fully functional after recovery

@@ -362,7 +362,7 @@ __EXPORT void usb_request_trace_flow(usb_request_t* req) {
   if (TRACE_ENABLED()) {
     const char* direction = "IN";
     unsigned int len = 2;
-    if (usb_ep_direction2(req->header.ep_address) == USB_ENDPOINT_OUT) {
+    if (usb_ep_is_out(req->header.ep_address)) {
       direction = "OUT";
       len = 3;
     }
@@ -373,14 +373,14 @@ __EXPORT void usb_request_trace_flow(usb_request_t* req) {
       req->flow_trace.started = true;
       TRACE_DURATION("USB Request", "Trace Begin");
       TRACE_FLOW_BEGIN("USB Request", "USB Trace", req->flow_trace.id, "ep_num",
-                       TA_UINT32(usb_ep_num2(req->header.ep_address)), "pipe direction",
+                       TA_UINT32(usb_ep_num(req->header.ep_address)), "pipe direction",
                        TA_CHAR_ARRAY(direction, len), "device_id", TA_UINT32(req->header.device_id),
                        "len", TA_UINT64(req->header.length), "frame", TA_UINT64(req->header.frame),
                        "direct", TA_BOOL(req->direct));
     } else {
       TRACE_DURATION("USB Request", "Trace Step");
       TRACE_FLOW_STEP("USB Request", "USB Trace", req->flow_trace.id, "ep_num",
-                      TA_UINT32(usb_ep_num2(req->header.ep_address)), "pipe direction",
+                      TA_UINT32(usb_ep_num(req->header.ep_address)), "pipe direction",
                       TA_CHAR_ARRAY(direction, len), "device_id", TA_UINT32(req->header.device_id),
                       "len", TA_UINT64(req->header.length), "frame", TA_UINT64(req->header.frame),
                       "direct", TA_BOOL(req->direct));

@@ -25,6 +25,12 @@
             source_availability: "unknown",
         },
         {
+            protocol: [ "fuchsia.hardware.power.statecontrol.ShutdownWatcherRegister" ],
+            from: "parent",
+            to: "#diagnostics",
+            availability: "optional",
+        },
+        {
             storage: "cache",
             from: "self",
             to: "#diagnostics",
@@ -48,6 +54,12 @@
         },
         {
             config: "fuchsia.diagnostics.persist.LowBatteryThresholdPercent",
+            from: "parent",
+            to: "#diagnostics",
+            availability: "same_as_target",
+        },
+        {
+            config: "fuchsia.diagnostics.persist.EnableShutdownSnapshot",
             from: "parent",
             to: "#diagnostics",
             availability: "same_as_target",

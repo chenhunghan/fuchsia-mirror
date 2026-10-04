@@ -9,8 +9,13 @@ package(default_applicable_licenses = ["//:license"])
 fidl_library(
     name = "fuchsia.hardware.usb.descriptor",
     srcs = [
+        "audio.fidl",
+        "cdc.fidl",
+        "hid.fidl",
         "hub.fidl",
+        "msc.fidl",
         "usb.fidl",
+        "video.fidl",
     ],
     api_area = "Drivers",
     category = "partner",

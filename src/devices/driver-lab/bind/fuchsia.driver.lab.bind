@@ -1,0 +1,27 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+library fuchsia.driver.lab;
+
+// Set on a node explicitly selected for driver-lab binding. The proxy
+// binds only when this property is present and selected, so it can
+// never bind opportunistically: production nodes never carry it, and
+// engineering activation sets it deliberately.
+bool PROXY_TARGET {
+    SELECTED = true,
+};
+
+// Set on a test node (for example via `ffx driver test-node add`) to
+// have the lab_root test driver bind and stand up a fake platform
+// device beneath it. String-valued so host tooling can set it through
+// key=value interfaces.
+string LAB_ROOT {
+    SELECTED = "selected",
+};
+
+// Set on the synthetic platform child node bound by the reference
+// in-situ sample driver (`lab_sample_driver`).
+bool SAMPLE_DEVICE {
+    SELECTED = true,
+};

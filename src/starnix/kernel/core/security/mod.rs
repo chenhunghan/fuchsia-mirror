@@ -47,12 +47,6 @@ impl KernelState {
 #[derive(Debug, Default)]
 pub struct FsNodeState(selinux_hooks::FsNodeState);
 
-/// Opaque structure holding security state for a [`binderfs::BinderConnection`].
-#[derive(Debug)]
-pub struct BinderConnectionState {
-    state: selinux_hooks::BinderConnectionState,
-}
-
 /// Opaque structure holding security state for a [`crate::vfs::socket::Socket`].
 #[derive(Debug, Default)]
 pub struct SocketState {

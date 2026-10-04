@@ -6,12 +6,9 @@
 
 import("//build/config/clang/clang_prefix.gni")
 import("//build/config/compiler_config.gni")
-import("//build/config/current_target_tuple.gni")
-import("//build/config/linker.gni")
 import("//build/rust/config.gni")
 import("//build/toolchain/rbe.gni")
 import("//build/toolchain/variant.gni")
-import("//build/toolchain/zircon/gcc.gni")
 import("//build/zircon/zircon_cpu.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 import("//zircon/kernel/lib/console/config.gni")
@@ -39,110 +36,15 @@ compiler_config("standalone") {
   compiler_configs = [ ":static-pic-link" ]
 
   if (toolchain_environment == "kernel") {
+    rust_linker = "$rebased_clang_prefix/lld"
+    if (rust_rbe_enable) {
+      rustflags = [ "--remote-inputs=$rust_linker" ]
+    }
     rust_target_edits = [
       {
         key = "pre-link-objects"
         action = "unset"
       },
-    ]
-    if (linker == "lld") {
-      rust_linker = "$rebased_clang_prefix/lld"
-      rust_linker_flavor = "gnu-lld"
-    } else {
-      assert(linker == "")
-      rust_linker =
-          rebase_path("$gcc_tool_dir/$clang_cpu-elf-ld", root_build_dir)
-      rust_linker_flavor = "gnu"
-      pre_link_edits = []
-      post_link_edits = []
-      foreach(flavor,
-              [
-                "gnu",
-                "gnu-lld",
-              ]) {
-        pre_link_edits += [
-          {
-            key = flavor
-            action = "erase"
-            value = [
-              "-z",
-              "rodynamic",
-            ]
-          },
-          {
-            key = flavor
-            action = "erase"
-            value = [
-              "-z",
-              "separate-loadable-segments",
-            ]
-          },
-          {
-            key = flavor
-            action = "erase"
-            value = [
-              "-z",
-              "rel",
-            ]
-          },
-          {
-            key = flavor
-            action = "erase"
-            value = [ "--pack-dyn-relocs=relr" ]
-          },
-          {
-            key = flavor
-            action = "extend"
-            value = [
-              "-z",
-              "pack-relative-relocs",
-            ]
-          },
-          {
-            key = flavor
-            action = "extend"
-            value = [ "--start-group" ]
-          },
-        ]
-        if (is_gcc && current_cpu == "arm64") {
-          pre_link_edits += [
-            {
-              key = flavor
-              action = "erase"
-              value = [ "--execute-only" ]
-            },
-            {
-              key = flavor
-              action = "erase"
-              value = [ "--fix-cortex-a53-843419" ]
-            },
-          ]
-        }
-        post_link_edits += [
-          {
-            key = flavor
-            action = "set"
-            value = [ "--end-group" ]
-          },
-        ]
-      }
-      rust_target_edits += [
-        {
-          key = "pre-link-args"
-          action = "edit"
-          value = pre_link_edits
-        },
-        {
-          key = "post-link-args"
-          action = "edit"
-          value = post_link_edits
-        },
-      ]
-    }
-    if (rust_rbe_enable) {
-      rustflags = [ "--remote-inputs=$rust_linker" ]
-    }
-    rust_target_edits += [
       {
         key = "linker"
         action = "set"
@@ -151,7 +53,7 @@ compiler_config("standalone") {
       {
         key = "linker-flavor"
         action = "set"
-        value = rust_linker_flavor
+        value = "gnu-lld"
       },
     ]
   }
@@ -356,28 +258,8 @@ variant("kernel_config") {
     ":instrumented-stack-size",
   ]
 
-  # TODO(https://fxbug.dev/42101573): This dependency is conditional because when built
-  # with GCC the kernel uses function scoped statics requiring dynamic
-  # initialization. Once https://fxbug.dev/42101573 is fixed, this dependency can be
-  # removed.
-  if (is_gcc) {
-    # Don't emit extra code making static initializers thread-safe.
-    configs += [ "//build/config/zircon:no_threadsafe_statics" ]
-  }
-
   rustflags = []
   rustenv = []
-
-  # TODO(https://fxbug.dev/529516970): gcc building is exposed as a config due
-  # to some Rust test code generating dynamic relocations specifically when
-  # built against gcc. As this is just tests, this config allows those tests to
-  # be skipped on gcc builders without harm.
-  if (is_gcc) {
-    rustflags += [
-      "--cfg",
-      "gcc",
-    ]
-  }
 
   # Always enable frame pointers in the kernel so there are panic
   # backtraces and such.
@@ -418,6 +300,9 @@ variant("kernel_config") {
     rustflags += [
       "--cfg=feature=\"experimental_continuous_per_vmo_attribution_enabled\"",
     ]
+  }
+  if (channel_message_body_tracing_enabled) {
+    rustflags += [ "--cfg=channel_message_body_tracing_enabled" ]
   }
 
   if (kernel_no_userabi) {
@@ -581,16 +466,6 @@ config("jtrace_config") {
   }
 }
 
-# See kernel.ld where KERNEL_GOT_TOLERANCE is used.
-if (current_cpu == "arm64" && is_gcc) {
-  # Each slot is 8 bytes.  The first two special slots are always there if
-  # .got is there at all, per psABI.  GNU (BFD) ld seems to emit two more
-  # unused slots with no associated relocs to explain their existence.
-  got_tolerance = 32
-} else {
-  got_tolerance = 0
-}
-
 # This is implicitly added last to configs in kernel_executable().
 compiler_config("kernel_executable.config") {
   visibility = [ "//zircon/kernel/bin/*" ]
@@ -606,8 +481,6 @@ compiler_config("kernel_executable.config") {
   }
 
   assignments = kernel_defines + [
-                  "KERNEL_GOT_TOLERANCE=$got_tolerance",
-
                   # This symbol is used by gdb python to know the base of the
                   # kernel module
                   #
@@ -636,25 +509,9 @@ variant("unit-tests-enabled") {
 
 # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
 clippy_lints = [
-  "assertions-on-constants",
-  "clone-on-copy",
-  "collapsible-if",
-  "crate-in-macro-def",
   "doc-lazy-continuation",
-  "empty-line-after-doc-comments",
-  "len-zero",
-  "let-unit-value",
-  "manual-non-exhaustive",
-  "needless-late-init",
   "new-without-default",
-  "non-canonical-clone-impl",
-  "ptr-eq",
-  "redundant-pattern-matching",
-  "suspicious-arithmetic-impl",
   "too-many-arguments",
-  "type-complexity",
-  "unnecessary-cast",
-  "unnecessary-unwrap",
 ]
 foreach(lint, clippy_lints) {
   config("allow-$lint") {

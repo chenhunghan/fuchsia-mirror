@@ -289,10 +289,8 @@ zx_status_t BlockDevice::AddDevice(uint32_t max_transfer_bytes) {
           },
   });
   if (controller_->SupportsInlineEncryption()) {
-    auto result = handlers.add_inline_encryption(
-        [this](fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) {
-          controller_->ServeInlineEncryption(std::move(server_end));
-        });
+    auto result = handlers.add_inline_encryption(inline_encryption_bindings_.CreateHandler(
+        this, fdf::Dispatcher::GetCurrent()->async_dispatcher(), fidl::kIgnoreBindingClosure));
     ZX_ASSERT(result.is_ok());
   }
 
@@ -484,6 +482,35 @@ void BlockDevice::Get(GetCompleter::Sync& completer) {
   } else {
     completer.Reply(zx::error(ZX_ERR_NOT_FOUND));
   }
+}
+
+void BlockDevice::ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync& completer) {
+  if (!block_server_) {
+    completer.ReplyError(ZX_ERR_BAD_STATE);
+    return;
+  }
+  zx::result<uint8_t> slot =
+      controller_->ProgramKeySlot(request->wrapped_key, request->data_unit_size);
+  if (slot.is_error()) {
+    completer.ReplyError(slot.error_value());
+    return;
+  }
+  zx::result<zx::eventpair> key_token = block_server_->RegisterKeySlot(*slot);
+  if (key_token.is_error()) {
+    completer.ReplyError(key_token.error_value());
+    return;
+  }
+  completer.ReplySuccess(std::move(*key_token));
+}
+
+void BlockDevice::DeriveRawSecret(DeriveRawSecretRequestView request,
+                                  DeriveRawSecretCompleter::Sync& completer) {
+  zx::result<std::vector<uint8_t>> secret = controller_->DeriveRawSecret(request->wrapped_key);
+  if (secret.is_error()) {
+    completer.ReplyError(secret.error_value());
+    return;
+  }
+  completer.ReplySuccess(fidl::VectorView<uint8_t>::FromExternal(*secret));
 }
 
 fdf::Logger& BlockDevice::logger() const { return controller_->driver_logger(); }

@@ -25,7 +25,7 @@ closed protocol Test {
     /// used as part of the Device protocol then Test output will be streamed to
     /// the socket set by SetOutputSocket().
     strict RunTests() -> (struct {
-        status zx.Status;
+        status zx.Result;
         report TestReport;
     });
 };

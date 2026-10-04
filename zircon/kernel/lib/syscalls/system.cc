@@ -67,7 +67,6 @@
 #include <object/vm_object_dispatcher.h>
 #include <phys/handoff.h>
 #include <platform/halt_helper.h>
-#include <platform/halt_token.h>
 #include <platform/mexec.h>
 #include <platform/timer.h>
 #include <vm/handoff-end.h>

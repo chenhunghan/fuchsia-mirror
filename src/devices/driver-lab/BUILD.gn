@@ -1,0 +1,315 @@
+# Build assertion: testonly = true on all lab_proxy targets strictly
+# forbids inclusion in any production (non-test) assembly or image.
+
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bind/bind.gni")
+import("//build/components.gni")
+import("//build/drivers.gni")
+import("//build/rust/rustc_library.gni")
+import("//build/rust/rustc_staticlib.gni")
+import("//build/rust/rustc_test.gni")
+import("//build/test.gni")
+import("//src/devices/driver-lab/driver_lab.gni")
+
+driver_bind_rules("bind") {
+  testonly = true
+  rules = "meta/lab_proxy.bind"
+  bind_output = "lab_proxy.bindbc"
+  deps = [ "bind:fuchsia.driver.lab" ]
+}
+
+# Pure-logic policy and audit code, kept free of Fuchsia dependencies so its
+# unit tests run on the build host without an emulator.
+rustc_library("core") {
+  name = "lab_proxy_core"
+  edition = "2024"
+  with_unit_tests = true
+
+  source_root = "src/core.rs"
+  sources = [
+    "src/access_policy.rs",
+    "src/audit_ring.rs",
+    "src/config.rs",
+    "src/core.rs",
+    "src/digest.rs",
+    "src/executor.rs",
+    "src/hardware_backend.rs",
+    "src/interrupt.rs",
+    "src/protocol_resource_adapter.rs",
+    "src/provider.rs",
+    "src/session.rs",
+    "src/state_bank.rs",
+    "src/target_policy.rs",
+  ]
+  deps = [
+    "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:serde_json",
+    "//third_party/rust_crates:sha2",
+  ]
+  test_deps = [ "//third_party/rust_crates:futures" ]
+}
+
+# Shared Fuchsia runtime library for both the standalone lab_proxy driver
+# and embedded in-situ debugging in existing DFv2 Rust drivers.
+rustc_library("driver_lab_rust") {
+  name = "driver_lab_rust"
+  edition = "2024"
+  with_unit_tests = true
+
+  features = [ "fdf_driver" ]
+  if (enable_driver_lab) {
+    features += [ "driver_lab_enabled" ]
+  }
+
+  source_root = "src/driver_lab_lib.rs"
+  sources = [
+    "src/driver_lab_lib.rs",
+    "src/embedded.rs",
+    "src/fuchsia_backends.rs",
+    "src/platform_provider.rs",
+    "src/server.rs",
+  ]
+  deps = [
+    ":core",
+    "fidl:fuchsia.driver.lab_rust",
+    "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_rust",
+    "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_rust",
+    "//sdk/fidl/fuchsia.hardware.i2c:fuchsia.hardware.i2c_rust",
+    "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
+    "//sdk/fidl/fuchsia.hardware.reset:fuchsia.hardware.reset_rust",
+    "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
+    "//sdk/fidl/fuchsia.hardware.spi:fuchsia.hardware.spi_rust",
+    "//sdk/lib/driver/component/rust",
+    "//sdk/lib/driver/mmio/rust:mmio",
+    "//sdk/lib/driver/platform-device/rust:pdev",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fidl/rust_next/fidl_next",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+  test_deps = [ "//src/lib/fuchsia" ]
+}
+
+# Pure C ABI staticlib shim wrapping driver_lab_rust for C/C++ DFv2 drivers.
+rustc_staticlib("driver_lab_c") {
+  name = "driver_lab_c"
+  edition = "2024"
+
+  source_root = "src/c_api.rs"
+  sources = [ "src/c_api.rs" ]
+  public = [ "cpp/include/lib/driver_lab/driver_lab_c.h" ]
+  deps = [
+    ":core",
+    ":driver_lab_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+config("driver_lab_cpp_include") {
+  include_dirs = [ "cpp/include" ]
+}
+
+# Idiomatic C++20 wrapper and StateVmoBank over driver_lab_c.
+source_set("driver_lab_cpp") {
+  public = [
+    "cpp/include/lib/driver_lab/driver_lab.h",
+    "cpp/include/lib/driver_lab/driver_lab_c.h",
+  ]
+  sources = [ "cpp/driver_lab.cc" ]
+  public_configs = [ ":driver_lab_cpp_include" ]
+  public_deps = [
+    ":driver_lab_c",
+    "fidl:fuchsia.driver.lab_cpp",
+    "//sdk/lib/component/outgoing/cpp",
+    "//sdk/lib/driver/outgoing/cpp",
+    "//sdk/lib/fit",
+    "//sdk/lib/stdcompat",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+fuchsia_rust_driver("driver") {
+  testonly = true
+  edition = "2024"
+  with_unit_tests = true
+
+  output_name = "lab_proxy"
+  sources = [ "src/lib.rs" ]
+  deps = [
+    ":core",
+    ":driver_lab_rust",
+    ":lab_proxy_config",
+    "fidl:fuchsia.driver.lab_rust",
+    "//sdk/lib/driver/component/rust",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+  test_deps = [ "//src/lib/fuchsia" ]
+}
+
+fuchsia_component_manifest("lab_proxy_manifest") {
+  testonly = true
+  component_name = "lab_proxy"
+  manifest = "meta/lab_proxy.cml"
+}
+
+fuchsia_structured_config_rust_lib("lab_proxy_config") {
+  testonly = true
+  cm_label = ":lab_proxy_manifest"
+}
+
+fuchsia_structured_config_values("lab_proxy_config_values") {
+  testonly = true
+  cm_label = ":lab_proxy_manifest"
+  values = {
+    enabled = true
+    audit_capacity = 1024
+    max_snapshot_items = 64
+    max_sequence_items = 64
+    max_delay_ns = 1000000000
+    max_sequence_duration_ns = 1000000000
+    max_deadline_ns = 1000000000
+    max_ops_per_second = 0
+  }
+}
+
+fuchsia_driver_component("component") {
+  testonly = true
+  component_name = "lab_proxy"
+  cm_label = ":lab_proxy_manifest"
+  deps = [
+    ":bind",
+    ":driver",
+  ]
+  info = "meta/lab_proxy_info.json"
+}
+
+fuchsia_driver_package("pkg") {
+  testonly = true
+  package_name = "lab_proxy"
+  driver_components = [ ":component" ]
+  deps = [ ":lab_proxy_config_values" ]
+  export_to_bazel = true
+}
+
+fuchsia_unittest_package("driver_lab_rust-unit-test-pkg") {
+  package_name = "driver_lab_rust-unit-test"
+  deps = [ ":driver_lab_rust_test" ]
+}
+
+fuchsia_unittest_package("lab_proxy-unit-test-pkg") {
+  package_name = "lab_proxy-unit-test"
+  deps = [ ":driver_test" ]
+}
+
+test("driver_lab_cpp_test_bin") {
+  output_name = "driver_lab_cpp_test"
+  sources = [ "cpp/tests/driver_lab_cpp_test.cc" ]
+  deps = [
+    ":driver_lab_cpp",
+    "fidl:fuchsia.driver.lab_cpp",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+fuchsia_unittest_package("driver_lab_cpp_tests") {
+  package_name = "driver_lab_cpp_tests"
+  deps = [ ":driver_lab_cpp_test_bin" ]
+}
+
+rustc_test("realm_test") {
+  output_name = "lab_proxy_realm_test"
+  edition = "2024"
+  testonly = true
+  source_root = "tests/realm_test.rs"
+  sources = [ "tests/realm_test.rs" ]
+  deps = [
+    "fidl:fuchsia.driver.lab_rust",
+    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+    "//sdk/lib/driver_test_realm/realm_builder/rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-component-test",
+    "//third_party/rust_crates:anyhow",
+  ]
+}
+
+fuchsia_unittest_package("lab_proxy-realm-test-pkg") {
+  package_name = "lab_proxy-realm-test"
+  deps = [
+    ":component",
+    ":lab_proxy_config_values",
+    ":realm_test",
+    "testing:component",
+    "//src/devices/misc/drivers/test-parent",
+  ]
+
+  # Driver enumeration races can log transient errors.
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}
+
+rustc_test("sample_driver_realm_test") {
+  output_name = "lab_sample_driver_realm_test"
+  edition = "2024"
+  testonly = true
+  source_root = "tests/sample_driver_realm_test.rs"
+  sources = [ "tests/sample_driver_realm_test.rs" ]
+  deps = [
+    "fidl:fuchsia.driver.lab_rust",
+    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+    "//sdk/lib/driver_test_realm/realm_builder/rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-component-test",
+    "//third_party/rust_crates:anyhow",
+  ]
+}
+
+fuchsia_unittest_package("lab_sample_driver-realm-test-pkg") {
+  package_name = "lab_sample_driver-realm-test"
+  deps = [
+    ":sample_driver_realm_test",
+    "testing:component",
+    "testing:sample_component",
+    "//src/devices/misc/drivers/test-parent",
+  ]
+
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":core_test($host_toolchain)",
+    ":driver_lab_cpp_tests",
+    ":driver_lab_rust-unit-test-pkg",
+    ":lab_proxy-realm-test-pkg",
+    ":lab_proxy-unit-test-pkg",
+    ":lab_sample_driver-realm-test-pkg",
+    ":pkg",
+    "testing:pkg",
+  ]
+}

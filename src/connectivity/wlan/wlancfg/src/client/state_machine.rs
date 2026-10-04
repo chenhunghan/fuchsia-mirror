@@ -46,14 +46,14 @@ type State = state_machine::State<ExitReason>;
 type ReqStream = stream::Fuse<mpsc::Receiver<ManualRequest>>;
 pub type TrackedSignals = HistoricalList<types::TimestampedSignal, NUM_PAST_SCORES>;
 
-#[derive(Clone)]
 struct PendingRoam {
     pub request: PolicyRoamRequest,
     pub timestamp: fasync::MonotonicInstant,
+    pub _wake_lease: Option<wlan_power_manager::WakeLease>,
 }
 impl From<PolicyRoamRequest> for PendingRoam {
     fn from(request: PolicyRoamRequest) -> Self {
-        Self { request, timestamp: fasync::MonotonicInstant::now() }
+        Self { request, timestamp: fasync::MonotonicInstant::now(), _wake_lease: None }
     }
 }
 
@@ -172,14 +172,14 @@ pub async fn serve(
     req_stream: mpsc::Receiver<ManualRequest>,
     update_sender: ClientListenerMessageSender,
     saved_networks_manager: Arc<dyn SavedNetworksManagerApi>,
-    connect_selection: Option<types::ConnectSelection>,
+    connect_selection: types::ConnectSelection,
     telemetry_sender: TelemetrySender,
     defect_sender: mpsc::Sender<Defect>,
     roam_manager: RoamManager,
     status_publisher: StateMachineStatusPublisher<Status>,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 ) {
-    let next_network = connect_selection
-        .map(|selection| ConnectingOptions { connect_selection: selection, attempt_counter: 0 });
+    let next_network = Some(ConnectingOptions { connect_selection, attempt_counter: 0 });
     let disconnect_options = DisconnectingOptions {
         disconnect_responder: None,
         previous_network: None,
@@ -196,6 +196,7 @@ pub async fn serve(
         defect_sender,
         roam_manager,
         status_publisher: status_publisher.clone(),
+        power_manager,
     };
     let state_machine =
         disconnecting_state(common_options, disconnect_options).into_state_machine();
@@ -239,6 +240,7 @@ struct CommonStateOptions {
     defect_sender: mpsc::Sender<Defect>,
     roam_manager: RoamManager,
     status_publisher: StateMachineStatusPublisher<Status>,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 }
 
 impl CommonStateOptions {
@@ -303,6 +305,9 @@ async fn disconnecting_state(
     common_options: CommonStateOptions,
     mut options: DisconnectingOptions,
 ) -> Result<State, ExitReason> {
+    let _wake_lease =
+        common_options.power_manager.take_wake_lease("wlancfg-client-disconnecting").await;
+
     // Log a message with the disconnect reason
     match options.reason {
         types::DisconnectReason::FailedToConnect
@@ -375,6 +380,9 @@ async fn handle_connecting_error_and_retry(
     common_options: CommonStateOptions,
     options: ConnectingOptions,
 ) -> Result<State, ExitReason> {
+    let _wake_lease =
+        common_options.power_manager.take_wake_lease("wlancfg-client-reconnect-retry").await;
+
     // Check if the limit for connection attempts to this network has been
     // exceeded.
     let new_attempt_count = options.attempt_counter + 1;
@@ -426,6 +434,8 @@ async fn connecting_state(
     mut common_options: CommonStateOptions,
     options: ConnectingOptions,
 ) -> Result<State, ExitReason> {
+    let _wake_lease =
+        common_options.power_manager.take_wake_lease("wlancfg-client-connecting").await;
     debug!("Entering connecting state");
     notify_on_connection_attempt(&common_options, &options);
 
@@ -692,14 +702,19 @@ async fn connected_state(
                             }
                         }
                         fidl_sme::ConnectTransactionEvent::OnSignalReport { ind } => {
-                            // Update connection data
-                            options.ap_state.tracked.signal = ind.into();
-
-                            // Update list of signals
-                            options.tracked_signals.add(types::TimestampedSignal {
-                                time: fasync::MonotonicInstant::now(),
-                                signal: ind.into(),
-                            });
+                            if let Some(rssi) = ind.rssi_dbm {
+                                options.ap_state.tracked.signal.rssi_dbm = rssi;
+                            }
+                            if let Some(snr) = ind.snr_db {
+                                options.ap_state.tracked.signal.snr_db = snr;
+                            }
+                            // Update list of signals only if RSSI or SNR was present.
+                            if ind.rssi_dbm.is_some() || ind.snr_db.is_some() {
+                                options.tracked_signals.add(types::TimestampedSignal {
+                                    time: fasync::MonotonicInstant::now(),
+                                    signal: options.ap_state.tracked.signal,
+                                });
+                            }
 
                             notify_on_signal_report(
                                 &common_options,
@@ -708,6 +723,7 @@ async fn connected_state(
                             );
                             false
                         }
+                        fidl_sme::ConnectTransactionEvent::OnRssiThresholdBreached { .. } => false,
                         fidl_sme::ConnectTransactionEvent::OnChannelSwitched { info } => {
                             info!(
                                 "OnChannelSwitch received. Previous channel: {:?}, new channel: {:?}.",
@@ -839,6 +855,7 @@ async fn connected_state(
             },
             () = &mut options.pending_roam_timer => {
                 error!("Pending roam request has timed out without a response from SME, cannot proceed with connection");
+                options.pending_roam = None;
                 notify_on_roam_error_and_exit(&common_options, &options).await;
                 let options = DisconnectingOptions {
                     disconnect_responder: None,
@@ -856,13 +873,18 @@ async fn connected_state(
                 if let Some(pending_roam) = &options.pending_roam {
                     info!("Already pending a roam result for a requested roam to BSSID: {:?}", pending_roam.request.candidate.bss.bssid);
                 } else {
+                    let wake_lease = common_options.power_manager.take_wake_lease("wlancfg-client-roaming").await;
                     let _ = common_options
                     .proxy
                     .roam(&roam_request.clone().into())
                     .inspect_err(|e| {
                         error!("Error sending sme roam request: {}", e);
                     });
-                    options.pending_roam = Some(roam_request.clone().into());
+                    options.pending_roam = Some(PendingRoam {
+                        request: roam_request.clone(),
+                        timestamp: fasync::MonotonicInstant::now(),
+                        _wake_lease: wake_lease,
+                    });
                     options.pending_roam_timer.set(fasync::Timer::new(PENDING_ROAM_TIMEOUT.after_now()).fuse());
                     common_options.telemetry_sender.send(TelemetryEvent::PolicyRoamAttempt {
                         request: roam_request,
@@ -916,7 +938,7 @@ fn notify_on_signal_report(
     common_options.status_publisher.publish_status(Status::from_ap_state(&options.ap_state));
 
     // Send signal report metrics
-    common_options.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind });
+    common_options.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind.clone() });
 
     // Forward signal report data to roam monitor.
     let _ = options
@@ -1268,6 +1290,7 @@ mod tests {
         defect_receiver: mpsc::Receiver<Defect>,
         roam_service_request_receiver: mpsc::Receiver<RoamServiceRequest>,
         status_reader: StateMachineStatusReader<Status>,
+        power_manager: Arc<wlan_power_manager_testing::TestPowerManager>,
     }
 
     fn test_setup() -> TestValues {
@@ -1283,6 +1306,7 @@ mod tests {
         let (roam_service_request_sender, roam_service_request_receiver) = mpsc::channel(100);
         let roam_manager = RoamManager::new(roam_service_request_sender);
         let (status_publisher, status_reader) = status_publisher_and_reader::<Status>();
+        let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
 
         TestValues {
             common_options: CommonStateOptions {
@@ -1295,6 +1319,7 @@ mod tests {
                 defect_sender,
                 roam_manager,
                 status_publisher,
+                power_manager: power_manager.clone(),
             },
             sme_req_stream,
             saved_networks_manager,
@@ -1304,6 +1329,7 @@ mod tests {
             defect_receiver,
             roam_service_request_receiver,
             status_reader,
+            power_manager,
         }
     }
 
@@ -1488,9 +1514,10 @@ mod tests {
         // Respond with a SignalReport, which should not unblock connecting_state
         connect_txn_handle
             .send_on_signal_report(&fidl_internal::SignalReportIndication {
-                rssi_dbm: -25,
-                snr_db: 30,
-                tx_rate_500kbps: 0,
+                rssi_dbm: Some(-25),
+                snr_db: Some(30),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
             })
             .expect("failed to send singal report");
 
@@ -3083,7 +3110,12 @@ mod tests {
             let rssi_1 = -50;
             let snr_1 = 25;
             let fidl_signal_report =
-                fidl_internal::SignalReportIndication { rssi_dbm: rssi_1, snr_db: snr_1 , tx_rate_500kbps: 0};
+                fidl_internal::SignalReportIndication {
+                    rssi_dbm: Some(rssi_1),
+                    snr_db: Some(snr_1),
+                    tx_rate_500kbps: Some(0),
+                    ..Default::default()
+                };
             connect_txn_handle
                 .send_on_signal_report(&fidl_signal_report)
                 .expect("failed to send signal report");
@@ -3115,7 +3147,12 @@ mod tests {
             let rssi_2 = -30;
             let snr_2 = 35;
             let fidl_signal_report =
-                fidl_internal::SignalReportIndication { rssi_dbm: rssi_2, snr_db: snr_2 , tx_rate_500kbps: 0};
+                fidl_internal::SignalReportIndication {
+                    rssi_dbm: Some(rssi_2),
+                    snr_db: Some(snr_2),
+                    tx_rate_500kbps: Some(0),
+                    ..Default::default()
+                };
             connect_txn_handle
                 .send_on_signal_report(&fidl_signal_report)
                 .expect("failed to send signal report");
@@ -3292,6 +3329,9 @@ mod tests {
 
             });
         });
+
+        let calls = test_values.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-client-roaming".to_string()));
     }
 
     #[fuchsia::test]
@@ -4118,11 +4158,12 @@ mod tests {
             client_req_stream,
             test_values.common_options.update_sender,
             test_values.common_options.saved_networks_manager,
-            Some(connect_selection),
+            connect_selection,
             test_values.common_options.telemetry_sender,
             test_values.common_options.defect_sender,
             test_values.common_options.roam_manager,
             test_values.common_options.status_publisher,
+            test_values.power_manager.clone(),
         );
         let mut fut = pin!(fut);
 
@@ -4168,11 +4209,12 @@ mod tests {
             client_req_stream,
             test_values.common_options.update_sender,
             test_values.common_options.saved_networks_manager,
-            Some(connect_selection),
+            connect_selection,
             test_values.common_options.telemetry_sender,
             test_values.common_options.defect_sender,
             test_values.common_options.roam_manager,
             test_values.common_options.status_publisher,
+            test_values.power_manager.clone(),
         );
         let mut fut = pin!(fut);
 
@@ -4224,11 +4266,12 @@ mod tests {
             client_req_stream,
             test_values.common_options.update_sender,
             test_values.common_options.saved_networks_manager,
-            Some(connect_selection),
+            connect_selection,
             test_values.common_options.telemetry_sender,
             test_values.common_options.defect_sender,
             test_values.common_options.roam_manager,
             test_values.common_options.status_publisher,
+            test_values.power_manager.clone(),
         );
         let mut fut = pin!(fut);
 
@@ -4315,11 +4358,12 @@ mod tests {
             client_req_stream,
             test_values.common_options.update_sender,
             test_values.common_options.saved_networks_manager,
-            Some(connect_selection),
+            connect_selection,
             test_values.common_options.telemetry_sender,
             test_values.common_options.defect_sender,
             test_values.common_options.roam_manager,
             test_values.common_options.status_publisher.clone(),
+            test_values.power_manager.clone(),
         );
         let mut fut = pin!(fut);
 
@@ -4484,5 +4528,22 @@ mod tests {
                     }
                 }
         });
+    }
+
+    #[fuchsia::test]
+    fn test_state_machine_wake_leases() {
+        let mut exec = fasync::TestExecutor::new();
+        let test_values = test_setup();
+
+        let disconnecting_options = DisconnectingOptions {
+            disconnect_responder: None,
+            previous_network: None,
+            next_network: None,
+            reason: types::DisconnectReason::Startup,
+        };
+        let mut fut = pin!(disconnecting_state(test_values.common_options, disconnecting_options));
+        assert!(exec.run_until_stalled(&mut fut).is_pending());
+        let calls = test_values.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-client-disconnecting".to_string()));
     }
 }

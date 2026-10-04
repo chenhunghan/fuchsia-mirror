@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_library(
+    name = "clocktree",
+    srcs = [
+        "baseclock.cc",
+        "clocktree.cc",
+    ],
+    hdrs = [
+        "include/baseclock.h",
+        "include/clocktree.h",
+        "include/types.h",
+    ],
+    copts = [
+        "-Isrc/devices/clock/lib/clocktree/include",
+    ],  # @bazel2gn:raw_overwrite:[ ":include" ]
+    implementation_deps = [
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = ["//src/devices/clock/lib/clocktree/tests:__pkg__"],
+    deps = [
+        "//zircon/system/ulib/zircon-internal",
+    ],
+    alwayslink = True,
+)

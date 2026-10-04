@@ -51,7 +51,7 @@ use netstack_testing_common::interfaces::{self, TestInterfaceExt as _};
 use netstack_testing_common::nud::apply_nud_flake_workaround;
 use netstack_testing_common::realms::{
     self, KnownServiceProvider, ManagementAgent, Manager, ManagerConfig, NetCfgBasic,
-    NetCfgVersion, Netstack3, NetstackExt, SocketProxyType, TestRealmExt as _, TestSandboxExt,
+    NetCfgVersion, Netstack3, SocketProxyType, TestRealmExt as _, TestSandboxExt,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
@@ -87,10 +87,8 @@ async fn test_oir<M: Manager>(name: &str, config: ManagerConfig, prefix: &str) {
         name,
         config,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
-            ..Default::default()
         },
         |_if_id: u64,
          _: &netemul::TestNetwork<'_>,
@@ -262,22 +260,16 @@ async fn test_filtering_udp<M: Manager>(
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     use_dhcp_server: true,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     config: realm1_manager,
                     socket_proxy_type: SocketProxyType::None,
                 },
+                KnownServiceProvider::DhcpClient,
                 // Include the DHCP server because we bring up a WLAN_AP device
                 // in some test cases.
                 KnownServiceProvider::DhcpServer { persistent: false },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+            ],
         )
         .expect("failed to create sender realm");
     let (_sender_ep, sender_ep_addr) = setup_filtering_iface::<M>(
@@ -296,22 +288,16 @@ async fn test_filtering_udp<M: Manager>(
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     use_dhcp_server: true,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     config: realm2_manager,
                     socket_proxy_type: SocketProxyType::None,
                 },
+                KnownServiceProvider::DhcpClient,
                 // Include the DHCP server because we bring up a WLAN_AP device
                 // in some test cases.
                 KnownServiceProvider::DhcpServer { persistent: false },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+            ],
         )
         .expect("failed to create receiver realm");
     let (_receiver_ep, receiver_ep_addr) = setup_filtering_iface::<M>(
@@ -421,7 +407,6 @@ async fn test_install_only_no_provisioning<M: Manager>(name: &str) {
         name,
         ManagerConfig::AllDelegated,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
         },
@@ -549,7 +534,6 @@ async fn test_install_with_local_table<M: Manager>(name: &str) {
         name,
         ManagerConfig::AllInterfaceLocalDelegated,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: true,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
         },
@@ -596,18 +580,12 @@ async fn test_oir_interface_name_conflict_uninstall_existing<M: Manager>(name: &
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -798,18 +776,12 @@ async fn test_oir_interface_name_conflict_reject<M: Manager>(
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::DuplicateNames,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -1224,20 +1196,14 @@ async fn test_wlan_ap_dhcp_server<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: true,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::DhcpServer { persistent: false },
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::SecureStash,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
     let wait_for_netmgr =
@@ -1277,18 +1243,12 @@ async fn observes_stop_events<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
     let mut event_stream = events::EventStream::open_at_path("/events/started_stopped")
@@ -1330,7 +1290,6 @@ async fn test_forwarding<M: Manager>(name: &str) {
         name,
         ManagerConfig::Forwarding,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
             ..Default::default()
@@ -1380,18 +1339,12 @@ async fn test_prefix_provider_not_supported<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -1430,19 +1383,13 @@ async fn test_prefix_provider_already_acquiring<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::Dhcpv6Client,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -1523,19 +1470,13 @@ async fn test_prefix_provider_stop_rapid_cycles<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::Dhcpv6Client,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -1598,19 +1539,13 @@ async fn test_prefix_provider_config_error<M: Manager>(
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::Dhcpv6Client,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -1641,19 +1576,13 @@ async fn test_prefix_provider_double_watch<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
                 KnownServiceProvider::FakeClock,
                 KnownServiceProvider::Dhcpv6Client,
-            ]
-            .into_iter()
-            .chain(
-                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                    .then_some(KnownServiceProvider::DhcpClient)
-                    .into_iter(),
-            ),
+                KnownServiceProvider::DhcpClient,
+            ],
         )
         .expect("create netstack realm");
 
@@ -1870,7 +1799,6 @@ async fn test_prefix_provider_full_integration<M: Manager>(name: &str) {
         name,
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
             ..Default::default()
@@ -1998,7 +1926,6 @@ async fn disable_interface_while_having_dhcpv6_prefix<M: Manager>(name: &str) {
         name,
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
             ..Default::default()
@@ -2240,18 +2167,12 @@ impl MasqueradeTestSetup {
                         agent: ManagementAgent::NetCfg(NetCfgVersion::Advanced),
                         config: ManagerConfig::Empty,
                         use_dhcp_server: false,
-                        use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                         socket_proxy_type: SocketProxyType::None,
                     },
+                    KnownServiceProvider::DhcpClient,
                     KnownServiceProvider::DnsResolver,
                     KnownServiceProvider::FakeClock,
-                ]
-                .into_iter()
-                .chain(
-                    Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
-                        .then_some(KnownServiceProvider::DhcpClient)
-                        .into_iter(),
-                ),
+                ],
             )
             .expect("create host netstack realm");
 
@@ -2696,7 +2617,6 @@ async fn dhcpv4_client_restarts_after_delay() {
         "dhcpv4_client_restarts_after_delay",
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: true,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
             ..Default::default()
@@ -2992,7 +2912,6 @@ async fn add_blackhole_interface<M: Manager>(name: &str) {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::WithBlackhole,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: true,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,

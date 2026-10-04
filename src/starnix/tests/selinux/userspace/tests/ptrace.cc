@@ -4,6 +4,7 @@
 
 #include <fcntl.h>
 #include <sys/ptrace.h>
+#include <sys/syscall.h>
 
 #include <gtest/gtest.h>
 #include <linux/capability.h>
@@ -369,6 +370,338 @@ TEST(PtraceTest, PtraceAttachDeniedWithoutSelinuxCapSysPtrace) {
     helper.ExpectSignal(SIGKILL);
     test_helper::ForkResult tracee_result = helper.WaitForChild(tracee_pid);
     EXPECT_TRUE(tracee_result.determined_result);
+  }));
+}
+
+// Verifies that the SELinux `process { ptrace }` permission check during `execve` uses the
+// tracer's current (live) credentials at the time of `execve`, rather than credentials cached at
+// `ptrace` attachment time.
+TEST(PtraceTest, PtraceExecProcessCheckUsesCurrentCreds) {
+  constexpr char kParentAllowSecurityContext[] = "test_u:test_r:test_ptrace_parent_allow_t:s0";
+  constexpr char kParentDenySecurityContext[] = "test_u:test_r:test_ptrace_parent_deny_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_ptrace_child_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  // Case 1: Tracer attaches in `allow_t` and transitions to `deny_t` before tracee calls `execv`.
+  // Because `process { ptrace }` is checked against the tracer's live credentials at `exec` time,
+  // `execv` fails with `EPERM`.
+  ASSERT_TRUE(RunSubprocessAs(kParentAllowSecurityContext, [&] {
+    pid_t pid;
+    ASSERT_TRUE((pid = fork()) >= 0);
+    if (pid == 0) {
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr), SyscallSucceeds());
+      ASSERT_THAT(raise(SIGSTOP), SyscallSucceeds());
+
+      auto set_exec_context = WriteTaskAttr("exec", kChildSecurityContext);
+      ASSERT_TRUE(set_exec_context.is_ok());
+
+      std::string binary_name = "stop_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      EXPECT_THAT(execv(path_for_exec.data(), args), SyscallFailsWithErrno(EPERM));
+      _exit(0);
+    } else {
+      int wstatus;
+      ASSERT_THAT(waitpid(pid, &wstatus, WUNTRACED), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGSTOP);
+
+      ASSERT_TRUE(WriteTaskAttr("current", kParentDenySecurityContext).is_ok());
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      EXPECT_TRUE(WIFEXITED(wstatus));
+      if (WIFEXITED(wstatus)) {
+        EXPECT_EQ(WEXITSTATUS(wstatus), 0);
+      } else {
+        SAFE_SYSCALL(kill(pid, SIGKILL));
+      }
+    }
+  }));
+
+  // Case 2: Tracer attaches in `deny_t` and transitions to `allow_t` before tracee calls `execv`.
+  // Because `process { ptrace }` is checked against the tracer's live credentials at `exec` time,
+  // `execv` succeeds.
+  ASSERT_TRUE(RunSubprocessAs(kParentDenySecurityContext, [&] {
+    pid_t pid;
+    ASSERT_TRUE((pid = fork()) >= 0);
+    if (pid == 0) {
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr), SyscallSucceeds());
+      ASSERT_THAT(raise(SIGSTOP), SyscallSucceeds());
+
+      auto set_exec_context = WriteTaskAttr("exec", kChildSecurityContext);
+      ASSERT_TRUE(set_exec_context.is_ok());
+
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      EXPECT_THAT(execv(path_for_exec.data(), args), SyscallSucceeds());
+      _exit(1);
+    } else {
+      int wstatus;
+      ASSERT_THAT(waitpid(pid, &wstatus, WUNTRACED), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGSTOP);
+
+      ASSERT_TRUE(WriteTaskAttr("current", kParentAllowSecurityContext).is_ok());
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGTRAP);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      EXPECT_TRUE(WIFEXITED(wstatus));
+      if (WIFEXITED(wstatus)) {
+        EXPECT_EQ(WEXITSTATUS(wstatus), 0);
+      } else {
+        SAFE_SYSCALL(kill(pid, SIGKILL));
+      }
+    }
+  }));
+}
+
+// Verifies that the vanilla capability (`cap_capable` / `CAP_SYS_PTRACE`) check during `execve`
+// (which determines whether a ptraced task may gain capabilities on `exec`, while SELinux
+// `capability { sys_ptrace }` is allowed throughout) uses the tracer's credentials cached at
+// `ptrace` attachment time.
+TEST(PtraceTest, PtraceExecVanillaCapCheckUsesCachedCreds) {
+  constexpr char kParentAllowSysPtraceContext[] =
+      "test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_ptrace_child_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  // Case 1: Tracer has vanilla `CAP_SYS_PTRACE` (and `CAP_SYSLOG`) at `ptrace` attachment time,
+  // and drops both before the tracee calls `execv`. Because the vanilla capability check uses the
+  // cached attachment-time credentials, the tracee still regains `CAP_SYSLOG`.
+  ASSERT_TRUE(RunSubprocessAs(kParentAllowSysPtraceContext, [&] {
+    pid_t pid;
+    ASSERT_TRUE((pid = fork()) >= 0);
+    if (pid == 0) {
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr), SyscallSucceeds());
+      test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+      test_helper::UnsetCapabilityPermitted(CAP_SYSLOG);
+      test_helper::UnsetCapabilityEffective(CAP_SYS_PTRACE);
+      test_helper::UnsetCapabilityPermitted(CAP_SYS_PTRACE);
+      ASSERT_THAT(raise(SIGSTOP), SyscallSucceeds());
+
+      auto set_exec_context = WriteTaskAttr("exec", kChildSecurityContext);
+      ASSERT_TRUE(set_exec_context.is_ok());
+
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      EXPECT_THAT(execv(path_for_exec.data(), args), SyscallSucceeds());
+      _exit(1);
+    } else {
+      int wstatus;
+      ASSERT_THAT(waitpid(pid, &wstatus, WUNTRACED), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGSTOP);
+
+      test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+      test_helper::UnsetCapabilityPermitted(CAP_SYSLOG);
+      test_helper::UnsetCapabilityEffective(CAP_SYS_PTRACE);
+      test_helper::UnsetCapabilityPermitted(CAP_SYS_PTRACE);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGTRAP);
+
+      __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, pid};
+      __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3] = {};
+      ASSERT_THAT(syscall(SYS_capget, &header, &caps), SyscallSucceeds());
+      bool child_has_cap_syslog =
+          (caps[CAP_TO_INDEX(CAP_SYSLOG)].permitted & CAP_TO_MASK(CAP_SYSLOG)) != 0;
+      EXPECT_TRUE(child_has_cap_syslog);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      EXPECT_TRUE(WIFEXITED(wstatus));
+      if (WIFEXITED(wstatus)) {
+        EXPECT_EQ(WEXITSTATUS(wstatus), 0);
+      } else {
+        SAFE_SYSCALL(kill(pid, SIGKILL));
+      }
+    }
+  }));
+
+  // Case 2: Tracer drops vanilla `CAP_SYS_PTRACE` (and `CAP_SYSLOG`) before `ptrace` attachment
+  // (while remaining in `kParentAllowSysPtraceContext` where SELinux `sys_ptrace` is granted).
+  // Although the tracer's live credentials at `exec` time are identical to Case 1, the cached
+  // attachment-time credentials lack vanilla `CAP_SYS_PTRACE`, so the tracee does not regain
+  // `CAP_SYSLOG`.
+  ASSERT_TRUE(RunSubprocessAs(kParentAllowSysPtraceContext, [&] {
+    test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+    test_helper::UnsetCapabilityPermitted(CAP_SYSLOG);
+    test_helper::UnsetCapabilityEffective(CAP_SYS_PTRACE);
+    test_helper::UnsetCapabilityPermitted(CAP_SYS_PTRACE);
+
+    pid_t pid;
+    ASSERT_TRUE((pid = fork()) >= 0);
+    if (pid == 0) {
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr), SyscallSucceeds());
+      ASSERT_THAT(raise(SIGSTOP), SyscallSucceeds());
+
+      auto set_exec_context = WriteTaskAttr("exec", kChildSecurityContext);
+      ASSERT_TRUE(set_exec_context.is_ok());
+
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      EXPECT_THAT(execv(path_for_exec.data(), args), SyscallSucceeds());
+      _exit(1);
+    } else {
+      int wstatus;
+      ASSERT_THAT(waitpid(pid, &wstatus, WUNTRACED), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGSTOP);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGTRAP);
+
+      __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, pid};
+      __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3] = {};
+      ASSERT_THAT(syscall(SYS_capget, &header, &caps), SyscallSucceeds());
+      bool child_has_cap_syslog =
+          (caps[CAP_TO_INDEX(CAP_SYSLOG)].permitted & CAP_TO_MASK(CAP_SYSLOG)) != 0;
+      EXPECT_FALSE(child_has_cap_syslog);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      EXPECT_TRUE(WIFEXITED(wstatus));
+      if (WIFEXITED(wstatus)) {
+        EXPECT_EQ(WEXITSTATUS(wstatus), 0);
+      } else {
+        SAFE_SYSCALL(kill(pid, SIGKILL));
+      }
+    }
+  }));
+}
+
+// Verifies that the SELinux `capability { sys_ptrace }` permission check during `execve` (while
+// the tracer holds vanilla `CAP_SYS_PTRACE` throughout) uses the tracer's credentials cached at
+// `ptrace` attachment time rather than the tracer's current credentials at `exec` time.
+TEST(PtraceTest, PtraceExecSelinuxCapCheckUsesCachedCreds) {
+  constexpr char kParentAllowSecurityContext[] = "test_u:test_r:test_ptrace_parent_allow_t:s0";
+  constexpr char kParentAllowSysPtraceContext[] =
+      "test_u:test_r:test_ptrace_parent_allow_sys_ptrace_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_ptrace_child_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  // Case 1: Tracer attaches while in `kParentAllowSysPtraceContext` (which grants SELinux
+  // `capability { sys_ptrace }`), then transitions to `kParentAllowSecurityContext` (which denies
+  // `capability { sys_ptrace }`) before the tracee calls `execv` (keeping vanilla `CAP_SYS_PTRACE`
+  // throughout). Because SELinux's `capability { sys_ptrace }` check on `execve` uses the cached
+  // attachment-time credentials, the tracee still regains `CAP_SYSLOG`.
+  ASSERT_TRUE(RunSubprocessAs(kParentAllowSysPtraceContext, [&] {
+    test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+    test_helper::UnsetCapabilityPermitted(CAP_SYSLOG);
+
+    pid_t pid;
+    ASSERT_TRUE((pid = fork()) >= 0);
+    if (pid == 0) {
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr), SyscallSucceeds());
+      ASSERT_THAT(raise(SIGSTOP), SyscallSucceeds());
+
+      auto set_exec_context = WriteTaskAttr("exec", kChildSecurityContext);
+      ASSERT_TRUE(set_exec_context.is_ok());
+
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      EXPECT_THAT(execv(path_for_exec.data(), args), SyscallSucceeds());
+      _exit(1);
+    } else {
+      int wstatus;
+      ASSERT_THAT(waitpid(pid, &wstatus, WUNTRACED), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGSTOP);
+
+      ASSERT_TRUE(WriteTaskAttr("current", kParentAllowSecurityContext).is_ok());
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGTRAP);
+
+      __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, pid};
+      __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3] = {};
+      ASSERT_THAT(syscall(SYS_capget, &header, &caps), SyscallSucceeds());
+      bool child_has_cap_syslog =
+          (caps[CAP_TO_INDEX(CAP_SYSLOG)].permitted & CAP_TO_MASK(CAP_SYSLOG)) != 0;
+      EXPECT_TRUE(child_has_cap_syslog);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      EXPECT_TRUE(WIFEXITED(wstatus));
+      if (WIFEXITED(wstatus)) {
+        EXPECT_EQ(WEXITSTATUS(wstatus), 0);
+      } else {
+        SAFE_SYSCALL(kill(pid, SIGKILL));
+      }
+    }
+  }));
+
+  // Case 2: Tracer attaches while in `kParentAllowSecurityContext` (which denies SELinux
+  // `capability { sys_ptrace }`), then transitions to `kParentAllowSysPtraceContext` (which grants
+  // `capability { sys_ptrace }`) before the tracee calls `execv` (keeping vanilla `CAP_SYS_PTRACE`
+  // throughout). Because SELinux's `capability { sys_ptrace }` check on `execve` uses the cached
+  // attachment-time credentials, the tracee does not regain `CAP_SYSLOG`.
+  ASSERT_TRUE(RunSubprocessAs(kParentAllowSecurityContext, [&] {
+    test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+    test_helper::UnsetCapabilityPermitted(CAP_SYSLOG);
+
+    pid_t pid;
+    ASSERT_TRUE((pid = fork()) >= 0);
+    if (pid == 0) {
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr), SyscallSucceeds());
+      ASSERT_THAT(raise(SIGSTOP), SyscallSucceeds());
+
+      auto set_exec_context = WriteTaskAttr("exec", kChildSecurityContext);
+      ASSERT_TRUE(set_exec_context.is_ok());
+
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      EXPECT_THAT(execv(path_for_exec.data(), args), SyscallSucceeds());
+      _exit(1);
+    } else {
+      int wstatus;
+      ASSERT_THAT(waitpid(pid, &wstatus, WUNTRACED), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGSTOP);
+
+      ASSERT_TRUE(WriteTaskAttr("current", kParentAllowSysPtraceContext).is_ok());
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      ASSERT_TRUE(WIFSTOPPED(wstatus));
+      ASSERT_EQ(WSTOPSIG(wstatus), SIGTRAP);
+
+      __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, pid};
+      __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3] = {};
+      ASSERT_THAT(syscall(SYS_capget, &header, &caps), SyscallSucceeds());
+      bool child_has_cap_syslog =
+          (caps[CAP_TO_INDEX(CAP_SYSLOG)].permitted & CAP_TO_MASK(CAP_SYSLOG)) != 0;
+      EXPECT_FALSE(child_has_cap_syslog);
+
+      ASSERT_THAT(ptrace(PTRACE_CONT, pid, nullptr, 0), SyscallSucceeds());
+      ASSERT_THAT(waitpid(pid, &wstatus, 0), SyscallSucceeds());
+      EXPECT_TRUE(WIFEXITED(wstatus));
+      if (WIFEXITED(wstatus)) {
+        EXPECT_EQ(WEXITSTATUS(wstatus), 0);
+      } else {
+        SAFE_SYSCALL(kill(pid, SIGKILL));
+      }
+    }
   }));
 }
 

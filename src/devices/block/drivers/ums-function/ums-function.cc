@@ -43,16 +43,18 @@ namespace frequest = fuchsia_hardware_usb_request;
 namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 void UmsFunction::Control(ControlRequest& req, ControlCompleter::Sync& completer) {
-  if (req.setup().bm_request_type() == (USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-      req.setup().b_request() == USB_REQ_GET_MAX_LUN && req.setup().w_value() == 0 &&
-      req.setup().w_index() == 0 && req.setup().w_length() >= sizeof(uint8_t)) {
+  if (req.setup().bm_request_type() == kClassInterfaceIn &&
+      req.setup().b_request() == fidl::ToUnderlying(fdescriptor::MscRequest::kGetMaxLun) &&
+      req.setup().w_value() == 0 && req.setup().w_index() == config_.intf.b_interface_number &&
+      req.setup().w_length() >= sizeof(uint8_t)) {
     completer.Reply(zx::ok(std::vector<uint8_t>{0}));
     return;
   }
 
-  if (req.setup().bm_request_type() == (USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-      req.setup().b_request() == USB_REQ_RESET && req.setup().w_value() == 0 &&
-      req.setup().w_index() == 0 && req.setup().w_length() == 0) {
+  if (req.setup().bm_request_type() == kClassInterfaceOut &&
+      req.setup().b_request() == fidl::ToUnderlying(fdescriptor::MscRequest::kReset) &&
+      req.setup().w_value() == 0 && req.setup().w_index() == config_.intf.b_interface_number &&
+      req.setup().w_length() == 0) {
     // Cancel all pending requests
     zx::result result = CancelAll(in_ep_);
     if (result.is_error()) {
@@ -791,10 +793,9 @@ zx::result<> UmsFunction::Start(fdf::DriverContext context) {
   }
 
   ffdf::DevfsAddArgs devfs_args{};
-  std::vector<ffdf::NodeProperty> props{};
   std::vector<ffdf::Offer> offers{};
 
-  zx::result start = AddChild(name(), props, offers);
+  zx::result start = AddChild(name(), devfs_args, {}, offers);
   if (start.is_error()) {
     fdf::error("AddChild(): {}", start);
     return start.take_error();

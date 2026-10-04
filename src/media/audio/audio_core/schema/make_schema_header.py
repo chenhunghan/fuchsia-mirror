@@ -53,7 +53,7 @@ def main():
     for i in range(len(lines)):
         l = lines[i].replace("\n", "")  # Remove the trailing newline
         l = re.sub("//.*", "", l)  # Remove any comments
-        l = re.sub("(^\s+|\s+$)", "", l)  # Remove leading/trailing whitespace
+        l = re.sub(r"(^\s+|\s+$)", "", l)  # Remove leading/trailing whitespace
         l = l.replace("\\", "\\\\")  # Escape all fwd slash
         l = l.replace('"', '\\"')  # Escape all double-quotes
 

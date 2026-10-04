@@ -4,6 +4,7 @@
 
 #include <endian.h>
 #include <fidl/fuchsia.hardware.network/cpp/wire.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
 #include <fidl/fuchsia.io/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
@@ -27,12 +28,15 @@
 #include <vector>
 
 #include <fbl/string.h>
+#include <gtest/gtest.h>
 #include <src/devices/lib/client/device_topology.h>
 #include <usb/cdc.h>
-#include <usb/usb.h>
-#include <zxtest/zxtest.h>
+#include <usb/descriptors.h>
 
 #include "src/connectivity/lib/network-device/cpp/network_device_client.h"
+#include "src/lib/testing/predicates/status.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_virtual_bus {
 namespace {
@@ -74,9 +78,13 @@ zx_status_t WaitForDevice(int dirfd, int event, const char* name, void* cookie) 
 
 class NetworkDeviceInterface {
  public:
-  explicit NetworkDeviceInterface(fidl::UnownedClientEnd<fuchsia_io::Directory> directory,
-                                  const fbl::String& path, const std::string& session_name)
-      : loop_(&kAsyncLoopConfigNoAttachToCurrentThread) {
+  NetworkDeviceInterface() : loop_(&kAsyncLoopConfigNoAttachToCurrentThread) {}
+
+  // Must be called exactly once, before any other method. Fatal assertions cannot be used in a
+  // constructor with gtest, so initialization lives here instead; callers should wrap this in
+  // ASSERT_NO_FATAL_FAILURE.
+  void Init(fidl::UnownedClientEnd<fuchsia_io::Directory> directory, const fbl::String& path,
+            const std::string& session_name) {
     zx::result device = component::ConnectAt<fuchsia_hardware_network::Device>(directory, path);
     ASSERT_OK(device);
 
@@ -98,7 +106,7 @@ class NetworkDeviceInterface {
             ASSERT_OK(ports_status.status_value());
             std::vector<network::client::netdev::wire::PortId> ports =
                 std::move(ports_status.value());
-            ASSERT_EQ(ports.size(), 1);
+            ASSERT_EQ(ports.size(), 1u);
             port_id_ = ports[0];
           });
       RunLoopUntil([this] { return port_id_.has_value(); });
@@ -162,16 +170,18 @@ class NetworkDeviceInterface {
     if ((buffer.data().port_id().base != port_id_.value().base) ||
         (buffer.data().port_id().salt != port_id_.value().salt) ||
         (buffer.data().frame_type() != fuchsia_hardware_network::wire::FrameType::kEthernet)) {
-      ADD_FAILURE(
-          "Frame metadata does not match. Received frame port ID base: %hu \
-                  Expected base: %hu \
-                  Received frame port ID salt: %hu \
-                  Expected salt: %hu \
-                  Received frame type: %hu\
-                  Expected frame type: %hu",
-          buffer.data().port_id().base, port_id_.value().base, buffer.data().port_id().salt,
-          buffer.data().port_id().salt, static_cast<uint8_t>(buffer.data().frame_type()),
-          static_cast<uint8_t>(fuchsia_hardware_network::wire::FrameType::kEthernet));
+      ADD_FAILURE() << "Frame metadata does not match."
+                    << " Received frame port ID base: "
+                    << static_cast<uint16_t>(buffer.data().port_id().base)
+                    << " Expected base: " << static_cast<uint16_t>(port_id_.value().base)
+                    << " Received frame port ID salt: "
+                    << static_cast<uint16_t>(buffer.data().port_id().salt)
+                    << " Expected salt: " << static_cast<uint16_t>(port_id_.value().salt)
+                    << " Received frame type: "
+                    << static_cast<uint16_t>(static_cast<uint8_t>(buffer.data().frame_type()))
+                    << " Expected frame type: "
+                    << static_cast<uint16_t>(static_cast<uint8_t>(
+                           fuchsia_hardware_network::wire::FrameType::kEthernet));
       return zx::error(ZX_ERR_INVALID_ARGS);
     }
     std::vector<uint8_t> output;
@@ -196,8 +206,8 @@ class NetworkDeviceInterface {
   std::queue<network::client::NetworkDeviceClient::Buffer> rx_queue_;
 
   std::optional<network::client::netdev::wire::PortId> port_id_;
-  uint32_t tx_depth_;
-  uint32_t rx_depth_;
+  uint32_t tx_depth_ = 0;
+  uint32_t rx_depth_ = 0;
   std::optional<size_t> mtu_;
 
   // TODO(https://fxbug.dev/42065375): remove this hand-rolled implementation (adapted
@@ -220,7 +230,7 @@ class NetworkDeviceInterface {
   }
 };
 
-class UsbCdcEcmTest : public zxtest::Test {
+class UsbCdcEcmTest : public ::testing::Test {
  public:
   void SetUp() override {
     auto bus = BusLauncher::Create();
@@ -261,8 +271,8 @@ class UsbCdcEcmTest : public zxtest::Test {
     device_desc.id_product = htole16(0x8152);
 
     usb_peripheral::wire::FunctionDescriptor usb_cdc_ecm_function_desc = {
-        .interface_class = USB_CLASS_COMM,
-        .interface_subclass = USB_CDC_SUBCLASS_ETHERNET,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+        .interface_subclass = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
         .interface_protocol = 0,
     };
 
@@ -329,9 +339,11 @@ void TransmitAndReceive(NetworkDeviceInterface& a, NetworkDeviceInterface& b,
 // TODO(b/316176095): Re-enable test after ensuring it works with DFv2.
 TEST_F(UsbCdcEcmTest, DISABLED_TransmitReceive) {
   fdio_cpp::UnownedFdioCaller caller(bus_->GetRootFd());
-  NetworkDeviceInterface peripheral(caller.directory(), peripheral_path_,
-                                    "usb-cdc-function-peripheral");
-  NetworkDeviceInterface host(caller.directory(), host_path_, "usb-cdc-ecm-host");
+  NetworkDeviceInterface peripheral;
+  ASSERT_NO_FATAL_FAILURE(
+      peripheral.Init(caller.directory(), peripheral_path_, "usb-cdc-function-peripheral"));
+  NetworkDeviceInterface host;
+  ASSERT_NO_FATAL_FAILURE(host.Init(caller.directory(), host_path_, "usb-cdc-ecm-host"));
 
   ASSERT_EQ(peripheral.mtu(), kEthernetMtu);
   ASSERT_EQ(host.mtu(), kEthernetMtu);
@@ -348,10 +360,10 @@ TEST_F(UsbCdcEcmTest, DISABLED_TransmitReceive) {
     return std::min(sender.tx_depth(), receiver.rx_depth() / 2);
   };
 
-  TransmitAndReceive(peripheral, host, pick_transmit_depth(peripheral, host));
-  TransmitAndReceive(host, peripheral, pick_transmit_depth(host, peripheral));
-
-  ASSERT_NO_FATAL_FAILURE();
+  ASSERT_NO_FATAL_FAILURE(
+      TransmitAndReceive(peripheral, host, pick_transmit_depth(peripheral, host)));
+  ASSERT_NO_FATAL_FAILURE(
+      TransmitAndReceive(host, peripheral, pick_transmit_depth(host, peripheral)));
 }
 
 }  // namespace

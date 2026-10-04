@@ -11,7 +11,7 @@ import sys
 # Verifies that two files have matching contents.
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--result-file", help="Path to the victory file", required=True

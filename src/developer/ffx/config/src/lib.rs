@@ -27,10 +27,7 @@ mod nested;
 mod paths;
 mod storage;
 
-pub use aliases::{
-    is_analytics_disabled, is_mdns_autoconnect_disabled, is_mdns_discovery_disabled,
-    is_usb_discovery_disabled,
-};
+pub use aliases::{is_analytics_disabled, is_mdns_discovery_disabled, is_usb_discovery_disabled};
 pub use api::ConfigError;
 pub use api::query::{ConfigQuery, ConfigQueryBuilder, SelectMode};
 pub use config_macros::FfxConfigBacked;

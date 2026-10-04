@@ -21,6 +21,8 @@
 
 namespace camera::usb_video {
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 static constexpr uint32_t MAX_OUTSTANDING_REQS = 8;
 
 namespace {
@@ -75,7 +77,7 @@ zx::result<usb_video_vc_probe_and_commit_controls> ProbeAndCommit(usb_protocol_t
                                                                   uint32_t default_frame_interval) {
   usb_video_vc_probe_and_commit_controls proposal;
   memset(&proposal, 0, sizeof(usb_video_vc_probe_and_commit_controls));
-  proposal.bmHint = USB_VIDEO_BM_HINT_FRAME_INTERVAL;
+  proposal.bmHint = fdescriptor::kVideoBmHintFrameInterval;
   proposal.bFormatIndex = format_index;
 
   proposal.bFrameIndex = frame_index;
@@ -86,12 +88,13 @@ zx::result<usb_video_vc_probe_and_commit_controls> ProbeAndCommit(usb_protocol_t
   zxlogf(DEBUG, "usb_video_negotiate_probe: PROBE_CONTROL SET_CUR");
   print_controls(proposal);
   // The wValue field (the fourth parameter) specifies the Control Selector
-  // (in this case USB_VIDEO_VS_PROBE_CONTROL) in the high byte,
+  // (in this case VideoVsControlSelector::kProbeControl) in the high byte,
   // and the low byte must be set to zero.
   // See UVC 1.5 Spec. 4.2.1 Interface Control Requests.
-  status = usb_control_out(usb, USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                           USB_VIDEO_SET_CUR, USB_VIDEO_VS_PROBE_CONTROL << 8, iface_num,
-                           ZX_TIME_INFINITE, (uint8_t*)&proposal, sizeof(proposal));
+  status = usb_control_out(
+      usb, kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::VideoRequest::kSetCur),
+      usb_descriptor_w_value(fdescriptor::VideoVsControlSelector::kProbeControl), iface_num,
+      ZX_TIME_INFINITE, (uint8_t*)&proposal, sizeof(proposal));
   if (status != ZX_OK) {
     return ClearIfIoErrors(status, usb);
   }
@@ -102,25 +105,27 @@ zx::result<usb_video_vc_probe_and_commit_controls> ProbeAndCommit(usb_protocol_t
 
   zxlogf(DEBUG, "usb_video_negotiate_probe: PROBE_CONTROL GET_CUR");
   size_t out_length;
-  status = usb_control_in(usb, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_VIDEO_GET_CUR,
-                          USB_VIDEO_VS_PROBE_CONTROL << 8, iface_num, ZX_TIME_INFINITE,
-                          (uint8_t*)&result, sizeof(result), &out_length);
+  status =
+      usb_control_in(usb, kClassInterfaceIn, fidl::ToUnderlying(fdescriptor::VideoRequest::kGetCur),
+                     usb_descriptor_w_value(fdescriptor::VideoVsControlSelector::kProbeControl),
+                     iface_num, ZX_TIME_INFINITE, (uint8_t*)&result, sizeof(result), &out_length);
   if (status != ZX_OK) {
     return ClearIfIoErrors(status, usb);
   }
   // Fields after dwMaxPayloadTransferSize are optional, only 26 bytes are
   // guaranteed.
   if (out_length < 26) {
-    zxlogf(ERROR, "usb_video_negotiate_probe: got length %lu, want >= 26", out_length);
-  } else {
-    print_controls(result);
+    status = ZX_ERR_IO;
+    return ClearIfIoErrors(status, usb);
   }
+  print_controls(result);
 
   uint32_t dwMaxPayloadTransferSize = result.dwMaxPayloadTransferSize;
 
-  status = usb_control_out(usb, USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                           USB_VIDEO_SET_CUR, USB_VIDEO_VS_COMMIT_CONTROL << 8, iface_num,
-                           ZX_TIME_INFINITE, (uint8_t*)&result, sizeof(result));
+  status = usb_control_out(
+      usb, kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::VideoRequest::kSetCur),
+      usb_descriptor_w_value(fdescriptor::VideoVsControlSelector::kCommitControl), iface_num,
+      ZX_TIME_INFINITE, (uint8_t*)&result, sizeof(result));
   if (status != ZX_OK) {
     if (status == ZX_ERR_IO_REFUSED || status == ZX_ERR_IO_INVALID) {
       // clear the stall/error

@@ -38,6 +38,7 @@ use crate::internal::base::{
 };
 use crate::internal::counters::IpCounters;
 use crate::internal::device::state::IpDeviceStateIpExt;
+use crate::internal::gso::MaybeSegmentableTransportSerializer;
 use crate::internal::routing::PacketOrigin;
 use crate::internal::routing::rules::RuleInput;
 use crate::internal::types::{InternalForwarding, ResolvedRoute, RoutableIpAddr};
@@ -104,7 +105,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
         tx_metadata: BC::TxMetadata,
     ) -> Result<(), IpSockSendError>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut,
         O: SendOptions<I> + RouteResolutionOptions<I>;
 
@@ -151,7 +152,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
         get_body_from_src_ip: F,
     ) -> Result<(), SendOneShotIpPacketError<E>>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut,
         F: FnOnce(IpDeviceAddr<I::Addr>) -> Result<S, E>,
         O: SendOptions<I> + RouteResolutionOptions<I>,
@@ -208,7 +209,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
         get_body_from_src_ip: F,
     ) -> Result<(), IpSockCreateAndSendError>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut,
         F: FnOnce(IpDeviceAddr<I::Addr>) -> S,
         O: SendOptions<I> + RouteResolutionOptions<I>,
@@ -483,7 +484,7 @@ where
         packet_metadata: IpLayerPacketMetadata<I, Self::WeakAddressId, BC>,
     ) -> Result<(), IpSendFrameError<S>>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut;
 
     /// Returns `DeviceId` for the loopback device.
@@ -554,7 +555,7 @@ where
         tx_metadata: BC::TxMetadata,
     ) -> Result<(), IpSockSendError>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut,
         O: SendOptions<I> + RouteResolutionOptions<I>,
     {
@@ -864,7 +865,7 @@ fn send_ip_packet<I, S, BC, CC, O>(
 ) -> Result<(), IpSockSendError>
 where
     I: IpLayerIpExt,
-    S: TransportPacketSerializer<I>,
+    S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
     S::Buffer: BufferMut,
     BC: IpSocketBindingsContext<CC::DeviceId>,
     CC: IpSocketContext<I, BC> + CounterContext<IpCounters<I>>,
@@ -1715,7 +1716,7 @@ pub(crate) mod testutil {
             _tx_meta: BC::TxMetadata,
         ) -> Result<(), IpSockSendError>
         where
-            S: TransportPacketSerializer<I>,
+            S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
             S::Buffer: BufferMut,
             O: SendOptions<I> + RouteResolutionOptions<I>,
         {

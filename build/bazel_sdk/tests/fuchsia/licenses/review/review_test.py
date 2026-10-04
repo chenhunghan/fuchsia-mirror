@@ -11,7 +11,7 @@ import zipfile
 
 
 class TestReview(unittest.TestCase):
-    def test_zip_file_contents(self):
+    def test_zip_file_contents(self) -> None:
         goldens_dir = "fuchsia/licenses/review/goldens"
 
         relative_golden_files = []

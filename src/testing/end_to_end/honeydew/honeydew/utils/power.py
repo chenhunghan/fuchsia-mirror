@@ -22,9 +22,13 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 SUSPEND_RESUME_DEFAULT_TIMEOUT: timedelta = timedelta(minutes=5)
 
 # This is the minimum time we'll idle waiting for the device to suspend. If it
-# doesn't suspend in time, we'll double the waiting period until we
-# successfully suspend, or the deadline runs out.
+# doesn't suspend in time, we'll double the waiting period up to
+# SUSPEND_RESUME_MAX_IDLE_DURATION until we successfully suspend, or the
+# deadline runs out.
 SUSPEND_RESUME_BASE_IDLE_DURATION: timedelta = timedelta(seconds=5)
+
+# This is the maximum time we'll idle on a single suspend attempt.
+SUSPEND_RESUME_MAX_IDLE_DURATION: timedelta = timedelta(seconds=60)
 
 
 class DeviceDidNotSuspendError(errors.HoneydewError):
@@ -98,6 +102,7 @@ async def suspend_resume(
     device: FuchsiaDevice,
     deadline: Deadline | None = None,
     base_idle_duration: timedelta = SUSPEND_RESUME_BASE_IDLE_DURATION,
+    max_idle_duration: timedelta = SUSPEND_RESUME_MAX_IDLE_DURATION,
 ) -> None:
     """Disconnects USB, idles, reconnects.
 
@@ -105,7 +110,10 @@ async def suspend_resume(
         device: Async Fuchsia device object.
         deadline: this will idle for increasing durations, up to this deadline.
         base_idle_duration: initial duration to sleep while disconnected. On
-            each subsequent attempt, this duration is doubled until deadline.
+            each subsequent attempt, this duration is doubled up to
+            max_idle_duration (and bounded by deadline).
+        max_idle_duration: maximum duration to sleep while disconnected on a
+            single attempt.
     """
     if deadline is None:
         deadline = Deadline.from_timeout(SUSPEND_RESUME_DEFAULT_TIMEOUT)
@@ -125,12 +133,14 @@ async def suspend_resume(
         _LOGGER.info("Suspension attempt %s...", attempt + 1)
         before_off_charger_stats = await get_sag_suspend_stats(device)
 
-        sleep_deadline = deadline.subdeadline_with_timeout(
-            base_idle_duration * (2**attempt)
-        )
         try:
             await device.suspend()
             # Measure the sleep duration strictly after device transitions offline
+            idle_duration = min(
+                base_idle_duration * (2**attempt),
+                max(base_idle_duration, max_idle_duration),
+            )
+            sleep_deadline = deadline.subdeadline_with_timeout(idle_duration)
             await control_flows.sleep_until_deadline(sleep_deadline)
         finally:
             await device.resume()

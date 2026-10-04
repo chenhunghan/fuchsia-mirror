@@ -16,6 +16,10 @@ import("//build/rust/rustc_test.gni")
 #     assumed to be the same as the target name. All dashes will be replaced
 #     with underscores in the library name: <name_underscored>
 #
+#   crate_name (optional)
+#     Same as `name`. Only one of `name` or `crate_name` may be set. Matches the
+#     attribute name used by rustc_library() and Bazel Rust rules.
+#
 #   edition (optional)
 #     Edition of the Rust language to be used.
 #     Options are "2015" and "2018". Defaults to "2018".
@@ -54,6 +58,8 @@ import("//build/rust/rustc_test.gni")
 #     Builds unit tests associated with the binary. This will create a
 #     `<name>_lib_test` test file in the output directory. Equivalent
 #     to adding a `rustc_test` target with that name and the same source_root.
+#     Accepts a boolean or "fuchsia" (equivalent to `true`). Since Rust dylibs
+#     are Fuchsia-only, "host" and "both" are not allowed.
 #
 #   test_environments (optional)
 #     What environments unit tests, if provided, should target. Only used here
@@ -71,6 +77,11 @@ import("//build/rust/rustc_test.gni")
 #     A list of conditional compilation flags to enable. This can be used to set features for crates
 #     built in-tree which are also published to crates.io. This would be passed to rustc as
 #     '--cfg feature="XXX"'
+#
+#   proc_macro_deps (optional)
+#     For proc_macro dependencies, has the same semantics as deps in GN,
+#     except that these are always built in `$host_toolchain`. Used by
+#     Bazel-converted targets, see //build/tools/bazel2gn/README.md.
 #
 #   output_dir (optional)
 #     Directory that the resulting library should be placed in.
@@ -109,18 +120,41 @@ template("rustc_dylib") {
     _original_target_name = target_name
   }
 
-  # if "with_unit_tests" is set to true, generate an additional rust test target
-  # TODO(https://fxbug.dev/42152447): accept a string.
-  if (defined(invoker.with_unit_tests) && invoker.with_unit_tests == true) {
+  # `version` is only used by the test target.
+  not_needed(invoker, [ "version" ])
+
+  _crate_name = target_name
+  assert(
+      !(defined(invoker.name) && defined(invoker.crate_name)),
+      "name and crate_name should not be defined at the same time, they mean the same thing")
+  if (defined(invoker.name)) {
+    _crate_name = invoker.name
+  }
+  if (defined(invoker.crate_name)) {
+    _crate_name = invoker.crate_name
+  }
+
+  # Resolve `with_unit_tests`. Rust dylibs are Fuchsia-only, so the only
+  # accepted string value is "fuchsia". See https://fxbug.dev/515405864.
+  _generate_unit_tests = false
+  if (defined(invoker.with_unit_tests)) {
+    _with_unit_tests_value = invoker.with_unit_tests
+    assert(_with_unit_tests_value == true || _with_unit_tests_value == false ||
+               _with_unit_tests_value == "fuchsia",
+           "rustc_dylib only supports Fuchsia, with_unit_tests must be a " +
+               "boolean or \"fuchsia\", got: ${_with_unit_tests_value}")
+    _generate_unit_tests = _with_unit_tests_value != false
+  }
+
+  # If requested, generate an additional rust test target.
+  if (_generate_unit_tests) {
     rustc_test_internal("${target_name}_test") {
-      name = invoker.target_name + "_dylib_test"
-      if (defined(invoker.name)) {
-        name = invoker.name + "_dylib_test"
-      }
+      name = _crate_name + "_dylib_test"
       original_target_name = _original_target_name
       forward_variables_from(invoker,
                              "*",
                              [
+                               "crate_name",
                                "name",
                                "output_name",
                                "public_deps",
@@ -145,6 +179,7 @@ template("rustc_dylib") {
                              "lint_config",
                              "output_dir",
                              "output_name",
+                             "proc_macro_deps",
                              "public_deps",
                              "rustflags",
                              "sources",
@@ -159,10 +194,7 @@ template("rustc_dylib") {
     if (defined(invoker.source_root)) {
       crate_root = invoker.source_root
     }
-    crate_name = target_name
-    if (defined(invoker.name)) {
-      crate_name = invoker.name
-    }
+    crate_name = _crate_name
     original_target_name = _original_target_name
 
     # Due to what is arguably a bug in the Rust compiler, if it sees libfoo.so

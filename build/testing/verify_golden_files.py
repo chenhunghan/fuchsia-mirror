@@ -208,11 +208,11 @@ def main() -> int:
             }
         )
         if outside_goldens:
-            outside_goldens = "\n*** ".join(outside_goldens)
+            outside_goldens_str = "\n*** ".join(outside_goldens)
             sys.stderr.write(
                 f"""
 *** Some golden files are not within {args.golden_dir}:
-*** {outside_goldens}
+*** {outside_goldens_str}
 """
             )
             return 2

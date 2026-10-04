@@ -132,7 +132,7 @@ type Bad = struct {
     opt_num int64:<1, 2, 3>;
 };
 )FIDL");
-  library.ExpectFail(ErrTooManyConstraints, "int64", 0, 3);
+  library.ExpectFail(ErrTooManyConstraints, "int64", 1, 3);
   ASSERT_COMPILER_DIAGNOSTICS(library);
 }
 
@@ -440,6 +440,14 @@ using dependent;
 alias Bar2 = dependent.Bar;
 )FIDL");
   ASSERT_COMPILED(library);
+}
+
+TEST(AliasTests, BadCannotNonZeroTwice) {
+  TestLibrary library;
+  library.AddFile("bad/fi-0225.test.fidl");
+
+  library.ExpectFail(ErrCannotIndicateNonZeroTwice, "MyAlias");
+  ASSERT_COMPILER_DIAGNOSTICS(library);
 }
 
 }  // namespace

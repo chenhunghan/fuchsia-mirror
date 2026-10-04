@@ -17,7 +17,7 @@ from sys import argv
 from zipfile import ZipFile
 
 
-def label_to_crate_name(label: str):
+def label_to_crate_name(label: str) -> str:
     """
     This function is not robust, but in the context of
     //third_party/rust_crates it is fine (ethanws@)
@@ -50,16 +50,16 @@ def fixup_extern(extern: str, aliases: dict[str, str]) -> tuple[str, str]:
     return crate_name, path
 
 
-def zip_dir(src: Path, dst: Path):
+def zip_dir(src: Path, dst: Path) -> None:
     """
     Creates a zip archive called `dst`, containing the recursive contents of the `src` directory.
     """
-    with ZipFile(dst, mode="w") as dst:
+    with ZipFile(dst, mode="w") as zip_file:
         for dirpath, dirnames, filenames in walk(src):
-            dst.mkdir(str(Path(dirpath).relative_to(src)))
+            zip_file.mkdir(str(Path(dirpath).relative_to(src)))
             for filename in filenames:
                 path = Path(dirpath, filename)
-                dst.write(
+                zip_file.write(
                     filename=str(path),
                     arcname=str(path.relative_to(src)),
                 )
@@ -103,6 +103,8 @@ def main(args: Namespace, rustdoc_invocation: list[str]) -> int:
 
     if args.touch is not None:
         args.touch.touch()
+
+    return 0
 
 
 def _get_ignore_parser() -> ArgumentParser:

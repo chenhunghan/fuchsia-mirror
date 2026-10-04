@@ -26,7 +26,7 @@ import json
 import sys
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Constructs a size budgets file"
     )
@@ -54,6 +54,7 @@ def main():
     # Ensure the outputfile is closed early.
     with args.output as output:
         json.dump(output_contents, output, indent=2)
+    return 0
 
 
 if __name__ == "__main__":

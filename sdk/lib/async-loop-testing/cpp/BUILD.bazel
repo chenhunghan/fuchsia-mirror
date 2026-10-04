@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Simplifies and supports deriving test fixtures with an event loop that
+# supports multi-process tests, and can exercise FIDL.
+idk_cc_source_library(
+    name = "cpp",
+    srcs = ["real_loop.cc"],
+    hdrs = ["include/lib/async-loop/testing/cpp/real_loop.h"],
+    api_area = "Kernel",
+    category = "partner",
+    idk_name = "async-loop-testing",
+    public_configs = [
+        ":include",
+    ],
+    stable = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
+    # visibility is limited to actual Bazel dependents.
+    visibility = [
+        "//src/lib/testing/loop_fixture:__pkg__",
+    ],  # @bazel2gn:raw_overwrite:[ "//*" ]
+    deps = [
+        # <real_loop.h> has #include <lib/async/cpp/executor.h>
+        "//sdk/lib/async:async-cpp",
+        # <real_loop.h> has #include <lib/async-loop/cpp/loop.h>
+        "//sdk/lib/async-loop:async-loop-cpp",
+        # <real_loop.h> has #include <lib/async-loop/default.h>
+        "//sdk/lib/async-loop:async-loop-default",
+        # <real_loop.h> has #include <lib/fit/function.h>
+        "//sdk/lib/fit",
+        # <real_loop.h> has #include <lib/zx/time.h>
+        "//zircon/system/ulib/zx",
+    ],
+)

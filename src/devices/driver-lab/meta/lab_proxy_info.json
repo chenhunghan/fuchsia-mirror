@@ -1,0 +1,10 @@
+{
+    "short_description": "Engineering-only proxy for audited host-driven hardware access",
+    "manufacturer": "",
+    "families": [],
+    "models": [],
+    "areas": [
+        "DriverFramework",
+        "Test"
+    ]
+}

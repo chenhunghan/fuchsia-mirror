@@ -1008,16 +1008,10 @@ where
                 None
             };
 
-            if rl_child_ns.is_none()
-                || (rl_child_ns.unwrap().rank_parity() == node_ns.rank_parity())
+            if let Some(rl_child_ns) = rl_child_ns
+                && rl_child_ns.rank_parity() != node_ns.rank_parity()
             {
-                // Case #1: single rotation.
-                self.rotate_lr::<RL<LR>>(node, parent);
-                parent_ns.demote_rank();
-                self.observer.record_insert_rotation();
-            } else {
-                // Case #2: double rotation.
-                let rl_child_ns = rl_child_ns.unwrap();
+                // Case #1: double rotation.
                 self.rotate_lr::<LR>(rl_child, node);
                 self.rotate_lr::<RL<LR>>(rl_child, parent);
 
@@ -1025,6 +1019,11 @@ where
                 node_ns.demote_rank();
                 parent_ns.demote_rank();
                 self.observer.record_insert_double_rotation();
+            } else {
+                // Case #2: single rotation.
+                self.rotate_lr::<RL<LR>>(node, parent);
+                parent_ns.demote_rank();
+                self.observer.record_insert_rotation();
             }
         }
     }
@@ -1185,18 +1184,17 @@ where
                 let y_is_2_child = y_ns.rank_parity() == z_ns.rank_parity();
 
                 if !y_is_2_child {
-                    let y_is_22_node;
-                    if y_ns.rank_parity() {
-                        y_is_22_node = (!valid_sentinel_ptr(y_ns.get_left())
+                    let y_is_22_node = if y_ns.rank_parity() {
+                        (!valid_sentinel_ptr(y_ns.get_left())
                             || Self::get_node_ref(y_ns.get_left()).rank_parity())
                             && (!valid_sentinel_ptr(y_ns.get_right())
-                                || Self::get_node_ref(y_ns.get_right()).rank_parity());
+                                || Self::get_node_ref(y_ns.get_right()).rank_parity())
                     } else {
-                        y_is_22_node = valid_sentinel_ptr(y_ns.get_left())
+                        valid_sentinel_ptr(y_ns.get_left())
                             && valid_sentinel_ptr(y_ns.get_right())
                             && !Self::get_node_ref(y_ns.get_left()).rank_parity()
-                            && !Self::get_node_ref(y_ns.get_right()).rank_parity();
-                    }
+                            && !Self::get_node_ref(y_ns.get_right()).rank_parity()
+                    };
 
                     if !y_is_22_node {
                         break;
@@ -1599,18 +1597,13 @@ where
             }
 
             let parent = ns.get_parent();
-            let was_one_child;
-            let was_left_child;
-
             debug_assert!(!parent.is_null());
-            if !is_sentinel_ptr(parent) {
+            let (was_one_child, was_left_child) = if !is_sentinel_ptr(parent) {
                 let parent_ns = Self::get_node_ref(parent);
-                was_one_child = ns.rank_parity() != parent_ns.rank_parity();
-                was_left_child = parent_ns.left.get() == owner;
+                (ns.rank_parity() != parent_ns.rank_parity(), parent_ns.left.get() == owner)
             } else {
-                was_one_child = false;
-                was_left_child = false;
-            }
+                (false, false)
+            };
 
             *owner = core::ptr::null_mut();
 
@@ -1820,10 +1813,7 @@ where
     /// * `Err((ptr, cursor))` if there was a collision. In this case, the
     ///   passed pointer `ptr` is returned back to the caller (not consumed), along with
     ///   a `CursorMut` positioned at the colliding node already in the tree.
-    pub fn insert_or_find<'a>(
-        &'a mut self,
-        ptr: P,
-    ) -> Result<(), (P, CursorMut<'a, K, P, Tag, S, O>)>
+    pub fn insert_or_find<'a>(&'a mut self, ptr: P) -> InsertOrFindResult<'a, K, P, Tag, S, O>
     where
         P: ManagedPtr,
     {
@@ -1842,7 +1832,7 @@ where
     pub unsafe fn insert_or_find_raw<'a>(
         &'a mut self,
         ptr: P,
-    ) -> Result<(), (P, CursorMut<'a, K, P, Tag, S, O>)> {
+    ) -> InsertOrFindResult<'a, K, P, Tag, S, O> {
         let mut collision = core::ptr::null_mut();
         // SAFETY: The caller guarantees `ptr` is valid and outlives the tree registration.
         // If a collision occurs, `collision` is guaranteed to be a valid pointer to the colliding
@@ -2339,6 +2329,8 @@ where
     }
 }
 
+pub type InsertOrFindResult<'a, K, P, Tag, S, O> = Result<(), (P, CursorMut<'a, K, P, Tag, S, O>)>;
+
 /// A cursor over elements in a `WavlTree`.
 pub struct CursorMut<
     'a,
@@ -2664,11 +2656,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let met = self.front.current == self.back.current;
         let item = self.front.next();
-        if item.is_some() {
-            if met {
-                self.front.current = make_sentinel_null();
-                self.back.current = make_sentinel_null();
-            }
+        if item.is_some() && met {
+            self.front.current = make_sentinel_null();
+            self.back.current = make_sentinel_null();
         }
         item
     }
@@ -2685,11 +2675,9 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         let met = self.front.current == self.back.current;
         let item = self.back.next();
-        if item.is_some() {
-            if met {
-                self.front.current = make_sentinel_null();
-                self.back.current = make_sentinel_null();
-            }
+        if item.is_some() && met {
+            self.front.current = make_sentinel_null();
+            self.back.current = make_sentinel_null();
         }
         item
     }

@@ -25,7 +25,7 @@
 // - An MSI-X capability was added at 0xf0.
 //
 // If this configuration is changed then it's likely that some of the tests in
-// protocol_test_driver.cpp will need to be updated.
+// src/devices/pci/drivers/pci/test/driver/driver_tests.rs will need to be updated.
 //
 // A basic lspci dump of this device:
 //  Subsystem: 103c:1097
@@ -335,6 +335,7 @@ static std::array<uint8_t, pci::kExtendedConfigSize> kFakeQuadroDeviceConfig = {
 
 };
 
+// LINT.IfChange
 constexpr size_t kFakeQuadroPowerManagementCapabilityOffset = 0x60;
 constexpr size_t kFakeQuadroMsiCapabilityOffset = 0x68;
 constexpr size_t kFakeQuadroMsiXCapabilityOffset = 0xf0;
@@ -365,6 +366,7 @@ static constexpr struct test_bar_info_t {
 
 
 };
+// LINT.ThenChange(//src/devices/pci/drivers/pci/test/driver/driver_tests.rs)
 
 // This is the configuration space dump of a virtio-input device. It should
 // contain an MSIX capability along with 5 Vendor capabilities.

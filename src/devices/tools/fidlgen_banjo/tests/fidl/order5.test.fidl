@@ -13,7 +13,7 @@ type BlablaSomethingRequest = struct {
 };
 
 type BlablaSomethingResponse = struct {
-    status zx.Status;
+    status zx.Result;
     value uint64;
     g_two GreatType;
 };

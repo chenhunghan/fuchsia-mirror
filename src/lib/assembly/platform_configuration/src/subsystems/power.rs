@@ -202,6 +202,18 @@ impl DefineSubsystemConfiguration<PowerConfig> for PowerManagementSubsystem {
             ),
         )?;
 
+        builder.set_config_capability(
+            "fuchsia.power.PowerFrameworkEnabledForWlanDriver",
+            Config::new(
+                ConfigValueType::Bool,
+                serde_json::Value::Bool(
+                    context
+                        .board_config
+                        .provides_feature(BoardFeature::PowerFrameworkEnabledForWlanDriver),
+                ),
+            ),
+        )?;
+
         if let (Some(config), FeatureSetLevel::Standard) =
             (&context.board_config.configuration.power_metrics_recorder, &context.feature_set_level)
         {

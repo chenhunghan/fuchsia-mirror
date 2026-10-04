@@ -67,8 +67,7 @@ class TestSpiDriver : public fdf::DriverBase2,
     if (metadata_offer.has_value()) {
       offers.push_back(std::move(metadata_offer.value()));
     }
-    zx::result child =
-        AddChild(kChildNodeName, std::vector<fuchsia_driver_framework::NodeProperty>{}, offers);
+    zx::result child = AddChild(kChildNodeName, {}, offers);
     if (child.is_error()) {
       fdf::error("Failed to add child: {}", child);
       return child.take_error();

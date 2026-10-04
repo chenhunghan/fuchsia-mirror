@@ -21,10 +21,30 @@
 namespace astro {
 namespace fpbus = fuchsia_hardware_platform_bus;
 
+constexpr uint64_t kCbusResetOffset = 0x1000;
+constexpr uint64_t kCbusResetLength = 0x1000;
+constexpr uint64_t kCbusDemuxOffset = 0x6000;
+constexpr uint64_t kCbusDemuxLength = 0x1000;
+constexpr uint64_t kCbusParserOffset = 0xe000;
+constexpr uint64_t kCbusParserLength = 0x1000;
+constexpr uint64_t kHiubusLength = 0x1000;
+constexpr uint64_t kAobusLength = 0x1000;
+
 static const std::vector<fpbus::Mmio> astro_video_mmios{
     {{
-        .base = S905D2_CBUS_BASE,
-        .length = S905D2_CBUS_LENGTH,
+        // kCbusReset (CBUS Page 1: Reset registers at +0x400 offset)
+        .base = S905D2_CBUS_BASE + kCbusResetOffset,
+        .length = kCbusResetLength,
+    }},
+    {{
+        // kCbusDemux (CBUS Page 6: Demux registers)
+        .base = S905D2_CBUS_BASE + kCbusDemuxOffset,
+        .length = kCbusDemuxLength,
+    }},
+    {{
+        // kCbusParser (CBUS Page 14: Parser registers)
+        .base = S905D2_CBUS_BASE + kCbusParserOffset,
+        .length = kCbusParserLength,
     }},
     {{
         .base = S905D2_DOS_BASE,
@@ -32,11 +52,11 @@ static const std::vector<fpbus::Mmio> astro_video_mmios{
     }},
     {{
         .base = S905D2_HIU_BASE,
-        .length = S905D2_HIU_LENGTH,
+        .length = kHiubusLength,
     }},
     {{
         .base = S905D2_AOBUS_BASE,
-        .length = 0x1000,
+        .length = kAobusLength,
     }},
     {{
         .base = S905D2_DMC_BASE,
@@ -96,6 +116,14 @@ static const fpbus::Node video_dev = []() {
 }();
 
 zx_status_t Astro::VideoInit() {
+  // We only map the specific pages needed of the HIU, AOBUS, and CBUS register blocks to limit MMIO
+  // access privilege. Assert that our mapped ranges do not exceed the hardware register block
+  // lengths.
+  static_assert(kHiubusLength <= S905D2_HIU_LENGTH);
+  static_assert(kAobusLength <= S905D2_AOBUS_LENGTH);
+  static_assert(kCbusResetOffset + kCbusResetLength <= S905D2_CBUS_LENGTH);
+  static_assert(kCbusDemuxOffset + kCbusDemuxLength <= S905D2_CBUS_LENGTH);
+  static_assert(kCbusParserOffset + kCbusParserLength <= S905D2_CBUS_LENGTH);
   fidl::Arena<> fidl_arena;
   fdf::Arena arena('VIDE');
 

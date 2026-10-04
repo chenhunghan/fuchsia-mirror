@@ -5,8 +5,8 @@
 #include "src/graphics/display/drivers/intel-display/dp-display.h"
 
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/mmio/testing/cpp/test-helper.h>
 #include <lib/driver/testing/cpp/scoped_global_logger.h>
-#include <lib/mmio-ptr/fake.h>
 
 #include <cstdint>
 #include <memory>
@@ -138,14 +138,7 @@ class DpDisplayTest : public ::testing::Test {
  protected:
   DpDisplayTest()
       : controller_(&engine_events_, inspect::Inspector{}),
-        mmio_buffer_({
-            .vaddr = FakeMmioPtr(buffer_),
-            .offset = 0,
-            .size = kMmioSize,
-            .vmo = ZX_HANDLE_INVALID,
-        }) {
-    std::memset(buffer_, 0, sizeof(buffer_));
-  }
+        mmio_buffer_(fdf_testing::CreateMmioBuffer(kMmioSize)) {}
 
   void SetUp() override {
     controller_.SetMmioForTesting(mmio_buffer_.View(0));
@@ -205,7 +198,6 @@ class DpDisplayTest : public ::testing::Test {
   // TODO(https://fxbug.dev/42164736): Remove DpDisplay's dependency on Controller which will remove
   // the need for much of what's in SetUp() and TearDown().
   Controller controller_;
-  uint8_t buffer_[kMmioSize];
   fdf::MmioBuffer mmio_buffer_;
 
   inspect::Node node_;

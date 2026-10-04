@@ -216,7 +216,7 @@ type TxResult = struct {
     /// getting a confirmation that the frame was sent) or stopped.
     /// - `ZX_ERR_INTERNAL` or any other unlisted errors will be reported as a
     /// generic [`fuchsia.hardware.network/TxReturnFlags.TX_RET_ERROR`].
-    status zx.Status;
+    status zx.Result;
 };
 
 @transport("Driver")
@@ -397,7 +397,7 @@ closed protocol NetworkDeviceIfc {
         id fuchsia.hardware.network.BasePortId;
         port client_end:NetworkPort;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Destroys port with `id`.
     ///
@@ -616,7 +616,7 @@ closed protocol NetworkDeviceImpl {
     strict Init(resource struct {
         iface client_end:NetworkDeviceIfc;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Starts the device's data path.
     ///
@@ -636,7 +636,7 @@ closed protocol NetworkDeviceImpl {
     /// specific error.
     @async
     strict Start() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Stops the network device.
     ///
@@ -713,7 +713,7 @@ closed protocol NetworkDeviceImpl {
         id fuchsia.hardware.network.VmoId;
         vmo zx.Handle:VMO;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Device may dispose of all references to the VMO referenced by `id`.
     ///

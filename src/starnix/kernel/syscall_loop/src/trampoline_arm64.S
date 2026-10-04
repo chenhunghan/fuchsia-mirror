@@ -40,9 +40,16 @@ FUNCTION(restricted_enter_loop)
   // Save address of restricted state and extended processor state mappings
   stp x3,  x4, [sp, #-16]!   // Will be at [sp], #0
 
-  // Restore extended processor state
-  mov x0, x4
-  bl restore_extended_pstate
+  // Restore extended processor state for initial entry based on target CPSR mode.
+  // The restricted state CPSR register's bit 0x10 selects between aarch32 and aarch64 mode.
+  mov  x0, x4
+  ldrb w11, [x3, #34 * 8]
+  tbnz w11, #4, .Lrestore_initial_aarch32
+  bl   restore_extended_pstate
+  b    .restricted_enter_loop_top
+
+.Lrestore_initial_aarch32:
+  bl   restore_extended_aarch32_pstate
 
 .restricted_enter_loop_top:
   // Restore zx_restricted_enter options from stack
@@ -55,7 +62,7 @@ FUNCTION(restricted_enter_loop)
   adr  x9, restricted_return_loop_aarch32
   // Restore restricted state mapping
   ldr  x10, [sp, #0]
-  // Load CPSR word - offset is after 32 registers, PC, and TIPDR_EL0
+  // Load low byte of CPSR - offset is after 32 registers, PC, and TPIDR_EL0
   ldrb w11, [x10, #34 * 8]
   tst  w11, #0x10
   csel x1, x8, x9, eq

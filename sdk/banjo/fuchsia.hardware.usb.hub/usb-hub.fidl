@@ -13,6 +13,6 @@ closed protocol UsbHubInterface {
     strict ResetPort(struct {
         port uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };

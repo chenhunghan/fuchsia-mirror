@@ -70,6 +70,7 @@ class CompileStep : public Compiler::Step {
   bool ResolveLiteralConstant(LiteralConstant* literal_constant,
                               std::optional<const Type*> opt_type);
   bool ResolveAsOptional(Constant* constant);
+  bool ResolveAsNonZero(Constant* constant);
   bool ResolveLiteralConstantNumeric(LiteralConstant* literal_constant,
                                      const PrimitiveType* primitive_type);
   template <typename NumericType>

@@ -1,0 +1,9 @@
+{
+    "short_description": "Test root driver providing a fake platform device for driver-lab realm tests",
+    "manufacturer": "",
+    "families": [],
+    "models": [],
+    "areas": [
+        "Test"
+    ]
+}

@@ -4,6 +4,7 @@
 
 use core::marker::PhantomData;
 use core::pin::Pin;
+use core::ptr::addr_of_mut;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 
 use crate::{LockEntryStorage, RawBrwLockPi};
@@ -67,15 +68,15 @@ impl<'a, Class: LockClass> BrwLockPiReadGuard<'a, Class> {
         unsafe {
             pin_init::pin_init_from_closure(
                 move |this: *mut Self| -> Result<(), core::convert::Infallible> {
-                    let lock_addr = core::ptr::addr_of_mut!((*this).lock);
+                    let lock_addr = addr_of_mut!((*this).lock);
                     core::ptr::write(lock_addr, lock);
 
-                    let entry_addr = core::ptr::addr_of_mut!((*this).lock_entry);
+                    let entry_addr = addr_of_mut!((*this).lock_entry);
                     core::ptr::write(entry_addr, LockEntryStorage::default());
 
                     lock.lock.acquire_read(entry_addr as *mut core::ffi::c_void);
 
-                    let token_addr = core::ptr::addr_of_mut!((*this).token);
+                    let token_addr = addr_of_mut!((*this).token);
                     core::ptr::write(token_addr, crate::LockToken::new());
 
                     Ok(())
@@ -106,7 +107,7 @@ impl<'a, Class: LockClass> BrwLockPiReadGuard<'a, Class> {
         // SAFETY: `lock_entry` is pinned on the stack and valid.
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _;
+            let entry_addr = addr_of_mut!(me.lock_entry);
             me.lock.lock.release_read(entry_addr as *mut core::ffi::c_void);
             let result = f();
             me.lock.lock.acquire_read(entry_addr as *mut core::ffi::c_void);
@@ -123,7 +124,7 @@ impl<'a, Class: LockClass> PinnedDrop for BrwLockPiReadGuard<'a, Class> {
         // and we are releasing it with the same entry storage.
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _;
+            let entry_addr = addr_of_mut!(me.lock_entry);
             me.lock.lock.release_read(entry_addr as *mut core::ffi::c_void);
         }
     }
@@ -147,15 +148,15 @@ impl<'a, Class: LockClass> BrwLockPiWriteGuard<'a, Class> {
         unsafe {
             pin_init::pin_init_from_closure(
                 move |this: *mut Self| -> Result<(), core::convert::Infallible> {
-                    let lock_addr = core::ptr::addr_of_mut!((*this).lock);
+                    let lock_addr = addr_of_mut!((*this).lock);
                     core::ptr::write(lock_addr, lock);
 
-                    let entry_addr = core::ptr::addr_of_mut!((*this).lock_entry);
+                    let entry_addr = addr_of_mut!((*this).lock_entry);
                     core::ptr::write(entry_addr, LockEntryStorage::default());
 
                     lock.lock.acquire_write(entry_addr as *mut core::ffi::c_void);
 
-                    let token_addr = core::ptr::addr_of_mut!((*this).token);
+                    let token_addr = addr_of_mut!((*this).token);
                     core::ptr::write(token_addr, crate::LockToken::new());
 
                     Ok(())
@@ -186,7 +187,7 @@ impl<'a, Class: LockClass> BrwLockPiWriteGuard<'a, Class> {
         // SAFETY: `lock_entry` is pinned on the stack and valid.
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _;
+            let entry_addr = addr_of_mut!(me.lock_entry);
             me.lock.lock.release_write(entry_addr as *mut core::ffi::c_void);
             let result = f();
             me.lock.lock.acquire_write(entry_addr as *mut core::ffi::c_void);
@@ -203,7 +204,7 @@ impl<'a, Class: LockClass> PinnedDrop for BrwLockPiWriteGuard<'a, Class> {
         // and we are releasing it with the same entry storage.
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _;
+            let entry_addr = addr_of_mut!(me.lock_entry);
             me.lock.lock.release_write(entry_addr as *mut core::ffi::c_void);
         }
     }

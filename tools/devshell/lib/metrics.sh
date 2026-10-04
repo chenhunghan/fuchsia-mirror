@@ -22,8 +22,8 @@
 fx-ensure-prebuilt "${PREBUILT_JQ}"
 
 # Increase the metrics version by 1 when analytics is updated
-_METRICS_VERSION="11"
-_METRICS_ALLOWS_CUSTOM_REPORTING=( "test" )
+_METRICS_VERSION="12"
+_METRICS_ALLOWS_CUSTOM_REPORTING=( "test" "worktree" )
 # If args match the below, then track capture group 1
 _METRICS_TRACK_REGEX=(
     "^run (fuchsia-pkg:\/\/[[:graph:]]*)"
@@ -551,11 +551,9 @@ function track-subcommand-custom-event {
     return 1
   fi
 
-  # Limit to the first 100 characters
-  # The Analytics API supports up to 500 bytes, but it is likely that
-  # anything larger than 100 characters is an invalid execution and/or not
-  # what we want to track.
-  event_label=${event_label:0:100}
+  # Limit to the first 500 characters
+  # The GA4 360 supports up to 500 characters for parameter values
+  event_label=${event_label:0:500}
 
   metrics-read-config
   if [[ "${METRICS_LEVEL}" -eq 0 ]]; then
@@ -927,9 +925,9 @@ function track-test-event {
        product: ($a.build_info_product // ""),
        board: ($a.build_info_board // ""),
        main_product_bundle: ($a.main_pb_label // ""),
-       test_selection: ($s.sel | tostring | .[0:1000]),
-       stats_json1: $s.stats[0:1000],
-       stats_json2: $s.stats[1000:2000]
+       test_selection: ($s.sel | tostring | .[0:500]),
+       stats_json1: $s.stats[0:500],
+       stats_json2: $s.stats[500:1000]
      }')
 
   _add-to-analytics-batch "test" "${event_params}"

@@ -16,11 +16,11 @@ rustc_library("lib") {
 
   deps = [
     "//src/developer/ffx/fidl/usb:fuchsia.ffx.usb_rust_common",
+    "//src/developer/ffx/lib/metrics:lib",
     "//src/developer/ffx/lib/usb_vsock_host",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fidl/rust/fidl_message",
     "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:rand",
@@ -29,6 +29,7 @@ rustc_library("lib") {
   ]
 
   test_deps = [
+    "//src/developer/lib/usb_vsock",
     "//src/lib/fuchsia",
     "//third_party/rust_crates:tempfile",
   ]

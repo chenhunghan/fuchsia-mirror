@@ -22,7 +22,6 @@ group("tests") {
 fuchsia_component_manifest("manifest") {
   component_name = "driver-index"
   manifest = "meta/driver-index.cml"
-  restricted_features = [ "delivery_type" ]
 }
 
 fuchsia_structured_config_rust_lib("driver_index_config") {

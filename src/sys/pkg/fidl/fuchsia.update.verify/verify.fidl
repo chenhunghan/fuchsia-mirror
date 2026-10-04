@@ -18,7 +18,7 @@ closed protocol HealthVerification {
     ///
     /// Returns `ZX_OK` if every required check is healthy.
     strict QueryHealthChecks() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

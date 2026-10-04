@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from cli.cli import main, send_command
 from cli.commands.break_cmd import resolve_path
+from cli.commands.stop import stop_daemon
 from daemon_manager.manager import (
+    UDS_PATH,
     DaemonAlreadyRunningError,
     DaemonConnectionError,
     DaemonCrashError,
@@ -48,6 +50,40 @@ class TestCLI(unittest.IsolatedAsyncioTestCase):
         exit_code = await main(["stop"])
         self.assertEqual(exit_code, 0)
         mock_stop.assert_called_once()
+
+    @patch("cli.commands.stop.DaemonManager")
+    async def test_stop_daemon_success(self, mock_manager_cls: Mock) -> None:
+        mock_manager = AsyncMock()
+        mock_manager_cls.return_value = mock_manager
+        mock_manager.stop = AsyncMock()
+
+        stdout = StringIO()
+        with patch("sys.stdout", stdout):
+            exit_code = await stop_daemon()
+
+        self.assertEqual(exit_code, 0)
+        mock_manager_cls.assert_called_once_with(socket_path=UDS_PATH)
+        mock_manager.stop.assert_awaited_once()
+        output = json.loads(stdout.getvalue().strip())
+        self.assertEqual(
+            output,
+            {"success": True, "message": "Daemon stopped"},
+        )
+
+    @patch("cli.commands.stop.DaemonManager")
+    async def test_stop_daemon_failure(self, mock_manager_cls: Mock) -> None:
+        mock_manager = AsyncMock()
+        mock_manager_cls.return_value = mock_manager
+        mock_manager.stop = AsyncMock(side_effect=RuntimeError("stop failed"))
+
+        stderr = StringIO()
+        with patch("sys.stderr", stderr):
+            exit_code = await stop_daemon()
+
+        self.assertEqual(exit_code, 1)
+        mock_manager_cls.assert_called_once_with(socket_path=UDS_PATH)
+        mock_manager.stop.assert_awaited_once()
+        self.assertIn("Error stopping daemon: stop failed", stderr.getvalue())
 
     @patch("cli.cli.send_command")
     async def test_attach_command(self, mock_send: Mock) -> None:

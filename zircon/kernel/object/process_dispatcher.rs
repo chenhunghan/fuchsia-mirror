@@ -11,10 +11,22 @@ use super::job_dispatcher::JobDispatcher;
 use super::process_dispatcher_ffi::cpp_process_dispatcher_hw_trace_context_id;
 use super::process_dispatcher_ffi::{
     cpp_process_add_initialized_thread, cpp_process_attach_aspace_to_thread,
-    cpp_process_dispatcher_current, cpp_process_dispatcher_enforce_basic_policy,
-    cpp_process_dispatcher_get_debug_addr, cpp_process_dispatcher_get_dyn_break_on_load,
-    cpp_process_dispatcher_get_info, cpp_process_dispatcher_is_current,
-    cpp_process_dispatcher_kill, cpp_process_dispatcher_make_and_add_handle,
+    cpp_process_dispatcher_aspace_at, cpp_process_dispatcher_create,
+    cpp_process_dispatcher_create_shared, cpp_process_dispatcher_current,
+    cpp_process_dispatcher_enforce_basic_policy, cpp_process_dispatcher_exit_current,
+    cpp_process_dispatcher_get_debug_addr, cpp_process_dispatcher_get_dispatcher_with_rights,
+    cpp_process_dispatcher_get_dyn_break_on_load, cpp_process_dispatcher_get_info,
+    cpp_process_dispatcher_get_timer_slack_policy,
+    cpp_process_dispatcher_get_timer_slack_policy_amount,
+    cpp_process_dispatcher_handle_table_add_handle_locked,
+    cpp_process_dispatcher_handle_table_get_handle_locked,
+    cpp_process_dispatcher_handle_table_koid, cpp_process_dispatcher_handle_table_lock,
+    cpp_process_dispatcher_handle_table_map_handle_to_value,
+    cpp_process_dispatcher_handle_table_remove_handle_locked,
+    cpp_process_dispatcher_handle_table_remove_handle_ptr_locked,
+    cpp_process_dispatcher_is_current, cpp_process_dispatcher_job, cpp_process_dispatcher_kill,
+    cpp_process_dispatcher_make_and_add_handle,
+    cpp_process_dispatcher_make_and_add_handle_from_ref, cpp_process_dispatcher_remove_handle,
     cpp_process_dispatcher_resume, cpp_process_dispatcher_set_critical_to_job,
     cpp_process_dispatcher_set_debug_addr, cpp_process_dispatcher_set_dyn_break_on_load,
     cpp_process_dispatcher_start, cpp_process_dispatcher_suspend,
@@ -24,7 +36,8 @@ use super::process_dispatcher_ffi::{
 use super::thread_dispatcher::ThreadDispatcher;
 use super::vm_address_region_dispatcher::VmAddressRegionDispatcher;
 use crate::arch_rs::UserEntryState;
-use crate::kernel::thread::ThreadPtr;
+use crate::kernel::thread::{AutoExpiringPreemptDisabler, ThreadPtr};
+use crate::vm::vm_aspace::VmAspace;
 use core::mem::MaybeUninit;
 use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
@@ -42,12 +55,44 @@ crate::object::dispatcher::impl_dispatcher_facade!(
     zx_types::ZX_OBJ_TYPE_PROCESS
 );
 
+/// A wrapper around a raw pointer to the current [`ProcessDispatcher`].
+///
+/// This type explicitly does not implement [`Send`] or [`Sync`], guaranteeing that it cannot be
+/// shared with or sent to other threads. Because the current thread must be part of this process,
+/// the process cannot be destroyed while this thread is executing, making it safe to dereference
+/// the raw pointer into a [`ProcessDispatcher`] reference.
+#[derive(Debug)]
+pub struct CurrentProcessDispatcher {
+    ptr: *const ProcessDispatcher,
+}
+
+impl core::ops::Deref for CurrentProcessDispatcher {
+    type Target = ProcessDispatcher;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `CurrentProcessDispatcher` does not implement `Send` or `Sync`, so it cannot be
+        // shared with other threads. The only way `self.ptr` could become invalid is if the
+        // process has been destroyed, which cannot happen while this thread (which is part of the
+        // process) is executing.
+        unsafe { &*self.ptr }
+    }
+}
+
 impl ProcessDispatcher {
+    /// Returns a wrapper that dereferences to the current [`ProcessDispatcher`].
+    #[inline]
+    pub fn get_current() -> CurrentProcessDispatcher {
+        // SAFETY: Calling `cpp_process_dispatcher_current` is safe when executing in a valid
+        // thread context.
+        let ptr = unsafe { cpp_process_dispatcher_current() };
+        CurrentProcessDispatcher { ptr }
+    }
+
     /// Executes the given function with a reference to the current process.
+    #[inline]
     pub fn with_current<R>(f: impl FnOnce(&ProcessDispatcher) -> R) -> R {
-        // SAFETY: The current process is guaranteed to be valid for the duration of the call.
-        let proc = unsafe { &*cpp_process_dispatcher_current() };
-        f(proc)
+        f(&Self::get_current())
     }
 
     /// Returns whether this `ProcessDispatcher` is the current process.
@@ -88,12 +133,8 @@ impl ProcessDispatcher {
     /// Removes a handle from this process's handle table and returns the owned handle if found.
     pub fn remove_handle(&self, handle: HandleValue) -> Option<HandleOwner> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let raw = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_remove_handle(
-                self.as_ffi_mut(),
-                handle.raw_value(),
-            )
-        };
+        let raw =
+            unsafe { cpp_process_dispatcher_remove_handle(self.as_ffi_mut(), handle.raw_value()) };
         // SAFETY: `raw` was exported by C++ `RemoveHandle.release()` or is null.
         unsafe { HandleOwner::from_raw(raw) }
     }
@@ -162,7 +203,7 @@ impl ProcessDispatcher {
         // SAFETY: `self` is a valid `ProcessDispatcher`, `raw_dispatcher` carries an acquired reference count
         // transferred to C++, and `out` points to writable memory.
         let status = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_make_and_add_handle_from_ref(
+            cpp_process_dispatcher_make_and_add_handle_from_ref(
                 self.as_ffi_mut(),
                 raw_dispatcher as *mut _,
                 rights,
@@ -184,22 +225,16 @@ impl ProcessDispatcher {
     /// Returns the timer slack policy amount for this process.
     pub fn get_timer_slack_policy_amount(&self) -> i64 {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_get_timer_slack_policy_amount(
-                self.as_ffi(),
-            )
-        }
+        unsafe { cpp_process_dispatcher_get_timer_slack_policy_amount(self.as_ffi()) }
     }
 
     /// Returns the timer slack policy for this process.
+    #[inline]
     pub fn get_timer_slack_policy(&self) -> crate::kernel::deadline::TimerSlack {
         let mut slack = crate::kernel::deadline::TimerSlack::none();
         // SAFETY: `self` is a valid `ProcessDispatcher` reference and `slack` points to valid memory.
         unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_get_timer_slack_policy(
-                self.as_ffi(),
-                &mut slack,
-            );
+            cpp_process_dispatcher_get_timer_slack_policy(self.as_ffi(), &mut slack);
         }
         slack
     }
@@ -209,9 +244,7 @@ impl ProcessDispatcher {
     pub fn handle_table_lock(&self) -> &ksync::BrwLockPi<HandleTableLockClass> {
         // SAFETY: `self` is a valid `ProcessDispatcher`, and its handle table lock is a valid `BrwLockPi`.
         unsafe {
-            let lock_ptr = super::process_dispatcher_ffi::cpp_process_dispatcher_handle_table_lock(
-                self.as_ffi(),
-            );
+            let lock_ptr = cpp_process_dispatcher_handle_table_lock(self.as_ffi());
             &*(lock_ptr as *const ksync::BrwLockPi<HandleTableLockClass>)
         }
     }
@@ -219,11 +252,7 @@ impl ProcessDispatcher {
     /// Returns the KOID of this process's handle table.
     #[inline]
     pub fn handle_table_koid(&self) -> zx_types::zx_koid_t {
-        unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_handle_table_koid(
-                self as *const _,
-            )
-        }
+        unsafe { cpp_process_dispatcher_handle_table_koid(self as *const _) }
     }
 
     /// Resolves a handle to a dispatcher of type `T` with the required `rights` in this process's
@@ -242,14 +271,13 @@ impl ProcessDispatcher {
         // SAFETY: `self` is a valid `ProcessDispatcher` and `ref_ptr` points to valid uninitialized
         // memory. C++ checks `T::TYPE` and `rights` before initializing `ref_ptr`.
         unsafe {
-            let status =
-                super::process_dispatcher_ffi::cpp_process_dispatcher_get_dispatcher_with_rights(
-                    self.as_ffi(),
-                    handle_value,
-                    T::TYPE,
-                    rights,
-                    ref_ptr.as_mut_ptr(),
-                );
+            let status = cpp_process_dispatcher_get_dispatcher_with_rights(
+                self.as_ffi(),
+                handle_value,
+                T::TYPE,
+                rights,
+                ref_ptr.as_mut_ptr(),
+            );
             Status::ok(status)?;
             Ok(ref_ptr.assume_init().cast::<T>())
         }
@@ -279,24 +307,9 @@ impl ProcessDispatcher {
         Status::ok(status)
     }
 
-    /// Default rights assigned to a newly created ProcessDispatcher handle.
-    pub const DEFAULT_RIGHTS: zx_rights_t = zx_types::ZX_RIGHT_TRANSFER
-        | zx_types::ZX_RIGHT_DUPLICATE
-        | zx_types::ZX_RIGHT_WAIT
-        | zx_types::ZX_RIGHT_INSPECT
-        | zx_types::ZX_RIGHT_READ
-        | zx_types::ZX_RIGHT_WRITE
-        | zx_types::ZX_RIGHT_GET_PROPERTY
-        | zx_types::ZX_RIGHT_SET_PROPERTY
-        | zx_types::ZX_RIGHT_ENUMERATE
-        | zx_types::ZX_RIGHT_DESTROY
-        | zx_types::ZX_RIGHT_SIGNAL
-        | zx_types::ZX_RIGHT_MANAGE_PROCESS
-        | zx_types::ZX_RIGHT_MANAGE_THREAD;
-
     /// Returns the default rights for a process handle.
     pub const fn default_rights() -> zx_rights_t {
-        Self::DEFAULT_RIGHTS
+        zx_types::ZX_DEFAULT_PROCESS_RIGHTS
     }
 
     /// Creates a new `ProcessDispatcher`.
@@ -316,7 +329,7 @@ impl ProcessDispatcher {
         // SAFETY: `job` is a valid `RefPtr<JobDispatcher>` whose refcount is transferred to C++,
         // `name` points to readable memory of length `name.len()`, and output pointers point to valid uninitialized storage.
         let status = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_create(
+            cpp_process_dispatcher_create(
                 fbl::RefPtr::into_raw(job) as *mut _,
                 name.as_ptr().cast(),
                 name.len(),
@@ -355,7 +368,7 @@ impl ProcessDispatcher {
 
         // SAFETY: `shared_proc` is a valid `RefPtr<ProcessDispatcher>` whose refcount is transferred to C++.
         let status = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_create_shared(
+            cpp_process_dispatcher_create_shared(
                 fbl::RefPtr::into_raw(shared_proc) as *mut _,
                 name.as_ptr().cast(),
                 name.len(),
@@ -381,24 +394,67 @@ impl ProcessDispatcher {
     /// Exits the current process with the given return code.
     pub fn exit_current(retcode: i64) -> ! {
         // SAFETY: Terminating current process execution within valid thread context.
-        unsafe { super::process_dispatcher_ffi::cpp_process_dispatcher_exit_current(retcode) }
+        unsafe { cpp_process_dispatcher_exit_current(retcode) }
     }
 
     /// Returns a reference to this process's address space at the given virtual address.
-    pub fn aspace_at(&self, va: usize) -> Option<&crate::vm::vm_aspace::VmAspace> {
+    pub fn aspace_at(&self, va: usize) -> Option<&VmAspace> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let aspace_ptr = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_aspace_at(self.as_ffi_mut(), va)
-        };
+        let aspace_ptr = unsafe { cpp_process_dispatcher_aspace_at(self.as_ffi_mut(), va) };
         // SAFETY: `aspace_ptr` is either null or points to a valid `VmAspace` managed by the process.
         unsafe { aspace_ptr.as_ref() }
+    }
+
+    /// Returns the normal address space for this process.
+    ///
+    /// All processes have a normal address space.  The normal aspace is the
+    /// address space that's active when a thread is in normal mode.
+    ///
+    /// For "shared processes", on architectures that support unified aspaces, the normal aspace
+    /// is a unified aspace. A unified aspace is an aspace that spans both the shared and restricted
+    /// aspace, and is used by threads in normal mode to avoid having to switch between the shared
+    /// and restricted aspaces.
+    ///
+    /// On architectures that don't yet support unified aspaces, the normal
+    /// aspace is a shared aspace (`ShareableProcessState::aspace()`).
+    ///
+    /// For non-shared processes (regular ones), the normal aspace is the one and only aspace
+    /// belonging to the process (`ShareableProcessState::aspace()`).
+    ///
+    /// TODO(https://fxbug.dev/42083004): Update this comment once all architectures support unified
+    /// aspaces.
+    pub fn normal_aspace(&self) -> &VmAspace {
+        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
+        let raw: *mut process_dispatcher_bindings::VmAspace = unsafe {
+            process_dispatcher_bindings::cpp_process_dispatcher_normal_aspace(
+                self.as_ffi_mut().cast(),
+            )
+        };
+        // SAFETY: The normal address space is valid for the lifetime of `self`.
+        unsafe { raw.cast::<VmAspace>().as_ref_unchecked() }
+    }
+
+    /// Returns the "restricted" address space for a process, or nullptr if it does not have a
+    /// restricted address space.
+    ///
+    /// The restricted address space spans the bottom half of the process' total address space, and
+    /// is private to the process. Threads executing in restricted mode are restricted to this
+    /// address space.
+    pub fn restricted_aspace(&self) -> Option<&VmAspace> {
+        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
+        let raw: *mut process_dispatcher_bindings::VmAspace = unsafe {
+            process_dispatcher_bindings::cpp_process_dispatcher_restricted_aspace(
+                self.as_ffi_mut().cast(),
+            )
+        };
+        // SAFETY: The restricted address space is valid for the lifetime of `self`.
+        unsafe { raw.cast::<VmAspace>().as_ref() }
     }
 
     /// Returns the job associated with this process.
     pub fn job(&self) -> Option<fbl::RefPtr<JobDispatcher>> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let ptr =
-            unsafe { super::process_dispatcher_ffi::cpp_process_dispatcher_job(self.as_ffi_mut()) };
+        let ptr = unsafe { cpp_process_dispatcher_job(self.as_ffi_mut()) };
         // SAFETY: `ptr` is exported via `fbl::ExportToRawPtr` with an acquired refcount.
         unsafe { fbl::RefPtr::try_from_raw(ptr) }
     }
@@ -514,6 +570,35 @@ impl ProcessDispatcher {
         // SAFETY: `self` and `thread` are valid references.
         unsafe { cpp_process_remove_thread(self.as_ffi(), thread as *const _) }
     }
+
+    /// Maps a handle to its user-visible `HandleValue` for this process.
+    #[inline]
+    pub fn map_handle_to_value(&self, handle: super::handle::HandleRef<'_>) -> HandleValue {
+        // SAFETY: `self` is a valid `ProcessDispatcher` and `handle` is a valid `HandleRef`.
+        let raw = unsafe {
+            cpp_process_dispatcher_handle_table_map_handle_to_value(self.as_ffi(), handle.as_ptr())
+        };
+        HandleValue::new(raw)
+    }
+
+    /// Removes a slice of raw handle values from this process's handle table.
+    ///
+    /// Matching C++ `HandleTable::RemoveHandles(ProcessDispatcher&, ktl::span<const zx_handle_t>)`,
+    /// `ZX_HANDLE_INVALID` entries are skipped, and if any non-zero handle is missing, returns
+    /// `ZX_ERR_BAD_HANDLE` after processing the remaining handles.
+    pub fn remove_handles(&self, handles: &[zx_types::zx_handle_t]) -> Result<(), Status> {
+        let mut status = Ok(());
+        let _preempt_disable = AutoExpiringPreemptDisabler::with_default_timeslice_extension();
+        ksync::lock!(let guard = HandleTableWriteGuard::new(self));
+        for &handle in handles {
+            if handle != zx_types::ZX_HANDLE_INVALID
+                && guard.remove_handle(HandleValue::new(handle)).is_none()
+            {
+                status = Err(Status::BAD_HANDLE);
+            }
+        }
+        status
+    }
 }
 
 zr::static_assert!(core::mem::size_of::<ProcessDispatcher>() == 0);
@@ -542,11 +627,88 @@ impl<'a> HandleTableReadGuard<'a> {
     pub fn get_handle(&self, handle_value: HandleValue) -> Option<super::handle::HandleRef<'_>> {
         // SAFETY: `self.process` is valid and the handle table lock is held for the duration of `self`.
         let ptr = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_handle_table_get_handle_locked(
+            cpp_process_dispatcher_handle_table_get_handle_locked(
                 self.process.as_ffi(),
                 handle_value.raw_value(),
             )
         };
         core::ptr::NonNull::new(ptr).map(|ptr| unsafe { super::handle::HandleRef::from_raw(ptr) })
+    }
+}
+
+/// RAII writer lock guard for a process's handle table.
+///
+/// Encapsulates the writer lock on the handle table, allowing handle lookups, additions, and
+/// removals while the lock is held.
+#[pin_data]
+pub struct HandleTableWriteGuard<'a> {
+    process: &'a ProcessDispatcher,
+    #[pin]
+    guard: ksync::BrwLockPiWriteGuard<'a, HandleTableLockClass>,
+}
+
+impl<'a> HandleTableWriteGuard<'a> {
+    /// Creates a stack-pinned handle table writer lock guard for `process`.
+    pub fn new(process: &'a ProcessDispatcher) -> impl PinInit<Self, core::convert::Infallible> {
+        pin_init!(Self {
+            process,
+            guard <- process.handle_table_lock().write_lock(),
+        })
+    }
+
+    /// Retrieves a handle reference while holding the handle table write lock.
+    #[inline]
+    pub fn get_handle(&self, handle_value: HandleValue) -> Option<super::handle::HandleRef<'_>> {
+        // SAFETY: `self.process` is valid and the handle table write lock is held for the duration
+        // of `self`.
+        let ptr = unsafe {
+            cpp_process_dispatcher_handle_table_get_handle_locked(
+                self.process.as_ffi(),
+                handle_value.raw_value(),
+            )
+        };
+        core::ptr::NonNull::new(ptr).map(|ptr| unsafe { super::handle::HandleRef::from_raw(ptr) })
+    }
+
+    /// Adds an owned handle to the handle table while holding the write lock.
+    #[inline]
+    pub fn add_handle(&self, handle: HandleOwner) {
+        // SAFETY: `self.process` is valid, the handle table write lock is held, and `handle`
+        // ownership is transferred to C++.
+        unsafe {
+            cpp_process_dispatcher_handle_table_add_handle_locked(
+                self.process.as_ffi_mut(),
+                handle.release(),
+            );
+        }
+    }
+
+    /// Removes a handle by value from the handle table while holding the write lock.
+    #[inline]
+    pub fn remove_handle(&self, handle_value: HandleValue) -> Option<HandleOwner> {
+        // SAFETY: `self.process` is valid and the handle table write lock is held.
+        let raw = unsafe {
+            cpp_process_dispatcher_handle_table_remove_handle_locked(
+                self.process.as_ffi_mut(),
+                handle_value.raw_value(),
+            )
+        };
+        // SAFETY: `raw` is a valid owned handle pointer released from the handle table or null.
+        unsafe { HandleOwner::from_raw(raw) }
+    }
+
+    /// Removes a handle known to be in this process's handle table while holding the write lock.
+    #[inline]
+    pub fn remove_handle_ref(&self, handle: super::handle::HandleRef<'_>) -> HandleOwner {
+        // SAFETY: `self.process` is valid, the handle table write lock is held, and `handle` was
+        // looked up in `self.process`'s handle table under the same lock.
+        let raw = unsafe {
+            cpp_process_dispatcher_handle_table_remove_handle_ptr_locked(
+                self.process.as_ffi_mut(),
+                handle.as_ptr() as *mut _,
+            )
+        };
+        // SAFETY: `raw` is a non-null owned handle pointer released from the handle table.
+        unsafe { HandleOwner::from_raw(raw).unwrap() }
     }
 }

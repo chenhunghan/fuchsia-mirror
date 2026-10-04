@@ -12,9 +12,10 @@ pub const MEMBER_BATTERY: &str = "battery";
 pub const MEMBER_DEVICE: &str = "device";
 pub const MEMBER_CHARGER: &str = "charger";
 pub const MEMBER_CONTROLLER: &str = "controller";
+pub const MEMBER_DEBUG: &str = "debug";
 
 const KNOWN_MEMBER_SUFFIXES: &[&str] =
-    &[MEMBER_BATTERY, MEMBER_CHARGER, MEMBER_CONTROLLER, MEMBER_DEVICE];
+    &[MEMBER_BATTERY, MEMBER_CHARGER, MEMBER_CONTROLLER, MEMBER_DEBUG, MEMBER_DEVICE];
 
 /// Formats micro-units (uA, uAh, uV) into human-readable quantities with appropriate prefixes.
 #[derive(Debug, PartialEq)]
@@ -127,6 +128,28 @@ mod tests {
         assert_eq!(
             append_member_suffix("/svc/my-battery/default", "battery"),
             PathBuf::from("/svc/my-battery/default/battery")
+        );
+        // Sibling suffix replacement (controller -> debug, charger -> debug, device -> battery)
+        assert_eq!(
+            append_member_suffix(
+                "/svc/fuchsia.hardware.power.charger.Service/default/controller",
+                "debug"
+            ),
+            PathBuf::from("/svc/fuchsia.hardware.power.charger.Service/default/debug")
+        );
+        assert_eq!(
+            append_member_suffix(
+                "/svc/fuchsia.hardware.power.charger.Service/default/charger",
+                "debug"
+            ),
+            PathBuf::from("/svc/fuchsia.hardware.power.charger.Service/default/debug")
+        );
+        assert_eq!(
+            append_member_suffix(
+                "/svc/fuchsia.power.battery.InfoService/default/device",
+                "battery"
+            ),
+            PathBuf::from("/svc/fuchsia.power.battery.InfoService/default/battery")
         );
     }
 }

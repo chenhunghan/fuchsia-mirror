@@ -26,7 +26,7 @@ closed protocol Fan {
     /// - response `fan_level` a uint32 field indicating the
     ///      current fan level. See fan level description above.
     strict GetFanLevel() -> (struct {
-        status zx.Status;
+        status zx.Result;
         fan_level uint32;
     });
 
@@ -39,7 +39,7 @@ closed protocol Fan {
     strict SetFanLevel(struct {
         fan_level uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

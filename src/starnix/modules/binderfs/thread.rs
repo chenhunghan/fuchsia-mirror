@@ -532,9 +532,13 @@ pub enum Command {
     /// Commands a binder thread to process an incoming reply to its transaction.
     /// Sent from the server to the client.
     Reply(TransactionData),
-    /// Notifies a binder thread that a transaction has completed.
+    /// Notifies a binder thread that its reply has been sent.
     /// Sent from binder to the server.
     TransactionComplete,
+    /// Notifies a binder thread that its two-way transaction has been sent. It is followed by the
+    /// outcome of the transaction, e.g. a [`Command::Reply`].
+    /// Sent from binder to the client.
+    TwoWayTransactionComplete,
     /// Notifies a binder thread that a oneway transaction has been sent.
     /// Sent from binder to the client.
     OnewayTransactionComplete,
@@ -561,6 +565,15 @@ pub enum Command {
 }
 
 impl Command {
+    /// The size of the largest serialized command: a `BR_TRANSACTION_SEC_CTX`, i.e. the return
+    /// code followed by a `binder_transaction_data` and a security context pointer.
+    ///
+    /// A read only dequeues a command after another one if the rest of the read buffer has room
+    /// for `MAX_SIZE` bytes, so that the dequeued command always fits and is never dropped.
+    pub const MAX_SIZE: usize = std::mem::size_of::<binder_driver_return_protocol>()
+        + std::mem::size_of::<binder_transaction_data>()
+        + std::mem::size_of::<binder_uintptr_t>();
+
     /// Returns the command's BR_* code for serialization.
     pub fn driver_return_code(&self) -> binder_driver_return_protocol {
         match self {
@@ -577,7 +590,9 @@ impl Command {
                 }
             }
             Self::Reply(..) => binder_driver_return_protocol_BR_REPLY,
-            Self::TransactionComplete | Self::OnewayTransactionComplete => {
+            Self::TransactionComplete
+            | Self::TwoWayTransactionComplete
+            | Self::OnewayTransactionComplete => {
                 binder_driver_return_protocol_BR_TRANSACTION_COMPLETE
             }
             Self::FailedReply => binder_driver_return_protocol_BR_FAILED_REPLY,
@@ -637,6 +652,7 @@ impl Command {
                 }
             }
             Self::TransactionComplete
+            | Self::TwoWayTransactionComplete
             | Self::OnewayTransactionComplete
             | Self::FailedReply
             | Self::FrozenReply
@@ -668,6 +684,12 @@ impl Command {
         struct Data<A> {
             command: binder_driver_return_protocol,
             parameters: A,
+        }
+        // `handle_thread_read` relies on `MAX_SIZE` being an upper bound of the size of any
+        // command, so that a command it dequeues always fits in the rest of the read buffer. This
+        // fails to compile if a larger command is added without updating `MAX_SIZE`.
+        const {
+            assert!(std::mem::size_of::<Data<A>>() <= Self::MAX_SIZE);
         }
 
         if buffer.length < std::mem::size_of::<Data<A>>() {

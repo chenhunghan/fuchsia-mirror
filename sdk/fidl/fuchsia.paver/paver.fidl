@@ -65,7 +65,7 @@ type ReadInfo = struct {
 
 type ReadResult = strict union {
     /// Error encountered while reading data.
-    1: err zx.Status;
+    1: err zx.Result;
     /// End of file reached.
     2: eof bool;
     /// Information about location of successfully read data within pre-registered VMO.
@@ -74,7 +74,7 @@ type ReadResult = strict union {
 
 type WriteFirmwareResult = strict union {
     /// The result status if a write was attempted.
-    1: status zx.Status;
+    1: status zx.Result;
 
     /// True if a write was not attempted due to unsupported firmware. This could
     /// be either unsupported content type or unsupported A/B configuration.
@@ -165,7 +165,7 @@ closed protocol DataSink {
         asset Asset;
         payload fuchsia.mem.Buffer;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Writes firmware data from `payload`.
@@ -224,7 +224,7 @@ closed protocol DataSink {
 
     /// Flush all previously buffered writes to persistent storage.
     strict Flush() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -240,7 +240,7 @@ closed protocol DynamicDataSink {
     /// *WARNING*: This API will wipe the existing partitions and data loss may occur.  Non-Fuchsia
     /// partitions *may* be preserved, although this is behaviour is board-specific.
     strict InitializePartitionTables() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Wipes all entries from the partition table of the specified block device.
@@ -250,7 +250,7 @@ closed protocol DynamicDataSink {
     /// the block device.
     @available(deprecated=HEAD)
     strict WipePartitionTables() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -344,7 +344,7 @@ closed protocol BootManager {
     strict SetConfigurationActive(struct {
         configuration Configuration;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Updates persistent metadata identifying whether `configuration` is bootable.
@@ -362,7 +362,7 @@ closed protocol BootManager {
     strict SetConfigurationUnbootable(struct {
         configuration Configuration;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Updates persistent metadata to mark a [`fuchsia.paver/Configuration`]
@@ -388,7 +388,7 @@ closed protocol BootManager {
     strict SetConfigurationHealthy(struct {
         configuration Configuration;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Force device to boot to recovery in the next reboot/power cycle. This will only be
@@ -398,7 +398,7 @@ closed protocol BootManager {
 
     /// Flush all previously buffered writes to persistent storage.
     strict Flush() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -415,7 +415,7 @@ closed protocol Sysconfig {
     strict Write(resource struct {
         payload fuchsia.mem.Buffer;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Get sub-partition size.
@@ -425,11 +425,11 @@ closed protocol Sysconfig {
 
     /// Flush all previously buffered data to persistent storage.
     strict Flush() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Wipe all data in the sub-partition (write 0 to all bytes).
     strict Wipe() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

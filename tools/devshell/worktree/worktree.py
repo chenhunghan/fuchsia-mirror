@@ -112,6 +112,16 @@ class Worktree:
             if d.exists() and d.is_dir() and d.name != "default"
         ]
 
+    def is_built_recently(
+        self, max_age_days: int = 7, now: float | None = None
+    ) -> bool:
+        max_age_sec = max_age_days * 24 * 60 * 60
+        for b_dir in self.build_dirs():
+            age = b_dir.get_build_time_ago_sec(now=now)
+            if age is not None and age <= max_age_sec:
+                return True
+        return False
+
     def get_sync_status(self) -> tuple[SyncStatus, int, int]:
         try:
             main_head = run_git(

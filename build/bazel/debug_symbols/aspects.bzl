@@ -4,7 +4,7 @@
 
 """Aspects related to debug symbols for the Fuchsia build system."""
 
-load("@rules_fuchsia//fuchsia/private:providers.bzl", "FuchsiaUnstrippedBinaryInfo")
+load("@rules_fuchsia//fuchsia/private:providers.bzl", "FuchsiaUnstrippedBinariesInfo", "FuchsiaUnstrippedBinaryInfo")
 load("@rules_rust//rust:rust_common.bzl", "CrateInfo")
 load("//build/bazel/aspects:utils.bzl", "get_target_deps_from_attributes")
 load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
@@ -40,11 +40,12 @@ def _collect_debug_symbols_manifest_aspect_impl(target, aspect_ctx):
     kind = aspect_ctx.rule.kind
     current_platform = aspect_ctx.attr._current_platform[CurrentPlatformInfo]
 
-    # On Fuchsia, calling the SDK fuchsia_cc_binary() macro will instantiate
-    # a _fuchsia_cc() target that depends on a native cc_binary() one.
-    # The former exposes a FuchsiaUnstrippedBinaryInfo provider, which
-    # contains a 'dest' path. The aspect will always visit the _fuchsia_cc()
-    # target before the cc_binary() one.
+    # On Fuchsia, calling the SDK fuchsia_cc_binary() macro or fx_packaged_binary()
+    # will instantiate a wrapper target (_fuchsia_cc() or _fx_packaged_binary())
+    # that depends on a native cc_binary() or rust_binary() one.
+    # The wrapper exposes a FuchsiaUnstrippedBinaryInfo or FuchsiaUnstrippedBinariesInfo
+    # provider, which contains 'dest' paths. The aspect will always visit the
+    # wrapper target before the underlying binary target.
     #
     # The same is true for fuchsia_wrap_rust_binary() which creates a
     # _fuchsia_cc() target that depends on a native rust_binary() one and
@@ -53,6 +54,10 @@ def _collect_debug_symbols_manifest_aspect_impl(target, aspect_ctx):
         # Record the destination path for the debug binary.
         unstripped_info = target[FuchsiaUnstrippedBinaryInfo]
         dest_paths.append((unstripped_info.unstripped_file, unstripped_info.dest))
+
+    if FuchsiaUnstrippedBinariesInfo in target:
+        for unstripped_info in target[FuchsiaUnstrippedBinariesInfo].binaries:
+            dest_paths.append((unstripped_info.unstripped_file, unstripped_info.dest))
 
     # TODO: Use something like FuchsiaPlatformBinaryInfo to support
     # non-SDK Fuchsia binaries generated in Bazel.

@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_rcu",
+    srcs = [
+        "src/lib.rs",
+        "src/rcu_atomic.rs",
+        "src/rcu_cache.rs",
+        "src/rcu_hash_map.rs",
+        "src/rcu_string.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//examples/rcu:__pkg__",
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/modules/android_usb:__pkg__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/fuchsia-rcu",
+        "//src/lib/fuchsia-rcu-collections",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_types",
+        "//third_party/rust_crates/vendor:rapidhash",
+    ],
+)

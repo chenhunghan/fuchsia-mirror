@@ -5,6 +5,7 @@
 use crate::{LockPolicy, LockToken, RawLock, RawMutex};
 use core::marker::PhantomData;
 use core::pin::Pin;
+use core::ptr::addr_of_mut;
 use lockdep::LockClass;
 use pin_init::{PinInit, pin_data, pin_init, pin_init_from_closure, pinned_drop};
 
@@ -129,14 +130,17 @@ impl<Class: LockClass, M: RawLock> KMutex<Class, M> {
     }
 
     /// Returns a reference to the underlying raw lock.
-    #[cfg(any(test, ktest))]
     #[inline]
     pub fn raw_mutex(&self) -> &M {
         &self.mutex
     }
 
     const fn class_id() -> *const core::ffi::c_void {
-        if cfg!(feature = "lock_dep") { Class::ID } else { core::ptr::null() }
+        if cfg!(any(feature = "lock_dep", feature = "lock_metadata_only")) {
+            Class::ID
+        } else {
+            core::ptr::null()
+        }
     }
 }
 
@@ -190,18 +194,18 @@ impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> KMutexGuard<'a, Class, 
                 // SAFETY: `this` is a valid pointer to uninitialized memory allocated for
                 // `KMutexGuard`.
 
-                let mutex_addr = core::ptr::addr_of_mut!((*this).mutex);
+                let mutex_addr = addr_of_mut!((*this).mutex);
                 core::ptr::write(mutex_addr, mutex);
 
-                let entry_addr = core::ptr::addr_of_mut!((*this).lock_entry);
+                let entry_addr = addr_of_mut!((*this).lock_entry);
                 core::ptr::write(entry_addr, M::LockEntry::default());
 
                 let state = P::acquire(&mutex.mutex, entry_addr, args);
 
-                let state_addr = core::ptr::addr_of_mut!((*this).state);
+                let state_addr = addr_of_mut!((*this).state);
                 core::ptr::write(state_addr, state);
 
-                let token_addr = core::ptr::addr_of_mut!((*this).token);
+                let token_addr = addr_of_mut!((*this).token);
                 core::ptr::write(token_addr, LockToken::new());
 
                 Ok(())
@@ -231,7 +235,7 @@ impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> KMutexGuard<'a, Class, 
         // SAFETY: `lock_entry` is pinned on the stack and valid.
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _;
+            let entry_addr = addr_of_mut!(me.lock_entry);
             P::release(&me.mutex.mutex, entry_addr, me.state);
             let result = f();
             P::reacquire(&me.mutex.mutex, entry_addr, &mut me.state);
@@ -250,7 +254,7 @@ impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> KMutexGuard<'a, Class, 
         // SAFETY: `lock_entry` is pinned on the stack and valid.
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _ as *mut core::ffi::c_void;
+            let entry_addr = addr_of_mut!(me.lock_entry) as *mut core::ffi::c_void;
             cpp_lock_validate_release(entry_addr);
             let result = f(&mut me.token);
             cpp_lock_validate_acquire(entry_addr);
@@ -274,7 +278,7 @@ impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> PinnedDrop
     fn drop(self: Pin<&mut Self>) {
         unsafe {
             let me = self.get_unchecked_mut();
-            let entry_addr = &mut me.lock_entry as *mut _;
+            let entry_addr = addr_of_mut!(me.lock_entry);
             P::release(&me.mutex.mutex, entry_addr, me.state);
         }
     }

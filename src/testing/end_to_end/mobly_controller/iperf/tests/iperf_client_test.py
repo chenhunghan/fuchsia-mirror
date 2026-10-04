@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import unittest
 from unittest import mock
 
@@ -105,9 +106,11 @@ class IPerfClientOverSshTest(unittest.TestCase):
         mock_open: mock.Mock,
     ) -> None:
         mock_ssh_provider = mock.Mock()
-        mock_process = mock.Mock()
-        mock_process.stdout = b"iperf test output"
-        mock_ssh_provider.run.return_value = mock_process
+        mock_ssh_provider.run.return_value = subprocess.CompletedProcess(
+            args=["iperf3"],
+            returncode=0,
+            stdout=b"iperf test output",
+        )
 
         client = IPerfClientOverSsh(mock_ssh_provider, sync_date=False)
 
@@ -118,6 +121,129 @@ class IPerfClientOverSshTest(unittest.TestCase):
             client.start("127.0.0.1", "IPERF_ARGS", "TAG")
         mock_open.assert_called_with(file_path, "wb")
         mock_open().__enter__().write.assert_called_with(b"iperf test output")
+
+    def test_ssh_client_timeout_subprocess(self) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.side_effect = subprocess.TimeoutExpired(
+            cmd="iperf3", timeout=10
+        )
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            with self.assertRaises(TimeoutError) as cm:
+                client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            self.assertIn("Command execution timed out", str(cm.exception))
+            self.assertIsInstance(
+                cm.exception.__cause__, subprocess.TimeoutExpired
+            )
+
+    def test_ssh_client_timeout_error(self) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.side_effect = TimeoutError("custom timeout")
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            with self.assertRaises(TimeoutError) as cm:
+                client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            self.assertEqual(str(cm.exception), "custom timeout")
+            self.assertIsNone(cm.exception.__cause__)
+
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_ssh_client_non_zero_exit_writes_output(
+        self, mock_file: mock.Mock
+    ) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.return_value = subprocess.CompletedProcess(
+            args=["iperf3"],
+            returncode=1,
+            stdout=b'{"error": "the server is busy running a test"}',
+        )
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            out_path = client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            self.assertEqual(out_path, MOCK_LOGFILE_PATH)
+            mock_ssh.run.assert_called_once_with(
+                "iperf3 -c 192.168.1.1 -t 10",
+                timeout_sec=10,
+            )
+            mock_file().write.assert_called_once_with(
+                b'{"error": "the server is busy running a test"}'
+            )
+
+    @mock.patch("iperf.iperf_client.logging.warning")
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_ssh_client_called_process_error_writes_output(
+        self, mock_file: mock.Mock, mock_warning: mock.Mock
+    ) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.side_effect = subprocess.CalledProcessError(
+            returncode=1,
+            cmd="iperf3",
+            output=b'{"error": "the server is busy running a test"}',
+        )
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            out_path = client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            self.assertEqual(out_path, MOCK_LOGFILE_PATH)
+            mock_ssh.run.assert_called_once_with(
+                "iperf3 -c 192.168.1.1 -t 10",
+                timeout_sec=10,
+            )
+            mock_warning.assert_called_once()
+            mock_file().write.assert_called_once_with(
+                b'{"error": "the server is busy running a test"}'
+            )
+
+    def test_ssh_client_unexpected_exception_propagates(self) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.side_effect = RuntimeError("transport failure")
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            self.assertIn("transport failure", str(cm.exception))
+
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_ssh_client_none_stdout_writes_empty_bytes(
+        self, mock_file: mock.Mock
+    ) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.return_value = subprocess.CompletedProcess(
+            args=["iperf3"],
+            returncode=0,
+            stdout=None,
+        )
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            mock_file().write.assert_called_once_with(b"")
+
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_ssh_client_none_called_process_error_writes_empty_bytes(
+        self, mock_file: mock.Mock
+    ) -> None:
+        mock_ssh = mock.Mock()
+        mock_ssh.run.side_effect = subprocess.CalledProcessError(
+            returncode=1,
+            cmd="iperf3",
+            output=None,
+        )
+        client = IPerfClientOverSsh(mock_ssh, sync_date=False)
+        with mock.patch.object(
+            client, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+        ):
+            client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
+            mock_file().write.assert_called_once_with(b"")
 
 
 class IPerfClientOverAdbTest(unittest.TestCase):

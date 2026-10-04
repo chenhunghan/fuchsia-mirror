@@ -194,7 +194,7 @@ zx_status_t UsbMassStorageDevice::Init() {
 
   for (auto ep_itr : interfaces->begin()->GetEndpointList()) {
     const usb_endpoint_descriptor_t* endp = ep_itr.descriptor();
-    if (usb_ep_direction(endp) == USB_ENDPOINT_OUT) {
+    if (usb_ep_direction(endp) == fdescriptor::EndpointDirection::kOut) {
       if (usb_ep_type(endp) == fdescriptor::EndpointType::kBulk) {
         bulk_out_addr = endp->b_endpoint_address;
         bulk_out_max_packet = usb_ep_max_packet(endp);
@@ -214,8 +214,9 @@ zx_status_t UsbMassStorageDevice::Init() {
 
   uint8_t max_lun;
   size_t out_length;
-  status = usb.ControlIn(USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_REQ_GET_MAX_LUN,
-                         0x00, 0x00, ZX_TIME_INFINITE, &max_lun, sizeof(max_lun), &out_length);
+  status = usb.ControlIn(kClassInterfaceIn, fidl::ToUnderlying(fdescriptor::MscRequest::kGetMaxLun),
+                         0x00, interface_number, ZX_TIME_INFINITE, &max_lun, sizeof(max_lun),
+                         &out_length);
   if (status == ZX_ERR_IO_REFUSED) {
     // Devices that do not support multiple LUNS may stall this command.
     // See USB Mass Storage Class Spec. 3.2 Get Max LUN.
@@ -312,7 +313,7 @@ zx_status_t UsbMassStorageDevice::Reset() {
   fdf::debug("UMS: performing reset recovery");
   // Step 1: Send  Bulk-Only Mass Storage Reset
   zx_status_t status =
-      usb_.ControlOut(USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_REQ_RESET, 0,
+      usb_.ControlOut(kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::MscRequest::kReset), 0,
                       interface_number_, ZX_TIME_INFINITE, NULL, 0);
   usb_protocol_t usb;
   usb_.GetProto(&usb);
@@ -321,14 +322,16 @@ zx_status_t UsbMassStorageDevice::Reset() {
     return status;
   }
   // Step 2: Clear Feature HALT to the Bulk-In endpoint
-  constexpr uint8_t request_type = USB_DIR_OUT | USB_RECIP_ENDPOINT;
-  status = usb_.ClearFeature(request_type, USB_ENDPOINT_HALT, bulk_in_addr_, ZX_TIME_INFINITE);
+  constexpr uint8_t request_type = kStandardEndpointOut;
+  status = usb_.ClearFeature(request_type, fdescriptor::FeatureSelector::kEndpointHalt,
+                             bulk_in_addr_, ZX_TIME_INFINITE);
   if (status != ZX_OK) {
     fdf::debug("UMS: clear endpoint halt failed: {}", zx_status_get_string(status));
     return status;
   }
   // Step 3: Clear Feature HALT to the Bulk-Out endpoint
-  status = usb_.ClearFeature(request_type, USB_ENDPOINT_HALT, bulk_out_addr_, ZX_TIME_INFINITE);
+  status = usb_.ClearFeature(request_type, fdescriptor::FeatureSelector::kEndpointHalt,
+                             bulk_out_addr_, ZX_TIME_INFINITE);
   if (status != ZX_OK) {
     fdf::debug("UMS: clear endpoint halt failed: {}", zx_status_get_string(status));
     return status;
@@ -390,8 +393,9 @@ zx_status_t UsbMassStorageDevice::ReadCsw(uint32_t* out_residue, bool retry) {
         fdf::error("ResetEndpoint failed {}", zx_status_get_string(status));
         return status;
       }
-      constexpr uint8_t request_type = USB_DIR_OUT | USB_RECIP_ENDPOINT;
-      status = usb_.ClearFeature(request_type, USB_ENDPOINT_HALT, bulk_in_addr_, ZX_TIME_INFINITE);
+      constexpr uint8_t request_type = kStandardEndpointOut;
+      status = usb_.ClearFeature(request_type, fdescriptor::FeatureSelector::kEndpointHalt,
+                                 bulk_in_addr_, ZX_TIME_INFINITE);
       if (status != ZX_OK) {
         fdf::error("UMS: clear endpoint halt failed: {}", zx_status_get_string(status));
         return status;
@@ -487,9 +491,10 @@ zx_status_t UsbMassStorageDevice::ExecuteCommandSync(uint8_t target, uint16_t lu
   // Some devices that we tested with do stall the CBW or data transfer stage,
   // so to accommodate those devices we consider the transfer to have ended (with an error)
   // when we receive a stall condition from the device.
-  zx_status_t status =
-      SendCbw(static_cast<uint8_t>(lun), static_cast<uint32_t>(data.iov_len),
-              is_write ? USB_DIR_OUT : USB_DIR_IN, static_cast<uint8_t>(cdb.iov_len), cdb.iov_base);
+  zx_status_t status = SendCbw(static_cast<uint8_t>(lun), static_cast<uint32_t>(data.iov_len),
+                               is_write ? fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut)
+                                        : fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn),
+                               static_cast<uint8_t>(cdb.iov_len), cdb.iov_base);
   if (status != ZX_OK) {
     fdf::warn("UMS: SendCbw failed with status {}", zx_status_get_string(status));
     return status;
@@ -566,7 +571,8 @@ zx_status_t UsbMassStorageDevice::DoTransaction(scsi::ScsiRequest& req, uint8_t 
     }
   }
 
-  const uint8_t flags = req.is_write() ? USB_DIR_OUT : USB_DIR_IN;
+  const uint8_t flags = req.is_write() ? fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut)
+                                       : fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   const uint8_t ep_address = req.is_write() ? bulk_out_addr_ : bulk_in_addr_;
 
   zx_status_t status = SendCbw(lun, static_cast<uint32_t>(num_bytes), flags,

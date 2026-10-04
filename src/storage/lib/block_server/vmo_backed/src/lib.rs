@@ -124,14 +124,12 @@ impl VmoBackedServer {
         while let Some(Ok(request)) = requests.next().await {
             match request {
                 DeviceRequest::ProgramKey { wrapped_key, data_unit_size: _, responder } => {
-                    responder
-                        .send(
-                            self.program_key(&fscrypt::to_xts_key(&wrapped_key, uuid))
-                                .map_err(zx::Status::into_raw),
-                        )
-                        .unwrap_or_else(|e| {
-                            log::error!("failed to send ProgramKey response. error: {:?}", e);
-                        });
+                    let res = self
+                        .program_key(&fscrypt::to_xts_key(&wrapped_key, uuid))
+                        .and_then(|hw_slot| self.server.register_key_slot(hw_slot));
+                    responder.send(res.map_err(zx::Status::into_raw)).unwrap_or_else(|e| {
+                        log::error!("failed to send ProgramKey response. error: {:?}", e);
+                    });
                 }
                 DeviceRequest::DeriveRawSecret { mut wrapped_key, responder } => {
                     // Swap the nibbles.

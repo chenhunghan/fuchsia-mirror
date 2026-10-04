@@ -805,7 +805,7 @@ zx_status_t Sdhci::SetUpDma(const fuchsia_hardware_sdmmc::wire::SdmmcReq& reques
   }
 
   size_t descriptor_size;
-  if (Capabilities0::Get().ReadFrom(&*regs_mmio_buffer_).v3_64_bit_system_address_support()) {
+  if (supports_64_bit_adma2_) {
     const cpp20::span descriptors{reinterpret_cast<AdmaDescriptor96*>(iobuf_->virt()),
                                   kDmaDescCount};
     descriptor_size = sizeof(descriptors[0]);
@@ -1477,7 +1477,8 @@ zx_status_t Sdhci::Init() {
   if (SupportsAdma2()) {
     auto buffer_factory = dma_buffer::CreateBufferFactory();
     auto host_control1 = HostControl1::Get().ReadFrom(&*regs_mmio_buffer_);
-    if (caps0.v3_64_bit_system_address_support()) {
+    supports_64_bit_adma2_ = caps0.v3_64_bit_system_address_support();
+    if (supports_64_bit_adma2_) {
       const size_t buffer_size =
           fbl::round_up(kDmaDescCount * sizeof(AdmaDescriptor96), zx_system_get_page_size());
       status = buffer_factory->CreateContiguous(bti_, buffer_size, 0,
@@ -1826,8 +1827,7 @@ zx::result<> Sdhci::Start(fdf::DriverContext context) {
   }
 
   const auto kChildNodeName = name();
-  zx::result result =
-      AddChild(kChildNodeName, std::vector<fuchsia_driver_framework::NodeProperty>{}, offers);
+  zx::result result = AddChild(kChildNodeName, {}, offers);
   if (result.is_error()) {
     fdf::error("Failed to add child: {}", result);
     return result.take_error();

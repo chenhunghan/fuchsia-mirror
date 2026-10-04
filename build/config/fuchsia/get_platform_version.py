@@ -72,8 +72,11 @@ def get_gn_variables(version_history_path: Path) -> dict[str, Any]:
     ), '"api_levels" contains a level with an unexpected "phase".'
 
     # Special API levels are added below.
-    runtime_supported_api_levels = sunset_api_levels + supported_api_levels
-    idk_buildable_api_levels = supported_api_levels.copy()
+    runtime_supported_api_levels: list[int | str] = [
+        *sunset_api_levels,
+        *supported_api_levels,
+    ]
+    idk_buildable_api_levels: list[int | str] = [*supported_api_levels]
 
     # Explicitly add concrete special API levels.
     # "HEAD" is not supported in the IDK - see https://fxbug.dev/334936990.

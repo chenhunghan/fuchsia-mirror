@@ -7,14 +7,15 @@
 // Constants used for the driver protocol tests.
 #include <inttypes.h>
 
+// LINT.IfChange
 #define PCI_TEST_DRIVER_VID 0x0eff
 #define PCI_TEST_DRIVER_DID 0x0fff
 
 #define PCI_TEST_BUS_ID 0x00
 #define PCI_TEST_DEV_ID 0x01
 #define PCI_TEST_FUNC_ID 0x02
+// LINT.ThenChange(//src/devices/pci/drivers/pci/test/driver/driver_tests.rs)
 
-constexpr char kFakeBusDriverName[] = "pcictl";
-constexpr char kProtocolTestDriverName[] = "pciproto";
+constexpr char kFakeBusDriverName[] = "fake-bus-pci";
 
 #endif  // SRC_DEVICES_PCI_DRIVERS_PCI_TEST_DRIVER_DRIVER_TESTS_H_

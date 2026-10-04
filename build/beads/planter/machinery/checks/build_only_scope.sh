@@ -14,9 +14,14 @@ set -euo pipefail
 # the task's commit, plus uncommitted changes) plus untracked files.
 #
 # Allowed paths (build-definition surface):
-#   - BUILD.gn, BUILD.bazel, BUILD (any directory)
+#   - BUILD.gn, BUILD.bazel, BUILD, *.BUILD.bazel, *.BUILD (any directory, including
+#     workspace/repo root build files such as build/bazel/toplevel.BUILD.bazel)
 #   - *.gni, *.bzl (build registration lists / macros, e.g. verification lists)
 #   - MODULE.bazel, WORKSPACE*, *.bazelrc
+#   - a newly added (not modified) test component manifest `.cml` that an
+#     `fx_component_manifest` of the nearest BUILD.bazel uses as `manifest` next to an
+#     `fx_test_component` (it replaces the manifest GN's fuchsia_unittest_package generated;
+#     Bazel does not generate test manifests, for C++ or Rust tests)
 #   - OWNERS / README.md are NOT allowed implicitly; they are not needed for migration.
 
 WORKDIR="${PLANTER_WORKDIR:-.}"
@@ -33,7 +38,7 @@ workdir = os.path.abspath(sys.argv[1])
 target_dir = sys.argv[2].strip().strip("/")
 
 ALLOWED_BASENAMES = {"BUILD.gn", "BUILD.bazel", "BUILD", "MODULE.bazel"}
-ALLOWED_SUFFIXES = (".gni", ".bzl", ".bazelrc")
+ALLOWED_SUFFIXES = (".gni", ".bzl", ".bazelrc", ".BUILD.bazel", ".BUILD")
 ALLOWED_PREFIX_BASENAMES = ("WORKSPACE",)
 
 
@@ -66,9 +71,40 @@ def is_build_file(path: str) -> bool:
     return False
 
 
+# Newly added files (not modifications of existing ones).
+added = set(git_lines(["diff", "--name-only", "--diff-filter=A", change_base]))
+added.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+
+
+def is_new_test_manifest(path: str) -> bool:
+    """A new `.cml` that an `fx_component_manifest` in the nearest BUILD.bazel uses as `manifest`
+    while that BUILD.bazel defines an `fx_test_component`: it replaces the manifest that GN's
+    `fuchsia_unittest_package` generated when a (C++ or Rust) test package migrates to `fx_test`."""
+    if path not in added or not path.endswith(".cml") or path.endswith(".shard.cml"):
+        return False
+    if not os.path.isfile(os.path.join(workdir, path)):
+        return False
+    pkg = os.path.dirname(path)
+    for _ in range(4):
+        bazel = os.path.join(workdir, pkg, "BUILD.bazel")
+        if os.path.isfile(bazel):
+            try:
+                text = open(bazel, encoding="utf-8").read()
+            except OSError:
+                return False
+            rel = os.path.relpath(path, pkg) if pkg else path
+            return "fx_test_component(" in text and bool(
+                re.search(r'\bmanifest\s*=\s*":?' + re.escape(rel) + r'"', text)
+            )
+        if not pkg:
+            break
+        pkg = os.path.dirname(pkg)
+    return False
+
+
 findings = []
 for path in sorted(changed):
-    if is_build_file(path):
+    if is_build_file(path) or is_new_test_manifest(path):
         continue
     findings.append({
         "source": "build_only_scope",

@@ -270,9 +270,7 @@ zx::result<> SkipBlock::Start(fdf::DriverContext context) {
   std::vector<fuchsia_driver_framework::Offer> offers = compat_server_.CreateOffers2();
   offers.push_back(fdf::MakeOffer2<fuchsia_hardware_skipblock::Service>());
 
-  zx::result child =
-      AddChild("skip-block", devfs_args, std::vector<fuchsia_driver_framework::NodeProperty>{},
-               std::move(offers));
+  zx::result child = AddChild("skip-block", devfs_args, {}, std::move(offers));
   if (child.is_error()) {
     fdf::error("Failed to add child node: {}", child);
     return child.take_error();

@@ -213,7 +213,7 @@ async fn read_rail<W: Write>(
                     if let Some(timestamp) = energy_reading.timestamp {
                         writeln!(
                             writer,
-                            "Rail {}: {:>8.6} J (timestamp: {})",
+                            "Rail {}: {:>8.6} J (timestamp: {} nanos)",
                             rail_label, energy_j, timestamp
                         )?;
                     } else {
@@ -243,7 +243,7 @@ async fn read_rail<W: Write>(
                     if let Some(timestamp) = current_reading.timestamp {
                         writeln!(
                             writer,
-                            "Rail {}: {:>8.6} A (timestamp: {})",
+                            "Rail {}: {:>8.6} A (timestamp: {} nanos)",
                             rail_label, current_a, timestamp
                         )?;
                     } else {
@@ -281,7 +281,7 @@ async fn read_rail<W: Write>(
                     if let Some(timestamp) = power_reading.timestamp {
                         writeln!(
                             writer,
-                            "Rail {}: {:>8.6} W{} (timestamp: {})",
+                            "Rail {}: {:>8.6} W{} (timestamp: {} nanos)",
                             rail_label, power_w, mode_suffix, timestamp
                         )?;
                     } else {
@@ -885,7 +885,7 @@ mod tests {
         assert!(res.is_ok());
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("12.345678 J"));
-        assert!(output.contains("timestamp: 10000000000"));
+        assert!(output.contains("timestamp: 10000000000 nanos"));
         drop(proxy);
         task.await;
     }

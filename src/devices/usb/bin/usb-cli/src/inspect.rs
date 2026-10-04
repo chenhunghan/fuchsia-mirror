@@ -448,6 +448,60 @@ fn print_properties_with_decoders(hierarchy: &DiagnosticsHierarchy, child_indent
     }
 }
 
+fn format_event_history(hierarchy: &DiagnosticsHierarchy, indent: usize) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let spaces = "  ".repeat(indent);
+    let prop_spaces = "  ".repeat(indent + 1);
+    let _ = writeln!(out, "{}{}:", spaces, hierarchy.name);
+
+    let mut sorted_children = hierarchy.children.clone();
+    sorted_children.sort_by(|a, b| {
+        let num_a = a.name.parse::<u32>().unwrap_or(0);
+        let num_b = b.name.parse::<u32>().unwrap_or(0);
+        num_a.cmp(&num_b)
+    });
+
+    struct EventEntry<'a> {
+        timestamp: i64,
+        node: &'a DiagnosticsHierarchy,
+    }
+    let mut entries = Vec::new();
+    for child in &sorted_children {
+        let mut ts = 0i64;
+        if let Some(Property::Uint(_, val)) = child.properties.iter().find(|p| p.name() == "@time")
+        {
+            ts = *val as i64;
+        } else if let Some(Property::Int(_, val)) =
+            child.properties.iter().find(|p| p.name() == "@time")
+        {
+            ts = *val;
+        }
+        entries.push(EventEntry { timestamp: ts, node: child });
+    }
+    entries.sort_by_key(|e| e.timestamp);
+
+    for entry in entries {
+        let child = entry.node;
+        let mut event_str = "";
+        for prop in &child.properties {
+            if let Property::String(n, v) = prop {
+                if n == "event" {
+                    event_str = v.as_str();
+                }
+            }
+        }
+
+        let time_utc_str = get_utc_string(entry.timestamp);
+        let _ = writeln!(out, "{}[{}] Event: {}", prop_spaces, time_utc_str, event_str);
+    }
+    out
+}
+
+fn print_event_history(hierarchy: &DiagnosticsHierarchy, indent: usize) {
+    print!("{}", format_event_history(hierarchy, indent));
+}
+
 fn print_custom_hierarchy(hierarchy: &DiagnosticsHierarchy, indent: usize) {
     if hierarchy.name == "control_history" {
         print_control_history(hierarchy, indent);
@@ -456,6 +510,11 @@ fn print_custom_hierarchy(hierarchy: &DiagnosticsHierarchy, indent: usize) {
 
     if hierarchy.name == "connection_history" {
         print_connection_history(hierarchy, indent);
+        return;
+    }
+
+    if hierarchy.name == "event_history" {
+        print_event_history(hierarchy, indent);
         return;
     }
 
@@ -476,6 +535,16 @@ fn print_custom_hierarchy(hierarchy: &DiagnosticsHierarchy, indent: usize) {
     for child in &sorted_children {
         print_custom_hierarchy(child, child_indent);
     }
+}
+
+fn find_child_by_name<'a>(
+    hierarchy: &'a DiagnosticsHierarchy,
+    name: &str,
+) -> Option<&'a DiagnosticsHierarchy> {
+    if hierarchy.name == name {
+        return Some(hierarchy);
+    }
+    hierarchy.children.iter().find_map(|child| find_child_by_name(child, name))
 }
 
 pub async fn print_usb_inspect_diagnostics() -> Result<(), Error> {
@@ -504,35 +573,58 @@ pub async fn print_usb_inspect_diagnostics() -> Result<(), Error> {
     let mut found = false;
     for result in sorted_results {
         let moniker = result.moniker.to_string();
-        // Deduplicate monikers
-        if !printed_monikers.insert(moniker.clone()) {
+        if printed_monikers.contains(&moniker) {
             continue;
         }
 
-        // Dynamic filter for USB / DWC / Policy / Peripheral
-        if moniker.contains("usb")
+        let Some(payload) = &result.payload else {
+            continue;
+        };
+
+        let is_usb_moniker = moniker.contains("usb")
             || moniker.contains("dwc")
             || moniker.contains("policy")
             || moniker.contains("peripheral")
-        {
-            if let Some(payload) = result.payload {
-                let has_usb_peripheral =
-                    payload.children.iter().any(|c| c.name == "usb-peripheral");
-                let has_dwc3 = payload.children.iter().any(|c| c.name == "dwc3");
+            || moniker.contains("functionfs");
 
-                if moniker.contains("usb-policy") {
-                    println!("\n=== USB Policy State History ===");
-                } else if has_usb_peripheral {
-                    println!("\n=== USB-Peripheral Driver Diagnostics ===");
-                } else if has_dwc3 {
-                    println!("\n=== Synopsys DWC3 Controller Diagnostics ===");
-                } else {
-                    println!("\n=== Inspect: {} ===", moniker);
-                }
+        let is_functionfs_candidate = moniker.contains("starnix")
+            || moniker.contains("kernel")
+            || moniker.contains("container")
+            || moniker.contains("functionfs");
 
-                print_custom_hierarchy(&payload, 1);
-                found = true;
+        let ffs_node_opt = if is_functionfs_candidate {
+            find_child_by_name(payload, "usb-functionfs")
+        } else {
+            None
+        };
+
+        // Dynamic filter for USB / DWC / Policy / Peripheral / FunctionFS
+        if is_usb_moniker || ffs_node_opt.is_some() {
+            let has_usb_peripheral = payload.children.iter().any(|c| c.name == "usb-peripheral");
+            let has_dwc3 = payload.children.iter().any(|c| c.name == "dwc3");
+
+            if moniker.contains("usb-policy") {
+                println!("\n=== USB Policy State History ===");
+                print_custom_hierarchy(payload, 1);
+            } else if has_usb_peripheral {
+                println!("\n=== USB-Peripheral Driver Diagnostics ===");
+                print_custom_hierarchy(payload, 1);
+            } else if has_dwc3 {
+                println!("\n=== Synopsys DWC3 Controller Diagnostics ===");
+                print_custom_hierarchy(payload, 1);
+            } else if let Some(ffs_node) = ffs_node_opt {
+                println!("\n=== Starnix FunctionFS Diagnostics ===");
+                print_custom_hierarchy(ffs_node, 1);
+            } else if moniker.contains("functionfs") {
+                println!("\n=== Starnix FunctionFS Diagnostics ===");
+                print_custom_hierarchy(payload, 1);
+            } else {
+                println!("\n=== Inspect: {} ===", moniker);
+                print_custom_hierarchy(payload, 1);
             }
+
+            printed_monikers.insert(moniker);
+            found = true;
         }
     }
 
@@ -638,5 +730,59 @@ mod tests {
         assert_eq!(decode_b_request(0x00, 12), "SYNCH_FRAME (12)");
         assert_eq!(decode_b_request(0x80, 99), "unknown (99)");
         assert_eq!(decode_b_request(0x21, 6), "6");
+    }
+
+    #[test]
+    fn test_find_child_by_name() {
+        let ffs_node = DiagnosticsHierarchy::new("usb-functionfs", vec![], vec![]);
+        let sibling_branch = DiagnosticsHierarchy::new(
+            "other-subsystem",
+            vec![],
+            vec![DiagnosticsHierarchy::new("unrelated-leaf", vec![], vec![])],
+        );
+        let kernel_branch = DiagnosticsHierarchy::new("kernel", vec![], vec![ffs_node.clone()]);
+        let mut root = DiagnosticsHierarchy::new_root();
+        root.children = vec![sibling_branch, kernel_branch];
+
+        assert_eq!(find_child_by_name(&root, "usb-functionfs"), Some(&ffs_node));
+        assert_eq!(find_child_by_name(&root, "non-existent"), None);
+    }
+
+    #[test]
+    fn test_format_event_history() {
+        let entry_0 = DiagnosticsHierarchy::new(
+            "0",
+            vec![
+                Property::Int("@time".to_string(), 1_000_000_000),
+                Property::String("event".to_string(), "CONTROL_OPENED".to_string()),
+            ],
+            vec![],
+        );
+        let entry_1 = DiagnosticsHierarchy::new(
+            "1",
+            vec![
+                Property::Int("@time".to_string(), 3_000_000_000),
+                Property::String("event".to_string(), "ENABLE".to_string()),
+            ],
+            vec![],
+        );
+        let entry_2 = DiagnosticsHierarchy::new(
+            "2",
+            vec![
+                Property::Int("@time".to_string(), 2_000_000_000),
+                Property::String("event".to_string(), "BIND".to_string()),
+            ],
+            vec![],
+        );
+        let history =
+            DiagnosticsHierarchy::new("event_history", vec![], vec![entry_1, entry_0, entry_2]);
+
+        let formatted = format_event_history(&history, 1);
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "  event_history:");
+        assert!(lines[1].starts_with("    [") && lines[1].ends_with("] Event: CONTROL_OPENED"));
+        assert!(lines[2].starts_with("    [") && lines[2].ends_with("] Event: BIND"));
+        assert!(lines[3].starts_with("    [") && lines[3].ends_with("] Event: ENABLE"));
     }
 }

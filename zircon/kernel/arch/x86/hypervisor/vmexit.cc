@@ -266,6 +266,8 @@ zx::result<> handle_cpuid(const ExitInfo& exit_info, AutoVmcs& vmcs, GuestState&
           //  * Processor Trace bit
           //  * TSC Adjust bit
           guest_state.rbx &= ~(1u << X86_FEATURE_PT.bit | 1u << X86_FEATURE_TSC_ADJUST.bit);
+          // Disable the LA57 bit.
+          guest_state.rcx &= ~(1u << X86_FEATURE_LA57.bit);
           // Disable:
           //  * Indirect Branch Prediction Barrier bit
           //  * Single Thread Indirect Branch Predictors bit

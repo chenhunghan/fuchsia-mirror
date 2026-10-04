@@ -17,7 +17,7 @@ At a high level, the Lacewing test framework consists of three layers of
 abstraction:
 * Test framework - [Mobly](https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/mobly/)
 * Device Controller - [Honeydew](honeydew/README.md)
-* Host-Target Transport - Currently SL4F (eventually [Fuchsia Controller](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/developer/ffx/lib/fuchsia-controller/))
+* Host-Target Transport - Currently SL4F (eventually [Fuchsia Controller](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/developer/fuchsia-controller/))
 
 Why the name Lacewing? Lacewings are insects that keep the Fuchsia plant healthy
 and free of harmful bugs - which is something that this framework aspires to be.

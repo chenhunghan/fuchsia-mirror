@@ -234,7 +234,9 @@ void StreamImpl::SetBufferCollection(
     for (auto& client_i : clients_) {
       if (client_i.second->Participant()) {
         fuchsia::sysmem2::BufferCollectionTokenDuplicateRequest dup_request;
-        dup_request.set_rights_attenuation_mask(ZX_RIGHT_SAME_RIGHTS);
+        // Defense-in-depth: camera3 clients are read-only consumers of the
+        // controller's shared collection.
+        dup_request.set_rights_attenuation_mask(static_cast<zx_rights_t>(~ZX_RIGHT_WRITE));
         dup_request.set_token_request(client_tokens[client_i.first].NewRequest());
         token->Duplicate(std::move(dup_request));
       }

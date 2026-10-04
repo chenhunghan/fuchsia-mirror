@@ -10,6 +10,7 @@
 #include <fuchsia/hardware/usb/c/banjo.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/metadata.h>
+#include <lib/zx/time.h>
 
 #include <bind/fuchsia/cpp/bind.h>
 #include <bind/fuchsia/usb/cpp/bind.h>
@@ -19,6 +20,8 @@
 
 #include "src/devices/usb/drivers/usb-bus/usb-bus.h"
 #include "src/lib/utf_conversion/utf_conversion.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_bus {
 
@@ -114,8 +117,9 @@ void UsbDevice::StopCallbackThread() {
 UsbDevice::Endpoint* UsbDevice::GetEndpoint(uint8_t ep_address) {
   uint8_t index = 0;
   if (ep_address > 0) {
-    index = static_cast<uint8_t>(2 * (ep_address & ~USB_ENDPOINT_DIR_MASK));
-    if ((ep_address & USB_ENDPOINT_DIR_MASK) == USB_ENDPOINT_OUT) {
+    index = static_cast<uint8_t>(2 * (ep_address & ~fdescriptor::kEndpointDirectionMask));
+    if ((ep_address & fdescriptor::kEndpointDirectionMask) ==
+        fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut)) {
       index--;
     }
   }
@@ -266,11 +270,11 @@ void UsbDevice::ControlComplete(void* ctx, usb_request_t* req) {
 }
 
 zx_status_t UsbDevice::Control(uint8_t request_type, uint8_t request, uint16_t value,
-                               uint16_t index, zx_time_t timeout, const void* write_buffer,
+                               uint16_t index, zx_duration_t timeout, const void* write_buffer,
                                size_t write_size, void* out_read_buffer, size_t read_size,
                                size_t* out_read_actual) {
   size_t length;
-  bool out = ((request_type & USB_DIR_MASK) == USB_DIR_OUT);
+  bool out = usb_request_is_out(request_type);
   if (out) {
     length = write_size;
   } else {
@@ -369,7 +373,7 @@ zx_status_t UsbDevice::Control(uint8_t request_type, uint8_t request, uint16_t v
 zx_status_t UsbDevice::UsbControlOut(uint8_t request_type, uint8_t request, uint16_t value,
                                      uint16_t index, int64_t timeout, const uint8_t* write_buffer,
                                      size_t write_size) {
-  if ((request_type & USB_DIR_MASK) != USB_DIR_OUT) {
+  if (!usb_request_is_out(request_type)) {
     return ZX_ERR_INVALID_ARGS;
   }
   return Control(request_type, request, value, index, timeout, write_buffer, write_size, nullptr, 0,
@@ -379,7 +383,7 @@ zx_status_t UsbDevice::UsbControlOut(uint8_t request_type, uint8_t request, uint
 zx_status_t UsbDevice::UsbControlIn(uint8_t request_type, uint8_t request, uint16_t value,
                                     uint16_t index, int64_t timeout, uint8_t* out_read_buffer,
                                     size_t read_size, size_t* out_read_actual) {
-  if ((request_type & USB_DIR_MASK) != USB_DIR_IN) {
+  if (!usb_request_is_in(request_type)) {
     return ZX_ERR_INVALID_ARGS;
   }
   return Control(request_type, request, value, index, timeout, nullptr, 0, out_read_buffer,
@@ -435,8 +439,9 @@ void UsbDevice::UsbRequestQueue(usb_request_t* req,
 usb_speed_t UsbDevice::UsbGetSpeed() { return speed_; }
 
 zx_status_t UsbDevice::UsbSetInterface(uint8_t interface_number, uint8_t alt_setting) {
-  return Control(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, USB_REQ_SET_INTERFACE,
-                 alt_setting, interface_number, ZX_TIME_INFINITE, nullptr, 0, nullptr, 0, nullptr);
+  return Control(kStandardInterfaceOut,
+                 fidl::ToUnderlying(fdescriptor::StandardRequest::kSetInterface), alt_setting,
+                 interface_number, ZX_TIME_INFINITE, nullptr, 0, nullptr, 0, nullptr);
 }
 
 uint8_t UsbDevice::UsbGetConfiguration() {
@@ -454,9 +459,9 @@ zx_status_t UsbDevice::UsbSetConfiguration(uint8_t configuration) {
       fbl::AutoLock lock(&state_lock_);
 
       zx_status_t status;
-      status =
-          Control(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_SET_CONFIGURATION,
-                  configuration, 0, ZX_TIME_INFINITE, nullptr, 0, nullptr, 0, nullptr);
+      status = Control(kStandardDeviceOut,
+                       fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration),
+                       configuration, 0, ZX_TIME_INFINITE, nullptr, 0, nullptr, 0, nullptr);
       if (status == ZX_OK) {
         current_config_index_ = index;
       }
@@ -561,7 +566,8 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
   if (!lang_ids_.has_value()) {
     usb_langid_desc_t id_desc;
     size_t actual;
-    auto result = GetDescriptor(USB_DT_STRING, 0, 0, &id_desc, sizeof(id_desc), &actual);
+    auto result = GetDescriptor(fdescriptor::DescriptorType::kString, 0, 0, &id_desc,
+                                sizeof(id_desc), &actual);
     if (result == ZX_ERR_IO_REFUSED || result == ZX_ERR_IO_INVALID) {
       zxlogf(WARNING,
              "Failed to get string descriptor language list due to error %s. Resetting endpoint.",
@@ -576,6 +582,8 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
     } else if ((result == ZX_OK) &&
                ((actual < 4) || (actual != id_desc.b_length) || (actual & 0x1))) {
       return ZX_ERR_INTERNAL;
+    } else if (result != ZX_OK) {
+      return result;
     }
 
     // So, if we have managed to fetch/synthesize a language ID table,
@@ -620,8 +628,8 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
   usb_string_desc_t string_desc;
   zxlogf(DEBUG, "Fetching string descriptor with lang_id %u", lang_id);
   size_t actual;
-  auto result = GetDescriptor(USB_DT_STRING, desc_id, le16toh(lang_id), &string_desc,
-                              sizeof(string_desc), &actual);
+  auto result = GetDescriptor(fdescriptor::DescriptorType::kString, desc_id, le16toh(lang_id),
+                              &string_desc, sizeof(string_desc), &actual);
 
   if (result == ZX_ERR_IO_REFUSED || result == ZX_ERR_IO_INVALID) {
     zxlogf(WARNING, "Fetching string descriptor failed with error %s",
@@ -631,8 +639,8 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
       zxlogf(ERROR, "failed to reset endpoint, err: %d", reset_result);
       return result;
     }
-    result = GetDescriptor(USB_DT_STRING, desc_id, le16toh(lang_id), &string_desc,
-                           sizeof(string_desc), &actual);
+    result = GetDescriptor(fdescriptor::DescriptorType::kString, desc_id, le16toh(lang_id),
+                           &string_desc, sizeof(string_desc), &actual);
     if (result == ZX_ERR_IO_REFUSED || result == ZX_ERR_IO_INVALID) {
       zxlogf(WARNING, "Fetching string descriptor after reset failed with error %s",
              zx_status_get_string(result));
@@ -828,12 +836,13 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
 
   // read device descriptor
   size_t actual;
-  auto status = GetDescriptor(USB_DT_DEVICE, 0, 0, &device_desc_, sizeof(device_desc_), &actual);
+  auto status = GetDescriptor(fdescriptor::DescriptorType::kDevice, 0, 0, &device_desc_,
+                              sizeof(device_desc_), &actual);
   if (status == ZX_OK && actual != sizeof(device_desc_)) {
     status = ZX_ERR_IO;
   }
   if (status != ZX_OK) {
-    zxlogf(ERROR, "%s: GetDescriptor(USB_DT_DEVICE) failed", __func__);
+    zxlogf(ERROR, "%s: GetDescriptor(kDevice) failed", __func__);
     return status;
   }
 
@@ -850,19 +859,19 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
     // read configuration descriptor header to determine size
     usb_configuration_descriptor_t config_desc_header;
     size_t actual;
-    status = GetDescriptor(USB_DT_CONFIG, config, 0, &config_desc_header,
-                           sizeof(config_desc_header), &actual);
+    status = GetDescriptor(fdescriptor::DescriptorType::kConfiguration, config, 0,
+                           &config_desc_header, sizeof(config_desc_header), &actual);
     if (status == ZX_OK && actual != sizeof(config_desc_header)) {
       status = ZX_ERR_IO;
     }
     if (status != ZX_OK) {
-      zxlogf(ERROR, "%s: GetDescriptor(USB_DT_CONFIG) failed", __func__);
+      zxlogf(ERROR, "%s: GetDescriptor(kConfiguration) failed", __func__);
       return status;
     }
     uint16_t config_desc_size = letoh16(config_desc_header.w_total_length);
     if (config_desc_size < sizeof(config_desc_header)) {
       zxlogf(ERROR,
-             "%s: GetDescriptor(USB_DT_CONFIG) gave length shorter than self: "
+             "%s: GetDescriptor(kConfiguration) gave length shorter than self: "
              "expected at least %lu, got %u\n",
              __func__, sizeof(config_desc_header), config_desc_size);
       return ZX_ERR_IO;
@@ -874,9 +883,10 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
     config_descs_[config].reset(config_desc, config_desc_size);
 
     // read full configuration descriptor
-    status = GetDescriptor(USB_DT_CONFIG, config, 0, config_desc, config_desc_size, &actual);
+    status = GetDescriptor(fdescriptor::DescriptorType::kConfiguration, config, 0, config_desc,
+                           config_desc_size, &actual);
     if (status != ZX_OK) {
-      zxlogf(ERROR, "%s: GetDescriptor(USB_DT_CONFIG) failed", __func__);
+      zxlogf(ERROR, "%s: GetDescriptor(kConfiguration) failed", __func__);
       return status;
     }
 
@@ -886,7 +896,7 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
     // match the number of bytes the descriptor said we should
     // expect when we first asked for the descriptor header, return an error.
     if (actual != config_desc_size) {
-      zxlogf(ERROR, "%s GetDescriptor(USB_DT_CONFIG) config %u expected %u bytes, got %lu\n",
+      zxlogf(ERROR, "%s GetDescriptor(kConfiguration) config %u expected %u bytes, got %lu\n",
              __func__, config, config_desc_size, actual);
       return ZX_ERR_IO;
     }
@@ -898,7 +908,7 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
         letoh16(reinterpret_cast<usb_configuration_descriptor_t*>(config_desc)->w_total_length);
     if (actual != config_desc_size_on_second_read) {
       zxlogf(ERROR,
-             "%s GetDescriptor(USB_DT_CONFIG) config %u length changed between reads: "
+             "%s GetDescriptor(kConfiguration) config %u length changed between reads: "
              "was %u bytes, then became %u\n",
              __func__, config, config_desc_size, config_desc_size_on_second_read);
       return ZX_ERR_IO;
@@ -929,11 +939,11 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
   // set configuration
   auto* config_desc = reinterpret_cast<usb_configuration_descriptor_t*>(
       config_descs_[current_config_index_].data());
-  status =
-      UsbControlOut(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_SET_CONFIGURATION,
-                    config_desc->b_configuration_value, 0, ZX_TIME_INFINITE, nullptr, 0);
+  status = UsbControlOut(kStandardDeviceOut,
+                         fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration),
+                         config_desc->b_configuration_value, 0, ZX_TIME_INFINITE, nullptr, 0);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "%s: USB_REQ_SET_CONFIGURATION failed", __func__);
+    zxlogf(ERROR, "%s: kSetConfiguration failed", __func__);
     return status;
   }
   zxlogf(INFO, "* found USB device (0x%04x:0x%04x, USB %x.%x) config %u", device_desc_.id_vendor,
@@ -1006,7 +1016,7 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
 zx_status_t UsbDevice::Reinitialize() {
   fbl::AutoLock lock(&state_lock_);
 
-  if (resetting_) {
+  if (!resetting_) {
     zxlogf(ERROR, "%s: resetting_ not set", __func__);
     return ZX_ERR_BAD_STATE;
   }
@@ -1014,9 +1024,9 @@ zx_status_t UsbDevice::Reinitialize() {
 
   auto* descriptor = reinterpret_cast<usb_configuration_descriptor_t*>(
       config_descs_[current_config_index_].data());
-  auto status =
-      UsbControlOut(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_SET_CONFIGURATION,
-                    descriptor->b_configuration_value, 0, ZX_TIME_INFINITE, nullptr, 0);
+  auto status = UsbControlOut(kStandardDeviceOut,
+                              fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration),
+                              descriptor->b_configuration_value, 0, ZX_TIME_INFINITE, nullptr, 0);
   if (status != ZX_OK) {
     zxlogf(ERROR, "could not restore configuration to %u, got err: %d",
            descriptor->b_configuration_value, status);
@@ -1028,10 +1038,11 @@ zx_status_t UsbDevice::Reinitialize() {
   return ZX_OK;
 }
 
-zx_status_t UsbDevice::GetDescriptor(uint16_t type, uint16_t index, uint16_t language, void* data,
+zx_status_t UsbDevice::GetDescriptor(uint16_t type, uint8_t index, uint16_t language, void* data,
                                      size_t length, size_t* out_actual) {
-  return UsbControlIn(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR,
-                      static_cast<uint16_t>(type << 8 | index), language, ZX_TIME_INFINITE,
+  return UsbControlIn(kStandardDeviceIn,
+                      fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor),
+                      usb_descriptor_w_value(type, index), language, ZX_TIME_INFINITE,
                       reinterpret_cast<uint8_t*>(data), length, out_actual);
 }
 

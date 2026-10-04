@@ -5,13 +5,12 @@
 use async_lock::Mutex as AsyncMutex;
 use futures::future::BoxFuture;
 use futures::{FutureExt, TryFutureExt};
-use num::bigint::BigInt;
-use num::rational::BigRational;
+use num_bigint::BigInt;
 use std::sync::Arc;
 
 use crate::error::Result;
 
-use super::{PlaygroundValue, Value, ValueExt};
+use super::{BigRational, PlaygroundValue, Value, ValueExt};
 
 /// Allows implementing a [`ReplayableIterator`]. Represents the state and
 /// position of a single clone of the iterator.

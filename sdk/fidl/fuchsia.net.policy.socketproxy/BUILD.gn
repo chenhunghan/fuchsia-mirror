@@ -37,7 +37,6 @@ fidl("fuchsia.net.policy.socketproxy") {
   sources = [
     "network_registry.fidl",
     "socketproxy.fidl",
-    "starnix.fidl",
   ]
   visibility = [ "*" ]
   public_deps = [

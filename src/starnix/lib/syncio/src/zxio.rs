@@ -559,6 +559,12 @@ pub struct zxio_verification_options {
 pub type zxio_verification_options_t = zxio_verification_options;
 pub type zxio_selinux_context_state_t = u8;
 #[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct zxio_node_attr_zxio_fscrypt_policy_t {
+    pub key_identifier: [u8; 16usize],
+    pub flags: u8,
+}
+#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct zxio_node_attr {
     pub protocols: zxio_node_protocols_t,
@@ -585,9 +591,9 @@ pub struct zxio_node_attr {
     pub casefold: bool,
     pub __bindgen_padding_1: [u8; 2usize],
     pub object_type: zxio_object_type_t,
-    pub wrapping_key_id: [u8; 16usize],
+    pub encryption_policy: zxio_node_attr_zxio_fscrypt_policy_t,
     pub has: zxio_node_attr_zxio_node_attr_has_t,
-    pub __bindgen_padding_2: [u8; 2usize],
+    pub __bindgen_padding_2: [u8; 1usize],
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -611,7 +617,7 @@ pub struct zxio_node_attr_zxio_node_attr_has_t {
     pub fsverity_enabled: bool,
     pub object_type: bool,
     pub casefold: bool,
-    pub wrapping_key_id: bool,
+    pub encryption_policy: bool,
     pub selinux_context: bool,
     pub pending_access_time_update: bool,
 }

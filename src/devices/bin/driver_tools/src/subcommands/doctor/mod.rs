@@ -28,18 +28,6 @@ trait DiagnosableParent {
     fn is_fuzzy_match(&self, properties: &DeviceProperties) -> bool;
 }
 
-impl DiagnosableParent for fdf::ParentSpec {
-    fn to_properties(&self) -> DeviceProperties {
-        node_to_bind_properties(Some(&self.properties))
-    }
-    fn evaluate_bind_rules(&self, properties: &DeviceProperties) -> Vec<Diagnostic> {
-        evaluate_bind_rules(&self.bind_rules, properties)
-    }
-    fn is_fuzzy_match(&self, properties: &DeviceProperties) -> bool {
-        is_spec_fuzzy_match(&self.bind_rules, properties)
-    }
-}
-
 impl DiagnosableParent for fdf::ParentSpec2 {
     fn to_properties(&self) -> DeviceProperties {
         node_to_bind_properties2(Some(&self.properties))
@@ -150,7 +138,7 @@ async fn diagnose_driver_and_node(
     if let Some(bytecode) = &driver.bind_rules_bytecode {
         match DecodedRules::new(bytecode.clone())? {
             DecodedRules::Normal(rules) => {
-                let properties = node_to_bind_properties(node.node_property_list.as_deref());
+                let properties = node_to_bind_properties2(node.node_property_list.as_deref());
                 if match_bind(
                     MatchBindData {
                         symbol_table: &rules.symbol_table,
@@ -212,16 +200,10 @@ async fn diagnose_spec_and_node(
         return Err(anyhow!("Node not found: {}", node_moniker));
     }
     let node = &nodes[0];
-    let node_properties = node_to_bind_properties(node.node_property_list.as_deref());
+    let node_properties = node_to_bind_properties2(node.node_property_list.as_deref());
 
     if let Some(spec) = &spec.spec {
-        if let Some(parents) = &spec.parents {
-            for (i, parent) in parents.iter().enumerate() {
-                writeln!(writer, "\nComparing against spec parent {}:", i)?;
-                let diagnostics = parent.evaluate_bind_rules(&node_properties);
-                report_diagnostics(&diagnostics, writer, 2)?;
-            }
-        } else if let Some(parents2) = &spec.parents2 {
+        if let Some(parents2) = &spec.parents2 {
             for (i, parent) in parents2.iter().enumerate() {
                 writeln!(writer, "\nComparing against spec parent {}:", i)?;
                 let diagnostics = parent.evaluate_bind_rules(&node_properties);
@@ -267,9 +249,7 @@ async fn diagnose_driver_and_spec(
             }
             DecodedRules::Composite(rules) => {
                 if let Some(spec) = &spec.spec {
-                    if let Some(parents) = &spec.parents {
-                        diagnose_composite_match(&rules, parents, writer)?;
-                    } else if let Some(parents2) = &spec.parents2 {
+                    if let Some(parents2) = &spec.parents2 {
                         diagnose_composite_match(&rules, parents2, writer)?;
                     } else {
                         writeln!(writer, "  Spec '{}' has no parents.", spec_name)?;
@@ -375,7 +355,7 @@ fn diagnose_composite_match<P: DiagnosableParent>(
                     continue;
                 }
                 let props = parent.to_properties();
-                let score = driver_keys.iter().filter(|k| props.contains_key(k)).count();
+                let score = driver_keys.iter().filter(|k| props.contains_key(*k)).count();
                 if score >= best_score {
                     best_score = score;
                     best_parent = Some(p_idx);
@@ -454,7 +434,7 @@ async fn diagnose_driver(
                 writeln!(writer, "\nFuzzy matching against all unbound nodes...")?;
                 let unbound_nodes = nodes.into_iter().filter(|n| is_node_unbound(n)).collect_vec();
                 for node in unbound_nodes {
-                    let props = node_to_bind_properties(node.node_property_list.as_deref());
+                    let props = node_to_bind_properties2(node.node_property_list.as_deref());
                     if is_fuzzy_match(&rules, &props) {
                         writeln!(
                             writer,
@@ -519,11 +499,7 @@ async fn diagnose_driver(
                 for spec_info in unmatched_specs {
                     if let Some(spec) = &spec_info.spec {
                         let mut potential_match = false;
-                        if let Some(parents) = &spec.parents {
-                            if parents.iter().any(|p| is_fuzzy_match(&rules, &p.to_properties())) {
-                                potential_match = true;
-                            }
-                        } else if let Some(parents2) = &spec.parents2 {
+                        if let Some(parents2) = &spec.parents2 {
                             if parents2.iter().any(|p| is_fuzzy_match(&rules, &p.to_properties())) {
                                 potential_match = true;
                             }
@@ -535,9 +511,7 @@ async fn diagnose_driver(
                                 "\n------------------------------------------------------------\nPotential match found: spec {}",
                                 spec.name.as_deref().unwrap_or("unknown")
                             )?;
-                            if let Some(parents) = &spec.parents {
-                                diagnose_composite_match(r, parents, writer)?;
-                            } else if let Some(parents2) = &spec.parents2 {
+                            if let Some(parents2) = &spec.parents2 {
                                 diagnose_composite_match(r, parents2, writer)?;
                             }
                         }
@@ -604,7 +578,7 @@ async fn diagnose_node_info(
             writeln!(writer, "  Node is QUARANTINED (driver failed to start). Check driver logs.")?;
         }
 
-        let properties = node_to_bind_properties(node.node_property_list.as_deref());
+        let properties = node_to_bind_properties2(node.node_property_list.as_deref());
 
         writeln!(writer, "\nFuzzy matching against all drivers...")?;
         let drivers = fdev::get_driver_info(driver_dev_proxy, &[]).await?;
@@ -655,20 +629,7 @@ async fn diagnose_node_info(
         let specs = fdev::get_composite_node_specs(driver_dev_proxy, None).await?;
         for spec_info in specs {
             if let Some(spec) = &spec_info.spec {
-                if let Some(parents) = &spec.parents {
-                    for (i, parent) in parents.iter().enumerate() {
-                        if parent.is_fuzzy_match(&properties) {
-                            let spec_name = spec.name.as_deref().unwrap_or("unknown");
-                            writeln!(
-                                writer,
-                                "\n------------------------------------------------------------\nPotential match: spec {} parent {}",
-                                spec_name, i
-                            )?;
-                            let diags = parent.evaluate_bind_rules(&properties);
-                            report_diagnostics(&diags, writer, 2)?;
-                        }
-                    }
-                } else if let Some(parents2) = &spec.parents2 {
+                if let Some(parents2) = &spec.parents2 {
                     for (i, parent) in parents2.iter().enumerate() {
                         if parent.is_fuzzy_match(&properties) {
                             let spec_name = spec.name.as_deref().unwrap_or("unknown");
@@ -700,16 +661,6 @@ async fn diagnose_node(
         return Ok(());
     }
     diagnose_node_info(&nodes[0], driver_dev_proxy, writer).await
-}
-
-fn is_spec_fuzzy_match(rules: &[fdf::BindRule], properties: &DeviceProperties) -> bool {
-    rules.iter().any(|rule| {
-        let key = match &rule.key {
-            fdf::NodePropertyKey::IntValue(v) => PropertyKey::NumberKey(*v as u64),
-            fdf::NodePropertyKey::StringValue(v) => PropertyKey::StringKey(v.clone()),
-        };
-        properties.contains_key(&key)
-    })
 }
 
 fn is_spec_fuzzy_match2(rules: &[fdf::BindRule2], properties: &DeviceProperties) -> bool {
@@ -752,16 +703,7 @@ async fn diagnose_spec_info(
                     if let Ok(DecodedRules::Composite(rules)) = DecodedRules::new(bytecode.clone())
                     {
                         let mut potential_match = false;
-                        if let Some(parents) = &spec.parents {
-                            if parents.iter().any(|p| {
-                                is_fuzzy_match(
-                                    &DecodedRules::Composite(rules.clone()),
-                                    &p.to_properties(),
-                                )
-                            }) {
-                                potential_match = true;
-                            }
-                        } else if let Some(parents2) = &spec.parents2 {
+                        if let Some(parents2) = &spec.parents2 {
                             if parents2.iter().any(|p| {
                                 is_fuzzy_match(
                                     &DecodedRules::Composite(rules.clone()),
@@ -778,9 +720,7 @@ async fn diagnose_spec_info(
                                 "\n------------------------------------------------------------\nPotential match: driver {}",
                                 driver.url.as_deref().unwrap_or("unknown")
                             )?;
-                            if let Some(parents) = &spec.parents {
-                                diagnose_composite_match(&rules, parents, writer)?;
-                            } else if let Some(parents2) = &spec.parents2 {
+                            if let Some(parents2) = &spec.parents2 {
                                 diagnose_composite_match(&rules, parents2, writer)?;
                             }
                         }
@@ -833,47 +773,7 @@ async fn diagnose_spec_info(
     let parent_names = spec_info.matched_driver.as_ref().and_then(|m| m.parent_names.as_ref());
 
     if let Some(spec) = &spec_info.spec {
-        if let Some(parents) = &spec.parents {
-            for (i, parent) in parents.iter().enumerate() {
-                let name =
-                    parent_names.and_then(|n| n.get(i)).map(|s| s.as_str()).unwrap_or("unknown");
-                writeln!(writer, "  Parent {} ({}):", i, name)?;
-
-                let mut bound_node = None;
-                if let Some(Some(moniker)) = parent_monikers.get(i) {
-                    bound_node = Some(moniker.clone());
-                } else if let Some(Some(path)) = parent_paths.get(i) {
-                    bound_node = Some(
-                        get_moniker_from_path(path, driver_dev_proxy)
-                            .await
-                            .unwrap_or_else(|_| path.clone()),
-                    );
-                }
-
-                if let Some(bound_name) = bound_node {
-                    writeln!(writer, "    Already bound to node: {}", bound_name)?;
-                } else {
-                    let mut found_match = false;
-                    for node in &unbound_nodes {
-                        let properties =
-                            node_to_bind_properties(node.node_property_list.as_deref());
-                        if parent.is_fuzzy_match(&properties) {
-                            found_match = true;
-                            writeln!(
-                                writer,
-                                "    Potential match: node {}",
-                                node.moniker.as_deref().unwrap_or("unknown")
-                            )?;
-                            let diags = parent.evaluate_bind_rules(&properties);
-                            report_diagnostics(&diags, writer, 4)?;
-                        }
-                    }
-                    if !found_match {
-                        writeln!(writer, "    No unbound nodes matched this parent.")?;
-                    }
-                }
-            }
-        } else if let Some(parents2) = &spec.parents2 {
+        if let Some(parents2) = &spec.parents2 {
             for (i, parent) in parents2.iter().enumerate() {
                 let name =
                     parent_names.and_then(|n| n.get(i)).map(|s| s.as_str()).unwrap_or("unknown");
@@ -886,7 +786,7 @@ async fn diagnose_spec_info(
                     bound_node = Some(
                         get_moniker_from_path(path, driver_dev_proxy)
                             .await
-                            .unwrap_or_else(|_| path.clone()),
+                            .unwrap_or_else(|_| path.to_string()),
                     );
                 }
 
@@ -896,7 +796,7 @@ async fn diagnose_spec_info(
                     let mut found_match = false;
                     for node in &unbound_nodes {
                         let properties =
-                            node_to_bind_properties(node.node_property_list.as_deref());
+                            node_to_bind_properties2(node.node_property_list.as_deref());
                         if parent.is_fuzzy_match(&properties) {
                             found_match = true;
                             writeln!(
@@ -976,27 +876,6 @@ async fn diagnose_all(
     }
 
     Ok(())
-}
-
-fn node_to_bind_properties(node_props: Option<&[fdf::NodeProperty]>) -> DeviceProperties {
-    let mut props = HashMap::new();
-    if let Some(node_props) = node_props {
-        for prop in node_props {
-            let key = match &prop.key {
-                fdf::NodePropertyKey::IntValue(v) => PropertyKey::NumberKey(*v as u64),
-                fdf::NodePropertyKey::StringValue(v) => PropertyKey::StringKey(v.clone()),
-            };
-            let value = match &prop.value {
-                fdf::NodePropertyValue::IntValue(v) => Symbol::NumberValue(*v as u64),
-                fdf::NodePropertyValue::StringValue(v) => Symbol::StringValue(v.clone()),
-                fdf::NodePropertyValue::BoolValue(v) => Symbol::BoolValue(*v),
-                fdf::NodePropertyValue::EnumValue(v) => Symbol::EnumValue(v.clone()),
-                _ => continue,
-            };
-            props.insert(key, value);
-        }
-    }
-    props
 }
 
 fn node_to_bind_properties2(node_props: Option<&[fdf::NodeProperty2]>) -> DeviceProperties {
@@ -1176,57 +1055,6 @@ fn read_next_value(
     } else {
         Err(())
     }
-}
-
-fn evaluate_bind_rules(rules: &[fdf::BindRule], properties: &DeviceProperties) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    for rule in rules {
-        let key = match &rule.key {
-            fdf::NodePropertyKey::IntValue(v) => PropertyKey::NumberKey(*v as u64),
-            fdf::NodePropertyKey::StringValue(v) => PropertyKey::StringKey(v.clone()),
-        };
-        let actual = properties.get(&key).cloned();
-
-        let mut matched = false;
-        for val in &rule.values {
-            let symbol_val = match val {
-                fdf::NodePropertyValue::IntValue(v) => Symbol::NumberValue(*v as u64),
-                fdf::NodePropertyValue::StringValue(v) => Symbol::StringValue(v.clone()),
-                fdf::NodePropertyValue::BoolValue(v) => Symbol::BoolValue(*v),
-                fdf::NodePropertyValue::EnumValue(v) => Symbol::EnumValue(v.clone()),
-                _ => continue,
-            };
-            if actual.as_ref() == Some(&symbol_val) {
-                matched = true;
-                break;
-            }
-        }
-
-        match rule.condition {
-            fdf::Condition::Accept => {
-                if !matched {
-                    diagnostics.push(Diagnostic::Mismatch {
-                        key,
-                        expected: Symbol::StringValue("one of requested values".to_string()),
-                        actual,
-                        is_equal: true,
-                    });
-                }
-            }
-            fdf::Condition::Reject => {
-                if matched {
-                    diagnostics.push(Diagnostic::Mismatch {
-                        key,
-                        expected: Symbol::StringValue("none of requested values".to_string()),
-                        actual,
-                        is_equal: false,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    diagnostics
 }
 
 fn evaluate_bind_rules2(
@@ -1488,20 +1316,6 @@ mod tests {
 
         let diagnostics = evaluate_rules_bytecode(&symbol_table, &instructions, &properties);
         assert_eq!(diagnostics.len(), 0);
-    }
-
-    #[test]
-    fn test_evaluate_bind_rules_mismatch() {
-        let rules = vec![fdf::BindRule {
-            key: fdf::NodePropertyKey::IntValue(1),
-            condition: fdf::Condition::Accept,
-            values: vec![fdf::NodePropertyValue::IntValue(100)],
-        }];
-        let mut properties = HashMap::new();
-        properties.insert(PropertyKey::NumberKey(1), Symbol::NumberValue(200));
-
-        let diagnostics = evaluate_bind_rules(&rules, &properties);
-        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]

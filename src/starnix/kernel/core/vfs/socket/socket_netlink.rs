@@ -31,7 +31,7 @@ use netlink_packet_sock_diag::message::EmptyDeserializeOptions as EmptyDeseriali
 use netlink_packet_utils::{DecodeError, Emitable as _};
 use starnix_sync::{
     AuditNetlinkClientAuditResponseLock, LockDepGuard, LockDepMutex, NetlinkSocketInnerLock,
-    UEventNetlinkSocketDeviceListenerKeyLock,
+    NflogListenersLock, UEventNetlinkSocketDeviceListenerKeyLock,
 };
 use std::io::Write;
 use std::marker::PhantomData;
@@ -446,8 +446,8 @@ struct NflogListener {
     inner: std::sync::Weak<LockDepMutex<NetlinkSocketInner, NetlinkSocketInnerLock>>,
 }
 
-static NFLOG_LISTENERS: std::sync::LazyLock<std::sync::Mutex<Vec<NflogListener>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+static NFLOG_LISTENERS: std::sync::LazyLock<LockDepMutex<Vec<NflogListener>, NflogListenersLock>> =
+    std::sync::LazyLock::new(|| LockDepMutex::new(Vec::new()));
 
 struct NflogNetlinkSocket {
     inner: Arc<LockDepMutex<NetlinkSocketInner, NetlinkSocketInnerLock>>,
@@ -455,7 +455,7 @@ struct NflogNetlinkSocket {
 
 impl NflogNetlinkSocket {
     fn new(inner: Arc<LockDepMutex<NetlinkSocketInner, NetlinkSocketInnerLock>>) -> Self {
-        NFLOG_LISTENERS.lock().unwrap().push(NflogListener { inner: Arc::downgrade(&inner) });
+        NFLOG_LISTENERS.lock().push(NflogListener { inner: Arc::downgrade(&inner) });
         Self { inner }
     }
 
@@ -466,7 +466,7 @@ impl NflogNetlinkSocket {
 
 impl Drop for NflogNetlinkSocket {
     fn drop(&mut self) {
-        let mut listeners = NFLOG_LISTENERS.lock().unwrap();
+        let mut listeners = NFLOG_LISTENERS.lock();
         listeners.retain(|l| {
             if let Some(arc) = l.inner.upgrade() { !Arc::ptr_eq(&arc, &self.inner) } else { false }
         });
@@ -619,7 +619,7 @@ pub fn send_fake_nflog_message(uid: u32) {
     packet.extend_from_slice(&msg_body);
 
     // Broadcast to all listeners
-    let listeners = NFLOG_LISTENERS.lock().unwrap();
+    let listeners = NFLOG_LISTENERS.lock();
     let ancillary_data = AncillaryData::Unix(UnixControlData::Credentials(Default::default()));
     let mut ancillary_data = vec![ancillary_data];
 

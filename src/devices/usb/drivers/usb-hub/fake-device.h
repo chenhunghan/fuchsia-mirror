@@ -5,6 +5,12 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_USB_HUB_FAKE_DEVICE_H_
 #define SRC_DEVICES_USB_DRIVERS_USB_HUB_FAKE_DEVICE_H_
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
+
+#include <usb/descriptors.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 enum class OperationType {
   kUsbBusDeviceAdded,
   kUsbBusDeviceRemoved,
@@ -124,7 +130,7 @@ struct EmulationMetadata {
         secondary_descriptor = cpp20::span(kSmaysHubDescriptor2, sizeof(kSmaysHubDescriptor2));
         device_descriptor = cpp20::span(kSmaysDeviceDescriptor, sizeof(kSmaysDeviceDescriptor));
         port_count = 4;
-        speed = USB_SPEED_HIGH;
+        speed = fidl::ToUnderlying(fdescriptor::UsbSpeed::kHigh);
         break;
       case EmulationMode::Unbranded:
         descriptor = cpp20::span(kUnbrandedHubDescriptor, sizeof(kUnbrandedHubDescriptor));
@@ -133,7 +139,7 @@ struct EmulationMetadata {
         secondary_descriptor =
             cpp20::span(kUnbrandedHubDescriptor2, sizeof(kUnbrandedHubDescriptor2));
         port_count = 4;
-        speed = USB_SPEED_SUPER;
+        speed = fidl::ToUnderlying(fdescriptor::UsbSpeed::kSuper);
         break;
     }
   }
@@ -513,12 +519,12 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
       case Opcode::GetClassDescriptor: {
         // Type field
         switch (value >> 8) {
-          case USB_HUB_DESC_TYPE_SS:
-            if (emulation_.speed != USB_SPEED_SUPER) {
+          case fidl::ToUnderlying(fdescriptor::DescriptorType::kHubSuperSpeed):
+            if (emulation_.speed != fdescriptor::UsbSpeed::kSuper) {
               break;
             }
             __FALLTHROUGH;
-          case USB_HUB_DESC_TYPE:
+          case fidl::ToUnderlying(fdescriptor::DescriptorType::kHub):
             // Fetch secondary hub descriptor
             memcpy(out_read_buffer, emulation_.secondary_descriptor.data(),
                    emulation_.secondary_descriptor.size());
@@ -527,13 +533,15 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
         }
       } break;
       case Opcode::GetStandardDescriptor: {
-        switch (value >> 8) {
-          case USB_DT_DEVICE: {
+        switch (usb_descriptor_type_from_w_value(value)) {
+          case fdescriptor::DescriptorType::kDevice: {
             memcpy(out_read_buffer, emulation_.device_descriptor.data(),
                    emulation_.device_descriptor.size());
             *out_read_actual = emulation_.device_descriptor.size();
           }
             return ZX_OK;
+          default:
+            break;
         }
       } break;
       case Opcode::GetPortStatus: {
@@ -563,7 +571,7 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     auto usb_request = entry->request;
     if (usb_request->header.ep_address == 0) {
       // Control request
-      if (usb_request->setup.bm_request_type & USB_DIR_IN) {
+      if (usb_request_is_in(usb_request->setup.bm_request_type)) {
         void* buffer;
         usb_request_mmap(usb_request, &buffer);
         size_t size = 0;
@@ -714,10 +722,10 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
 
   void ConnectDeviceDispatch(uint8_t port, usb_speed_t speed) {
     // We use zero-based indexing for ports, USB uses 1-based indexing.
-    if (speed == USB_SPEED_HIGH) {
+    if (speed == fdescriptor::UsbSpeed::kHigh) {
       port_status_[port].SetBit(PortStatusBit::kHighSpeed);
     }
-    if (speed == USB_SPEED_LOW) {
+    if (speed == fdescriptor::UsbSpeed::kLow) {
       port_status_[port].SetBit(PortStatusBit::kLowSpeed);
     }
     port_status_[port].SetBit(PortStatusBit::kConnected);

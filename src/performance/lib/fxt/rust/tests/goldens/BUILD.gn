@@ -2,19 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_host_tool.gni")
 import("//build/compiled_action.gni")
-import("//build/rust/rustc_binary.gni")
 import("//build/testing/golden_files.gni")
 
-rustc_binary("fxt_pretty_printer") {
-  testonly = true
-  edition = "2024"
-  source_root = "src/pretty_printer.rs"
-  sources = [ source_root ]
-  deps = [
-    "//src/performance/lib/fxt/rust",
-    "//third_party/rust_crates:argh",
-  ]
+if (is_host) {
+  bazel_host_tool("fxt_pretty_printer") {
+    testonly = true
+    bazel_target = ":fxt_pretty_printer"
+    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/fxt_pretty_printer"
+  }
 }
 
 golden_test_defs = [

@@ -357,10 +357,14 @@ impl<T> WeakRef<T> {
         self.0.upgrade().and_then(OwnedRef::re_own)
     }
 
-    /// Returns a raw pointer to the object T pointed to by this WeakRef<T>.
+    /// Returns a raw pointer to the object T pointed to by this WeakRef<T>, or null if this is an
+    /// empty reference.
     ///
     /// See `Weak::as_ptr`
     pub fn as_ptr(&self) -> *const T {
+        if Weak::ptr_eq(&self.0, &Weak::new()) {
+            return std::ptr::null();
+        }
         let base = self.0.as_ptr();
         let value = memoffset::raw_field!(base, RefInner<T>, value);
         memoffset::raw_field!(value, ReleaseGuard<T>, value)
@@ -368,7 +372,7 @@ impl<T> WeakRef<T> {
 
     /// Returns true if the two objects point to the same allocation
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        Self::as_ptr(this) == Self::as_ptr(other)
+        Weak::ptr_eq(&this.0, &other.0)
     }
 }
 
@@ -938,6 +942,13 @@ mod test {
     fn test_default() {
         let reference = WeakRef::<Data>::default();
         assert!(reference.upgrade().is_none());
+    }
+
+    #[::fuchsia::test]
+    fn test_default_as_ptr_is_null() {
+        let reference = WeakRef::<Data>::default();
+        assert!(reference.as_ptr().is_null());
+        assert!(WeakRef::ptr_eq(&reference, &WeakRef::default()));
     }
 
     #[::fuchsia::test]

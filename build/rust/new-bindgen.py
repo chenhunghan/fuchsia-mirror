@@ -22,7 +22,7 @@ FUCHSIA_NOTICE_HEADER = """// Copyright %s The Fuchsia Authors. All rights reser
 """
 
 
-def post_process_args(args):
+def post_process_args(args: argparse.Namespace) -> None:
     if args.extra_clang_flags:
         assert (
             args.extra_clang_flags[0] == "--"
@@ -30,7 +30,7 @@ def post_process_args(args):
         args.extra_clang_flags.pop(0)
 
     # Process complex structures
-    replacements = []
+    replacements: list[list[str]] = []
     if args.replacement:
         for r in args.replacement:
             if len(r) == 1:
@@ -47,10 +47,15 @@ def post_process_args(args):
 
 
 class Bindgen:
-    def __init__(self, args):
+    def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
 
-    def run_bindgen(self, input_files, output_file, depfile_out=None):
+    def run_bindgen(
+        self,
+        input_files: list[str],
+        output_file: str,
+        depfile_out: str | None = None,
+    ) -> None:
         if len(input_files) > 1:
             output_dir = os.path.dirname(os.path.abspath(output_file))
             with tempfile.TemporaryDirectory(
@@ -75,11 +80,11 @@ class Bindgen:
 
     def _run_bindgen_impl(
         self,
-        input_file_for_bindgen,
-        output_file,
-        depfile_out=None,
-        wrapper_file_to_filter=None,
-    ):
+        input_file_for_bindgen: str,
+        output_file: str,
+        depfile_out: str | None = None,
+        wrapper_file_to_filter: str | None = None,
+    ) -> None:
         # Bindgen arguments.
         if not self.args.notice_year:
             raise ValueError("notice_year is required")
@@ -254,7 +259,7 @@ class Bindgen:
         else:
             os.unlink(depfile_path)
 
-    def post_process_rust_file(self, rust_file_name):
+    def post_process_rust_file(self, rust_file_name: str) -> None:
         with open(rust_file_name, "r+") as source_file:
             text = source_file.read()
             for regexp, replacement in self.args.compiled_replacements:
@@ -264,7 +269,7 @@ class Bindgen:
             source_file.truncate()
             source_file.write(text)
 
-    def run(self):
+    def run(self) -> None:
         self.run_bindgen(self.args.input, self.args.output, self.args.depfile)
         # We must format the file before post-processing because our replacements
         # and auto-derive logic expect formatted code layout (e.g. predictable
@@ -282,7 +287,7 @@ class Bindgen:
         subprocess.check_call(cmd)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Run bindgen")
     parser.add_argument(
         "--input",
@@ -484,6 +489,7 @@ def main():
     post_process_args(args)
     bindgen = Bindgen(args)
     bindgen.run()
+    return 0
 
 
 if __name__ == "__main__":

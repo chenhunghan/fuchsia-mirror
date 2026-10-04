@@ -34,12 +34,12 @@ impl AllowList {
 /// A trait to query scrutiny's verify/component_resolvers API.
 trait QueryComponentResolvers {
     /// Walk the v2 component tree, finding all components with a component resolver for `scheme`
-    /// in its environment that has the given `moniker` and has access to `protocol`.
+    /// in its environment that has the given `moniker` and capability name `resolver`.
     fn query(
         &self,
         scheme: String,
         moniker: Moniker,
-        protocol: String,
+        resolver: String,
     ) -> Result<ComponentResolverResponse>;
 }
 
@@ -54,17 +54,17 @@ impl QueryComponentResolvers for ScrutinyQueryComponentResolvers {
         &self,
         scheme: String,
         moniker: Moniker,
-        protocol: String,
+        resolver: String,
     ) -> Result<ComponentResolverResponse> {
-        self.artifacts.get_monikers_for_resolver(scheme, moniker, protocol)
+        self.artifacts.get_monikers_for_resolver(scheme, moniker, resolver)
     }
 }
 
 /// For each section of the provided `allowlist`, queries scrutiny for all components configured
-/// with a component resolver for `scheme` with the given `moniker` that itself has access
-/// to `protocol`.  If any components match but are not in the allowlist, returns an allowlist that
-/// would allow all found violations. On success, returns the set of files accessed to run the
-/// analysis, for depfile generation.
+/// with a component resolver for `scheme` with the given `moniker` and capability name `resolver`.
+/// If any components match but are not in the allowlist, returns an allowlist that would allow all
+/// found violations. On success, returns the set of files accessed to run the analysis, for
+/// depfile generation.
 fn verify_component_resolvers(
     scrutiny: impl QueryComponentResolvers,
     allowlist: AllowList,
@@ -76,7 +76,7 @@ fn verify_component_resolvers(
         let allowed_monikers: HashSet<&Moniker> = allowed_monikers.iter().collect();
 
         let response = scrutiny
-            .query(query.scheme.clone(), query.moniker.clone(), query.protocol.clone())
+            .query(query.scheme.clone(), query.moniker.clone(), query.resolver.clone())
             .with_context(|| {
                 format!("Failed to query verify.capability_component_resolvers with {:?}", query)
             })?;
@@ -173,9 +173,9 @@ mod tests {
             &self,
             scheme: String,
             moniker: Moniker,
-            protocol: String,
+            resolver: String,
         ) -> Result<ComponentResolverResponse> {
-            let key = (scheme, moniker, protocol);
+            let key = (scheme, moniker, resolver);
 
             let response = self
                 .responses
@@ -205,9 +205,9 @@ mod tests {
         let allowlist = parse_allowlist(
             r#"[
             {
-                scheme: "fuchsia-pkg",
-                moniker: "/core/full-resolver",
-                protocol: "fuchsia.pkg.PackageResolver",
+                scheme: "test-scheme",
+                moniker: "/foo/bar",
+                resolver: "my_resolver",
                 components: [
                 ],
             },
@@ -215,11 +215,7 @@ mod tests {
         );
 
         let scrutiny = MockQueryComponentResolvers::new().with_raw_response(
-            (
-                "fuchsia-pkg".to_owned(),
-                "/core/full-resolver".to_owned(),
-                "fuchsia.pkg.PackageResolver".to_owned(),
-            ),
+            ("test-scheme".to_owned(), "/foo/bar".to_owned(), "my_resolver".to_owned()),
             "invalid".to_owned(),
         );
 
@@ -231,11 +227,11 @@ mod tests {
         let allowlist = parse_allowlist(
             r#"[
             {
-                scheme: "fuchsia-pkg",
-                moniker: "/core/full-resolver",
-                protocol: "fuchsia.pkg.PackageResolver",
+                scheme: "test-scheme",
+                moniker: "/foo/bar",
+                resolver: "my_resolver",
                 components: [
-                    "/core/allowed",
+                    "/baz/allowed",
                 ],
             },
         ]"#,
@@ -244,23 +240,19 @@ mod tests {
         let violations = parse_allowlist(
             r#"[
             {
-                scheme: "fuchsia-pkg",
-                moniker: "/core/full-resolver",
-                protocol: "fuchsia.pkg.PackageResolver",
+                scheme: "test-scheme",
+                moniker: "/foo/bar",
+                resolver: "my_resolver",
                 components: [
-                    "/core/stopme",
+                    "/baz/stopme",
                 ],
             },
         ]"#,
         );
 
         let scrutiny = MockQueryComponentResolvers::new().with_response(
-            (
-                "fuchsia-pkg".to_owned(),
-                "/core/full-resolver".to_owned(),
-                "fuchsia.pkg.PackageResolver".to_owned(),
-            ),
-            vec!["/core/allowed".to_owned(), "/core/stopme".to_owned()],
+            ("test-scheme".to_owned(), "/foo/bar".to_owned(), "my_resolver".to_owned()),
+            vec!["/baz/allowed".to_owned(), "/baz/stopme".to_owned()],
             vec!["path/to/dep.zbi".to_owned()],
         );
 
@@ -272,24 +264,20 @@ mod tests {
         let allowlist = parse_allowlist(
             r#"[
             {
-                scheme: "fuchsia-pkg",
-                moniker: "/core/full-resolver",
-                protocol: "fuchsia.pkg.PackageResolver",
+                scheme: "test-scheme",
+                moniker: "/foo/bar",
+                resolver: "my_resolver",
                 components: [
-                    "/core/allowed",
-                    "/core/also-allowed",
+                    "/baz/allowed",
+                    "/baz/also-allowed",
                 ],
             },
         ]"#,
         );
 
         let scrutiny = MockQueryComponentResolvers::new().with_response(
-            (
-                "fuchsia-pkg".to_owned(),
-                "/core/full-resolver".to_owned(),
-                "fuchsia.pkg.PackageResolver".to_owned(),
-            ),
-            vec!["/core/allowed".to_owned(), "/core/also-allowed".to_owned()],
+            ("test-scheme".to_owned(), "/foo/bar".to_owned(), "my_resolver".to_owned()),
+            vec!["/baz/allowed".to_owned(), "/baz/also-allowed".to_owned()],
             vec!["path/to/dep.zbi".to_owned()],
         );
 
@@ -303,26 +291,26 @@ mod tests {
             r#"[
             {
                 scheme: "a",
-                moniker: "/core/resolver-a",
-                protocol: "fuchsia.proto.a",
+                moniker: "/foo/resolver-a",
+                resolver: "resolver-a",
                 components: [
-                    "/core/allowed-a",
+                    "/foo/allowed-a",
                 ],
             },
             {
                 scheme: "b",
-                moniker: "/core/resolver-b",
-                protocol: "fuchsia.proto.b",
+                moniker: "/foo/resolver-b",
+                resolver: "resolver-b",
                 components: [
-                    "/core/allowed-b",
+                    "/foo/allowed-b",
                 ],
             },
             {
                 scheme: "c",
-                moniker: "/core/resolver-c",
-                protocol: "fuchsia.proto.c",
+                moniker: "/foo/resolver-c",
+                resolver: "resolver-c",
                 components: [
-                    "/core/allowed-c",
+                    "/foo/allowed-c",
                 ],
             },
         ]"#,
@@ -332,18 +320,18 @@ mod tests {
             r#"[
             {
                 scheme: "a",
-                moniker: "/core/resolver-a",
-                protocol: "fuchsia.proto.a",
+                moniker: "/foo/resolver-a",
+                resolver: "resolver-a",
                 components: [
-                    "/core/violation-a",
+                    "/foo/violation-a",
                 ],
             },
             {
                 scheme: "c",
-                moniker: "/core/resolver-c",
-                protocol: "fuchsia.proto.c",
+                moniker: "/foo/resolver-c",
+                resolver: "resolver-c",
                 components: [
-                    "/core/violation-c",
+                    "/foo/violation-c",
                 ],
             },
         ]"#,
@@ -351,18 +339,18 @@ mod tests {
 
         let scrutiny = MockQueryComponentResolvers::new()
             .with_response(
-                ("a".to_owned(), "/core/resolver-a".to_owned(), "fuchsia.proto.a".to_owned()),
-                vec!["/core/allowed-a".to_owned(), "/core/violation-a".to_owned()],
+                ("a".to_owned(), "/foo/resolver-a".to_owned(), "resolver-a".to_owned()),
+                vec!["/foo/allowed-a".to_owned(), "/foo/violation-a".to_owned()],
                 vec!["dep1".to_owned()],
             )
             .with_response(
-                ("b".to_owned(), "/core/resolver-b".to_owned(), "fuchsia.proto.b".to_owned()),
-                vec!["/core/allowed-b".to_owned()],
+                ("b".to_owned(), "/foo/resolver-b".to_owned(), "resolver-b".to_owned()),
+                vec!["/foo/allowed-b".to_owned()],
                 vec!["dep2".to_owned()],
             )
             .with_response(
-                ("c".to_owned(), "/core/resolver-c".to_owned(), "fuchsia.proto.c".to_owned()),
-                vec!["/core/allowed-c".to_owned(), "/core/violation-c".to_owned()],
+                ("c".to_owned(), "/foo/resolver-c".to_owned(), "resolver-c".to_owned()),
+                vec!["/foo/allowed-c".to_owned(), "/foo/violation-c".to_owned()],
                 vec!["dep3".to_owned()],
             );
 

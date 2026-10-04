@@ -72,6 +72,19 @@
             service: "fuchsia.input.report.Service",
             from: "#boot-drivers",
             to: "#virtual_console",
+            availability: "optional",
+        },
+
+        // Routing from #base-drivers allows Virtcon to discover input devices
+        // packaged in base driver packages (such as touchscreen drivers). Using
+        // source_availability: 'unknown' and availability: 'optional' ensures
+        // compatibility with bringup products where #base-drivers is not defined.
+        {
+            service: "fuchsia.input.report.Service",
+            from: "#base-drivers",
+            to: "#virtual_console",
+            availability: "optional",
+            source_availability: "unknown",
         },
         {
             protocol: "fuchsia.hardware.pty.Device",

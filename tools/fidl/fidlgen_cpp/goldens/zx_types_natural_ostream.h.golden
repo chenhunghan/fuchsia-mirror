@@ -68,6 +68,62 @@ template <>
 struct fidl::ostream::Formatter<::test_zxtypes::StatusProtocolBResult> {
   static std::ostream& Format(std::ostream& os, const ::test_zxtypes::StatusProtocolBResult& value);
 };
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultEnum> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultEnum& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultEnumAlias> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultEnumAlias& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultStruct> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultStruct& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultStructAlias> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultStructAlias& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultTable> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultTable& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultTableAlias> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultTableAlias& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultUnion> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultUnion& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultUnionAlias> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultUnionAlias& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultProtocolARequest> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultProtocolARequest& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultProtocolAResponse> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultProtocolAResponse& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultProtocolAResult> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultProtocolAResult& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBRequest> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultProtocolBRequest& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBResponse> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultProtocolBResponse& value);
+};
+template <>
+struct fidl::ostream::Formatter<::test_zxtypes::ResultProtocolBResult> {
+  static std::ostream& Format(std::ostream& os, const ::test_zxtypes::ResultProtocolBResult& value);
+};
 
 namespace test_zxtypes {
 
@@ -99,6 +155,34 @@ std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::StatusProtocolB
 
 std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::StatusProtocolBResult& value);
 
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultEnum& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultEnumAlias& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultStruct& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultStructAlias& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultTable& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultTableAlias& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultUnion& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultUnionAlias& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolARequest& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolAResponse& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolAResult& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolBRequest& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolBResponse& value);
+
+std::ostream& operator<<(std::ostream& os, const ::test_zxtypes::ResultProtocolBResult& value);
+
 }  // namespace test_zxtypes
 
 #if __FIDL_SUPPORT_HANDLES
@@ -112,10 +196,22 @@ template <>
 struct fidl::ostream::Formatter<::fidl::ServerEnd<::test_zxtypes::StatusProtocol>> {
   static std::ostream& Format(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::StatusProtocol>& value);
 };
+template <>
+struct fidl::ostream::Formatter<::fidl::ClientEnd<::test_zxtypes::ResultProtocol>> {
+  static std::ostream& Format(std::ostream& os, const ::fidl::ClientEnd<::test_zxtypes::ResultProtocol>& value);
+};
+
+template <>
+struct fidl::ostream::Formatter<::fidl::ServerEnd<::test_zxtypes::ResultProtocol>> {
+  static std::ostream& Format(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::ResultProtocol>& value);
+};
 
 std::ostream& operator<<(std::ostream& os, const ::fidl::ClientEnd<::test_zxtypes::StatusProtocol>& value);
 
 std::ostream& operator<<(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::StatusProtocol>& value);
+std::ostream& operator<<(std::ostream& os, const ::fidl::ClientEnd<::test_zxtypes::ResultProtocol>& value);
+
+std::ostream& operator<<(std::ostream& os, const ::fidl::ServerEnd<::test_zxtypes::ResultProtocol>& value);
 
 #endif  // __FIDL_SUPPORT_HANDLES
 

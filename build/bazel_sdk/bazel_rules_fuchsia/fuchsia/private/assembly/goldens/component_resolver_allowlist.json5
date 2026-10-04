@@ -1,11 +1,19 @@
 [
-    // List of all components that can register a resolver for "fuchsia-pkg" in their
-    // environment, where that resolver is provided by the "core/pkg-resolver" component which has
-    // access to fuchsia.pkg.PackageResolver.
+    // List of all components that can have in their environment registered for scheme "fuchsia-pkg"
+    // the "full_resolver" capability provided by "/bootstrap/pkg-cache".
+    {
+        scheme: "fuchsia-pkg",
+        moniker: "/bootstrap/pkg-cache",
+        resolver: "full_resolver",
+        components: [],
+    },
+
+    // List of all components that can have in their environment registered for scheme "fuchsia-pkg"
+    // the "full-resolver" capability provided by "/core/pkg-resolver".
     {
         scheme: "fuchsia-pkg",
         moniker: "/core/pkg-resolver",
-        protocol: "fuchsia.pkg.PackageResolver",
+        resolver: "full-resolver",
         components: [],
     },
 ]

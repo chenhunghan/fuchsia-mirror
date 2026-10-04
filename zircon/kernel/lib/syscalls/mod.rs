@@ -9,6 +9,7 @@ pub mod syscall_signatures {
 }
 
 mod bti;
+mod channel;
 mod clock;
 mod counter;
 mod cprng;
@@ -16,6 +17,7 @@ mod debug;
 mod debuglog;
 mod event;
 mod fifo;
+mod guest;
 mod iob;
 mod iommu;
 mod job;

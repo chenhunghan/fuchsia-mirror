@@ -467,6 +467,11 @@ bool PipelineManager::CreateFGNode(const StreamCreationData& info, const std::ve
   Dump();
 #endif
 
+  // If we just created an input node, synchronize its state with streaming_enabled_.
+  if (icself.type == NodeType::kInputStream) {
+    UpdateInputNodeStreamingState();
+  }
+
   // Return true if the configured node was an output. This indicates that the `request` channel was
   // consumed and the pipeline is complete.
   return icself.type == kOutputStream;
@@ -564,7 +569,9 @@ void PipelineManager::GetBuffers(const std::vector<uint8_t>& origin,
   fuchsia::sysmem2::BufferCollectionTokenHandle token;
 
   fuchsia::sysmem2::BufferCollectionAttachTokenRequest attach_token_request;
-  attach_token_request.set_rights_attenuation_mask(ZX_RIGHT_SAME_RIGHTS);
+  // The collection backs internal ISP/GDC DMA buffers shared across sibling
+  // streams. External camera3 clients must not receive ZX_RIGHT_WRITE on it.
+  attach_token_request.set_rights_attenuation_mask(static_cast<zx_rights_t>(~ZX_RIGHT_WRITE));
   attach_token_request.set_token_request(token.NewRequest());
   input_buffer_collection->AttachToken(std::move(attach_token_request));
 

@@ -18,24 +18,6 @@ impl From<SourceBreakingDef> for fidl::marker::SourceBreaking {
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(remote = fdf::BindRule)]
-#[rkyv(archived = ArchivedBindRule)]
-pub struct BindRuleDef {
-    #[rkyv(with = NodePropertyKeyDef)]
-    pub key: fdf::NodePropertyKey,
-    #[rkyv(with = ConditionDef)]
-    pub condition: fdf::Condition,
-    #[rkyv(with = rkyv::with::Map<NodePropertyValueDef>)]
-    pub values: Vec<fdf::NodePropertyValue>,
-}
-
-impl From<BindRuleDef> for fdf::BindRule {
-    fn from(value: BindRuleDef) -> Self {
-        Self { key: value.key, condition: value.condition, values: value.values }
-    }
-}
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(remote = fdf::BindRule2)]
 #[rkyv(archived = ArchivedBindRule2)]
 pub struct BindRule2Def {
@@ -179,8 +161,6 @@ impl From<CompositeInfoDef> for fdf::CompositeInfo {
 #[rkyv(archived = ArchivedCompositeNodeSpec)]
 pub struct CompositeNodeSpecDef {
     pub name: Option<String>,
-    #[rkyv(with = rkyv::with::Map<rkyv::with::Map<ParentSpecDef>>)]
-    pub parents: Option<Vec<fdf::ParentSpec>>,
     #[rkyv(with = rkyv::with::Map<rkyv::with::Map<ParentSpec2Def>>)]
     pub parents2: Option<Vec<fdf::ParentSpec2>>,
     pub driver_host: Option<String>,
@@ -192,7 +172,6 @@ impl From<CompositeNodeSpecDef> for fdf::CompositeNodeSpec {
     fn from(value: CompositeNodeSpecDef) -> Self {
         Self {
             name: value.name,
-            parents: value.parents,
             parents2: value.parents2,
             driver_host: value.driver_host,
             __source_breaking: value.__source_breaking,
@@ -435,38 +414,6 @@ impl From<DriverPackageTypeDef> for fdf::DriverPackageType {
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(remote = fdf::ParentSpec)]
-#[rkyv(archived = ArchivedParentSpec)]
-pub struct ParentSpecDef {
-    #[rkyv(with = rkyv::with::Map<BindRuleDef>)]
-    pub bind_rules: Vec<fdf::BindRule>,
-    #[rkyv(with = rkyv::with::Map<NodePropertyDef>)]
-    pub properties: Vec<fdf::NodeProperty>,
-}
-
-impl From<ParentSpecDef> for fdf::ParentSpec {
-    fn from(value: ParentSpecDef) -> Self {
-        Self { bind_rules: value.bind_rules, properties: value.properties }
-    }
-}
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(remote = fdf::NodeProperty)]
-#[rkyv(archived = ArchivedNodeProperty)]
-pub struct NodePropertyDef {
-    #[rkyv(with = NodePropertyKeyDef)]
-    pub key: fdf::NodePropertyKey,
-    #[rkyv(with = NodePropertyValueDef)]
-    pub value: fdf::NodePropertyValue,
-}
-
-impl From<NodePropertyDef> for fdf::NodeProperty {
-    fn from(value: NodePropertyDef) -> Self {
-        Self { key: value.key, value: value.value }
-    }
-}
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(remote = fdf::NodeProperty2)]
 #[rkyv(archived = ArchivedNodeProperty2)]
 pub struct NodeProperty2Def {
@@ -478,23 +425,6 @@ pub struct NodeProperty2Def {
 impl From<NodeProperty2Def> for fdf::NodeProperty2 {
     fn from(value: NodeProperty2Def) -> Self {
         Self { key: value.key, value: value.value }
-    }
-}
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(remote = fdf::NodePropertyKey)]
-#[rkyv(archived = ArchivedNodePropertyKey)]
-pub enum NodePropertyKeyDef {
-    IntValue(u32),
-    StringValue(String),
-}
-
-impl From<NodePropertyKeyDef> for fdf::NodePropertyKey {
-    fn from(value: NodePropertyKeyDef) -> Self {
-        match value {
-            NodePropertyKeyDef::IntValue(a) => Self::IntValue(a),
-            NodePropertyKeyDef::StringValue(a) => Self::StringValue(a),
-        }
     }
 }
 

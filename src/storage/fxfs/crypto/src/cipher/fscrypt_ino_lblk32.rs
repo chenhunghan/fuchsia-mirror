@@ -2,23 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::{Cipher, Tweak, UnwrappedKey, XtsInPlaceProcessor};
-use aes::Aes256;
-use aes::cipher::inout::InOutBuf;
-use aes::cipher::{
-    Block, BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt, KeyInit,
-    KeyIvInit,
+use super::{
+    BLOCK_SIZE, Cipher, MAX_FILENAME_LEN, MAX_SYMLINK_LEN, Tweak, UnwrappedKey,
+    XtsInPlaceProcessor, decrypt_filename_cts, encrypt_filename_cts,
 };
-use anyhow::{Context, Error, ensure};
+use aes::Aes256;
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
+use anyhow::{Context, Error};
 use siphasher::sip::SipHasher;
 use std::hash::Hasher;
 use storage_ptr_slice::MutPtrByteSlice;
 use zerocopy::IntoBytes;
-
-const BLOCK_SIZE: usize = 4096;
-const MAX_FILENAME_LEN: usize = 255;
-const MAX_SYMLINK_LEN: usize = 4093;
-const NAME_PADDING: usize = 16;
 
 #[derive(Debug)]
 pub(crate) struct FscryptInoLblk32DirCipher {
@@ -92,37 +86,20 @@ impl Cipher for FscryptInoLblk32DirCipher {
 }
 
 impl FscryptInoLblk32DirCipher {
+    fn iv(&self, object_id: u64) -> [u32; 4] {
+        let mut hasher = SipHasher::new_with_key(&self.ino_hash_key);
+        hasher.write(object_id.as_bytes());
+        [hasher.finish() as u32, 0, 0, 0]
+    }
+
     fn encrypt_filename_with_max_len(
         &self,
         object_id: u64,
         buffer: &mut Vec<u8>,
         max_len: usize,
     ) -> Result<(), Error> {
-        ensure!(buffer.len() <= max_len, "Filename too long");
-
-        let mut hasher = SipHasher::new_with_key(&self.ino_hash_key);
-        hasher.write(object_id.as_bytes());
-        let iv = [hasher.finish() as u32, 0, 0, 0];
-
-        buffer.resize(buffer.len().next_multiple_of(NAME_PADDING), 0);
-
-        let mut cbc = cbc::Encryptor::<aes::Aes256>::new(
-            (&self.cts_key).try_into().unwrap(),
-            iv.as_bytes().try_into().unwrap(),
-        );
-        let inout = InOutBuf::<'_, '_, u8>::from(&mut buffer[..]);
-        let (mut blocks, _): (InOutBuf<'_, '_, Block<aes::Aes256>>, _) = inout.into_chunks();
-        let mut chunks = blocks.get_out();
-        cbc.encrypt_blocks(&mut chunks);
-        if chunks.len() >= 2 {
-            // We are encrypting with CTS.  In most cases, the padding will mean it's a multiple of
-            // NAME_PADDING bytes, so all we need to do is swap the last two chunks.  There is one
-            // exception: when the filename ends up being longer than max_len after padding.  In
-            // that case, all we have to do is trim the end after swapping the last two chunks.
-            chunks.swap(chunks.len() - 1, chunks.len() - 2);
-            buffer.truncate(max_len);
-        }
-        Ok(())
+        let iv = self.iv(object_id);
+        encrypt_filename_cts(&self.cts_key, &iv, buffer, max_len)
     }
 
     fn decrypt_filename_with_max_len(
@@ -131,56 +108,20 @@ impl FscryptInoLblk32DirCipher {
         buffer: &mut Vec<u8>,
         max_len: usize,
     ) -> Result<(), Error> {
-        let alignment = buffer.len() % NAME_PADDING;
-        if alignment != 0 {
-            // For CTS, the only case we need to care about is when the encrypted filename is
-            // max_len bytes. In all other cases, the filename should be a multiple of NAME_PADDING
-            // bytes.
-            ensure!(buffer.len() == max_len, "Unexpected filename length");
-
-            // Decrypt the second to last block.
-            let cipher = aes::Aes256::new((&self.cts_key).try_into().unwrap());
-            let mut out: Block<aes::Aes256> =
-                buffer[max_len - alignment - NAME_PADDING..max_len - alignment].try_into().unwrap();
-            cipher.decrypt_block(&mut out);
-
-            // Copy the extra bytes we need.
-            buffer.extend_from_slice(&out[alignment..]);
-        }
-
-        let mut hasher = SipHasher::new_with_key(&self.ino_hash_key);
-        hasher.write(object_id.as_bytes());
-        let iv = [hasher.finish() as u32, 0, 0, 0];
-
-        let mut cbc = cbc::Decryptor::<aes::Aes256>::new(
-            (&self.cts_key).try_into().unwrap(),
-            iv.as_bytes().try_into().unwrap(),
-        );
-        let inout = InOutBuf::<'_, '_, u8>::from(&mut buffer[..]);
-        let (mut blocks, _): (InOutBuf<'_, '_, Block<aes::Aes256>>, _) = inout.into_chunks();
-        let mut chunks = blocks.get_out();
-        if chunks.len() >= 2 {
-            chunks.swap(chunks.len() - 1, chunks.len() - 2);
-        }
-        cbc.decrypt_blocks(&mut chunks);
-
-        // Strip padding
-        while let Some(0) = buffer.last() {
-            buffer.pop();
-        }
-        Ok(())
+        let iv = self.iv(object_id);
+        decrypt_filename_cts(&self.cts_key, &iv, buffer, max_len)
     }
 }
 
 #[derive(Debug)]
-pub(super) struct FscryptInoLblk32FileCipher {
+pub struct FscryptInoLblk32FileCipher {
     slot: u8,
     ino_hash_key: [u8; 16],
 }
 
 impl FscryptInoLblk32FileCipher {
     pub fn new(key: &UnwrappedKey) -> Self {
-        Self { slot: key[0], ino_hash_key: key[1..17].try_into().unwrap() }
+        Self { slot: key.slot().unwrap(), ino_hash_key: key[..16].try_into().unwrap() }
     }
 
     #[inline(always)]
@@ -310,7 +251,8 @@ impl FscryptSoftwareInoLblk32FileCipher {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_SIZE, FscryptInoLblk32DirCipher, FscryptSoftwareInoLblk32FileCipher, UnwrappedKey,
+        BLOCK_SIZE, FscryptInoLblk32DirCipher, FscryptInoLblk32FileCipher,
+        FscryptSoftwareInoLblk32FileCipher, UnwrappedKey,
     };
     use crate::Cipher;
     use crate::cipher::fscrypt_test_data;
@@ -320,7 +262,7 @@ mod tests {
     #[test]
     fn test_encrypt_filename() {
         let mut unwrapped_key = UnwrappedKey::new([0; 64].to_vec());
-        unwrapped_key.0[0] = 0x10;
+        unwrapped_key[0] = 0x10;
         let cipher: Arc<dyn Cipher> = Arc::new(FscryptInoLblk32DirCipher::new(&unwrapped_key));
         let object_id = 2;
 
@@ -402,7 +344,7 @@ mod tests {
         // cat in.txt
         // ```
         let mut unwrapped_key = UnwrappedKey::new([0; 64].to_vec());
-        unwrapped_key.0[0] = 0x10;
+        unwrapped_key[0] = 0x10;
         let cipher: Arc<dyn Cipher> = Arc::new(FscryptInoLblk32DirCipher::new(&unwrapped_key));
         let object_id = 2;
 
@@ -421,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_generated_filenames() {
-        let cipher: Arc<dyn Cipher> = Arc::new(FscryptInoLblk32DirCipher::new(&UnwrappedKey(
+        let cipher: Arc<dyn Cipher> = Arc::new(FscryptInoLblk32DirCipher::new(&UnwrappedKey::new(
             fscrypt::to_directory_keys(
                 fscrypt_test_data::KEY,
                 fscrypt_test_data::UUID,
@@ -449,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_generated_casefold_filenames() {
-        let unwrapped = UnwrappedKey(
+        let unwrapped = UnwrappedKey::new(
             fscrypt::to_directory_keys(
                 fscrypt_test_data::KEY,
                 fscrypt_test_data::UUID,
@@ -488,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_generated_casefold_symlinks() {
-        let unwrapped = UnwrappedKey(
+        let unwrapped = UnwrappedKey::new(
             fscrypt::to_directory_keys(
                 fscrypt_test_data::KEY,
                 fscrypt_test_data::UUID,
@@ -578,5 +520,30 @@ mod tests {
         // Verify multi-block decrypt restores all blocks at once.
         cipher.decrypt(&mut multi_block_buf, base_tweak).expect("multi-block decrypt failed");
         assert_eq!(multi_block_buf, original_plaintext);
+    }
+
+    #[test]
+    fn test_file_cipher_uses_registered_slot() {
+        let ino_hash_key = [0xab; 16];
+        let unwrapped_with_slot = UnwrappedKey::new_with_slot(ino_hash_key.to_vec(), Some(42));
+        let cipher = FscryptInoLblk32FileCipher::new(&unwrapped_with_slot);
+
+        let (dun, slot) = cipher.crypt_ctx(7, 0, 3 * BLOCK_SIZE as u64).unwrap();
+        assert_eq!(slot, 42);
+        assert_eq!(dun, cipher.tweak(7, 3).into());
+    }
+
+    #[test]
+    fn test_fscrypt_ino_lblk32_file_cipher_dun() {
+        let ino = 0x1234_5678u64;
+        let file_offset = 10 * 4096;
+
+        let cipher_lblk32 = FscryptInoLblk32FileCipher::new(&UnwrappedKey::new_with_slot(
+            vec![0x42u8; 16],
+            Some(5),
+        ));
+        let (dun32, slot32) = cipher_lblk32.crypt_ctx(ino, 0, file_offset).unwrap();
+        assert_eq!(slot32, 5);
+        assert!(dun32 <= u32::MAX as u64);
     }
 }

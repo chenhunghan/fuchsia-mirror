@@ -4,6 +4,8 @@
 
 #include "src/ui/lib/escher/flib/fence_set_listener.h"
 
+#include <lib/zx/counter.h>
+
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
@@ -18,7 +20,7 @@ class FenceSetListenerTest : public gtest::TestLoopFixture {};
 
 TEST_F(FenceSetListenerTest, EmptySet) {
   // Create an empty FenceSetListener.
-  std::vector<zx::event> fence_listeners;
+  std::vector<zx::handle> fence_listeners;
 
   FenceSetListener fence_set_listener(std::move(fence_listeners));
 
@@ -34,7 +36,7 @@ TEST_F(FenceSetListenerTest, EmptySet) {
 
 TEST_F(FenceSetListenerTest, ReadyStateSignalled) {
   // Create an FenceSetListener.
-  std::vector<zx::event> fence_listeners;
+  std::vector<zx::handle> fence_listeners;
   zx::event fence1;
   ASSERT_EQ(ZX_OK, zx::event::create(0, &fence1));
   fence_listeners.push_back(CopyEvent(fence1));
@@ -76,9 +78,34 @@ TEST_F(FenceSetListenerTest, ReadyStateSignalled) {
   ASSERT_TRUE(signalled);
 }
 
+TEST_F(FenceSetListenerTest, ReadyStateSignalledCounter) {
+  zx::counter counter;
+  ASSERT_EQ(ZX_OK, zx::counter::create(0, &counter));
+  zx::counter counter_copy;
+  ASSERT_EQ(ZX_OK, counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_copy));
+
+  std::vector<zx::handle> fence_listeners;
+  fence_listeners.push_back(std::move(counter));
+
+  FenceSetListener fence_set_listener(std::move(fence_listeners));
+
+  bool signalled = false;
+  fence_set_listener.WaitReadyAsync([&signalled]() { signalled = true; });
+
+  RunLoopUntilIdle();
+  ASSERT_FALSE(fence_set_listener.ready());
+  ASSERT_FALSE(signalled);
+
+  counter_copy.signal(0u, ZX_COUNTER_SIGNALED);
+
+  RunLoopUntilIdle();
+  EXPECT_TRUE(fence_set_listener.ready());
+  ASSERT_TRUE(signalled);
+}
+
 TEST_F(FenceSetListenerTest, DestroyWhileWaiting) {
   // Create an FenceSetListener.
-  std::vector<zx::event> fences;
+  std::vector<zx::handle> fences;
   zx::event fence1;
   ASSERT_EQ(ZX_OK, zx::event::create(0, &fence1));
   fences.push_back(CopyEvent(fence1));
@@ -120,7 +147,7 @@ TEST_F(FenceSetListenerTest, DestroyWhileNotWaiting) {
   bool signalled = false;
   {
     // Create an FenceSetListener.
-    std::vector<zx::event> fences;
+    std::vector<zx::handle> fences;
     FenceSetListener fence_set_listener(std::move(fences));
 
     // Start waiting for signal events.
@@ -138,7 +165,7 @@ TEST_F(FenceSetListenerTest, DestroyInClosureWithEmptyFenceList) {
   bool deleted = false;
   {
     // Create an FenceSetListener.
-    std::vector<zx::event> fences;
+    std::vector<zx::handle> fences;
     auto fence_set_listener =
         std::unique_ptr<FenceSetListener, std::function<void(FenceSetListener*)>>(
             new FenceSetListener(std::move(fences)), [&deleted](FenceSetListener* listener) {
@@ -165,7 +192,7 @@ TEST_F(FenceSetListenerTest, DestroyInClosureWithUnsignalledFence) {
   bool deleted = false;
   {
     // Create an FenceSetListener with one fence.
-    std::vector<zx::event> fences;
+    std::vector<zx::handle> fences;
     zx::event fence;
     ASSERT_EQ(ZX_OK, zx::event::create(0, &fence));
     fences.push_back(CopyEvent(fence));
@@ -197,7 +224,7 @@ TEST_F(FenceSetListenerTest, DestroyInClosureWithSignalledFence) {
   bool deleted = false;
   {
     // Create an FenceSetListener with one fence.
-    std::vector<zx::event> fences;
+    std::vector<zx::handle> fences;
     zx::event fence;
     ASSERT_EQ(ZX_OK, zx::event::create(0, &fence));
     fence.signal(0u, kFenceSignalled);

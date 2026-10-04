@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Checks the migration commit message:
+#   subject: [bazel_migration][<subsystem>] //<migrated/dir>
+#            or [bazel_migration] //<migrated/dir> when the directory's git log
+#            shows no established subsystem tag (there is no parent subsystem).
+#            A target dir build/secondary/<dir> (GN-only overlay) migrates to
+#            //<dir> (gn_secondary_tree). A change that modifies no file versus
+#            its parent migrates nothing: INFO instead of subject findings.
+#   Test: footers: `fx bazel` commands need --config=..., Bazel labels start
+#            with @//, no redundant //a/b:b labels, bazel2gn verification is
+#            the single line `Test: fx bazel2gn`, listed last.
+# Only runs when HEAD is the task's own commit (PLANTER_CHANGE_BASE != HEAD).
+
+WORKDIR="${PLANTER_WORKDIR:-.}"
+TARGET_DIR="${PLANTER_TARGET_DIR:-}"
+BASE="${PLANTER_CHANGE_BASE:-HEAD}"
+
+python3 - "$WORKDIR" "$TARGET_DIR" "$BASE" <<'PYEOF'
+import collections, json, re, subprocess, sys
+
+workdir, target_dir, base = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def git(*args):
+    try:
+        return subprocess.run(["git", "-C", workdir, *args], capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:
+        return ""
+
+findings = []
+
+def add(category, line, message, remediation, severity="warning"):
+    findings.append({
+        "source": "commit_message_format",
+        "category": category,
+        "severity": severity,
+        "file": "/COMMIT_MSG",
+        "line": line,
+        "message": message,
+        "remediation": remediation,
+    })
+
+head = git("rev-parse", "HEAD")
+base_rev = git("rev-parse", base)
+if head and base_rev and head != base_rev:
+    msg = git("log", "-1", "--format=%B", "HEAD")
+    lines = msg.splitlines()
+    subject = lines[0] if lines else ""
+    raw_dirs = [d.strip().strip("/") for d in target_dir.split(",") if d.strip().strip("/")]
+    # build/secondary/<dir> is GN's overlay for //<dir> and must not get Bazel files
+    # (gn_secondary_tree): its code migrates to //<dir> (e.g. //third_party/<name>).
+    dirs = [d[len("build/secondary/"):] if d.startswith("build/secondary/") else d for d in raw_dirs]
+    first = dirs[0] if dirs else "<dir>"
+    changed = [f for f in git("diff", "--name-only", base_rev, "HEAD").splitlines() if f]
+
+    # Subsystem tags used by earlier commits touching the directory.
+    tags = collections.Counter()
+    if dirs:
+        log = git("log", "-n", "200", "--format=%s", base_rev, "--", *dict.fromkeys(raw_dirs + dirs))
+        for s in log.splitlines():
+            for t in re.findall(r"\[([A-Za-z0-9_.\-]+)\]", s):
+                if t.lower() not in ("bazel_migration", "bazel", "build", "gn", "roll", "release"):
+                    tags[t] += 1
+    common = [t for t, n in tags.most_common() if n >= 2]
+    shown = " ".join(dict.fromkeys(raw_dirs[:1] + dirs[:1])) or "<dir>"
+    hint = (f"Tags used for this directory in `git log --format=%s -- {shown}`: "
+            + ", ".join(f"[{t}]" for t in common[:5]) + ".") if common else (
+            f"`git log --format=%s -- {shown}` shows no recurring subsystem tag.")
+    moved = [f"//{r} -> //{d}" for r, d in zip(raw_dirs, dirs) if r != d]
+    if moved:
+        hint += (" GN overlay directories migrate to the directory they overlay (gn_secondary_tree): "
+                 + ", ".join(moved) + ".")
+
+    leaves = [d.rsplit("/", 1)[-1] for d in dirs]
+    m_tag = re.match(r"^\[bazel_migration\]\[([A-Za-z0-9_.\-]+)\] //\S+$", subject)
+    m_none = re.match(r"^\[bazel_migration\] //\S+$", subject)
+    if not changed and not git("status", "--porcelain", "--ignore-submodules=all"):
+        add("commit_subject_empty_change", 1,
+            "The change modifies no file versus its parent, so nothing is migrated and the "
+            "'[bazel_migration] //<migrated dir>' subject is not required.",
+            "Do not announce a migration that did not happen: keep a subject that describes the commit and "
+            "report the blocker and the steps it needs first in the summary. Once the change migrates "
+            f"targets, use '[bazel_migration][<subsystem>] //{first}'. {hint}", severity="info")
+    elif not (m_tag or m_none):
+        add("commit_subject_format", 1,
+            f"Commit subject {subject!r} does not follow '[bazel_migration][<subsystem>] //<migrated dir>' "
+            "(or '[bazel_migration] //<migrated dir>' when there is no established subsystem).",
+            f"Use '[bazel_migration][<subsystem>] //{first}' with <subsystem> taken from the directory's git log "
+            "history (prefer the broader subsystem over a leaf directory or crate name); if the history has no "
+            f"recurring tag and no parent directory is a subsystem, use '[bazel_migration] //{first}'. {hint}")
+    elif m_tag and m_tag.group(1) in leaves and not [t for t in common if t not in leaves]:
+        add("commit_subject_leaf_tag", 1,
+            f"Commit subject tag [{m_tag.group(1)}] is just the leaf directory name, which may be too narrow to be "
+            "a subsystem tag.",
+            f"Keep it only if the history shows it is an established subsystem; otherwise, with no parent "
+            f"subsystem, use '[bazel_migration] //{first}'. {hint}")
+    elif m_none and [t for t in common if t not in leaves]:
+        add("commit_subject_missing_tag", 1,
+            "Commit subject has no subsystem tag although the directory's git log uses one.",
+            f"Use '[bazel_migration][<subsystem>] //{first}'. {hint}")
+
+    test_lines = [(i + 1, l) for i, l in enumerate(lines) if l.startswith("Test:")]
+    for ln, l in test_lines:
+        cmd = l[len("Test:"):].strip()
+        if re.search(r"\bfx bazel (build|test|run|query|cquery)\b", cmd) and "--config=" not in cmd:
+            add("test_footer_bazel_no_config", ln,
+                f"`Test:` footer `{cmd}` runs `fx bazel` without `--config=...`, which is invalid.",
+                "Pass `--config=fuchsia_platform` (device) or `--config=host`, e.g. "
+                "`fx bazel test --config=fuchsia_platform @//<dir>:<test>`; record only commands that exited 0.")
+        if re.search(r"\bfx bazel\b", cmd) and re.search(r"(?<![@\w])//", cmd):
+            add("test_footer_label_without_at", ln,
+                f"`Test:` footer `{cmd}` passes Bazel labels without a leading `@`.",
+                "Write Bazel labels as `@//<dir>:<target>` in `fx bazel ...` commands.")
+        for pkg, name in re.findall(r"@?//([\w./\-]+):([\w.\-]+)", cmd):
+            if pkg.rsplit("/", 1)[-1] == name:
+                add("test_footer_redundant_label", ln,
+                    f"`Test:` footer label `//{pkg}:{name}` repeats the package name.",
+                    f"Write `//{pkg}` instead of `//{pkg}:{name}`.")
+        if re.search(r"\bfx bazel2gn\s+\S", cmd) or re.search(r"bazel2gn_verifications|verify_bazel2gn", cmd):
+            add("test_footer_bazel2gn_form", ln,
+                f"`Test:` footer `{cmd}` verifies bazel2gn in a narrower or indirect form.",
+                "Use the single line `Test: fx bazel2gn` (covers all bazel2gn targets).")
+        if re.search(r"\bfx bazel build\b.*:all\b", cmd):
+            add("test_footer_build_all_not_test", ln,
+                f"`Test:` footer `{cmd}` builds `:all` instead of building or running the migrated test target.",
+                "Name the test target: `fx bazel test --config=fuchsia_platform @//<dir>:<test>` if it runs, else "
+                "`fx bazel build ...`; add `fx bazel test --config=host @//<dir>:<test>` when the target can build "
+                "for host (no target_compatible_with restriction).")
+    # Test footers: prefer an ancestor test_suite() that includes the migrated tests.
+    suites, has_tests = [], False
+    for d in dirs:
+        try:
+            with open(f"{workdir}/{d}/BUILD.bazel") as fh:
+                own = fh.read()
+            has_tests |= bool(re.search(r'with_host_unit_tests\s*=\s*True|with_unit_tests\s*=\s*"(host|both|fuchsia)"'
+                                        r'|^\s*(host_\w*test|rustc_test|fx_test|test_suite)\(', own, re.M))
+        except OSError:
+            pass
+        parts = d.split("/")
+        for i in range(len(parts) - 1, 0, -1):
+            anc = "/".join(parts[:i])
+            try:
+                with open(f"{workdir}/{anc}/BUILD.bazel") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            for blk in re.findall(r"^test_suite\((.*?)^\)", text, re.M | re.S):
+                n = re.search(r'^\s*name\s*=\s*"([^"]+)"', blk, re.M)
+                if n and re.search(r'"@?//' + re.escape(d) + r'[:"]', blk):
+                    suites.append((anc, n.group(1)))
+    def names_suite(l, a, n):
+        return f"//{a}:{n}" in l or (n == a.rsplit("/", 1)[-1] and re.search(r"//" + re.escape(a) + r"(?![\w/:.-])", l))
+    if suites and test_lines and not any(names_suite(l, a, n) for _, l in test_lines for a, n in suites):
+        a, n = suites[-1]
+        add("test_footer_not_ancestor_suite", test_lines[0][0],
+            f"`Test:` footers run the migrated tests directly, but the ancestor `test_suite()` //{a}:{n} includes them.",
+            f"Prefer the higher-level suite, e.g. `Test: fx bazel test --config=host @//{a}:{n}`, or the GN group that "
+            "depends on it through a `bazel_test_suite` (e.g. `Test: fx test --host //<pkg>:tests`), which also runs "
+            "remaining GN tests. Use it only after verifying the new tests run as a result, and state the dependency "
+            "chain in the body before the footers.")
+    if dirs and has_tests and not suites:
+        add("migrated_tests_not_in_ancestor_suite", 1,
+            "No ancestor BUILD.bazel `test_suite()` includes the migrated tests.",
+            "Add the migrated tests to the appropriate `test_suite()` in an ancestor directory's BUILD.bazel (the one "
+            "already wired into a GN `bazel_test_suite`). If none exists (e.g. first migration in the area), do not "
+            "invent one: say in the summary that the developer must choose or define the `test_suite()` (possibly "
+            "consulting the Build team).", severity="info")
+    # Body: changes not specific to the migrated targets must be described.
+    body = "\n".join(l for l in lines[1:] if not re.match(r"^(Test|Bug|Fixed|Change-Id|Multiply|Cq-[\w-]+):", l))
+    in_dirs = lambda f: any(f == d or f.startswith(d + "/") for d in dirs)
+    for f in changed:
+        if in_dirs(f) or not (f.endswith(".bzl") or f.rsplit("/", 1)[-1] == "MODULE.bazel"):
+            continue
+        if f not in body and f.rsplit("/", 1)[-1] not in body:
+            add("commit_body_unmentioned_shared_change", 1,
+                f"The change edits `{f}`, which is not specific to the migrated targets, but the commit body "
+                "does not mention it.",
+                f"Describe the `{f}` change and why it is needed in the body (one bullet per topic). Wiring edits "
+                "(parent BUILD files, `*.gni` lists, verification registration) need no mention. Keep the body in "
+                "sync as changes are added or removed during review. First confirm the shared edit is needed at "
+                "all (e.g. test-only files belong in `test_data`, not in a rule edit forwarding `data`).")
+    # Body: name only the rules/macros actually called in the migrated BUILD.bazel files.
+    called = set()
+    for d in dirs:
+        try:
+            with open(f"{workdir}/{d}/BUILD.bazel") as fh:
+                called |= set(re.findall(r"^\s*([A-Za-z_]\w*)\(", fh.read(), re.M))
+        except OSError:
+            pass
+    if dirs and called:
+        for rule in sorted(set(re.findall(r"(?<![\w.])(rust_(?:library|binary|test|proc_macro)|cc_(?:library|binary|test))(?![\w.])", body))):
+            if rule not in called:
+                add("commit_body_uncalled_rule", 1,
+                    f"The commit body names `{rule}`, which no migrated BUILD.bazel calls directly.",
+                    "Name only the rules/macros that define targets in BUILD.bazel, written as `rustc_library()`; "
+                    "say which attribute generates implicit targets (e.g. `with_host_unit_tests = True` generates "
+                    "\"lib_test\"). Refer to targets by name and give the crate name separately when different "
+                    "(target \"lib\" (crate name \"foo\")); put identifiers in backticks or quotes.")
+    # Body: a crate_name that differs from its target name must not be presented as a target name.
+    crates = {}
+    for d in dirs:
+        try:
+            with open(f"{workdir}/{d}/BUILD.bazel") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for blk in re.findall(r"^[A-Za-z_]\w*\((.*?)^\)", text, re.M | re.S):
+            n = re.search(r'^\s*name\s*=\s*"([^"]+)"', blk, re.M)
+            c = re.search(r'^\s*crate_name\s*=\s*"([^"]+)"', blk, re.M)
+            if n and c and n.group(1) != c.group(1):
+                crates[c.group(1)] = n.group(1)
+    for crate, tgt in sorted(crates.items()):
+        for m in re.finditer(r"(?<![\w/.:-])" + re.escape(crate) + r"(_test)?(?![\w-])", body):
+            if not re.search(r"\bcrate\b", body[max(0, m.start() - 40):m.end() + 20], re.I):
+                add("commit_body_crate_name_as_target", 1,
+                    f"The commit body names `{m.group(0)}` like a target, but `{crate}` is the crate_name of target "
+                    f"\"{tgt}\" (its unit test target is \"{tgt}_test\").",
+                    f"Refer to the target by name and give the crate name separately, e.g. target \"{tgt}\" "
+                    f"(crate name \"{crate}\"), and say which attribute generates \"{tgt}_test\".")
+                break
+    b2g = [ln for ln, l in test_lines if re.search(r"\bfx bazel2gn\b|bazel2gn_verifications|verify_bazel2gn", l)]
+    if b2g and test_lines and b2g[-1] != test_lines[-1][0]:
+        add("test_footer_bazel2gn_not_last", b2g[-1],
+            "The bazel2gn verification `Test:` line is not last.",
+            "Group build/test commands together and put `Test: fx bazel2gn` last.")
+print(json.dumps(findings, indent=2))
+PYEOF

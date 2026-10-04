@@ -330,7 +330,7 @@ impl Transformer {
         input: TokenStream,
     ) -> Result<Transformer, Error> {
         let args = Args::parse(args)?;
-        let ItemFn { attrs, vis, sig, block } = syn::parse2(input)?;
+        let ItemFn { attrs, vis, sig, block, modifiers: _ } = syn::parse2(input)?;
         let is_async = sig.asyncness.is_some();
 
         let err = |message| Err(Error::new(sig.ident.span(), message));

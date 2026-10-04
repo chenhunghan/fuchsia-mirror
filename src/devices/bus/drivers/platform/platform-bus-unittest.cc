@@ -183,6 +183,17 @@ void BootItems::Get2(Get2RequestView request, Get2Completer::Sync& completer) {
     return;
   }
   std::vector<fuchsia_boot::wire::RetrievedItems> result;
+  if (request->type == ZBI_TYPE_DRV_BOARD_INFO) {
+    const zbi_board_info_t kEarlierBoardInfo = {.revision = BOARD_REVISION_TEST + 1};
+    zx::vmo earlier_vmo;
+    ASSERT_OK(zx::vmo::create(sizeof(kEarlierBoardInfo), 0, &earlier_vmo));
+    ASSERT_OK(earlier_vmo.write(&kEarlierBoardInfo, 0, sizeof(kEarlierBoardInfo)));
+    result.push_back({
+        .payload = std::move(earlier_vmo),
+        .length = sizeof(kEarlierBoardInfo),
+        .extra = extra,
+    });
+  }
   fuchsia_boot::wire::RetrievedItems items = {
       .payload = std::move(vmo), .length = length, .extra = extra};
   result.emplace_back(std::move(items));
@@ -703,6 +714,14 @@ TEST(PlatformBusTest2, GetMmioIndexNoMmios) {
     auto result = platform_bus::GetMmioIndex(node, "none");
     ASSERT_FALSE(result.has_value());
   }
+}
+
+TEST_F(PlatformBusTest, BoardInfoRevision) {
+  fdf::Arena arena('TEST');
+  auto result = pbus().buffer(arena)->GetBoardInfo();
+  ASSERT_TRUE(result.ok());
+  ASSERT_TRUE(result->is_ok());
+  EXPECT_EQ(result->value()->info.board_revision, static_cast<uint32_t>(BOARD_REVISION_TEST));
 }
 
 }  // namespace

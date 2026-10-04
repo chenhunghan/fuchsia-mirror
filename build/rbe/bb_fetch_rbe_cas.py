@@ -27,12 +27,12 @@ _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
 
 PROJECT_ROOT = fuchsia.project_root_dir()
-PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, start=os.curdir)
+PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, start=Path(os.curdir))
 
 _REPROXY_CFG = _SCRIPT_DIR / "fuchsia-reproxy.cfg"
 
 
-def msg(text: str):
+def msg(text: str) -> None:
     print(f"[{_SCRIPT_BASENAME}] {text}")
 
 
@@ -143,17 +143,20 @@ def fetch_artifact_from_reproxy_log(
 def _main(
     bbpath: Path,
     cfg: Path,
-    bbid: str = None,
-    reproxy_log: Path = None,
-    artifact_path: Path = None,
-    output: Path = None,
+    bbid: str | None = None,
+    reproxy_log: Path | None = None,
+    artifact_path: Path | None = None,
+    output: Path | None = None,
     verbose: bool = False,
 ) -> int:
-    reproxy_log = reproxy_log or bbtool.fetch_reproxy_log_from_bbid(
-        bbpath=bbpath,
-        bbid=bbid,
-        verbose=verbose,
-    )
+    if reproxy_log is None:
+        # --bbid and --reproxy_log are a required mutually exclusive group.
+        assert bbid is not None
+        reproxy_log = bbtool.fetch_reproxy_log_from_bbid(
+            bbpath=bbpath,
+            bbid=bbid,
+            verbose=verbose,
+        )
     if reproxy_log is None:
         return 1
 

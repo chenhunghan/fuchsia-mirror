@@ -40,6 +40,11 @@ impl DynamicFileSource for CpuinfoFile {
                 {
                     unreachable!("32-bit programs are only supported on ARM.")
                 }
+            } else {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    arm64_write_features(sink, current_task.kernel().hwcaps.arch64)?;
+                }
             }
             writeln!(sink)?;
         }
@@ -84,6 +89,67 @@ fn arm32_write_features(
         "i8mm",
     ];
     const HWCAP2_STRINGS: [&str; 7] = ["aes", "pmull", "sha1", "sha2", "crc32", "sb", "ssbs"];
+
+    for i in 0..HWCAP_STRINGS.len() {
+        if hwcap.hwcap & (1 << i) != 0 {
+            write!(sink, " {}", HWCAP_STRINGS[i])?;
+        }
+    }
+    for i in 0..HWCAP2_STRINGS.len() {
+        if hwcap.hwcap2 & (1 << i) != 0 {
+            write!(sink, " {}", HWCAP2_STRINGS[i])?;
+        }
+    }
+    writeln!(sink)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+fn arm64_write_features(
+    sink: &mut DynamicFileBuf,
+    hwcap: starnix_core::task::HwCap,
+) -> Result<(), Errno> {
+    write!(sink, "Features\t:")?;
+    const HWCAP_STRINGS: [&str; 32] = [
+        "fp", "asimd", "evtstrm", "aes", "pmull", "sha1", "sha2", "crc32", "atomics", "fphp",
+        "asimdhp", "cpuid", "asimdrdm", "jscvt", "fcma", "lrcpc", "dcpop", "sha3", "sm3", "sm4",
+        "asimddp", "sha512", "sve", "asimdfhm", "dit", "uscat", "ilrcpc", "flagm", "ssbs", "sb",
+        "paca", "pacg",
+    ];
+    const HWCAP2_STRINGS: [&str; 32] = [
+        "dcpodp",
+        "sve2",
+        "sveaes",
+        "svepmull",
+        "svebitperm",
+        "svesha3",
+        "svesm4",
+        "flagm2",
+        "frint",
+        "svei8mm",
+        "svef32mm",
+        "svef64mm",
+        "svebf16",
+        "i8mm",
+        "bf16",
+        "dgh",
+        "rng",
+        "bti",
+        "mte",
+        "ecv",
+        "afp",
+        "rpres",
+        "mte3",
+        "sme",
+        "smei16i64",
+        "smef64f64",
+        "smei8i32",
+        "smef16f32",
+        "smeb16f32",
+        "smef32f32",
+        "smefa64",
+        "wfxt",
+    ];
 
     for i in 0..HWCAP_STRINGS.len() {
         if hwcap.hwcap & (1 << i) != 0 {

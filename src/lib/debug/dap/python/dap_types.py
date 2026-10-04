@@ -5,6 +5,7 @@
 from typing import Any, Literal
 
 SteppingGranularity = Literal["statement", "line", "instruction"]
+DataBreakpointAccessType = Literal["read", "write", "readWrite"]
 
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
@@ -164,3 +165,21 @@ class Breakpoint(DapBaseModel):
     end_column: int | None = None
     instruction_reference: str | None = None
     offset: int | None = None
+
+
+class DataBreakpoint(DapBaseModel):
+    """Properties of a data breakpoint passed to the `setDataBreakpoints` request.
+
+    Attributes:
+        data_id: An id representing the data. This id is returned from the
+            `dataBreakpointInfo` request.
+        access_type: The access type of the data ('read' | 'write' | 'readWrite').
+        condition: An optional expression for conditional breakpoints.
+        hit_condition: An optional expression that controls how many times the
+            breakpoint must be hit.
+    """
+
+    data_id: str
+    access_type: DataBreakpointAccessType | None = None
+    condition: str | None = None
+    hit_condition: str | None = None

@@ -42,6 +42,7 @@ const StorageSize kMaxLogLineSize =
     StorageSize::Bytes(Format(BuildLogMessage(FUCHSIA_LOG_INFO, "line X").value()).size());
 
 const StorageSize kMaxDecompressedSize = StorageSize::Kilobytes(256);
+const StorageSize kTotalLogSize = StorageSize::Kilobytes(256);
 
 std::unique_ptr<Encoder> MakeIdentityEncoder() {
   return std::unique_ptr<Encoder>(new IdentityEncoder());
@@ -139,7 +140,7 @@ TEST(ReaderTest, SortsMessages) {
   IdentityRedactor redactor(inspect::BoolProperty{});
   LogMessageStore store(StorageSize::Kilobytes(8), StorageSize::Kilobytes(8), &redactor,
                         MakeIdentityEncoder());
-  SystemLogWriter writer(temp_dir.path(), 1u, std::make_unique<IdentityDecoder>());
+  SystemLogWriter writer(temp_dir.path(), 1u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::msec(0))));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::msec(3))));
@@ -206,7 +207,7 @@ TEST(ReaderTest, SortsMessagesMultipleFiles) {
   // Set the block and buffer to both hold 4 log messages.
   IdentityRedactor redactor(inspect::BoolProperty{});
   LogMessageStore store(kMaxLogLineSize * 4, kMaxLogLineSize * 4, &redactor, MakeIdentityEncoder());
-  SystemLogWriter writer(temp_dir.path(), 8u, std::make_unique<IdentityDecoder>());
+  SystemLogWriter writer(temp_dir.path(), 8u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::msec(0))));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::msec(3))));

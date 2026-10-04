@@ -11,7 +11,7 @@ type Point = struct {
 };
 
 type StructWithZxField = struct {
-    status zx.Status;
+    status zx.Result;
 };
 
 type Direction = strict enum : uint32 {
@@ -31,13 +31,13 @@ closed protocol Drawing {
     strict DrawLots(resource struct {
         commands zx.Handle:VMO;
     }) -> (struct {
-        result zx.Status;
+        result zx.Result;
         p Point;
     });
     strict DrawArray(struct {
         points array<Point, 4>;
     }) -> (struct {
-        rv zx.Status;
+        rv zx.Result;
     });
     strict Describe(struct {
         one string:64;

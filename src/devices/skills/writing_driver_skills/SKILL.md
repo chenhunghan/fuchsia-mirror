@@ -136,8 +136,8 @@ Ensure that related skills are cross-linked.
 
 ### 12. Follow Project Language Rules
 
-* **Adhere to GEMINI.md**: Ensure all code snippets adhere to the
-  Fuchsia-specific coding style and constraints defined in `GEMINI.md`.
+* **Adhere to AGENTS.md**: Ensure all code snippets adhere to the
+  Fuchsia-specific coding style and constraints defined in `AGENTS.md`.
 
 ### 13. Tone and Style
 

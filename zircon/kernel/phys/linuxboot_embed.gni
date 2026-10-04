@@ -1,0 +1,153 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+# Define an action() target to embed images with a linuxboot phys_executable().
+#
+# This combines a phys_executable() using linuxboot (arm64 or riscv64)
+#
+# Parameters
+#
+#   * shim_binary
+#     - Required: The raw Linux-compatible binary image, as produced by the
+#     image_binary() target inside phys_executable().
+#     Actually mutually exclusive with $shim_label; exactly one is required.
+#     - Type: path
+#
+#   * shim_label
+#     - Optional: phys_executable() defined in earlier in the same file;
+#     just uses get_target_outputs(shim_label) to set $shim_binary.
+#     - Type: label
+#
+#   * inputs
+#     - Required: Files to be concatenated as data for the shim to see.
+#     - Type: list(path)
+#
+#   * output_dir
+#     - Optional: Directory where the image will be written.
+#     - Type: path
+#     - Default: $target_out_dir
+#
+#   * output_extension
+#     - Optional: Extension to append to $output_name (after a dot unless "").
+#     - Type: string
+#     - Default: "bin"
+#
+#   * output_name
+#     - Optional: File name within $output_dir where the image will be written.
+#     - Type: path
+#     - Default: $target_name
+#
+#   * deps
+#     - Optional: Anything necessary to use $shim_binary and $inputs as inputs.
+#
+#   * images_metadata, release_output, emulator_support_aib
+#     - Optional: As for phys_executable().
+#     - Type: list(scope)
+#
+#   * data_deps, metadata, public_deps, visibility, testonly, validations
+#     - Optional: Usual GN meanings.
+#
+template("linuxboot_embed") {
+  if (defined(invoker.shim_binary)) {
+    shim_binary = invoker.shim_binary
+  } else {
+    shim_outputs = get_target_outputs(invoker.shim_label)
+    shim_binary = shim_outputs[0]
+  }
+
+  if (defined(invoker.output_dir)) {
+    output_dir = invoker.output_dir
+  } else {
+    output_dir = target_out_dir
+  }
+  if (defined(invoker.output_extension)) {
+    output_extension = invoker.output_extension
+  } else {
+    output_extension = "bin"
+  }
+  if (defined(invoker.output_name)) {
+    output_name = invoker.output_name
+  } else {
+    output_name = target_name
+  }
+
+  output_file = "$output_dir/$output_name"
+  if (output_extension != "") {
+    output_file += ".$output_extension"
+  }
+
+  action(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "data_deps",
+                             "deps",
+                             "public_deps",
+                             "testonly",
+                             "validations",
+                             "visibility",
+                           ])
+    if (!defined(deps)) {
+      deps = []
+    }
+    if (defined(invoker.shim_label)) {
+      deps += [ invoker.shim_label ]
+    }
+
+    script = "//zircon/kernel/phys/linuxboot-embed.py"
+    outputs = [ output_file ]
+    sources = [ shim_binary ] + invoker.inputs
+    args = [
+             "--output=" + rebase_path(output_file, root_build_dir),
+             "--shim=" + rebase_path(shim_binary, root_build_dir),
+           ] + rebase_path(invoker.inputs, root_build_dir)
+    metadata = {
+      images = []
+
+      if (defined(invoker.metadata)) {
+        forward_variables_from(invoker.metadata, "*")
+      }
+
+      # For the //:images build_api_module(), as in phys_executable().
+      images += [
+        {
+          name = target_name
+          label = get_label_info(":$target_name", "label_with_toolchain")
+          cpu = current_cpu
+
+          # Botanist needs this exact value for images used as QEMU kernels.
+          type = "kernel"
+
+          # The caller can override those values and/or add others.
+          if (defined(invoker.images_metadata)) {
+            forward_variables_from(invoker.images_metadata, "*")
+          }
+
+          # The caller can't override `path` since that would
+          # not refer to this target's output any more.
+          path = rebase_path(output_file, root_build_dir)
+        },
+      ]
+      if (defined(invoker.release_output) && invoker.release_output) {
+        exported_files = [
+          {
+            name = target_name
+            path = rebase_path(output_file, root_build_dir)
+          },
+        ]
+      }
+      if (defined(invoker.emulator_support_aib) &&
+          invoker.emulator_support_aib) {
+        emulator_support_aib_input_barrier = []
+        emulator_support_aib_input = [
+          {
+            label = get_label_info(":$target_name", "label_with_toolchain")
+            path = rebase_path(output_file, root_build_dir)
+          },
+        ]
+      }
+    }
+  }
+}

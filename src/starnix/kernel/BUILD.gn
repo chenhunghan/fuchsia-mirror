@@ -53,6 +53,7 @@ rustc_binary("starnix_kernel_bin") {
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-fs",
+    "//src/lib/fuchsia-rcu",
     "//src/lib/fuchsia-runtime",
     "//src/lib/trace/rust:trace",
     "//src/lib/trace/rust:trace-provider",
@@ -68,8 +69,6 @@ rustc_binary("starnix_kernel_bin") {
     "//third_party/rust_crates:uuid",
     "//zircon/system/ulib/inspector",
   ]
-
-  test_deps = [ "//src/lib/fuchsia-rcu" ]
 
   sources = [
     "lockup_detector.rs",

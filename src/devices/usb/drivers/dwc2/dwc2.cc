@@ -224,9 +224,6 @@ void Dwc2::HandleReset() {
 
     // Flush All other endpoint TX FIFOs.
     FlushTxFifo(0x10);
-
-    // Flush the learning queue
-    GRSTCTL::Get().FromValue(0).set_intknqflsh(1).WriteTo(mmio);
   }
 
   // Enable interrupts for only EPO IN and OUT
@@ -463,10 +460,10 @@ zx_status_t Dwc2::HandleSetupRequest(size_t* out_actual) {
 
   zx::duration elapsed;
   zx::time_boot now;
-  if (cur_setup_.bm_request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE)) {
+  if (cur_setup_.bm_request_type == kStandardDeviceOut) {
     // Handle some special setup requests in this driver
     switch (cur_setup_.b_request) {
-      case USB_REQ_SET_ADDRESS:
+      case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress):
         fdf::info("SET_ADDRESS {}", cur_setup_.w_value);
         SetAddress(static_cast<uint8_t>(cur_setup_.w_value));
         now = zx::clock::get_boot();
@@ -481,7 +478,7 @@ zx_status_t Dwc2::HandleSetupRequest(size_t* out_actual) {
         }
         *out_actual = 0;
         return ZX_OK;
-      case USB_REQ_SET_CONFIGURATION:
+      case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration):
         fdf::info("SET_CONFIGURATION {}", cur_setup_.w_value);
         configured_ = true;
         if (dci_intf_.is_valid()) {
@@ -501,7 +498,7 @@ zx_status_t Dwc2::HandleSetupRequest(size_t* out_actual) {
     }
   }
 
-  bool is_in = ((cur_setup_.bm_request_type & USB_DIR_MASK) == USB_DIR_IN);
+  bool is_in = usb_request_is_in(cur_setup_.bm_request_type);
   auto length = le16toh(cur_setup_.w_length);
 
   if (dci_intf_.is_valid()) {
@@ -745,7 +742,7 @@ void Dwc2::EnableEp(uint8_t ep_num, bool enable) {
 
 void Dwc2::HandleEp0Setup() {
   auto length = letoh16(cur_setup_.w_length);
-  bool is_in = ((cur_setup_.bm_request_type & USB_DIR_MASK) == USB_DIR_IN);
+  bool is_in = usb_request_is_in(cur_setup_.bm_request_type);
   size_t actual = 0;
 
   // No data to read, can handle setup now
@@ -908,8 +905,15 @@ void Dwc2::SoftDisconnect() {
 // being, the recovery logic involves a soft port disconnect and controller reset. This appears to
 // the host as a unplug-replug event.
 void Dwc2::HandleEp0TimeoutRecovery() {
-  std::lock_guard<std::mutex> _(lock_);
+  // SetConnected(false) must be called without holding lock_.
+  // The lock hierarchy (dwc2.h) requires that endpoint locks are acquired before lock_.
+  // SetConnected(false) notifies the DCI interface (which causes function drivers like
+  // usb-cdc-function to cancel endpoints, acquiring ep->lock then lock_) and completes
+  // pending endpoint requests under ep->lock. Calling SetConnected(false) outside lock_
+  // prevents an AB-BA deadlock.
   SetConnected(false);
+
+  std::lock_guard<std::mutex> _(lock_);
   SoftDisconnect();
   ep0_state_ = Ep0State::DISCONNECTED;
   zx::nanosleep(zx::deadline_after(zx::msec(50)));
@@ -1044,8 +1048,6 @@ zx::result<> Dwc2::InitController() {
   FlushTxFifo(0x10);
   FlushRxFifo();
 
-  GRSTCTL::Get().FromValue(0).set_intknqflsh(1).WriteTo(mmio);
-
   // Clear all pending device interrupts
   DIEPMSK::Get().FromValue(0).WriteTo(mmio);
   DOEPMSK::Get().FromValue(0).WriteTo(mmio);
@@ -1079,7 +1081,7 @@ zx::result<> Dwc2::InitController() {
 }
 
 void Dwc2::SetConnected(bool connected) {
-  if (connected == connected_) {
+  if (connected_.exchange(connected) == connected) {
     return;
   }
 
@@ -1128,8 +1130,6 @@ void Dwc2::SetConnected(bool connected) {
       }
     }
   }
-
-  connected_ = connected;
 }
 
 zx_status_t Dwc2::Init(fdf::DriverContext& context, const dwc2_config::Config& config) {
@@ -1454,8 +1454,10 @@ void Dwc2::StartController(StartControllerCompleter::Sync& completer) {
 }
 
 void Dwc2::StopController(StopControllerCompleter::Sync& completer) {
-  std::lock_guard<std::mutex> _(lock_);
+  // SetConnected(false) must be called outside lock_ to preserve the endpoint lock hierarchy.
   SetConnected(false);
+
+  std::lock_guard<std::mutex> _(lock_);
   SoftDisconnect();
   ep0_state_ = Ep0State::DISCONNECTED;
   zx::nanosleep(zx::deadline_after(zx::msec(50)));
@@ -1476,11 +1478,11 @@ void Dwc2::ConfigureEndpoint(ConfigureEndpointRequest& request,
     return;
   }
 
-  bool is_in = usb_ep_direction2(ep_addr);
-  fdescriptor::EndpointType ep_type = usb_ep_type2(request.ep_descriptor());
-  uint16_t max_packet_size = usb_ep_max_packet2(request.ep_descriptor());
+  bool is_in = usb_ep_is_in(ep_addr);
+  fdescriptor::EndpointType ep_type = usb_ep_type(request.ep_descriptor());
+  uint16_t max_packet_size = usb_ep_max_packet(request.ep_descriptor());
 
-  if (ep_type == fdescriptor::EndpointType::kIsochronous) {
+  if (usb_ep_is_isoch(request.ep_descriptor())) {
     fdf::error("Dwc2::ConfigureEndpoint: isochronous endpoints are not supported");
     completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
     return;
@@ -1662,8 +1664,8 @@ void Dwc2::GetHardwareInfo(GetHardwareInfoCompleter::Sync& completer) {
   size_t num_in_eps =
       std::min(metadata_.tx_fifo_sizes().size(), static_cast<size_t>(num_dev_ep - 1));
   std::vector<fuchsia_hardware_usb_dci::SupportedEndpointInfo> in_supported_types(2);
-  in_supported_types[0].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
-  in_supported_types[1].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt);
+  in_supported_types[0].endpoint_type(fdescriptor::EndpointType::kBulk);
+  in_supported_types[1].endpoint_type(fdescriptor::EndpointType::kInterrupt);
 
   for (size_t i = 0; i < num_in_eps; i++) {
     uint16_t max_packet = static_cast<uint16_t>(metadata_.tx_fifo_sizes()[i] * kWordSizeBytes);
@@ -1679,9 +1681,9 @@ void Dwc2::GetHardwareInfo(GetHardwareInfoCompleter::Sync& completer) {
   // OUT endpoints share the Rx FIFO.
   // Limited by the number of device endpoints supported by the hardware.
   std::vector<fuchsia_hardware_usb_dci::SupportedEndpointInfo> out_supported_types(2);
-  out_supported_types[0].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+  out_supported_types[0].endpoint_type(fdescriptor::EndpointType::kBulk);
   out_supported_types[0].max_packet_size_limit(kMaxOutPacketSizeLimit);
-  out_supported_types[1].endpoint_type(fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt);
+  out_supported_types[1].endpoint_type(fdescriptor::EndpointType::kInterrupt);
   out_supported_types[1].max_packet_size_limit(kMaxOutPacketSizeLimit);
 
   for (uint32_t i = 1; i < num_dev_ep; i++) {

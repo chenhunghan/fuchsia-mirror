@@ -48,7 +48,6 @@ syscall_tests_without_deps = [
   "pidfd_test",
   "pipe_test",
   "poll_test",
-  "prctl_test",
   "pressure_test",
   "process_mrelease_test",
   "procfs_mem_test",
@@ -129,7 +128,6 @@ syscall_tests_etc = [
   },
   {
     name = "mount_test"
-    includes = [ "//src/starnix/tests/syscalls/cpp/meta/mount_test.shard.cml" ]
     resources = [
       ":hello_world_resource",
       ":mount_ext4_img",
@@ -189,6 +187,10 @@ syscall_tests_etc = [
   },
   {
     name = "capabilities_test"
+    executables = [ "test_programs:print_helper" ]
+  },
+  {
+    name = "prctl_test"
     executables = [ "test_programs:print_helper" ]
   },
   {
@@ -773,7 +775,7 @@ fuchsia_test_package("starnix_syscalls_cpp_tests") {
     ":crash_test",
     ":ext4_write_test",
   ]
-  deps = [ "//src/storage/erofs/component:erofs_component" ]
+  deps = []
   foreach(test_name, all_test_names) {
     test_components += [ ":${test_name}" ]
     deps += [ ":${test_name}_config" ]
@@ -813,7 +815,7 @@ fuchsia_test_package("starnix_syscalls_cpp_tests") {
 if (current_cpu == "arm64") {
   fuchsia_test_package("starnix_arch32_syscalls_cpp_tests") {
     test_components = []
-    deps = [ "//src/storage/erofs/component:erofs_component" ]
+    deps = []
     foreach(test_name, all_test_names) {
       test_components += [ ":${test_name}_arch32" ]
       deps += [ ":${test_name}_config" ]

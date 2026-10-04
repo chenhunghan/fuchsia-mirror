@@ -394,3 +394,11 @@ pub extern "C" fn rs_test_custom_track_concurrent_usage() {
         handle.join().unwrap();
     }
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_test_flush_buffer() -> i32 {
+    match trace::flush_buffer() {
+        Ok(()) => 0,
+        Err(status) => status.into_raw(),
+    }
+}

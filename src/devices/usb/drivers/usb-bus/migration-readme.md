@@ -51,7 +51,6 @@ descriptors like `UsbSetup` or `UsbDeviceDescriptor`.
 *   **Platform**: `usb-peripheral`, `usb-peripheral-test`.
 *   **Functions**: `usb-adb-function`, `usb-fastboot-function`, `ums-function`.
 *   **Network**: `usb-cdc-function`, `rndis-function`.
-*   **Others**: `usb-harriet`.
 
 ## Current Testing State
 

@@ -170,7 +170,7 @@ class DciInspect {
 
   void UpdateState(const std::string& state);
   void UpdateConnectionStatus(bool connected, usb_speed_t speed);
-  void UpdateUsbMode(usb_mode_t usb_mode);
+  void UpdateUsbMode(UsbMode usb_mode);
 
   void RecordEvent(const std::string& event_name);
   void RecordControlTransfer(const ControlTransferInfo& info);

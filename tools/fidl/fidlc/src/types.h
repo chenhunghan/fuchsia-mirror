@@ -52,6 +52,7 @@ struct Type {
   bool type_shape_compiling = false;
 
   virtual bool IsNullable() const { return false; }
+  virtual bool IsZeroable() const { return true; }
 
   // Returns the nominal resourceness of the type per the FTP-057 definition.
   // For IdentifierType, can only be called after the Decl has been compiled.
@@ -64,15 +65,6 @@ struct Type {
                                 const TypeConstraints& constraints, const Reference& layout,
                                 std::unique_ptr<Type>* out_type,
                                 LayoutInvocation* out_params) const = 0;
-};
-
-struct RejectOptionalConstraints : public Constraints<> {
-  using Constraints::Constraints;
-  bool OnUnexpectedConstraint(TypeResolver* resolver, Reporter* reporter,
-                              std::optional<SourceSpan> params_span, const Name& layout_name,
-                              Resource* resource, size_t num_constraints,
-                              const std::vector<std::unique_ptr<Constant>>& params,
-                              size_t param_index) const override;
 };
 
 struct ArrayConstraints : public Constraints<ConstraintKind::kUtf8> {
@@ -180,13 +172,26 @@ struct HandleType final : public Type, HandleConstraints {
   const static HandleRightsValue kSameRights;
 };
 
-struct PrimitiveType final : public Type, public RejectOptionalConstraints {
-  using Constraints = RejectOptionalConstraints;
+struct PrimitiveConstraints : public Constraints<ConstraintKind::kZeroability> {
+  using Constraints::Constraints;
+  bool OnUnexpectedConstraint(TypeResolver* resolver, Reporter* reporter,
+                              std::optional<SourceSpan> params_span, const Name& layout_name,
+                              Resource* resource, size_t num_constraints,
+                              const std::vector<std::unique_ptr<Constant>>& params,
+                              size_t param_index) const override;
+};
+
+struct PrimitiveType final : public Type, public PrimitiveConstraints {
+  using Constraints = PrimitiveConstraints;
 
   PrimitiveType(const Name& name, PrimitiveSubtype subtype)
-      : Type(name, Kind::kPrimitive), subtype(subtype) {}
+      : PrimitiveType(name, subtype, Constraints()) {}
+  PrimitiveType(const Name& name, PrimitiveSubtype subtype, Constraints constraints)
+      : Type(name, Kind::kPrimitive), Constraints(std::move(constraints)), subtype(subtype) {}
 
   PrimitiveSubtype subtype;
+
+  bool IsZeroable() const override { return zeroability == Zeroability::kZeroable; }
 
   bool ApplyConstraints(TypeResolver* resolver, Reporter* reporter,
                         const TypeConstraints& constraints, const Reference& layout,

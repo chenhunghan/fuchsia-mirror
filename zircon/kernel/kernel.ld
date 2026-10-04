@@ -158,12 +158,10 @@ SECTIONS {
   }
 
   /*
-   * Ideally there should be no .got section generated at all.
-   * But GNU (BFD) ld for arm64 insists on producing one unnecessarily.
-   * KERNEL_GOT_TOLERANCE is set via -defsym in BUILD.gn.
+   * There should be no .got section generated at all.
    */
   .got : { *(.got*) }
-  ASSERT(SIZEOF(.got) <= KERNEL_GOT_TOLERANCE, "unexpected GOT slots")
+  ASSERT(SIZEOF(.got) == 0, "unexpected GOT slots")
 
   /*
    * LLD only makes particular named sections part of PT_GNU_RELRO, so
@@ -179,7 +177,11 @@ SECTIONS {
     PROVIDE_HIDDEN(__stop_lk_init = .);
 
     PROVIDE_HIDDEN(__start_unittest_testcases = .);
-    *(.data.rel.ro.unittest_testcases)
+    /*
+     * TODO(https://fxbug.dev/567366633): Remove KEEP() once Rust #[link_section]
+     * statics support SHF_GNU_RETAIN and special-section semantics.
+     */
+    KEEP(*(.data.rel.ro.unittest_testcases))
     PROVIDE_HIDDEN(__stop_unittest_testcases = .);
 
     PROVIDE_HIDDEN(__start_asan_globals = .);

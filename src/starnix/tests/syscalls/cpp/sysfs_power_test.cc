@@ -6,6 +6,7 @@
 #include <lib/stdcompat/string_view.h>
 #include <sys/epoll.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/uio.h>
 
@@ -20,6 +21,7 @@
 
 #include "src/lib/files/directory.h"
 #include "src/lib/files/file.h"
+#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 using testing::IsSupersetOf;
@@ -609,4 +611,68 @@ TEST_F(SysfsPowerTest, WakeupCountBehavior) {
   EXPECT_EQ(final_count, initial_count + 1);
 
   close(fd);
+}
+
+TEST_F(SysfsPowerTest, CpuIdleDirectoryContainsExpectedContents) {
+  constexpr const char* kCpuIdleDir = "/sys/devices/system/cpu/cpu0/cpuidle";
+  if (!test_helper::IsStarnix() && access(kCpuIdleDir, F_OK) != 0) {
+    GTEST_SKIP() << kCpuIdleDir << " not available, skipping...";
+  }
+
+  struct stat st = {};
+  ASSERT_THAT(stat(kCpuIdleDir, &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(0755u, st.st_mode & 0777u);
+  EXPECT_EQ(0u, st.st_uid);
+  EXPECT_EQ(0u, st.st_gid);
+
+  std::vector<std::string> entries;
+  ASSERT_TRUE(files::ReadDirContents(kCpuIdleDir, &entries));
+  if (test_helper::IsStarnix()) {
+    EXPECT_THAT(entries, IsSupersetOf({"state0", "state1"}));
+  }
+
+  bool found_state = false;
+  for (const std::string& entry : entries) {
+    if (!entry.starts_with("state")) {
+      continue;
+    }
+    found_state = true;
+    std::string state_dir = std::format("{}/{}", kCpuIdleDir, entry);
+
+    ASSERT_THAT(stat(state_dir.c_str(), &st), SyscallSucceeds()) << state_dir;
+    EXPECT_TRUE(S_ISDIR(st.st_mode));
+    EXPECT_EQ(0755u, st.st_mode & 0777u);
+    EXPECT_EQ(0u, st.st_uid);
+    EXPECT_EQ(0u, st.st_gid);
+
+    std::vector<std::string> state_files;
+    ASSERT_TRUE(files::ReadDirContents(state_dir, &state_files));
+    EXPECT_THAT(state_files, IsSupersetOf({"name", "desc", "time", "usage"}));
+
+    for (const char* attr : {"name", "desc", "time", "usage"}) {
+      std::string attr_path = std::format("{}/{}", state_dir, attr);
+      ASSERT_THAT(stat(attr_path.c_str(), &st), SyscallSucceeds()) << attr_path;
+      EXPECT_TRUE(S_ISREG(st.st_mode));
+      EXPECT_EQ(0444u, st.st_mode & 0777u);
+      EXPECT_EQ(0u, st.st_uid);
+      EXPECT_EQ(0u, st.st_gid);
+
+      VerifyReadOutOfBound(attr_path);
+    }
+
+    std::string content;
+    EXPECT_TRUE(files::ReadFileToString(std::format("{}/name", state_dir), &content));
+    EXPECT_TRUE(std::regex_match(content, std::regex("^.+\n$")));
+
+    EXPECT_TRUE(files::ReadFileToString(std::format("{}/desc", state_dir), &content));
+    EXPECT_TRUE(std::regex_match(content, std::regex("^.+\n$")));
+
+    EXPECT_TRUE(files::ReadFileToString(std::format("{}/time", state_dir), &content));
+    EXPECT_TRUE(std::regex_match(content, std::regex("^[0-9]+\n$")));
+
+    EXPECT_TRUE(files::ReadFileToString(std::format("{}/usage", state_dir), &content));
+    EXPECT_TRUE(std::regex_match(content, std::regex("^[0-9]+\n$")));
+  }
+  EXPECT_TRUE(found_state);
 }

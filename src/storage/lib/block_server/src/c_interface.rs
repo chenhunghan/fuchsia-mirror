@@ -473,3 +473,31 @@ pub unsafe extern "C" fn block_server_send_reply(
 ) {
     block_server.orchestrator.session_manager.complete_request(request_id, zx::Status::ok(status));
 }
+
+/// Registers a hardware inline encryption key slot `hw_slot` with `block_server`, writing the
+/// client end of the minted eventpair token to `out_handle`.
+///
+/// # Safety
+///
+/// `block_server` must be a valid reference.
+/// `out_handle` must be valid for writes, properly aligned, and not accessed concurrently or
+/// aliased by active references for the duration of the write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn block_server_register_key_slot(
+    block_server: &BlockServer,
+    hw_slot: u8,
+    out_handle: *mut zx_handle_t,
+) -> zx_status_t {
+    match block_server.server.register_key_slot(hw_slot) {
+        Ok(client_ep) => {
+            // SAFETY: The caller guarantees `out_handle` is valid for writes, properly aligned,
+            // and not accessed concurrently or aliased by active references for the duration of
+            // the write.
+            unsafe {
+                *out_handle = zx::NullableHandle::from(client_ep).into_raw();
+            }
+            zx::sys::ZX_OK
+        }
+        Err(status) => status.into_raw(),
+    }
+}

@@ -21,8 +21,10 @@ group("tests") {
   testonly = true
 
   deps = [
+    ":remote-control-bin-tests",
     ":remote-control-lib-tests",
     "usb:tests",
+    "//src/developer/remote-control/fdomain-uart-driver:tests",
     "//src/developer/remote-control/identify-host:tests",
     "//src/developer/remote-control/runner:tests",
     "//src/developer/remote-control/test:fdomain-connection-test",
@@ -108,6 +110,11 @@ rustc_binary("bin") {
     "//third_party/rust_crates:log",
   ]
 
+  test_deps = [
+    "//sdk/fidl/fuchsia.hardware.vsock:fuchsia.hardware.vsock_rust",
+    "//src/lib/fuchsia",
+  ]
+
   sources = [
     "src/fdomain.rs",
     "src/main.rs",
@@ -139,6 +146,15 @@ fuchsia_test_package("remote-control-lib-tests") {
   }
 }
 
+fuchsia_unittest_package("remote-control-bin-tests") {
+  deps = [ ":bin_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}
+
 fuchsia_component("remote-control-component") {
   component_name = "remote-control"
   manifest = "meta/remote-control.cml"
@@ -151,6 +167,7 @@ fuchsia_package("remote-control-package") {
     ":remote-control-component",
     "//build/validate:non_production_tag",
     "//src/developer/remote-control/fdomain-runner:bin",
+    "//src/developer/remote-control/fdomain-uart-driver:component",
     "//src/developer/remote-control/identify-host:bin",
     "//src/developer/remote-control/runner:bin",
   ]

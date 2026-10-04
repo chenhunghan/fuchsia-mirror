@@ -27,7 +27,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureAndRouteFidlCalls) {
   // Valid descriptors for ValidateFunction (we pass UMS's descriptors)
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -61,8 +61,10 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureAndRouteFidlCalls) {
 
   // Test SetConfigured via standard endpoint request
   fdescriptor::wire::UsbSetup setup;
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_CONFIGURATION;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kDevice |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   setup.w_value = 1;  // Configuration 1
   setup.w_index = interface_num;
   setup.w_length = 0;
@@ -77,7 +79,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureAndRouteFidlCalls) {
   EXPECT_TRUE(fake_function->configured());
 
   // Test Control via provided endpoint request.
-  setup.bm_request_type = USB_DIR_IN;
+  setup.bm_request_type = fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
   setup.b_request = 0xAA;
   setup.w_value = 0x01;
   setup.w_index = 0x02;
@@ -93,8 +95,10 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureAndRouteFidlCalls) {
   EXPECT_EQ(0xAA, fake_function->control_req());
 
   // Test SetInterface via standard endpoint request
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_INTERFACE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_INTERFACE;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kInterface |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetInterface);
   setup.w_value = 1;  // Alt setting 1
   setup.w_index = interface_num;
   setup.w_length = 0;
@@ -133,7 +137,7 @@ TEST_F(UsbPeripheralFunctionTest, RepeatedSetConfigurationResetsFunction) {
   // Valid descriptors for ValidateFunction (we pass UMS's descriptors)
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -167,8 +171,10 @@ TEST_F(UsbPeripheralFunctionTest, RepeatedSetConfigurationResetsFunction) {
 
   // Test SetConfigured via standard endpoint request
   fdescriptor::wire::UsbSetup setup;
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_CONFIGURATION;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kDevice |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   setup.w_value = 1;  // Configuration 1
   setup.w_index = interface_num;
   setup.w_length = 0;
@@ -228,7 +234,7 @@ TEST_F(UsbPeripheralFunctionTest, ClearFunctionsWaitsForTeardown) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -278,7 +284,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureFailsIfInterfaceNotAllocated) {
   // We use an interface number that hasn't been allocated (0, by default in descriptors).
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = 0,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -316,7 +322,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureFailsIfAlreadyBound) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -400,7 +406,7 @@ TEST_F(UsbPeripheralFunctionTest, ConnectToEndpointSuccessAndSequencing) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 1,
@@ -410,7 +416,7 @@ TEST_F(UsbPeripheralFunctionTest, ConnectToEndpointSuccessAndSequencing) {
   };
   usb_endpoint_descriptor_t ep_desc = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = ep_addr,
       .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = 512,
@@ -507,7 +513,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureFailsIfDescriptorsMalformed) {
   std::vector<uint8_t> malformed_descriptors(sizeof(usb_interface_descriptor_t));
   auto* intf = reinterpret_cast<usb_interface_descriptor_t*>(malformed_descriptors.data());
   intf->b_length = 5;  // Invalid! Must be 9.
-  intf->b_descriptor_type = USB_DT_INTERFACE;
+  intf->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface);
 
   fidl::WireResult configure_res =
       function_client->Configure(fidl::VectorView<uint8_t>::FromExternal(
@@ -626,7 +632,7 @@ TEST_F(UsbPeripheralFunctionTest, DeconfigureAllowsReconfigure) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -680,8 +686,10 @@ TEST_F(UsbPeripheralFunctionTest, DeconfigureAllowsReconfigure) {
   {
     ASSERT_OK(dci()->SetConnected(true).status());
     fdescriptor::wire::UsbSetup setup;
-    setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-    setup.b_request = USB_REQ_SET_CONFIGURATION;
+    setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                            fdescriptor::RequestRecipient::kDevice |
+                            fdescriptor::RequestType::kStandard;
+    setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
     setup.w_value = 1;  // Configuration 1
     setup.w_index = interface_num;
     setup.w_length = 0;
@@ -715,7 +723,7 @@ TEST_F(UsbPeripheralFunctionTest, ControllerStoppedOnFunctionClose) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -829,7 +837,7 @@ TEST_F(UsbPeripheralFunctionTest, AllocResources) {
       .intf =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = response->interface_nums[0],
               .b_num_endpoints = 2,
               .b_interface_class = 8,
@@ -840,7 +848,7 @@ TEST_F(UsbPeripheralFunctionTest, AllocResources) {
       .ep1 =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = ep1_addr,
               .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = 512,
@@ -848,7 +856,7 @@ TEST_F(UsbPeripheralFunctionTest, AllocResources) {
       .ep2 =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = ep2_addr,
               .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = 512,
@@ -1313,7 +1321,7 @@ TEST_F(UsbPeripheralFunctionTest, StateTransitionErrors) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = alloc_res->value()->interface_nums[0],
       .b_alternate_setting = 0,
       .b_num_endpoints = 1,
@@ -1323,7 +1331,7 @@ TEST_F(UsbPeripheralFunctionTest, StateTransitionErrors) {
   };
   usb_endpoint_descriptor_t ep_desc = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = ep_addr,
       .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = 512,
@@ -1377,7 +1385,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureEndpointDuringSetConfigured) {
   std::vector<uint8_t> descriptors;
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -1417,8 +1425,10 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureEndpointDuringSetConfigured) {
 
   // Trigger SetConfigured by sending standard endpoint request SetConfiguration = 1
   fdescriptor::wire::UsbSetup setup;
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_CONFIGURATION;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kDevice |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   setup.w_value = 1;
   setup.w_index = 0;
   setup.w_length = 0;
@@ -1499,7 +1509,7 @@ TEST_F(UsbPeripheralFunctionTest, ConfigureFailsIfFirstDescriptorNotInterfaceOrI
   // Pass endpoint descriptor first instead of Interface.
   usb_endpoint_descriptor_t ep_desc = {
       .b_length = sizeof(usb_endpoint_descriptor_t),
-      .b_descriptor_type = USB_DT_ENDPOINT,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
       .b_endpoint_address = 0x81,
       .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
       .w_max_packet_size = 512,
@@ -1701,7 +1711,7 @@ TEST_F(UsbPeripheralFunctionTest, ControlStallsEp0OnError) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -1726,8 +1736,10 @@ TEST_F(UsbPeripheralFunctionTest, ControlStallsEp0OnError) {
 
   // Configure first.
   fdescriptor::wire::UsbSetup setup;
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_CONFIGURATION;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kDevice |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   setup.w_value = 1;  // Configuration 1
   setup.w_index = 0;
   setup.w_length = 0;
@@ -1742,7 +1754,9 @@ TEST_F(UsbPeripheralFunctionTest, ControlStallsEp0OnError) {
   fake_function->set_control_status(ZX_ERR_NOT_SUPPORTED);
 
   // Test Control via provided endpoint request (vendor request, directed to interface).
-  setup.bm_request_type = USB_DIR_IN | USB_RECIP_INTERFACE | USB_TYPE_VENDOR;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kIn |
+                          fdescriptor::RequestRecipient::kInterface |
+                          fdescriptor::RequestType::kVendor;
   setup.b_request = 0xAA;
   setup.w_value = 0x01;
   setup.w_index = interface_num;  // Use interface_num to route to this function.
@@ -1775,7 +1789,7 @@ TEST_F(UsbPeripheralFunctionTest, SetConfiguredStallsEp0OnError) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -1801,8 +1815,10 @@ TEST_F(UsbPeripheralFunctionTest, SetConfiguredStallsEp0OnError) {
   fidl::Arena arena;
   std::vector<uint8_t> unused;
   fdescriptor::wire::UsbSetup setup;
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_CONFIGURATION;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kDevice |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   setup.w_value = 1;
   setup.w_index = 0;
   setup.w_length = 0;
@@ -1834,7 +1850,7 @@ TEST_F(UsbPeripheralFunctionTest, SetInterfaceStallsEp0OnError) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -1859,8 +1875,10 @@ TEST_F(UsbPeripheralFunctionTest, SetInterfaceStallsEp0OnError) {
 
   // Configure first.
   fdescriptor::wire::UsbSetup setup;
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_CONFIGURATION;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kDevice |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   setup.w_value = 1;  // Configuration 1
   setup.w_index = 0;
   setup.w_length = 0;
@@ -1874,8 +1892,10 @@ TEST_F(UsbPeripheralFunctionTest, SetInterfaceStallsEp0OnError) {
   // Set SetInterface status to return error.
   fake_function->set_set_interface_status(ZX_ERR_NOT_SUPPORTED);
 
-  setup.bm_request_type = USB_DIR_OUT | USB_RECIP_INTERFACE | USB_TYPE_STANDARD;
-  setup.b_request = USB_REQ_SET_INTERFACE;
+  setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                          fdescriptor::RequestRecipient::kInterface |
+                          fdescriptor::RequestType::kStandard;
+  setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetInterface);
   setup.w_value = 1;  // Alt setting 1
   setup.w_index = interface_num;
   setup.w_length = 0;
@@ -1905,8 +1925,10 @@ TEST_F(UsbPeripheralFunctionTest, SetFeatureEndpointHaltCancelsAll) {
 
   // Configure first to make the peripheral active.
   fdescriptor::wire::UsbSetup config_setup;
-  config_setup.bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD;
-  config_setup.b_request = USB_REQ_SET_CONFIGURATION;
+  config_setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                                 fdescriptor::RequestRecipient::kDevice |
+                                 fdescriptor::RequestType::kStandard;
+  config_setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration);
   config_setup.w_value = 1;  // Configuration 1
   config_setup.w_index = 0;
   config_setup.w_length = 0;
@@ -1928,9 +1950,11 @@ TEST_F(UsbPeripheralFunctionTest, SetFeatureEndpointHaltCancelsAll) {
       [](UsbPeripheralTestEnvironment& env) { env.dci().fail_cancel_all_status_.store(ZX_OK); });
 
   fdescriptor::wire::UsbSetup halt_setup;
-  halt_setup.bm_request_type = USB_DIR_OUT | USB_RECIP_ENDPOINT | USB_TYPE_STANDARD;
-  halt_setup.b_request = USB_REQ_SET_FEATURE;
-  halt_setup.w_value = USB_ENDPOINT_HALT;
+  halt_setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
+                               fdescriptor::RequestRecipient::kEndpoint |
+                               fdescriptor::RequestType::kStandard;
+  halt_setup.b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetFeature);
+  halt_setup.w_value = fidl::ToUnderlying(fdescriptor::FeatureSelector::kEndpointHalt);
   halt_setup.w_index = ep_addr;
   halt_setup.w_length = 0;
 
@@ -2051,7 +2075,7 @@ TEST_F(UsbPeripheralFunctionTest, RejectConfigureWhileStopping) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 0,
@@ -2208,7 +2232,7 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
 
   usb_interface_descriptor_t intf_desc = {
       .b_length = sizeof(usb_interface_descriptor_t),
-      .b_descriptor_type = USB_DT_INTERFACE,
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
       .b_interface_number = interface_num,
       .b_alternate_setting = 0,
       .b_num_endpoints = 1,
@@ -2234,8 +2258,10 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
 
   // Set configuration 1 to move device out of unconfigured state.
   fdescriptor::wire::UsbSetup setup = {
-      .bm_request_type = USB_DIR_OUT | USB_RECIP_DEVICE | USB_TYPE_STANDARD,
-      .b_request = USB_REQ_SET_CONFIGURATION,
+      .bm_request_type = fdescriptor::EndpointDirection::kOut |
+                         fdescriptor::RequestRecipient::kDevice |
+                         fdescriptor::RequestType::kStandard,
+      .b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration),
       .w_value = 1,
       .w_index = 0,
       .w_length = 0,
@@ -2247,8 +2273,10 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
 
   // 1. GET_STATUS on EP0 OUT (0x00) should succeed and return status 0.
   setup = {
-      .bm_request_type = USB_DIR_IN | USB_RECIP_ENDPOINT | USB_TYPE_STANDARD,
-      .b_request = USB_REQ_GET_STATUS,
+      .bm_request_type = fdescriptor::EndpointDirection::kIn |
+                         fdescriptor::RequestRecipient::kEndpoint |
+                         fdescriptor::RequestType::kStandard,
+      .b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kGetStatus),
       .w_value = 0,
       .w_index = 0x00,
       .w_length = 2,
@@ -2274,9 +2302,11 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
   // 3. SET_FEATURE(ENDPOINT_HALT) on unallocated endpoint (e.g. 0x02) should return
   // ZX_ERR_NOT_FOUND without invoking UsbDciCancelAll or UsbDciEndpointSetStall.
   setup = {
-      .bm_request_type = USB_DIR_OUT | USB_RECIP_ENDPOINT | USB_TYPE_STANDARD,
-      .b_request = USB_REQ_SET_FEATURE,
-      .w_value = USB_ENDPOINT_HALT,
+      .bm_request_type = fdescriptor::EndpointDirection::kOut |
+                         fdescriptor::RequestRecipient::kEndpoint |
+                         fdescriptor::RequestType::kStandard,
+      .b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kSetFeature),
+      .w_value = fidl::ToUnderlying(fdescriptor::FeatureSelector::kEndpointHalt),
       .w_index = 0x02,
       .w_length = 0,
   };
@@ -2295,8 +2325,10 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
 
   // Verify GET_STATUS on allocated endpoint reports halted (status == 1).
   setup = {
-      .bm_request_type = USB_DIR_IN | USB_RECIP_ENDPOINT | USB_TYPE_STANDARD,
-      .b_request = USB_REQ_GET_STATUS,
+      .bm_request_type = fdescriptor::EndpointDirection::kIn |
+                         fdescriptor::RequestRecipient::kEndpoint |
+                         fdescriptor::RequestType::kStandard,
+      .b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kGetStatus),
       .w_value = 0,
       .w_index = allocated_ep,
       .w_length = 2,
@@ -2311,9 +2343,11 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
 
   // 5. CLEAR_FEATURE(ENDPOINT_HALT) on allocated endpoint should succeed.
   setup = {
-      .bm_request_type = USB_DIR_OUT | USB_RECIP_ENDPOINT | USB_TYPE_STANDARD,
-      .b_request = USB_REQ_CLEAR_FEATURE,
-      .w_value = USB_ENDPOINT_HALT,
+      .bm_request_type = fdescriptor::EndpointDirection::kOut |
+                         fdescriptor::RequestRecipient::kEndpoint |
+                         fdescriptor::RequestType::kStandard,
+      .b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kClearFeature),
+      .w_value = fidl::ToUnderlying(fdescriptor::FeatureSelector::kEndpointHalt),
       .w_index = allocated_ep,
       .w_length = 0,
   };
@@ -2324,8 +2358,10 @@ TEST_F(UsbPeripheralFunctionTest, EndpointRecipientControlRequestsHandling) {
 
   // Verify GET_STATUS on allocated endpoint reports cleared (status == 0).
   setup = {
-      .bm_request_type = USB_DIR_IN | USB_RECIP_ENDPOINT | USB_TYPE_STANDARD,
-      .b_request = USB_REQ_GET_STATUS,
+      .bm_request_type = fdescriptor::EndpointDirection::kIn |
+                         fdescriptor::RequestRecipient::kEndpoint |
+                         fdescriptor::RequestType::kStandard,
+      .b_request = fidl::ToUnderlying(fdescriptor::StandardRequest::kGetStatus),
       .w_value = 0,
       .w_index = allocated_ep,
       .w_length = 2,

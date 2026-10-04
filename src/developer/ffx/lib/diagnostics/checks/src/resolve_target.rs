@@ -34,8 +34,12 @@ fn sources_from_query(query: &TargetInfoQuery) -> DiscoverySources {
         TargetInfoQuery::NodenameOrId(_) | TargetInfoQuery::First | TargetInfoQuery::Id(_) => {
             DiscoverySources::all()
         }
-        TargetInfoQuery::VSock(_) => DiscoverySources::USB_FASTBOOT | DiscoverySources::EMULATOR,
-        TargetInfoQuery::Usb(_) => DiscoverySources::USB_FASTBOOT,
+        TargetInfoQuery::VSock(_) => {
+            DiscoverySources::USB_FASTBOOT
+                | DiscoverySources::EMULATOR
+                | DiscoverySources::USB_VSOCK
+        }
+        TargetInfoQuery::Usb(_) => DiscoverySources::USB_FASTBOOT | DiscoverySources::USB_VSOCK,
         TargetInfoQuery::Addr(_) => {
             DiscoverySources::MDNS
                 | DiscoverySources::FASTBOOT_FILE

@@ -201,6 +201,9 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
             QueryApfPacketFilterSupport(responder) => {
                 responder.respond(self.device.query_apf_packet_filter_support()?)
             }
+            QueryRssiMonitorSupport(responder) => {
+                responder.respond(self.device.query_rssi_monitor_support()?)
+            }
             GetIfaceStats(responder) => responder.respond(self.device.get_iface_stats()?),
             GetIfaceHistogramStats(responder) => {
                 responder.respond(self.device.get_iface_histogram_stats()?)
@@ -247,6 +250,14 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
                 };
                 responder.respond(res);
             }
+            StartRssiMonitor(req, responder) => responder.respond(self.device.start_rssi_monitor(
+                fidl_fullmac::WlanFullmacImplStartRssiMonitorRequest {
+                    min_rssi_dbm: Some(req.min_rssi_dbm),
+                    max_rssi_dbm: Some(req.max_rssi_dbm),
+                    ..Default::default()
+                },
+            )?),
+            StopRssiMonitor(responder) => responder.respond(self.device.stop_rssi_monitor()?),
         };
         Ok(())
     }
@@ -382,6 +393,10 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
             }
             FullmacDriverEvent::SignalReport { ind } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::SignalReport { ind });
+            }
+            FullmacDriverEvent::OnRssiThresholdBreached { cur_rssi_dbm } => {
+                self.mlme_event_sink
+                    .send(fidl_mlme::MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm });
             }
             FullmacDriverEvent::EapolInd { ind } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::EapolInd { ind });
@@ -1154,6 +1169,50 @@ mod handle_mlme_request_tests {
         assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::QueryApfPacketFilterSupport));
         let support = assert_matches!(support_receiver.try_recv(), Ok(Some(support)) => support);
         assert_eq!(support, mocked_support);
+    }
+
+    #[test]
+    fn test_query_rssi_monitor_support() {
+        let mut h = TestHelper::set_up();
+        let mocked_support =
+            Ok(fidl_common::RssiMonitorSupport { supported: Some(true), ..Default::default() });
+        h.fake_device.lock().query_rssi_monitor_support_mock.replace(mocked_support.clone());
+        let (support_responder, mut support_receiver) = wlan_sme::responder::Responder::new();
+        let fidl_req = wlan_sme::MlmeRequest::QueryRssiMonitorSupport(support_responder);
+
+        h.mlme.handle_mlme_request(fidl_req).unwrap();
+
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::QueryRssiMonitorSupport));
+        let support = assert_matches!(support_receiver.try_recv(), Ok(Some(support)) => support);
+        assert_eq!(support, mocked_support);
+    }
+
+    #[test]
+    fn test_start_and_stop_rssi_monitor() {
+        let mut h = TestHelper::set_up();
+        let (start_responder, mut start_receiver) = wlan_sme::responder::Responder::new();
+        let start_req = wlan_sme::MlmeRequest::StartRssiMonitor(
+            fidl_mlme::MlmeStartRssiMonitorRequest { min_rssi_dbm: -80, max_rssi_dbm: -50 },
+            start_responder,
+        );
+
+        h.mlme.handle_mlme_request(start_req).unwrap();
+
+        let driver_req = assert_matches!(
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::StartRssiMonitor { req }) => req
+        );
+        assert_eq!(driver_req.min_rssi_dbm, Some(-80));
+        assert_eq!(driver_req.max_rssi_dbm, Some(-50));
+        assert_matches!(start_receiver.try_recv(), Ok(Some(Ok(()))));
+
+        let (stop_responder, mut stop_receiver) = wlan_sme::responder::Responder::new();
+        let stop_req = wlan_sme::MlmeRequest::StopRssiMonitor(stop_responder);
+
+        h.mlme.handle_mlme_request(stop_req).unwrap();
+
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::StopRssiMonitor));
+        assert_matches!(stop_receiver.try_recv(), Ok(Some(Ok(()))));
     }
 
     #[test]
@@ -1998,9 +2057,10 @@ mod handle_driver_event_tests {
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
         let signal_report_ind = fidl_fullmac::WlanFullmacSignalReportIndication {
-            rssi_dbm: 1,
-            snr_db: 2,
-            tx_rate_500kbps: 0,
+            rssi_dbm: Some(1),
+            snr_db: Some(2),
+            tx_rate_500kbps: Some(0),
+            ..Default::default()
         };
         assert_matches!(
             h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.signal_report(&signal_report_ind)),
@@ -2012,8 +2072,33 @@ mod handle_driver_event_tests {
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::SignalReport { ind } => ind);
         assert_eq!(
             ind,
-            fidl_internal::SignalReportIndication { rssi_dbm: 1, snr_db: 2, tx_rate_500kbps: 0 }
+            fidl_internal::SignalReportIndication {
+                rssi_dbm: Some(1),
+                snr_db: Some(2),
+                tx_rate_500kbps: Some(0),
+                ..Default::default()
+            }
         );
+    }
+
+    #[test]
+    fn test_on_rssi_threshold_breached() {
+        let (mut h, mut test_fut) = TestHelper::set_up();
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let breach_req = fidl_fullmac::WlanFullmacImplIfcOnRssiThresholdBreachedRequest {
+            cur_rssi_dbm: Some(-75),
+            ..Default::default()
+        };
+        h.fullmac_ifc_proxy.on_rssi_threshold_breached(&breach_req).unwrap();
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
+        let cur_rssi_dbm = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm } => cur_rssi_dbm
+        );
+        assert_eq!(cur_rssi_dbm, -75);
     }
 
     #[test]

@@ -220,32 +220,49 @@ impl DefineSubsystemConfiguration<(&BluetoothConfig, &PlatformMediaConfig)>
         if let A2dpConfig::Enabled(a2dp) = profiles.a2dp {
             builder.platform_bundle("bluetooth_a2dp")?;
 
-            let mut a2dp_config = builder.package("bt-a2dp").component("meta/bt-a2dp.cm")?;
-            a2dp_config
-                .field("domain", "Bluetooth")?
-                .field("enable_avrcp_target", true)?
-                .field("enable_aac", true)?
-                .field("initiator_delay", 500)?
-                .field("channel_mode", "basic")?
-                .field("enable_sink", a2dp.sink_enabled())?
-                .field("source_type", get_source_type_str(&a2dp.sink_and_source))?;
+            // Domain, EnableAvrcpTarget, EnableAac, InitiatorDelay, and ChannelMode
+            // are not configurable in assembly and use the default values defined in
+            // bt-a2dp.cml.
+            builder.set_config_capability(
+                "fuchsia.bluetooth.EnableSink",
+                Config::new(ConfigValueType::Bool, a2dp.sink_enabled().into()),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.SourceType",
+                Config::new(
+                    ConfigValueType::String { max_size: 10 },
+                    get_source_type_str(&a2dp.sink_and_source).into(),
+                ),
+            )?;
         }
         if profiles.avrcp.enabled {
             builder.platform_bundle("bluetooth_avrcp")?;
         }
         if profiles.did.enabled {
             builder.platform_bundle("bluetooth_device_id")?;
-            let mut did_config =
-                builder.package("bt-device-id").component("meta/bt-device-id.cm")?;
-            did_config
-                .field("vendor_id", profiles.did.vendor_id)?
-                .field("product_id", profiles.did.product_id)?
-                .field("version", profiles.did.version)?
-                .field("primary", profiles.did.primary)?
-                .field(
-                    "service_description",
-                    profiles.did.service_description.clone().unwrap_or(String::new()),
-                )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.VendorId",
+                Config::new(ConfigValueType::Uint16, profiles.did.vendor_id.into()),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.ProductId",
+                Config::new(ConfigValueType::Uint16, profiles.did.product_id.into()),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.Version",
+                Config::new(ConfigValueType::Uint16, profiles.did.version.into()),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.Primary",
+                Config::new(ConfigValueType::Bool, profiles.did.primary.into()),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.ServiceDescription",
+                Config::new(
+                    ConfigValueType::String { max_size: 200 },
+                    profiles.did.service_description.clone().unwrap_or(String::new()).into(),
+                ),
+            )?;
         }
 
         if let AudioGatewayConfig::Enabled(hfp_ag_features) = &profiles.hfp.audio_gateway {

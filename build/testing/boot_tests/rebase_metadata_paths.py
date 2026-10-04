@@ -14,7 +14,7 @@ value is relative to the build directory.
 """
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(usage=USAGE)
     parser.add_argument(
         "--root-build-dir",

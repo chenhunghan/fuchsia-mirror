@@ -27,5 +27,10 @@
 
         // Maximum size of the rolling packet capture buffer in bytes.
         max_rolling_capture_buffer_size: { type: "uint32" },
+
+        // Whether to enable TCP Generic Receive Offload (GRO).
+        // TODO(https://fxbug.dev/452980285): Remove this flag when enabled by
+        // default.
+        tcp_gro_enabled: { type: "bool" },
     },
 }

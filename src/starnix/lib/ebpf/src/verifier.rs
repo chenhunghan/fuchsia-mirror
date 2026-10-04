@@ -11,8 +11,9 @@ use crate::{
     DataWidth, EbpfError, EbpfInstruction, GENERAL_REGISTER_COUNT, MapSchema, REGISTER_COUNT,
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
-use fuchsia_sync::Mutex;
 use linux_uapi::{bpf_map_type, bpf_map_type_BPF_MAP_TYPE_ARRAY};
+#[cfg(target_os = "fuchsia")]
+use starnix_sync::{EbpfVerifierDependenciesLock, LockDepMutex};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -1388,6 +1389,24 @@ macro_rules! bpf_log {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
+type DependenciesMutex = LockDepMutex<DataDependencies, EbpfVerifierDependenciesLock>;
+
+#[cfg(not(target_os = "fuchsia"))]
+#[derive(Debug, Default)]
+struct DependenciesMutex(std::sync::Mutex<DataDependencies>);
+
+#[cfg(not(target_os = "fuchsia"))]
+impl DependenciesMutex {
+    fn lock(&self) -> std::sync::MutexGuard<'_, DataDependencies> {
+        self.0.lock().unwrap()
+    }
+
+    fn get_mut(&mut self) -> &mut DataDependencies {
+        self.0.get_mut().unwrap()
+    }
+}
+
 /// The state of the computation as known by the verifier at a given point in time.
 #[derive(Debug, Default)]
 struct ComputationContext {
@@ -1405,7 +1424,7 @@ struct ComputationContext {
     parent: Option<Arc<ComputationContext>>,
     /// The data dependencies of this context. This is used to broaden a known ending context to
     /// help cutting computation branches.
-    dependencies: Mutex<DataDependencies>,
+    dependencies: DependenciesMutex,
     /// Whether this context has reached an exit instruction. The main loop uses this flag to
     /// call terminate() on the owned context, avoiding the extra Arc reference that would be
     /// created by cloning self in the exit handler.

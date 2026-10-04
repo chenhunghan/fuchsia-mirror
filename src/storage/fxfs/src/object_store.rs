@@ -15,7 +15,7 @@ pub mod graveyard;
 mod install;
 pub mod journal;
 mod key_manager;
-pub(crate) mod merge;
+pub mod merge;
 pub mod object_manager;
 pub mod object_record;
 pub mod project_id;
@@ -29,7 +29,10 @@ pub use data_object_handle::{
     DataObjectHandle, DataObjectState, DirectWriter, FileExtent, FsverityStateInner, RangeType,
 };
 pub use directory::Directory;
-pub use object_record::{ChildValue, DirType, ObjectDescriptor, PosixAttributes, Timestamp};
+pub use object_record::{
+    ChildValue, DirType, FscryptDirInfo, FscryptPolicyFlags, LEGACY_FSCRYPT_FLAGS,
+    ObjectDescriptor, PosixAttributes, Timestamp,
+};
 pub use store_object_handle::{MAX_INLINE_XATTR_SIZE, SetExtendedAttributeMode, StoreObjectHandle};
 
 use crate::errors::FxfsError;
@@ -47,8 +50,8 @@ use crate::object_store::graveyard::Graveyard;
 use crate::object_store::journal::{JournalCheckpoint, JournalCheckpointV32, JournaledTransaction};
 use crate::object_store::key_manager::KeyManager;
 use crate::object_store::transaction::{
-    AssocObj, AssociatedObject, LockKey, LockKeys, ObjectMutationIterator, ObjectStoreMutation,
-    Operation, Options, Transaction, WriteGuard, lock_keys,
+    AssocObj, AssociatedObject, LockKey, LockKeys, MutationV59, ObjectMutationIterator,
+    ObjectStoreMutation, Operation, Options, Transaction, WriteGuard, lock_keys,
 };
 use crate::serialized_types::{
     AES_JOURNAL_ENCRYPTION_VERSION, DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Version, Versioned,
@@ -62,7 +65,7 @@ use fuchsia_sync::Mutex;
 use fxfs_crypto::ff1::Ff1;
 use fxfs_crypto::{
     CipherHolder, Crypt, JournalCipher, JournalXtsCipher, KeyPurpose, ObjectType, StreamCipher,
-    UnwrappedKey, WrappingKeyId, key_to_cipher,
+    UnwrappedKey, key_to_cipher,
 };
 use rand::Rng as _;
 use scopeguard::ScopeGuard;
@@ -1292,6 +1295,7 @@ impl ObjectStore {
         {
             permanent_keys = permanent;
             let cipher = key_to_cipher(&key, &unwrapped_key)?;
+            store.key_manager.insert_fscrypt_file_cipher(&key, cipher.clone());
             transaction.add(
                 store.store_object_id(),
                 Mutation::insert_object(
@@ -1334,16 +1338,22 @@ impl ObjectStore {
         owner: &Arc<S>,
         mut transaction: &mut Transaction<'_>,
         options: HandleOptions,
-        wrapping_key_id: Option<WrappingKeyId>,
+        fscrypt_info: Option<FscryptDirInfo>,
     ) -> Result<DataObjectHandle<S>, Error> {
         let store = owner.as_ref().as_ref();
         let object_id = store.get_next_object_id().await?;
         let crypt = store.crypt();
         let encryption_options = if let Some(crypt) = crypt {
-            let key_id =
-                if wrapping_key_id.is_some() { FSCRYPT_KEY_ID } else { VOLUME_DATA_KEY_ID };
-            let (key, unwrapped_key) = if let Some(wrapping_key_id) = wrapping_key_id {
-                crypt.create_key_with_id(object_id.get(), wrapping_key_id, ObjectType::File).await?
+            let key_id = if fscrypt_info.is_some() { FSCRYPT_KEY_ID } else { VOLUME_DATA_KEY_ID };
+            let (key, unwrapped_key) = if let Some(info) = fscrypt_info {
+                crypt
+                    .create_key_with_id(
+                        object_id.get(),
+                        info.wrapping_key_id,
+                        ObjectType::File,
+                        info.flags.into(),
+                    )
+                    .await?
             } else {
                 let (fxfs_key, unwrapped_key) =
                     crypt.create_key(object_id.get(), KeyPurpose::Data).await?;
@@ -1446,8 +1456,13 @@ impl ObjectStore {
         }
     }
 
-    /// Purges an object that is in the graveyard. If a truncate guard is not provided, one will be
-    /// acquired.
+    /// Tombstones (purges) an object that is in the graveyard by deallocating its extents,
+    /// removing its graveyard entry, and inserting an LSM-tree tombstone record
+    /// (`ObjectValue::None`). If a truncate guard is not provided, one will be acquired.
+    ///
+    /// Callers outside of [`ObjectStore`] should generally prefer
+    /// [`FxFilesystem::tombstone_object`] or [`Graveyard::queue_tombstone_object`] so that
+    /// transaction reservations are configured appropriately for the store.
     pub async fn tombstone_object(
         &self,
         object_id: u64,
@@ -1580,7 +1595,13 @@ impl ObjectStore {
         Ok(())
     }
 
-    // Purges an object's attribute that is in the graveyard.
+    /// Tombstones (purges) an object's attribute that is in the graveyard by deallocating its
+    /// extents, removing its graveyard entry, and inserting an LSM-tree tombstone record
+    /// (`ObjectValue::None`).
+    ///
+    /// Callers outside of [`ObjectStore`] should generally prefer
+    /// [`FxFilesystem::tombstone_attribute`] or [`Graveyard::queue_tombstone_attribute`] so that
+    /// transaction reservations are configured appropriately for the store.
     pub async fn tombstone_attribute(
         &self,
         object_id: u64,
@@ -3205,7 +3226,7 @@ impl JournalingObject for ObjectStore {
 
 /// The plaintext serialization of the mutations for a transaction that are encrypted then wrapped
 /// in `Mutation::EncryptedObjectStore`.
-pub type EncryptedTransaction = EncryptedTransactionV57;
+pub type EncryptedTransaction = EncryptedTransactionV59;
 
 static_assertions::const_assert!(EncryptedTransaction::MAX_CHUNK_SIZE % 16 == 0);
 impl EncryptedTransaction {
@@ -3255,24 +3276,49 @@ impl EncryptedTransaction {
 // wrapped in Mutation and the version associated with it will come from some parent type above
 // Mutation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct EncryptedTransactionV57(pub Vec<Mutation>);
+pub struct EncryptedTransactionV59(pub Vec<MutationV59>);
 
-impl TypeFingerprint for EncryptedTransactionV57 {
+impl TypeFingerprint for EncryptedTransactionV59 {
     fn fingerprint() -> String {
         format!(
             "struct{{MAX_CHUNK_SIZE: {}, {}}}",
             // The MAX_CHUNK_SIZE is an important part of the format.
             Self::MAX_CHUNK_SIZE,
-            Vec::<Mutation>::fingerprint()
+            Vec::<MutationV59>::fingerprint()
+        )
+    }
+}
+
+impl Versioned for EncryptedTransactionV59 {
+    // This can serialize much larger sizes. They will be broken up before being wrapped in
+    // EncryptedObjectStore.
+    fn max_serialized_size() -> Option<u64> {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EncryptedTransactionV57(pub Vec<crate::object_store::transaction::MutationV57>);
+
+impl TypeFingerprint for EncryptedTransactionV57 {
+    fn fingerprint() -> String {
+        format!(
+            "struct{{MAX_CHUNK_SIZE: {}, {}}}",
+            EncryptedTransaction::MAX_CHUNK_SIZE,
+            Vec::<crate::object_store::transaction::MutationV57>::fingerprint()
         )
     }
 }
 
 impl Versioned for EncryptedTransactionV57 {
-    // This can serialize much larger sizes. They will be broken up before being wrapped in
-    // EncryptedObjectStore.
     fn max_serialized_size() -> Option<u64> {
         None
+    }
+}
+
+impl From<EncryptedTransactionV57> for EncryptedTransactionV59 {
+    fn from(old: EncryptedTransactionV57) -> Self {
+        Self(old.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -5173,8 +5219,9 @@ mod tests {
             owner: u64,
             wrapping_key_id: WrappingKeyId,
             object_type: ObjectType,
+            flags: fidl_fuchsia_io::FscryptPolicyFlags,
         ) -> Result<(EncryptionKey, UnwrappedKey), zx::Status> {
-            self.delegate.create_key_with_id(owner, wrapping_key_id, object_type).await
+            self.delegate.create_key_with_id(owner, wrapping_key_id, object_type, flags).await
         }
     }
 

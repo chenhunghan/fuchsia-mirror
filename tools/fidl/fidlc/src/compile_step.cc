@@ -9,6 +9,7 @@
 #include "tools/fidl/fidlc/src/attribute_schema.h"
 #include "tools/fidl/fidlc/src/flat_ast.h"
 #include "tools/fidl/fidlc/src/name.h"
+#include "tools/fidl/fidlc/src/properties.h"
 #include "tools/fidl/fidlc/src/type_resolver.h"
 
 namespace fidlc {
@@ -544,6 +545,20 @@ bool CompileStep::ResolveAsOptional(Constant* constant) {
   return builtin->id == Builtin::Identity::kOptional;
 }
 
+bool CompileStep::ResolveAsNonZero(Constant* constant) {
+  ZX_ASSERT(constant);
+
+  if (constant->kind != Constant::Kind::kIdentifier)
+    return false;
+
+  auto identifier_constant = static_cast<IdentifierConstant*>(constant);
+  auto element = identifier_constant->reference.resolved().element();
+  if (element->kind != Element::Kind::kBuiltin)
+    return false;
+  auto builtin = static_cast<Builtin*>(element);
+  return builtin->id == Builtin::Identity::kNonZero;
+}
+
 void CompileStep::CompileAttributeList(AttributeList* attributes) {
   Scope<std::string> scope;
   for (auto& attribute : attributes->attributes) {
@@ -795,6 +810,32 @@ void CompileStep::CompileConst(Const* const_declaration) {
     reporter()->Fail(ErrInvalidConstantType, const_declaration->name.span().value(), const_type);
   } else if (!ResolveConstant(const_declaration->value.get(), const_type)) {
     reporter()->Fail(ErrCannotResolveConstantValue, const_declaration->name.span().value());
+  }
+
+  if (!const_type->IsZeroable()) {
+    const auto& value = const_declaration->value->Value();
+    bool is_zero;
+    switch (value.kind) {
+      case ConstantValue::Kind::kInt8:
+      case ConstantValue::Kind::kInt16:
+      case ConstantValue::Kind::kInt32:
+      case ConstantValue::Kind::kInt64:
+        is_zero = value.AsSigned() == 0;
+        break;
+      case ConstantValue::Kind::kUint8:
+      case ConstantValue::Kind::kUint16:
+      case ConstantValue::Kind::kUint32:
+      case ConstantValue::Kind::kUint64:
+        is_zero = value.AsUnsigned() == 0;
+        break;
+      default:
+        ZX_PANIC("only signed and unsigned integers should ever not be zeroable");
+        break;
+    }
+    if (is_zero) {
+      reporter()->Fail(ErrConstantMayNotBeZero, const_declaration->name.span().value(),
+                       const_declaration->name, const_type);
+    }
   }
 }
 

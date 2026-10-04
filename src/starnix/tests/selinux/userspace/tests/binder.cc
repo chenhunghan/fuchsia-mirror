@@ -366,11 +366,7 @@ TEST_P(Impersonation, ImpersonateViaTransition) {
     bool br_transaction_complete_observed = false;
     bool br_failed_reply_observed = false;
     auto transaction_succeeded = [&] {
-      return br_reply_observed &&
-             // TODO: https://fxbug.dev/443721582 - why doesn't this process observe a
-             // BR_TRANSACTION_COMPLETE when run with Starnix? It seems to see one when run with
-             // Linux?
-             (br_transaction_complete_observed || test_helper::IsStarnix());
+      return br_reply_observed && br_transaction_complete_observed;
     };
     auto transaction_failed = [&] { return br_failed_reply_observed; };
 

@@ -9,7 +9,7 @@ import stat
 import sys
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generates a grouped dart test file from individual tests"
     )
@@ -79,6 +79,8 @@ void main(List<String> args) {
         | stat.S_IROTH
     )
     os.chmod(grouped_test, permissions)
+
+    return 0
 
 
 if __name__ == "__main__":

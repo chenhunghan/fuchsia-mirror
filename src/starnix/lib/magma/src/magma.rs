@@ -7,7 +7,7 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub const MAGMA_DEVICE_NAMESPACE: &[u8; 1] = b"\0";
-pub const MAGMA_API_VERSION: u32 = 14;
+pub const MAGMA_API_VERSION: u32 = 15;
 pub const MAGMA_VENDOR_ID_MALI: u32 = 5045;
 pub const MAGMA_VENDOR_ID_INTEL: u32 = 32902;
 pub type magma_log_severity_t = i8;
@@ -48,10 +48,6 @@ pub union magma_poll_item__bindgen_ty_1 {
 impl Default for magma_poll_item__bindgen_ty_1 {
     fn default() -> Self {
         let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
         unsafe {
             ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
             s.assume_init()
@@ -61,10 +57,6 @@ impl Default for magma_poll_item__bindgen_ty_1 {
 impl Default for magma_poll_item {
     fn default() -> Self {
         let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
         unsafe {
             ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
             s.assume_init()
@@ -103,10 +95,6 @@ pub struct magma_command_descriptor {
 impl Default for magma_command_descriptor {
     fn default() -> Self {
         let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
         unsafe {
             ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
             s.assume_init()
@@ -126,10 +114,6 @@ pub struct magma_inline_command_buffer {
 impl Default for magma_inline_command_buffer {
     fn default() -> Self {
         let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
         unsafe {
             ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
             s.assume_init()
@@ -224,13 +208,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = "\n \\brief If a system driver error occurs, the connection will be closed, and this interface will\n        eventually return the error. This interface does not flush messages that may be pending\n        (see magma_connection_flush).\n \\param connection An open connection.\n"]
     pub fn magma_connection_get_error(connection: magma_connection_t) -> magma_status_t;
-}
-unsafe extern "C" {
-    #[doc = "\n \\brief Creates a context on the given connection.\n \\param connection An open connection.\n \\param context_id_out The returned context id.\n"]
-    pub fn magma_connection_create_context(
-        connection: magma_connection_t,
-        context_id_out: *mut u32,
-    ) -> magma_status_t;
 }
 unsafe extern "C" {
     #[doc = "\n \\brief Releases the context associated with the given id.\n \\param connection An open connection.\n \\param context_id A valid context id.\n"]
@@ -665,8 +642,6 @@ pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_DEVICE_CREATE_CONNECTION: virt
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_RELEASE: virtio_magma_ctrl_type = 4100;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_GET_ERROR: virtio_magma_ctrl_type =
     4101;
-pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_CREATE_CONTEXT:
-    virtio_magma_ctrl_type = 4102;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_RELEASE_CONTEXT:
     virtio_magma_ctrl_type = 4103;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_CREATE_BUFFER: virtio_magma_ctrl_type =
@@ -737,8 +712,6 @@ pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_RELEASE: virtio_ma
     8196;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_GET_ERROR: virtio_magma_ctrl_type =
     8197;
-pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_CREATE_CONTEXT:
-    virtio_magma_ctrl_type = 8198;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_RELEASE_CONTEXT:
     virtio_magma_ctrl_type = 8199;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_CREATE_BUFFER:
@@ -925,23 +898,6 @@ pub struct virtio_magma_connection_get_error_resp {
     pub result_return: u64,
 }
 pub type virtio_magma_connection_get_error_resp_t = virtio_magma_connection_get_error_resp;
-#[repr(C, packed)]
-#[derive(Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable)]
-pub struct virtio_magma_connection_create_context_ctrl {
-    pub hdr: virtio_magma_ctrl_hdr_t,
-    pub connection: u64,
-}
-pub type virtio_magma_connection_create_context_ctrl_t =
-    virtio_magma_connection_create_context_ctrl;
-#[repr(C, packed)]
-#[derive(Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable)]
-pub struct virtio_magma_connection_create_context_resp {
-    pub hdr: virtio_magma_ctrl_hdr_t,
-    pub context_id_out: u64,
-    pub result_return: u64,
-}
-pub type virtio_magma_connection_create_context_resp_t =
-    virtio_magma_connection_create_context_resp;
 #[repr(C, packed)]
 #[derive(Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable)]
 pub struct virtio_magma_connection_release_context_ctrl {

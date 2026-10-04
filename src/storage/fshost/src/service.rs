@@ -96,23 +96,19 @@ async fn open_or_create_starnix_volume(
         .ok_or_else(|| anyhow!("Tried to mount starnix volume without container set"))?;
 
     let mount_options = MountOptions { crypt: Some(crypt), ..MountOptions::default() };
+    let create_options =
+        CreateOptions { restrict_inode_ids_to_32_bit: Some(true), ..Default::default() };
     let mounted_vol = if recreate {
         if multi_vol_fs.has_volume(volume_name).await? {
             log::info!(volume_name:%; "Recreating starnix volume");
             multi_vol_fs.remove_volume(volume_name).await?;
         }
-        multi_vol_fs
-            .create_volume(
-                volume_name,
-                CreateOptions { restrict_inode_ids_to_32_bit: Some(true), ..Default::default() },
-                mount_options,
-            )
-            .await?
+        multi_vol_fs.create_volume(volume_name, create_options, mount_options).await?
     } else {
         if multi_vol_fs.has_volume(volume_name).await? {
             multi_vol_fs.open_volume(volume_name, mount_options).await?
         } else {
-            multi_vol_fs.create_volume(volume_name, CreateOptions::default(), mount_options).await?
+            multi_vol_fs.create_volume(volume_name, create_options, mount_options).await?
         }
     };
 

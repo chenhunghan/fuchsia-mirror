@@ -53,9 +53,12 @@ const _: () = {
 
 fn get_total_capacity(vector: UserInPtr<zx_iovec_t>, count: usize) -> Result<usize, Status> {
     let mut total = 0usize;
-    for_each(vector, count, |_buffer, capacity| {
-        total = total.checked_add(capacity).ok_or(Status::INVALID_ARGS)?;
-        Ok(())
+    for_each(vector, count, |_buffer, capacity| match total.checked_add(capacity) {
+        Some(sum) => {
+            total = sum;
+            Status::NEXT
+        }
+        None => Status::INVALID_ARGS,
     })?;
     Ok(total)
 }
@@ -87,12 +90,19 @@ fn copy_to_slice<T>(
 
 fn for_each<F>(vector: UserInPtr<zx_iovec_t>, count: usize, mut cb: F) -> Result<(), Status>
 where
-    F: FnMut(usize, usize) -> Result<(), Status>,
+    F: FnMut(usize, usize) -> Status,
 {
     let raw_vec = vector.reinterpret::<RawIovec>();
     for i in 0..count {
         let elem = raw_vec.element_offset(i).read()?;
-        cb(elem.buffer, elem.capacity)?;
+        let status = cb(elem.buffer, elem.capacity);
+        if status == Status::NEXT {
+            continue;
+        }
+        if status == Status::STOP {
+            break;
+        }
+        return Err(status);
     }
     Ok(())
 }
@@ -140,10 +150,15 @@ impl UserInIovec {
         copy_to_slice(self.vector, self.count, out)
     }
 
-    /// Iterates through the iovecs and invokes the callback for each user pointer and capacity.
+    /// Iterate through the iovec.
+    ///
+    /// To continue to the next buffer in the vector, return `Status::NEXT`. To stop
+    /// iterating successfully, return `Status::STOP`. Returning any other error will
+    /// also stop the iteration but will cause `for_each` to return that error instead
+    /// of `Ok(())`.
     pub fn for_each<F>(&self, mut cb: F) -> Result<(), Status>
     where
-        F: FnMut(UserInPtr<u8>, usize) -> Result<(), Status>,
+        F: FnMut(UserInPtr<u8>, usize) -> Status,
     {
         for_each(self.vector, self.count, |buffer, capacity| {
             cb(UserInPtr::new(buffer as *const u8), capacity)
@@ -199,10 +214,15 @@ impl UserOutIovec {
         copy_to_slice(self.vector, self.count, out)
     }
 
-    /// Iterates through the iovecs and invokes the callback for each user pointer and capacity.
+    /// Iterate through the iovec.
+    ///
+    /// To continue to the next buffer in the vector, return `Status::NEXT`. To stop
+    /// iterating successfully, return `Status::STOP`. Returning any other error will
+    /// also stop the iteration but will cause `for_each` to return that error instead
+    /// of `Ok(())`.
     pub fn for_each<F>(&self, mut cb: F) -> Result<(), Status>
     where
-        F: FnMut(UserOutPtr<u8>, usize) -> Result<(), Status>,
+        F: FnMut(UserOutPtr<u8>, usize) -> Status,
     {
         for_each(self.vector, self.count, |buffer, capacity| {
             cb(UserOutPtr::new(buffer as *mut u8), capacity)
@@ -253,10 +273,15 @@ impl UserInOutIovec {
         copy_to_slice(self.vector, self.count, out)
     }
 
-    /// Iterates through the iovecs and invokes the callback for each user pointer and capacity.
+    /// Iterate through the iovec.
+    ///
+    /// To continue to the next buffer in the vector, return `Status::NEXT`. To stop
+    /// iterating successfully, return `Status::STOP`. Returning any other error will
+    /// also stop the iteration but will cause `for_each` to return that error instead
+    /// of `Ok(())`.
     pub fn for_each<F>(&self, mut cb: F) -> Result<(), Status>
     where
-        F: FnMut(UserInOutPtr<u8>, usize) -> Result<(), Status>,
+        F: FnMut(UserInOutPtr<u8>, usize) -> Status,
     {
         for_each(self.vector, self.count, |buffer, capacity| {
             cb(UserInOutPtr::new(buffer as *mut u8), capacity)

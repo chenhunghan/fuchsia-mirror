@@ -11,6 +11,7 @@ use fbl::{IsOpaqueRefCounted, OpaqueRefCountedFacade, RefPtr};
 use ksync::{KMutex, RawCriticalMutex, guarded};
 use zr::ToMutPtr;
 use zx_status::Status;
+use zx_types::ZX_CACHE_POLICY_MASK;
 
 use super::arch_vm_aspace::ArchMmuFlags;
 use super::vm_object::VmObject;
@@ -60,7 +61,6 @@ impl VmObjectPhysicalState {
 }
 
 const PAGE_SIZE: u64 = kernel_page::SIZE as u64;
-const ZX_CACHE_POLICY_MASK: ArchMmuFlags = constants::kVmCachePolicyMask as ArchMmuFlags;
 
 const fn in_range(offset: u64, len: u64, size: u64) -> bool {
     if let Some(end) = offset.checked_add(len) { end <= size } else { false }
@@ -464,7 +464,7 @@ pub unsafe extern "C" fn rust_vm_object_physical_set_mapping_cache_policy(
 ) -> Result<(), Status> {
     // SAFETY: The caller guarantees `state_ptr` points to an initialized `VmObjectPhysicalState`.
     let state = unsafe { &*state_ptr };
-    if (cache_policy & !ZX_CACHE_POLICY_MASK) != 0 {
+    if (cache_policy & !(ZX_CACHE_POLICY_MASK as ArchMmuFlags)) != 0 {
         return Err(Status::INVALID_ARGS);
     }
 

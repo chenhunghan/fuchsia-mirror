@@ -235,6 +235,10 @@ fit::result<fuchsia_driver_framework::NodeError> PendingNodeManager::AddNode(
 
 void PendingNodeManager::TryResolvePendingNodes(
     const std::unordered_map<ResourceId, std::weak_ptr<Resource>>& multibind_resources) {
+  if (pending_nodes_.empty()) {
+    return;
+  }
+
   std::vector<ResourceWithProperties> resources;
   resources.reserve(multibind_resources.size());
   for (const auto& [id, resource_weak] : multibind_resources) {

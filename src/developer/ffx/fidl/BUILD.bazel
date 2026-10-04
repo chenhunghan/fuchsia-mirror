@@ -17,6 +17,7 @@ fidl_library(
     visibility = [
         "//build/sdk/meta:__pkg__",
         "//src/developer/ffx:__subpackages__",
+        "//src/developer/fuchsia-controller:__subpackages__",
         "//src/sys/pkg/lib:__subpackages__",
         "//tools/fidl/fidlgen_python/tests:__subpackages__",
         "//tools/funnel:__subpackages__",

@@ -18,14 +18,14 @@
 
 namespace pci {
 
-// Normally we would track the allocations and assert on issues during
-// cleanup, but presently with an IsolatedDevmgr we don't have a way
-// to cleanly tear down the FakeBusDriver, so no dtors on anything
-// will be called anyway.
+// In integration tests, DriverTestRealm tears down the fake bus driver
+// at realm shutdown. For isolated unit tests, FakeAllocation instances
+// provide backing memory without requiring bus driver teardown tracking.
 class FakeAllocation : public PciAllocation {
  public:
-  FakeAllocation(pci_address_space_t type, std::optional<zx_paddr_t> base, size_t size)
-      : PciAllocation(type, zx::resource(ZX_HANDLE_INVALID)),
+  FakeAllocation(pci_address_space_t type, std::optional<zx_paddr_t> base, size_t size,
+                 zx::resource resource = zx::resource(ZX_HANDLE_INVALID))
+      : PciAllocation(type, std::move(resource)),
         base_((base.has_value()) ? *base : 0),
         size_(size) {
     zxlogf(DEBUG, "fake allocation created [%#lx, %#lx)", base_, base_ + size);
@@ -42,12 +42,14 @@ class FakeAllocation : public PciAllocation {
   }
 
   zx::result<zx::resource> CreateResource() const final {
+    if (zx::result<zx::resource> result = PciAllocation::CreateResource(); result.is_ok()) {
+      return result;
+    }
     zx_handle_t handle = ZX_HANDLE_INVALID;
     zx_rsrc_kind_t kind =
         (type() == PCI_ADDRESS_SPACE_MEMORY) ? ZX_RSRC_KIND_MMIO : ZX_RSRC_KIND_IOPORT;
     ZX_DEBUG_ASSERT(fake_resource_create(kind, &handle) == ZX_OK);
-    auto resource = zx::resource(handle);
-    return zx::ok(std::move(resource));
+    return zx::ok(zx::resource(handle));
   }
 
  private:
@@ -76,6 +78,9 @@ class FakeAllocator : public PciAllocator {
       fail_next_any_ = true;
     }
   }
+  // Sets an optional backing resource duplicated into allocations created by this allocator.
+  void SetResource(zx::resource resource) { resource_ = std::move(resource); }
+
   zx::result<std::unique_ptr<PciAllocation>> Allocate(std::optional<zx_paddr_t> in_base,
                                                       size_t size) final {
     if (fail_next_any_ || (fail_next_assigned_ && in_base.has_value())) {
@@ -88,7 +93,12 @@ class FakeAllocator : public PciAllocator {
     // In a normal reallocation use the requested base, but in a forced it
     // should align to the size so that's a convenient placeholder.
     const zx_paddr_t base = (in_base.has_value()) ? *in_base : size;
-    auto allocation = std::unique_ptr<PciAllocation>(new FakeAllocation(type(), base, size));
+    zx::resource res;
+    if (resource_.is_valid()) {
+      ZX_DEBUG_ASSERT(resource_.duplicate(ZX_RIGHT_SAME_RIGHTS, &res) == ZX_OK);
+    }
+    auto allocation =
+        std::unique_ptr<PciAllocation>(new FakeAllocation(type(), base, size, std::move(res)));
     allocation_log_.push_back({.size = size, .succeeded = true});
     return zx::ok(std::move(allocation));
   }
@@ -104,6 +114,7 @@ class FakeAllocator : public PciAllocator {
   bool fail_next_assigned_ = false;
   bool fail_next_any_ = false;
   std::vector<AllocationLogEntry> allocation_log_;
+  zx::resource resource_;
 };
 
 }  // namespace pci

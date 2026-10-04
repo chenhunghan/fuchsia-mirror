@@ -135,7 +135,7 @@ impl StorageAdmin {
                 e,
             )
         })?;
-        let sandbox = component.lock_resolved_state().await?.sandbox.clone();
+        let sandbox = component.component_sandbox().await?;
         let storage_router = match sandbox.program_output_dict.get_capability(&storage_decl.name) {
             Some(Capability::DirConnectorRouter(storage_router)) => storage_router,
             _ => {
@@ -149,8 +149,10 @@ impl StorageAdmin {
             StorageDirectorySource::Self_ => sandbox.program_output_dict.clone(),
             StorageDirectorySource::Child(name) => {
                 let child_name = ChildName::parse(name).expect("invalid moniker in manifest");
-                let child = component.lock_resolved_state().await?.get_child(&child_name).cloned().expect("storage source doesn't exist, this should be prevented by manifest validation");
-                child.lock_resolved_state().await?.sandbox.component_output.capabilities()
+                let child = component.get_child_maybe_resolve(&child_name).await?.expect(
+                    "storage source doesn't exist, this should be prevented by manifest validation",
+                );
+                child.get_component_output_dict().await?
             }
         };
         let backing_dir_router = match source_dictionary.get_capability(&storage_decl.backing_dir) {

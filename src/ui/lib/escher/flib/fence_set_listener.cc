@@ -10,8 +10,8 @@
 
 namespace escher {
 
-FenceSetListener::FenceSetListener(std::vector<zx::event> fence_listeners)
-    : fences_(std::move(fence_listeners)) {}
+FenceSetListener::FenceSetListener(std::vector<zx::handle> fence_listeners)
+    : fences_(std::move(fence_listeners)), total_fences_(fences_.size()) {}
 
 void FenceSetListener::WaitReadyAsync(fit::closure ready_callback) {
   if (!ready_callback)
@@ -32,8 +32,8 @@ void FenceSetListener::WaitReadyAsync(fit::closure ready_callback) {
   }
 
   FX_DCHECK(waiters_.empty());
-  waiters_.reserve(fences_.size());
-  int waiter_index = 0;
+  waiters_.reserve(total_fences_);
+  size_t waiter_index = 0;
 
   // Wait for |kFenceSignalled| on each fence.
   for (auto& fence : fences_) {

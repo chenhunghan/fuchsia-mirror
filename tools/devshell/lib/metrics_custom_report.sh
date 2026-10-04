@@ -21,7 +21,9 @@
 set -e
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/vars.sh || exit $?
-fx-config-read
+if fx-build-dir-if-present; then
+  fx-config-read
+fi
 declare -r metrics_sh="${FUCHSIA_DIR}/tools/devshell/lib/metrics.sh"
 source "${metrics_sh}" || exit $?
 

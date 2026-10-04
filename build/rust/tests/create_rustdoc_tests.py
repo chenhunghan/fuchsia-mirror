@@ -14,6 +14,7 @@ from shutil import rmtree
 from subprocess import run
 from sys import argv
 from tempfile import TemporaryDirectory
+from typing import TypeVar
 
 # better errors when running local tests
 use_lxml = False
@@ -30,7 +31,7 @@ if use_lxml:
 
 @dataclass(frozen=True)
 class FileExists:
-    path: Path
+    path: str
     fail: bool
     cci: bool
     """Whether this assertion depends on Cross Crate Information (information aggregated from
@@ -66,7 +67,7 @@ class FileExists:
 
 @dataclass(frozen=True)
 class HasRaw:
-    file: Path
+    file: str
     content: str
     fail: bool
     cci: bool
@@ -74,9 +75,9 @@ class HasRaw:
     multiple crates). Checking for the presence of a search index would be an example."""
 
     def run(self, root: Path) -> None:
-        cont = root / self.file
-        assert cont.is_file(), f"{cont} does not exist"
-        cont = cont.read_text()
+        path = root / self.file
+        assert path.is_file(), f"{path} does not exist"
+        cont = path.read_text()
         assert (
             self.content in cont
         ), f"found `{cont}`, to contain `{self.content}` in {root / self.file}"
@@ -107,7 +108,7 @@ class HasRaw:
 
 @dataclass(frozen=True)
 class Has:
-    file: Path
+    file: str
     xpath: str
     content: str
     full: bool
@@ -116,19 +117,19 @@ class Has:
     """Whether this assertion depends on Cross Crate Information (information aggregated from
     multiple crates). Checking for the presence of a search index would be an example."""
 
-    def run(self, root: Path):
-        cont = root / self.file
-        assert cont.is_file(), f"{cont} does not exist"
+    def run(self, root: Path) -> None:
+        path = root / self.file
+        assert path.is_file(), f"{path} does not exist"
+        cont: str
         if use_lxml:
-            cont = html.parse(cont)
-            cont = cont.xpath(self.xpath)
-            assert len(cont) == 1, (
+            elements = html.parse(path).xpath(self.xpath)
+            assert len(elements) == 1, (
                 f"{self.xpath} in {root / self.file} should have selected a single"
-                f" element, instead got {len(cont)}"
+                f" element, instead got {len(elements)}"
             )
-            cont = cont[0].text_content()
+            cont = elements[0].text_content()
         else:
-            cont = cont.read_text()
+            cont = path.read_text()
         if self.full and use_lxml:
             assert (
                 self.content == cont
@@ -159,7 +160,7 @@ class Has:
             f"    )\n"
         )
 
-    def render(self):
+    def render(self) -> str:
         bang = "!" if self.fail else ""
         command = "has" if self.full else "matches"
         return (
@@ -180,7 +181,7 @@ class CrateConfig:
     include_parts_dir: frozenset["Crate"] = frozenset()
     enable_index_page: bool = False
     separate_out_dir: bool = False
-    extra_flags: tuple[str] = tuple()
+    extra_flags: tuple[str, ...] = tuple()
     examples: tuple["Crate", str] | None = None  # crate, path
 
 
@@ -193,6 +194,7 @@ class Crate:
     crate_type: str
     ext: str
 
+    @staticmethod
     def new(
         contents: str,
         name: str,
@@ -211,7 +213,7 @@ class Crate:
 
     def makefile(
         self, crate_name: str, config: CrateConfig, rustdoc: Path, rustc: Path
-    ) -> str:
+    ) -> tuple[str, str]:
         merge = "" if config.merge is None else f"--merge={config.merge.value}"
         include_parts_dir = " ".join(
             [
@@ -272,9 +274,9 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
         self,
         path: Path,
         aux: Path,
-        configs: dict["Crate", "Config"],
+        configs: dict["Crate", CrateConfig],
         extra_header: str,
-    ):
+    ) -> None:
         header = ""
         for d in self.deps:
             aux.mkdir(exist_ok=True)
@@ -290,10 +292,11 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
             if not configs[self].separate_out_dir
             else "//@ unique-doc-out-dir\n"
         )
-        flags = []
+        flags: list[str] = []
         flags.extend(configs[self].extra_flags)
-        if configs[self].merge is not None:
-            flags.append(f"--merge={configs[self].merge.value}")
+        merge = configs[self].merge
+        if merge is not None:
+            flags.append(f"--merge={merge.value}")
         for c in configs[self].include_parts_dir:
             flags.append(f"--include-parts-dir=info/doc.parts/{c.name}")
         if configs[self].parts_out_dir:
@@ -304,27 +307,28 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
             flags.append(f"--crate-type={self.crate_type}")
         if self.crate_type == "proc-macro":
             flags.append(f"--extern=proc_macro")
-        if configs[self].examples is not None:
-            c, p = configs[self].examples
+        examples = configs[self].examples
+        if examples is not None:
+            c, p = examples
             flags += [f"--scrape-examples-output-path={p}"]
             flags += [f"--scrape-examples-target-crate={c.name}"]
         if len(flags) > 0:
             flags.append("-Zunstable-options")
-        flags = "".join(f"//@ doc-flags:{f}\n" for f in flags)
-        if len(flags) > 0:
-            flags += "\n"
+        doc_flags = "".join(f"//@ doc-flags:{f}\n" for f in flags)
+        if len(doc_flags) > 0:
+            doc_flags += "\n"
         contents = self.contents + "\n" if len(self.contents) > 0 else ""
         Path(path, self.name).with_suffix(".rs").write_text(
-            f"{header}{separate_out_dir}{flags}" f"{extra_header}{contents}"
+            f"{header}{separate_out_dir}{doc_flags}" f"{extra_header}{contents}"
         )
 
     def render_as_gn_target(
         self,
         config_root: Path,
         configs: dict["Crate", CrateConfig],
-        targets: dict[str, str],
+        targets: dict[str, tuple[str, str]],
         is_index: bool,
-    ):
+    ) -> str:
         if self.name in targets:
             return self.name
 
@@ -341,10 +345,11 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
             d.render_as_gn_target(config_root, configs, targets, False)
         deps = [f'":{d.name}", ' for d in self.deps]
         public_deps = [f'"{target_name(d)}", ' for d in self.deps]
+        crate_merge = configs[self].merge
         merge = (
             f""
-            if configs[self].merge is None
-            else f'  rustdoc_merge = "{configs[self].merge.value}"\n'
+            if crate_merge is None
+            else f'  rustdoc_merge = "{crate_merge.value}"\n'
         )
         extra_flags = list(f'"{f}", ' for f in configs[self].extra_flags)
         extra_flags += [
@@ -367,16 +372,17 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
             "proc-macro": "rustc_macro",
             "bin": "rustc_binary",
         }[self.crate_type]
-        if configs[self].examples is not None:
-            c, p = configs[self].examples
+        examples = configs[self].examples
+        if examples is not None:
+            c, p = examples
             extra_flags += f'"--scrape-examples-output-path", '
             extra_flags += (
                 f'rebase_path("{rustdoc_out_dir}/{p}", root_build_dir), '
             )
             extra_flags += f'"--scrape-examples-target-crate={c.name}", '
-        deps = "".join(deps)
-        public_deps = "".join(public_deps)
-        extra_flags = "".join(extra_flags)
+        deps_str = "".join(deps)
+        public_deps_str = "".join(public_deps)
+        extra_flags_str = "".join(extra_flags)
         rustdoc_parts_dir = (
             f'  rustdoc_parts_dir = "$target_gen_dir/doc.parts/{self.name}"\n'
             if configs[self].parts_out_dir
@@ -387,14 +393,14 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
             f'  edition = "2024"\n'
             f"  define_rustdoc_test_override = true\n"
             f'  name = "{self.name}"\n'
-            f"  deps = [{deps}]\n"
-            f"  public_deps = [{public_deps}]\n"
+            f"  deps = [{deps_str}]\n"
+            f"  public_deps = [{public_deps_str}]\n"
             f"  testonly = true\n"
             f'  source_root = "{source}"\n'
             f'  sources = [ "{source}" ]\n'
             f"  quiet_clippy = true\n"
             f'  rustdoc_out_dir = "{rustdoc_out_dir}"\n'
-            f"  rustdoc_args = [{extra_flags}]\n"
+            f"  rustdoc_args = [{extra_flags_str}]\n"
             f'  zip_rustdoc_to = "$target_gen_dir/{self.name}.doc.zip"\n'
             f"{merge}"
             f"{rustdoc_parts_dir}"
@@ -422,17 +428,17 @@ class Config:
     assertions: list[Has | HasRaw | FileExists]
     no_mergeable_rustdoc: bool
 
-    def render_as_gn_test(self, path: Path):
+    def render_as_gn_test(self, path: Path) -> None:
         # tests share source files
         src = path / "src"
         src.mkdir(parents=True, exist_ok=True)
 
         config_root = path / self.name
         config_root.mkdir(parents=True, exist_ok=True)
-        targets = dict()
+        targets: dict[str, tuple[str, str]] = dict()
         self.index.render_as_gn_target(config_root, self.configs, targets, True)
-        targets, build_name = zip(*targets.values())
-        targets = "".join(targets)
+        target_defs, build_name = zip(*targets.values())
+        targets_str = "".join(target_defs)
         public_deps = "".join(f'"{target_name(c)}", ' for c in self.configs)
         build = (
             f"# Copyright 2024 The Fuchsia Authors. All rights reserved.\n"
@@ -465,7 +471,7 @@ class Config:
             f"  }}\n"
             f"}}\n"
             f"\n"
-            f"{targets}"
+            f"{targets_str}"
         )
         Path(config_root, "BUILD.gn").write_text(build)
         assertions = "".join(
@@ -493,7 +499,7 @@ class Config:
         )
         Path(config_root, "test.py").write_text(run_test)
 
-    def render_as_rustdoc_test(self, path: Path):
+    def render_as_rustdoc_test(self, path: Path) -> None:
         path = Path(path, self.name)
         aux = path / "auxiliary"
         aux.mkdir(exist_ok=True, parents=True)
@@ -505,12 +511,9 @@ class Config:
         extra_header += "".join(f"// {w}\n" for w in textwrap.wrap(self.desc))
         self.index.render_as_rustdoc_test(path, aux, self.configs, extra_header)
 
-    def run(self, rustc: Path, rustdoc: Path):
-        root = "root"
-        with TemporaryDirectory() as root:
-            root = Path(root)
-            root.mkdir(exist_ok=True)
-            root = Path(root)
+    def run(self, rustc: Path, rustdoc: Path) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
             makes, targets = zip(
                 *(
                     c.makefile(
@@ -539,9 +542,12 @@ class Config:
                 ), f"assertion in {self.name} should fail {repr(t)}"
 
 
-def dedup(items: Iterable[any]) -> list:
-    ret = []
-    seen = set()
+_T = TypeVar("_T")
+
+
+def dedup(items: Iterable[_T]) -> list[_T]:
+    ret: list[_T] = []
+    seen: set[_T] = set()
     for item in items:
         if item not in seen:
             ret.append(item)
@@ -655,7 +661,7 @@ t_i_header = Has(
 )
 
 
-def index_but_crate_absent(c, i) -> list:
+def index_but_crate_absent(c: Crate, i: int | Crate) -> list[FileExists | Has]:
     return [
         FileExists(
             path="index.html",
@@ -681,7 +687,9 @@ def index_but_crate_absent(c, i) -> list:
     ]
 
 
-def test_index_has_crate(c, i, fail: bool) -> list:
+def test_index_has_crate(
+    c: Crate, i: int | Crate, fail: bool
+) -> list[FileExists | Has]:
     """index.html is cross-crate information, and a crate should only appear here if and only if it was written to the shared output directory,
 
     overwritten with --merge=finalize, or included with --include-parts-dir from
@@ -721,7 +729,9 @@ def test_index_has_crate(c, i, fail: bool) -> list:
     ]
 
 
-def test_root_has_item(c, kind, name, fail: bool):
+def test_root_has_item(
+    c: Crate, kind: str, name: str, fail: bool
+) -> FileExists:
     """{crate name}/index.html is specific to each crate, and does not serve as a cci part.
 
     should appear if rendered to a fixed out-dir or copied with
@@ -734,7 +744,9 @@ def test_root_has_item(c, kind, name, fail: bool):
     )
 
 
-def test_fixed_crate_impl(c, kind, trait, implr, implr_alias):
+def test_fixed_crate_impl(
+    c: Crate, kind: str, trait: str, implr: str, implr_alias: str
+) -> list[FileExists | HasRaw]:
     """regular trait implementation, does not rely on cross-crate trait linking"""
     return [
         FileExists(
@@ -751,7 +763,7 @@ def test_fixed_crate_impl(c, kind, trait, implr, implr_alias):
     ]
 
 
-def test_cross_crate_impl_not_exist(c, name):
+def test_cross_crate_impl_not_exist(c: Crate, name: str) -> FileExists:
     """regular trait implementation, not cross-crate trait implementation"""
     return FileExists(
         path=f"trait.impl/{c.name}/trait.{name}.js",
@@ -760,7 +772,7 @@ def test_cross_crate_impl_not_exist(c, name):
     )
 
 
-def test_cross_crate_impl(c, name, implr, kind: str):
+def test_cross_crate_impl(c: Crate, name: str, implr: str, kind: str) -> HasRaw:
     """regular trait implementation, not cross-crate trait implementation"""
     return HasRaw(
         file=f"trait.impl/{c.name}/trait.{name}.js",
@@ -770,7 +782,7 @@ def test_cross_crate_impl(c, name, implr, kind: str):
     )
 
 
-def test_search_index(name: str, fail: bool):
+def test_search_index(name: str, fail: bool) -> HasRaw:
     """check for the presence of the item in the search index"""
     return HasRaw(
         file=f"search-index.js",
@@ -796,7 +808,7 @@ def test_type_impl(
     original: str,
     trait_name: str,
     alias_name: str,
-) -> list:
+) -> list[FileExists | HasRaw]:
     return [
         FileExists(
             path=f"type.impl/{original_crate.name}/{kind}.{original}.js",
@@ -818,15 +830,15 @@ def test_type_impl(
     ]
 
 
-def assert_no_duplicate_config_names(configs: Iterable[Config]):
-    seen = set()
+def assert_no_duplicate_config_names(configs: Iterable[Config]) -> None:
+    seen: set[str] = set()
     for c in configs:
         assert c.name not in seen, f"found duplicate name {c.name}"
         seen.add(c.name)
 
 
-def main(args: Namespace):
-    configs = []
+def main(args: Namespace) -> None:
+    configs: list[Config] = []
 
     configs.append(
         Config(

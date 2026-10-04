@@ -263,20 +263,6 @@ fn convert_dictionary_value(value: fdata::DictionaryValue) -> fidl_next_fdata::D
     }
 }
 
-fn convert_node_property(p: fidl_fdf::NodeProperty) -> fidl_next_fdf::NodeProperty {
-    fidl_next_fdf::NodeProperty {
-        key: convert_node_property_key(p.key),
-        value: convert_node_property_value(p.value),
-    }
-}
-
-fn convert_node_property_key(k: fidl_fdf::NodePropertyKey) -> fidl_next_fdf::NodePropertyKey {
-    match k {
-        fidl_fdf::NodePropertyKey::IntValue(v) => fidl_next_fdf::NodePropertyKey::IntValue(v),
-        fidl_fdf::NodePropertyKey::StringValue(v) => fidl_next_fdf::NodePropertyKey::StringValue(v),
-    }
-}
-
 fn convert_node_property_value(v: fidl_fdf::NodePropertyValue) -> fidl_next_fdf::NodePropertyValue {
     match v {
         fidl_fdf::NodePropertyValue::IntValue(v) => fidl_next_fdf::NodePropertyValue::IntValue(v),
@@ -299,13 +285,6 @@ fn convert_node_property_entry_2(
     fidl_next_fdf::NodePropertyEntry2 {
         name: e.name,
         properties: e.properties.into_iter().map(convert_node_property_2).collect(),
-    }
-}
-
-fn convert_node_property_entry(e: fidl_fdf::NodePropertyEntry) -> fidl_next_fdf::NodePropertyEntry {
-    fidl_next_fdf::NodePropertyEntry {
-        name: e.name,
-        properties: e.properties.into_iter().map(convert_node_property).collect(),
     }
 }
 
@@ -356,9 +335,6 @@ pub(crate) fn convert_start_args(
             token: p.token,
         }),
         log_sink: args.log_sink.map(|c| fidl_next::ClientEnd::from_untyped(c.into_channel())),
-        node_properties: args
-            .node_properties
-            .map(|props| props.into_iter().map(convert_node_property_entry).collect()),
         node_properties_2: args
             .node_properties_2
             .map(|props| props.into_iter().map(convert_node_property_entry_2).collect()),

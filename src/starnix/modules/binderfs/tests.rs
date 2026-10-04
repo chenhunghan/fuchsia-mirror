@@ -36,7 +36,6 @@ pub mod tests {
         DesiredAddress, MappingName, MappingOptions, MemoryAccessor, MemoryAccessorExt, PAGE_SIZE,
         ProtectionFlags,
     };
-    use starnix_core::security;
     use starnix_core::task::{CurrentTask, ExitStatus, Kernel, SimpleWaiter, Waiter};
     use starnix_core::testing::*;
     use starnix_core::vfs::{Anon, FdFlags, FdNumber, FileHandle, FileObject, anon_fs};
@@ -98,7 +97,6 @@ pub mod tests {
         device: Weak<BinderDriver>,
         proc: OwnedRef<BinderProcess>,
         thread: OwnedRef<BinderThread>,
-        connection_security_state: security::BinderConnectionState,
         kernel: Arc<Kernel>,
         task: Option<AutoReleasableTask>,
     }
@@ -113,7 +111,6 @@ pub mod tests {
                 device: Arc::downgrade(device),
                 proc,
                 thread,
-                connection_security_state: security::binder_connection_alloc(&task),
                 kernel: current_task.kernel().clone(),
                 task: Some(task),
             }
@@ -128,7 +125,6 @@ pub mod tests {
                 device: Arc::downgrade(device),
                 proc,
                 thread,
-                connection_security_state: security::binder_connection_alloc(current_task),
                 kernel: current_task.kernel().clone(),
                 task: None,
             }
@@ -149,7 +145,6 @@ pub mod tests {
                 if let Some(task) = self.task.as_ref() { &task } else { current_task };
             OperationContext {
                 current_task,
-                connection_security_state: &self.connection_security_state,
                 binder_proc: &self.proc,
                 binder_thread: &self.thread,
                 memory_accessor: current_task.as_memory_accessor().expect("as_memory_accessor"),
@@ -266,12 +261,10 @@ pub mod tests {
         spawn_kernel_and_run(async |current_task| {
             let device = BinderDevice::default();
             let manager = BinderProcessFixture::new_current(current_task, &device);
-            let security_state = security::binder_connection_alloc(current_task);
 
             device
                 .ioctl(
                     current_task,
-                    &security_state,
                     &manager.proc,
                     None,
                     uapi::BINDER_SET_CONTEXT_MGR,
@@ -282,7 +275,6 @@ pub mod tests {
 
             match device.ioctl(
                 current_task,
-                &security_state,
                 &manager.proc,
                 None,
                 uapi::BINDER_SET_CONTEXT_MGR,
@@ -297,7 +289,6 @@ pub mod tests {
             other.task().set_creds(Credentials::with_ids(1, 1));
             match device.ioctl(
                 other.task(),
-                &other.connection_security_state,
                 &other.proc,
                 None,
                 uapi::BINDER_SET_CONTEXT_MGR,
@@ -314,7 +305,6 @@ pub mod tests {
             device
                 .ioctl(
                     current_task,
-                    &security::binder_connection_alloc(current_task),
                     &successor.proc,
                     None,
                     uapi::BINDER_SET_CONTEXT_MGR,
@@ -1446,7 +1436,6 @@ pub mod tests {
                 .copy_transaction_buffers(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    &receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &transaction,
@@ -1520,7 +1509,6 @@ pub mod tests {
                 .translate_objects(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &offsets,
@@ -1613,7 +1601,6 @@ pub mod tests {
                 .translate_objects(&sender.context(current_task),
                     &mut Vec::new(),
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &offsets,
                     &mut transaction_data,
@@ -1693,7 +1680,6 @@ pub mod tests {
                 .translate_objects(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &offsets,
@@ -1812,7 +1798,6 @@ pub mod tests {
                 .translate_objects(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &offsets,
@@ -1967,7 +1952,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut Vec::new(),
                     current_task,
-                    current_task,
                     &receiver.proc,
                     &input,
                     None,
@@ -2071,7 +2055,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut Vec::new(),
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &input,
                     None,
@@ -2153,7 +2136,6 @@ pub mod tests {
                 .copy_transaction_buffers(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &input,
@@ -2609,7 +2591,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut Vec::new(),
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &input,
                     None,
@@ -2656,7 +2637,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut Vec::new(),
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &[0 as binder_uintptr_t],
                     &mut transaction_data,
@@ -2691,7 +2671,6 @@ pub mod tests {
                 .translate_objects(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &[0 as binder_uintptr_t],
@@ -2738,7 +2717,6 @@ pub mod tests {
                 .translate_objects(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &[
@@ -2807,7 +2785,7 @@ pub mod tests {
             let binder_fd = open_binder_fd(&current_task, &device);
             let binder_connection =
                 binder_fd.downcast_file::<BinderConnection>().expect("must be a BinderConnection");
-            let binder_proc = binder_connection.proc(current_task).unwrap();
+            let binder_proc = binder_connection.proc().unwrap();
             let binder_thread =
                 binder_proc.lock().find_or_register_thread(&current_task.task).unwrap();
 
@@ -2837,7 +2815,6 @@ pub mod tests {
 
             let context = OperationContext {
                 current_task,
-                connection_security_state: &security::binder_connection_alloc(current_task),
                 binder_proc: &binder_proc,
                 binder_thread: &binder_thread,
                 memory_accessor: binder_proc.get_memory_accessor(current_task, None),
@@ -3142,7 +3119,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut Vec::new(),
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &offsets,
                     &mut transaction_data,
@@ -3236,7 +3212,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut source_files,
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &offsets,
                     &mut transaction_data,
@@ -3298,7 +3273,6 @@ pub mod tests {
                     &sender.context(current_task),
                     &mut Vec::new(),
                     receiver.task(),
-                    receiver.task(),
                     &receiver.proc,
                     &offsets,
                     &mut transaction_data,
@@ -3355,7 +3329,6 @@ pub mod tests {
                 .translate_objects(
                     &sender.context(current_task),
                     &mut Vec::new(),
-                    receiver.task(),
                     receiver.task(),
                     &receiver.proc,
                     &offsets,
@@ -3696,7 +3669,11 @@ pub mod tests {
                 .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
                 .expect("failed to handle the transaction");
 
-            // Check that there are no commands waiting for the sending thread.
+            // Check that the sending thread has a TwoWayTransactionComplete command waiting.
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
             assert!(sender.thread.lock().command_queue.is_empty());
 
             // Check that the receiving process has a transaction scheduled.
@@ -3715,6 +3692,206 @@ pub mod tests {
             );
             // Check that the transaction has been popped.
             assert_matches!(sender.thread.lock().transactions.pop(), None);
+        })
+        .await;
+    }
+
+    /// Sends a two-way transaction from `sender` to a binder object owned by `receiver`. On return,
+    /// `sender`'s thread has a `TwoWayTransactionComplete` queued and a pending
+    /// `TransactionRole::Sender`.
+    fn send_two_way_transaction(
+        current_task: &CurrentTask,
+        device: &BinderDevice,
+        sender: &BinderProcessFixture,
+        receiver: &BinderProcessFixture,
+    ) {
+        const OBJECT_ADDR: UserAddress = UserAddress::const_from(0x01);
+        let (_, guard) =
+            register_binder_object(&receiver.proc, OBJECT_ADDR, (OBJECT_ADDR + 1u64).unwrap());
+        let handle = sender
+            .proc
+            .lock()
+            .handles
+            .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+        let transaction = binder_transaction_data_sg {
+            transaction_data: binder_transaction_data {
+                code: 42,
+                target: binder_transaction_data__bindgen_ty_1 { handle: handle.into() },
+                ..binder_transaction_data::default()
+            },
+            buffers_size: 0,
+        };
+        device
+            .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
+            .expect("failed to handle the transaction");
+    }
+
+    /// Returns a command whose serialized size is `Command::MAX_SIZE`: a transaction carrying a
+    /// security context, which is written as BR_TRANSACTION_SEC_CTX.
+    fn largest_command(current_task: &CurrentTask, peer: &BinderProcessFixture) -> Command {
+        Command::OnewayTransaction(TransactionData {
+            peer_pid: peer.proc.key.id,
+            peer_tid: peer.thread.tid,
+            peer_euid: current_task.current_creds().euid,
+            object: FlatBinderObject::Remote { handle: Handle::ContextManager },
+            code: 200,
+            flags: transaction_flags_TF_ONE_WAY,
+            buffers: TransactionBuffers {
+                security_context: Some(UserBuffer {
+                    address: UserAddress::const_from(0x1000),
+                    length: std::mem::size_of::<binder_uintptr_t>(),
+                }),
+                ..TransactionBuffers::default()
+            },
+        })
+    }
+
+    #[fuchsia::test]
+    async fn command_max_size_is_size_of_largest_command() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let proc = BinderProcessFixture::new_current(current_task, &device);
+            let context = proc.context(current_task);
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let command = largest_command(current_task, &proc);
+            assert_eq!(
+                command.driver_return_code(),
+                uapi::binder_driver_return_protocol_BR_TRANSACTION_SEC_CTX
+            );
+
+            // The largest command takes exactly `MAX_SIZE` bytes...
+            assert_eq!(
+                command.write_to_memory(
+                    context.memory_accessor,
+                    &UserBuffer { address: read_buffer_addr, length: Command::MAX_SIZE },
+                ),
+                Ok(Command::MAX_SIZE)
+            );
+            // ... and does not fit in fewer.
+            assert_eq!(
+                command.write_to_memory(
+                    context.memory_accessor,
+                    &UserBuffer { address: read_buffer_addr, length: Command::MAX_SIZE - 1 },
+                ),
+                Err(errno!(ENOMEM))
+            );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn two_way_transaction_complete_is_read_with_largest_command_if_buffer_fits_it() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+            send_two_way_transaction(current_task, &device, &sender, &receiver);
+
+            // Queue the largest possible command after the BR_TRANSACTION_COMPLETE.
+            sender.thread.lock().enqueue_command(largest_command(current_task, &receiver).into());
+
+            // The buffer has exactly enough room for BR_TRANSACTION_COMPLETE followed by a command
+            // of `MAX_SIZE`, so both are returned by a single read.
+            let command_size = std::mem::size_of::<u32>();
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &sender.context(current_task),
+                    &UserBuffer {
+                        address: read_buffer_addr,
+                        length: command_size + Command::MAX_SIZE,
+                    },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, command_size + Command::MAX_SIZE);
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_TRANSACTION_SEC_CTX);
+            assert!(sender.thread.lock().command_queue.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn two_way_transaction_complete_is_read_alone_if_buffer_cannot_fit_largest_command() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+            send_two_way_transaction(current_task, &device, &sender, &receiver);
+
+            // Drop the receiving process, so that a (small) BR_DEAD_REPLY is queued.
+            std::mem::drop(receiver);
+
+            // The buffer is one byte too small for BR_TRANSACTION_COMPLETE followed by a command
+            // of `MAX_SIZE`. Even though the queued BR_DEAD_REPLY would fit, the read returns
+            // the BR_TRANSACTION_COMPLETE alone: the next command is only dequeued if any
+            // command fits, so that it is never lost.
+            let command_size = std::mem::size_of::<u32>();
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &sender.context(current_task),
+                    &UserBuffer {
+                        address: read_buffer_addr,
+                        length: command_size + Command::MAX_SIZE - 1,
+                    },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, command_size);
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+
+            // The BR_DEAD_REPLY is still queued, and returned by the next read.
+            assert_matches!(
+                sender.thread.lock().command_queue.commands.front(),
+                Some(QueuedCommand { command: Command::DeadReply, .. })
+            );
+            let bytes_read = device
+                .handle_thread_read(
+                    &sender.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, command_size);
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_DEAD_REPLY);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn two_way_transaction_complete_is_read_alone_if_buffer_is_small() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+            send_two_way_transaction(current_task, &device, &sender, &receiver);
+
+            // The buffer only has room for the BR_TRANSACTION_COMPLETE, so the read returns it
+            // without waiting for the reply.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &sender.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: std::mem::size_of::<u32>() },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, std::mem::size_of::<u32>());
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+
+            // The transaction is still pending.
+            assert_matches!(
+                sender.thread.lock().transactions.last(),
+                Some(TransactionRole::Sender(_))
+            );
         })
         .await;
     }
@@ -3774,6 +3951,10 @@ pub mod tests {
             device
                 .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
                 .expect("failed to handle the transaction");
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
             device
                 .handle_transaction(
                     &sender.context(current_task),
@@ -3781,6 +3962,10 @@ pub mod tests {
                     second_transaction,
                 )
                 .expect("failed to handle the transaction");
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
 
             // Check that both receivers have a transaction scheduled.
             assert_matches!(
@@ -3871,7 +4056,11 @@ pub mod tests {
                 .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
                 .expect("failed to handle the transaction");
 
-            // Check that there are no commands waiting for the sending thread.
+            // Check that the sending thread has a TwoWayTransactionComplete command waiting.
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
             assert!(sender.thread.lock().command_queue.is_empty());
 
             // Check that the receiving process has a transaction scheduled.
@@ -3935,7 +4124,11 @@ pub mod tests {
                 .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
                 .expect("failed to handle the transaction");
 
-            // Check that there are no commands waiting for the sending thread.
+            // Check that the sending thread has a TwoWayTransactionComplete command waiting.
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
             assert!(sender.thread.lock().command_queue.is_empty());
 
             // Check that the receiving process has a transaction scheduled. Because the thread is
@@ -4013,7 +4206,11 @@ pub mod tests {
                 .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
                 .expect("failed to handle the transaction");
 
-            // Check that there are no commands waiting for the sending thread.
+            // Check that the sending thread has a TwoWayTransactionComplete command waiting.
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
             assert!(sender.thread.lock().command_queue.is_empty());
 
             // Check that the receiving process' thread has a transaction scheduled.
@@ -4146,14 +4343,25 @@ pub mod tests {
                 .handle_reply(&proc_b.context(current_task), &mut Vec::new(), reply)
                 .expect("handle_reply to proc_a");
 
-            // 4. proc_a.thread reads from driver once and receives BR_REPLY.
+            // 4. proc_a.thread reads from driver once and receives BR_TRANSACTION_COMPLETE followed
+            // by BR_REPLY.
             let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
-            device
+            let bytes_read = device
                 .handle_thread_read(
                     &proc_a.context(current_task),
                     &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
                 )
                 .expect("proc_a.thread handle_thread_read");
+            let command_size = std::mem::size_of::<u32>();
+            assert_eq!(
+                bytes_read,
+                2 * command_size + std::mem::size_of::<binder_transaction_data>()
+            );
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_REPLY);
 
             // proc_a.thread returns to userspace. It will NOT call handle_thread_read again!
             assert!(proc_a.thread.lock().transactions.is_empty());
@@ -4162,7 +4370,6 @@ pub mod tests {
             // the process queue command without requiring proc_a.thread to re-enter handle_thread_read.
             let looper_context = OperationContext {
                 current_task: &looper_task,
-                connection_security_state: &proc_a.connection_security_state,
                 binder_proc: &proc_a.proc,
                 binder_thread: &looper_thread,
                 memory_accessor: looper_task.as_memory_accessor().expect("as_memory_accessor"),
@@ -4505,7 +4712,11 @@ pub mod tests {
                 .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
                 .expect("failed to handle the transaction");
 
-            // Check that there are no commands waiting for the sending thread.
+            // Check that the sending thread has a TwoWayTransactionComplete command waiting.
+            assert_matches!(
+                sender.thread.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::TwoWayTransactionComplete, .. })
+            );
             assert!(sender.thread.lock().command_queue.is_empty());
 
             // Check that the receiving process has a transaction scheduled.
@@ -4556,7 +4767,6 @@ pub mod tests {
             device
                 .ioctl(
                     current_task,
-                    &security::binder_connection_alloc(current_task),
                     &receiver.proc,
                     None,
                     uapi::BINDER_FREEZE,
@@ -4602,7 +4812,6 @@ pub mod tests {
             device
                 .ioctl(
                     current_task,
-                    &security::binder_connection_alloc(current_task),
                     &receiver.proc,
                     None,
                     uapi::BINDER_GET_FROZEN_INFO,

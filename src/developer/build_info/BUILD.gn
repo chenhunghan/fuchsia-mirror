@@ -2,9 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
-import("//build/testing/cc_test_executable.gni")
 
 rustc_binary("shell_bin") {
   name = "build-info"
@@ -28,33 +28,8 @@ fuchsia_package_with_single_component("build-info-shell") {
   deps = [ ":shell_bin" ]
 }
 
-cc_test_executable("test-bin") {
-  testonly = true
-  output_name = "build_info_unittest"
-  sources = [
-    "build_info.cc",
-    "build_info.h",
-    "build_info_unittest.cc",
-  ]
-
-  deps = [
-    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_cpp",
-    "//sdk/lib/syslog/cpp",
-    "//sdk/lib/vfs/cpp",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/loop_fixture",
-  ]
-}
-
-fuchsia_unittest_package("build-info-unittest") {
-  deps = [ ":test-bin" ]
-  test_specs = {
-    # Tests may produce ERROR logs when validating behavior in scenarios where
-    # build-info is not present (e.g. not allowlisted).
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
+bazel_test_suite("build-info-unittest") {
+  target_tests = [ "//src/developer/build_info:build-info-unittest" ]
 }
 
 group("tests") {

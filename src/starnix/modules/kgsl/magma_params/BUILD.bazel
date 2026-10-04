@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "kgsl_magma_params",
+    srcs = [
+        "kgsl_magma_params.rs",
+        "lib.rs",
+    ],
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/config:starnix_clippy_lints",
+    deps = [
+        "//src/starnix/lib/magma",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

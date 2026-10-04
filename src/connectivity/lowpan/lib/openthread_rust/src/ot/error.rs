@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use num::{FromPrimitive, ToPrimitive};
 use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive};
 use openthread_sys::*;
 
 /// Type returned by OpenThread calls.
@@ -131,11 +131,7 @@ impl Error {
     /// mapping [`ot::Error::None`](crate::ot::Error::None) to [`Ok(())`] and any other error to
     /// [`Err(x)`].
     pub fn into_result(self) -> Result {
-        if self == Self::None {
-            Ok(())
-        } else {
-            Err(self)
-        }
+        if self == Self::None { Ok(()) } else { Err(self) }
     }
 }
 

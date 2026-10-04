@@ -6,7 +6,6 @@
 
 #include <fidl/fuchsia.driver.framework/cpp/fidl.h>
 
-#include "src/devices/bin/driver_manager/node_property_conversion.h"
 #include "src/devices/bin/driver_manager/resource.h"
 #include "src/devices/lib/log/log.h"
 

@@ -38,7 +38,6 @@ group("tests") {
     "refcount:tests",
     "region-alloc:tests",
     "runtests-utils:tests",
-    "smbios:tests",
     "sysconfig-client:tests",
     "syslog:tests",
     "sysmem-version:tests",

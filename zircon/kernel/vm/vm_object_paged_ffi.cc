@@ -6,7 +6,6 @@
 
 #include "vm/vm_object_paged_ffi.h"
 
-#include <lib/user_copy/user_iovec.h>
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
@@ -51,49 +50,6 @@ FFI_ALWAYS_INLINE vm_page_t* cpp_vm_object_paged_debug_get_page(VmObjectPaged* v
   return vmo->DebugGetPage(offset);
 }
 
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_paged_read_user_vector(const VmObjectPaged* vmo,
-                                                                   user_out_ptr<zx_iovec_t> vector,
-                                                                   size_t count, uint64_t offset,
-                                                                   size_t length,
-                                                                   size_t* out_actual) {
-  auto [status, actual] = const_cast<VmObjectPaged*>(vmo)->ReadUserVector(
-      make_user_out_iovec(vector, count), offset, length);
-  *out_actual = actual;
-  return status;
-}
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_paged_write_user_vector(
-    const VmObjectPaged* vmo, user_in_ptr<const zx_iovec_t> vector, size_t count, uint64_t offset,
-    size_t length, size_t* out_actual) {
-  auto [status, actual] = const_cast<VmObjectPaged*>(vmo)->WriteUserVector(
-      make_user_in_iovec(vector, count), offset, length,
-      VmObject::OnWriteBytesTransferredCallback());
-  *out_actual = actual;
-  return status;
-}
-
-struct ProgressCookie {
-  void (*cb)(void*, uint64_t, size_t);
-  void* cookie;
-  uint64_t prev_stream_size;
-};
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_paged_write_user_vector_progress(
-    const VmObjectPaged* vmo, user_in_ptr<const zx_iovec_t> vector, size_t count, uint64_t offset,
-    size_t length, uint64_t prev_stream_size, size_t* out_actual,
-    void (*cb)(void*, uint64_t, size_t), void* cookie) {
-  ProgressCookie pc{cb, cookie, prev_stream_size};
-  auto [status, actual] = const_cast<VmObjectPaged*>(vmo)->WriteUserVector(
-      make_user_in_iovec(vector, count), offset, length,
-      [&pc](const uint64_t write_offset, const size_t len) {
-        if (write_offset + len > pc.prev_stream_size) {
-          pc.cb(pc.cookie, write_offset, len);
-        }
-      });
-  *out_actual = actual;
-  return status;
-}
-
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_paged_zero_range(const VmObjectPaged* vmo,
                                                              uint64_t offset, uint64_t length) {
   return const_cast<VmObjectPaged*>(vmo)->ZeroRange(offset, length);
@@ -124,10 +80,9 @@ FFI_ALWAYS_INLINE void cpp_vm_object_paged_set_user_stream_size(VmObjectPaged* v
   vmo->SetUserStreamSize(fbl::ImportFromRawPtr(ssm));
 }
 
-FFI_ALWAYS_INLINE bool cpp_vm_object_paged_user_stream_size(const VmObjectPaged* vmo,
-                                                            uint64_t* out_stream_size) {
-  Guard<CriticalMutex> vmo_guard{vmo->lock()};
-  auto result = const_cast<VmObjectPaged*>(vmo)->user_stream_size_locked();
+FFI_ALWAYS_INLINE bool cpp_vm_object_paged_user_stream_size_locked(
+    VmObjectPaged* vmo, uint64_t* out_stream_size) TA_NO_THREAD_SAFETY_ANALYSIS {
+  auto result = vmo->user_stream_size_locked();
   if (result.has_value()) {
     *out_stream_size = result.value();
     return true;

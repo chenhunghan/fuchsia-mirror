@@ -14,12 +14,16 @@ namespace {
 // See https://source.android.com/docs/core/architecture/bootloader/boot-reason
 constexpr std::string_view kBootArgKey = "androidboot.bootreason";
 
+// The maximum property value size enforced by the bootloader.
+constexpr size_t kMaxRebootReasonSize = 512;
+
 // Maps an `androidboot.bootreason` value, compared as a single string, to a ZBI reboot reason.
 struct RebootReasonMap {
   std::string_view reason;
   zbi_hw_reboot_reason_t value;
-  // If true, match any value starting with `reason` (e.g. "reboot,uvlo" matches
-  // "reboot,uvlo,pmic,sub"); otherwise the value must equal `reason` exactly.
+  // If true, match any value starting with `reason` (e.g. "reboot,ocp" matches
+  // "reboot,ocp2,pmic,sub"); otherwise the value must equal `reason`, optionally
+  // followed by ',' and sub-reasons.
   bool is_prefix = false;
 };
 
@@ -41,12 +45,10 @@ constexpr auto kRebootReasons = std::to_array<RebootReasonMap>({
     {.reason = "reboot,cold", .value = ZBI_HW_REBOOT_REASON_COLD},
 
     {.reason = "watchdog", .value = ZBI_HW_REBOOT_REASON_WATCHDOG},
-    {.reason = "reboot,uvlo", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
+    {.reason = "reboot,uvlo", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
     {.reason = "reboot,ocp", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
-    {.reason = "reboot,sys_ldo_ok,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
-    {.reason = "reboot,smpl_timeout,pmic",
-     .value = ZBI_HW_REBOOT_REASON_BROWNOUT,
-     .is_prefix = true},
+    {.reason = "reboot,sys_ldo_ok,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
+    {.reason = "reboot,smpl_timeout,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
     {.reason = "reboot,master_dc,reset", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
     {.reason = "reboot,longkey,s2", .value = ZBI_HW_REBOOT_REASON_USER_HARD_RESET},
 });
@@ -54,7 +56,10 @@ constexpr auto kRebootReasons = std::to_array<RebootReasonMap>({
 }  // namespace
 
 void RebootReasonItem::Init(const BootProperties& properties, const char* shim_name, FILE* log) {
-  auto prop = properties.GetProperty(kBootArgKey);
+  // Bootloaders may write the boot reason into bootconfig unquoted, which bootconfig syntax parses
+  // as an array, so join the elements to recover the full boot reason.
+  std::array<char, kMaxRebootReasonSize> buffer;
+  auto prop = properties.JoinProperty(kBootArgKey, buffer);
 
   // No reboot reason.
   if (prop.is_error()) {
@@ -71,7 +76,11 @@ void RebootReasonItem::Init(const BootProperties& properties, const char* shim_n
   }
 
   for (const auto& [reason, value, is_prefix] : kRebootReasons) {
-    if (is_prefix ? reboot_reason.starts_with(reason) : reboot_reason == reason) {
+    // Values may carry sub-reasons after a known reason (e.g. "reboot,uvlo,pmic,sub" or
+    // "watchdog,apc"), so also match `reason` followed by a ','.
+    if (is_prefix ? reboot_reason.starts_with(reason)
+                  : reboot_reason == reason || (reboot_reason.starts_with(reason) &&
+                                                reboot_reason[reason.size()] == ',')) {
       fprintf(log, "%s: INFO %.*s was <%.*s>.\n", shim_name, static_cast<int>(kBootArgKey.size()),
               kBootArgKey.data(), static_cast<int>(reboot_reason.size()), reboot_reason.data());
       set_payload(value);

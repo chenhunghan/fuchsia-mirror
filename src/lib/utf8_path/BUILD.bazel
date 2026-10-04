@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "utf8_path",
+    srcs = [
+        "src/lib.rs",
+        "src/path_to_string.rs",
+        "src/paths.rs",
+    ],
+    edition = "2024",
+    # utf8_path is a thin library that should not depend on big crates
+    tags = [
+        "assert_no_deps=//third_party/rust_crates/vendor:regex",
+        "assert_no_deps=//third_party/rust_crates/vendor:serde",
+        "assert_no_deps=//third_party/rust_crates/vendor:serde_json",
+        "assert_no_deps=//third_party/rust_crates/vendor:serde_json5",
+    ],
+    visibility = [
+        "//src/developer/ffx/plugins:__subpackages__",
+        "//src/lib/assembly:__subpackages__",
+        "//src/sys/pkg/lib/fuchsia-pkg:__pkg__",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:pathdiff",
+    ],
+)

@@ -5,7 +5,7 @@
             metrics: [
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/unknown:min",
-                    metric_id: 1004,
+                    metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -14,7 +14,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/unknown:max",
-                    metric_id: 1005,
+                    metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -23,7 +23,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/unknown:average",
-                    metric_id: 1006,
+                    metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -32,7 +32,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/unknown:median",
-                    metric_id: 1007,
+                    metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -41,7 +41,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/unknown:min",
-                    metric_id: 1004,
+                    metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -50,7 +50,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/unknown:max",
-                    metric_id: 1005,
+                    metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -59,7 +59,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/unknown:average",
-                    metric_id: 1006,
+                    metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -68,7 +68,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/unknown:median",
-                    metric_id: 1007,
+                    metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -77,7 +77,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/idle:min",
-                    metric_id: 1004,
+                    metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -86,7 +86,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/idle:max",
-                    metric_id: 1005,
+                    metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -95,7 +95,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/idle:average",
-                    metric_id: 1006,
+                    metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -104,7 +104,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/idle:median",
-                    metric_id: 1007,
+                    metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -113,7 +113,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/idle:min",
-                    metric_id: 1004,
+                    metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -122,7 +122,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/idle:max",
-                    metric_id: 1005,
+                    metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -131,7 +131,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/idle:average",
-                    metric_id: 1006,
+                    metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -140,7 +140,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/idle:median",
-                    metric_id: 1007,
+                    metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -149,7 +149,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/active:min",
-                    metric_id: 1004,
+                    metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -158,7 +158,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/active:max",
-                    metric_id: 1005,
+                    metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -167,7 +167,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/active:average",
-                    metric_id: 1006,
+                    metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -176,7 +176,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_mlb/histograms/active:median",
-                    metric_id: 1007,
+                    metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         1,
@@ -185,7 +185,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/active:min",
-                    metric_id: 1004,
+                    metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -194,7 +194,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/active:max",
-                    metric_id: 1005,
+                    metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -203,7 +203,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/active:average",
-                    metric_id: 1006,
+                    metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -212,7 +212,7 @@
                 },
                 {
                     selector: "core/metrics-logger-standalone:root/MetricsLogger/metrics-logger-standalone/PowerLogger/power_speakers/histograms/active:median",
-                    metric_id: 1007,
+                    metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
                         2,
@@ -221,42 +221,42 @@
                 },
                 {
                     selector: "bootstrap/power-broker:root/fuchsia.inspect.Stats:current_size",
-                    metric_id: 7,
+                    metric_name: "power_broker_inspect_vmo_used_bytes",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/power-broker:root/fuchsia.inspect.Stats:utilization_per_ten_k",
-                    metric_id: 8,
+                    metric_name: "power_broker_inspect_vmo_used_per_ten_k",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/power-broker:root/broker/topology/stats:event_capacity",
-                    metric_id: 9,
+                    metric_name: "power_broker_inspect_event_buffer_capacity",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/power-broker:root/broker/topology/stats:at_capacity_history_duration_seconds",
-                    metric_id: 11,
+                    metric_name: "power_broker_inspect_event_history_duration_seconds",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/system-activity-governor:root/fuchsia.inspect.Stats:current_size",
-                    metric_id: 12,
+                    metric_name: "system_activity_governor_inspect_vmo_used_bytes",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/system-activity-governor:root/fuchsia.inspect.Stats:utilization_per_ten_k",
-                    metric_id: 13,
+                    metric_name: "system_activity_governor_inspect_vmo_used_per_ten_k",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/system-activity-governor:root/suspend_events_stats:event_capacity",
-                    metric_id: 14,
+                    metric_name: "system_activity_governor_inspect_event_buffer_capacity",
                     metric_type: "Integer",
                 },
                 {
                     selector: "bootstrap/system-activity-governor:root/suspend_events_stats:at_capacity_history_duration_seconds",
-                    metric_id: 15,
+                    metric_name: "system_activity_governor_inspect_event_history_duration_seconds",
                     metric_type: "Integer",
                 },
             ],

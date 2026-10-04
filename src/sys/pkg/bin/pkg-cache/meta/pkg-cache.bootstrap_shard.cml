@@ -151,20 +151,12 @@
             as: "base-bin",
         },
         {
-            protocol: "fuchsia.pkg.PackageResolver",
-            from: "#pkg-cache",
-            as: "fuchsia.pkg.PackageResolver-base",
-        },
-        {
-            protocol: "fuchsia.component.resolution.Resolver",
-            from: "#pkg-cache",
-            as: "fuchsia.component.resolution.Resolver-base",
-        },
-        {
             protocol: [
+                "fuchsia.component.resolution.Resolver-base",
                 "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.PackageCache",
+                "fuchsia.pkg.PackageResolver-base",
                 "fuchsia.pkg.RetainedBlobs",
                 "fuchsia.pkg.RetainedPackages",
             ],

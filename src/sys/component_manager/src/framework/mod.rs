@@ -23,7 +23,6 @@ use futures::future::BoxFuture;
 use log::warn;
 use moniker::Moniker;
 use router_error::RouterError;
-use routing::component_instance::ResolvedInstanceInterface;
 use routing::resolving::{ComponentAddress, ResolverError};
 use runtime_capabilities::{Dictionary, Routable, Router, WeakInstanceToken};
 use std::sync::Arc;

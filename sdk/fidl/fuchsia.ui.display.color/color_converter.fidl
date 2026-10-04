@@ -60,7 +60,7 @@ closed protocol Converter {
     strict SetValues(resource struct {
         properties ConversionProperties;
     }) -> (struct {
-        res zx.Status;
+        res zx.Result;
     });
 
     /// Submits a minimum value that all channels of all pixels rendered to the display

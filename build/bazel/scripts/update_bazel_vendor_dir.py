@@ -53,6 +53,17 @@ def main() -> int:
             " content should be preserved after the update"
         ),
     )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help=(
+            "Glob pattern, relative to the Bazel vendor directory, of files or"
+            " directories to remove from vendored repositories (e.g."
+            " 'rules_rust+/*/cargo-bazel'). Each pattern must match at least"
+            " one path, so that stale patterns are detected"
+        ),
+    )
     args = parser.parse_args()
 
     # Check for empty values, otherwise the rmdir / copytree operations
@@ -104,6 +115,26 @@ def main() -> int:
             stderr=subprocess.DEVNULL,
         )
 
+        # Remove excluded content from vendored repositories.
+        for pattern in args.exclude:
+            if not pattern or Path(pattern).is_absolute() or ".." in pattern:
+                parser.error(f"Invalid --exclude pattern: {pattern!r}")
+            matches = sorted(temp_dir.glob(pattern))
+            if not matches:
+                print(
+                    f"ERROR: --exclude pattern {pattern!r} did not match"
+                    " anything, please remove it.",
+                    file=sys.stderr,
+                )
+                return 1
+            for match in matches:
+                assert match.is_relative_to(temp_dir), match
+                print(f"Excluding {match.relative_to(temp_dir)}")
+                if match.is_dir() and not match.is_symlink():
+                    shutil.rmtree(match)
+                else:
+                    match.unlink()
+
         # Update registry directory with new content.
         if not args.bazel_registry_dir.is_relative_to(args.bazel_vendor_dir):
             shutil.rmtree(args.bazel_registry_dir, ignore_errors=True)
@@ -123,6 +154,8 @@ def main() -> int:
 
         shutil.rmtree(args.bazel_vendor_dir)
         shutil.move(temp_dir, args.bazel_vendor_dir)
+
+    return 0
 
 
 if __name__ == "__main__":

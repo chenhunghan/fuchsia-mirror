@@ -18,7 +18,7 @@ import os
 import sys
 
 
-def main(argv):
+def main(argv: list[str]) -> None:
     assert len(argv) == 3, "Incorrect number of arguments"
 
     candidate_path, output_path, proto_path = argv

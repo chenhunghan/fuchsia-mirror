@@ -15,7 +15,7 @@ import typing as T
 
 import build_utils
 import compare_utils
-from compare_utils import CompareCommandsQuery
+from compare_utils import CompareCommandsQuery, ConfiguredBazelLabel
 
 # Enable debug logging.
 _DEBUG = False
@@ -46,6 +46,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--bazel_label", required=True, help="Bazel Rust target label"
+    )
+    parser.add_argument(
+        "--bazel_config",
+        default=compare_utils.BAZEL_CONFIG_HOST,
+        help=f"Bazel configuration (defaults to {compare_utils.BAZEL_CONFIG_HOST})",
+        choices=compare_utils.VALID_BAZEL_CONFIGS,
     )
     parser.add_argument(
         "--action_type",
@@ -84,6 +90,7 @@ def main() -> int:
     debug(f"Build Dir: {paths.build_dir}")
     debug(f"GN Label: {args.gn_label}")
     debug(f"Bazel Label: {args.bazel_label}")
+    debug(f"Bazel Config: {args.bazel_config}")
     debug(f"Action type: {args.action_type}")
 
     bazel_paths = build_utils.BazelPaths(paths.fuchsia_dir, paths.build_dir)
@@ -91,7 +98,7 @@ def main() -> int:
     target_queries = [
         CompareCommandsQuery(
             gn=args.gn_label,
-            bazel=args.bazel_label,
+            bazel=ConfiguredBazelLabel(args.bazel_label, args.bazel_config),
             action_type=args.action_type,
         ),
     ]

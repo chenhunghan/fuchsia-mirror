@@ -6,7 +6,8 @@
 import fnmatch
 import json
 import re
-from typing import Any, Mapping, cast
+from collections.abc import Mapping
+from typing import Any, cast
 
 from reporting import metrics
 

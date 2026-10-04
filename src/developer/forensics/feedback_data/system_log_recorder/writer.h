@@ -20,6 +20,7 @@
 #include "src/developer/forensics/feedback_data/system_log_recorder/disk_backed_logs_metadata.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/decoder.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/log_message_store.h"
+#include "src/developer/forensics/utils/storage_size.h"
 
 namespace forensics {
 namespace feedback_data {
@@ -56,7 +57,7 @@ class SystemLogWriter {
   static constexpr size_t kFirstFileNumber = 0u;
   static constexpr size_t kMinFilesForSufficientCoverage = 5u;
 
-  SystemLogWriter(const std::string& logs_dir, size_t max_num_files,
+  SystemLogWriter(const std::string& logs_dir, size_t max_num_files, StorageSize total_log_size,
                   std::unique_ptr<Decoder> decoder,
                   const std::string& metadata_path = feedback::kCurrentDiskBackedLogsMetadataPath);
 
@@ -85,6 +86,7 @@ class SystemLogWriter {
 
   const std::string logs_dir_;
   const size_t max_num_files_;
+  const StorageSize total_log_size_;
   std::unique_ptr<Decoder> decoder_;
 
   DiskBackedLogsMetadata metadata_;

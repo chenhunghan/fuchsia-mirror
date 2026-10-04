@@ -8,7 +8,7 @@ import os
 import subprocess
 
 
-def get_parser():
+def get_parser() -> argparse.ArgumentParser:
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -83,7 +83,7 @@ def component_manifests_from_paths(paths: str) -> list[str]:
         return paths.split(",")
 
 
-def main():
+def main() -> None:
     args = get_parser().parse_args()
     cmc = args.cmc
     package_manifest = args.package_manifest_path

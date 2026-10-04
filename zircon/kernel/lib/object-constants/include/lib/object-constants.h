@@ -8,14 +8,20 @@
 #define ZIRCON_KERNEL_LIB_OBJECT_CONSTANTS_INCLUDE_LIB_OBJECT_CONSTANTS_H_
 
 #include <stddef.h>
-#include <stdint.h>
 
 // Size and alignment constants for Rust dispatcher states stored in C++ OpaqueStorage.
 // These values must match the exact size and alignment of their corresponding Rust structs,
 // which is enforced by static_asserts in both Rust and C++.
 
+#if defined(WITH_LOCK_DEP) || \
+    (defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL >= 1)
+constexpr size_t kLockClassIdSize = 8;
+#else
+constexpr size_t kLockClassIdSize = 0;
+#endif
+
 // Size, alignment, and offset for BusTransactionInitiatorDispatcherState.
-constexpr size_t kBusTransactionInitiatorDispatcherStateSize = 56;
+constexpr size_t kBusTransactionInitiatorDispatcherStateSize = 56 + kLockClassIdSize;
 constexpr size_t kBusTransactionInitiatorDispatcherStateAlign = 8;
 constexpr size_t kBusTransactionInitiatorDispatcherStateOffset = 48;
 
@@ -27,6 +33,15 @@ constexpr size_t kClockDispatcherStateOffset = 48;
 // Size and alignment for ClockDispatcher.
 constexpr size_t kClockTransformationStorageSize = 112;
 constexpr size_t kClockTransformationStorageAlign = 8;
+
+// Size, alignment, and offset for ChannelDispatcherState.
+constexpr size_t kChannelDispatcherStateSize = 112;
+constexpr size_t kChannelDispatcherStateAlign = 8;
+constexpr size_t kChannelDispatcherStateOffset = 48;
+
+// Size and alignment for MessageWaiter.
+constexpr size_t kMessageWaiterSize = 136;
+constexpr size_t kMessageWaiterAlign = 8;
 
 // Size, alignment, and offset for CounterDispatcherState.
 constexpr size_t kCounterDispatcherStateSize = 64;
@@ -48,6 +63,11 @@ constexpr size_t kFifoDispatcherStateSize = 72;
 constexpr size_t kFifoDispatcherStateAlign = 8;
 constexpr size_t kFifoDispatcherStateOffset = 48;
 
+// Size, alignment, and offset for GuestDispatcherState.
+constexpr size_t kGuestDispatcherStateSize = 48;
+constexpr size_t kGuestDispatcherStateAlign = 8;
+constexpr size_t kGuestDispatcherStateOffset = 48;
+
 // Size, alignment, and offset for IoBufferDispatcherState.
 constexpr size_t kIoBufferDispatcherStateSize = 64;
 constexpr size_t kIoBufferDispatcherStateAlign = 8;
@@ -59,7 +79,7 @@ constexpr size_t kIoBufferSharedRegionDispatcherStateAlign = 8;
 constexpr size_t kIoBufferSharedRegionDispatcherStateOffset = 48;
 
 // Size, alignment, and offset for IommuDispatcherState.
-constexpr size_t kIommuDispatcherStateSize = 48;
+constexpr size_t kIommuDispatcherStateSize = 48 + kLockClassIdSize;
 constexpr size_t kIommuDispatcherStateAlign = 8;
 constexpr size_t kIommuDispatcherStateOffset = 48;
 
@@ -78,12 +98,12 @@ constexpr size_t kDlogReaderStorageSize = 48;
 constexpr size_t kDlogReaderStorageAlign = 8;
 
 // Size, alignment, and offset for PinnedMemoryTokenDispatcherState.
-constexpr size_t kPinnedMemoryTokenDispatcherStateSize = 56;
+constexpr size_t kPinnedMemoryTokenDispatcherStateSize = 56 + kLockClassIdSize;
 constexpr size_t kPinnedMemoryTokenDispatcherStateAlign = 8;
 constexpr size_t kPinnedMemoryTokenDispatcherStateOffset = 48;
 
 // Size, alignment, and offset for ProfileDispatcherState.
-constexpr size_t kProfileDispatcherStateSize = 96;
+constexpr size_t kProfileDispatcherStateSize = 96 + kLockClassIdSize;
 constexpr size_t kProfileDispatcherStateAlign = 8;
 constexpr size_t kProfileDispatcherStateOffset = 48;
 
@@ -137,12 +157,31 @@ constexpr size_t kWaitSignalObserverStorageSize = 32;
 constexpr size_t kWaitSignalObserverStorageAlign = 8;
 constexpr size_t kWaitSignalObserverStorageOffset = 40;
 
+// Size and alignment for ChainLock.
+//
+// A ChainLock is a simple pair of atomics (the lock token and the contention
+// state bitmask).  It is the sole member of ChainLockable, which in turn is the
+// first base of every chain lockable type in the kernel, so these constants also
+// describe the leading bytes of Thread, WaitQueueBase, WaitQueue, and
+// OwnedWaitQueue.
+constexpr size_t kChainLockSize = 16;
+constexpr size_t kChainLockAlign = 8;
+
+// Size and alignment for WaitQueueCollection.
+constexpr size_t kWaitQueueCollectionSize = 32;
+constexpr size_t kWaitQueueCollectionAlign = 8;
+
+// Size and alignment for WaitQueue (and its WaitQueueBase base class, which has
+// the same layout; WaitQueue declares no members of its own).
+constexpr size_t kWaitQueueSize = 56;
+constexpr size_t kWaitQueueAlign = 8;
+
 // Size and alignment for OwnedWaitQueue.
 constexpr size_t kOwnedWaitQueueSize = 88;
 constexpr size_t kOwnedWaitQueueAlign = 8;
 
 // Size, alignment, and offset for ResourceDispatcherState.
-constexpr size_t kResourceDispatcherStateSize = 128;
+constexpr size_t kResourceDispatcherStateSize = 128 + kLockClassIdSize;
 constexpr size_t kResourceDispatcherStateAlign = 8;
 constexpr size_t kResourceDispatcherStateOffset = 48;
 

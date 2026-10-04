@@ -10,6 +10,7 @@
 #include <lib/id_allocator.h>
 #include <zircon/compiler.h>
 #include <zircon/syscalls/hypervisor.h>
+#include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
 #include <arch/x86/apic.h>

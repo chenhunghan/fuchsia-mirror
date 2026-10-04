@@ -4,11 +4,13 @@
 """Unit tests for adb.py."""
 
 import asyncio
+import concurrent.futures
 import io
 import os
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from importlib import resources
 from pathlib import Path
@@ -19,6 +21,7 @@ from honeydew import errors
 from honeydew.transports.adb import adb
 from honeydew.transports.adb import errors as adb_errors
 from honeydew.utils import host_shell
+from mobly import signals
 
 _DEVICE_NAME = "fuchsia-mock-device"
 _SERIAL_NUMBER = "12345678"
@@ -502,6 +505,46 @@ class AdbTests(unittest.TestCase):
     @mock.patch.object(
         host_shell,
         "run",
+        side_effect=signals.TestAbortAll("abort"),
+        autospec=True,
+    )
+    def test_run_does_not_wrap_unexpected_exceptions(
+        self, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test run propagates non-host-command exceptions (e.g. Mobly signals) as-is."""
+        with self.assertRaises(signals.TestAbortAll):
+            self.adb_obj.run(["shell", "id"])
+
+    @mock.patch.object(
+        host_shell,
+        "run",
+        side_effect=signals.TestAbortAll("abort"),
+        autospec=True,
+    )
+    def test_cache_adbd_pid_does_not_swallow_unexpected_exceptions(
+        self, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test _cache_adbd_pid propagates non-host-command exceptions."""
+        with self.assertRaises(signals.TestAbortAll):
+            self.adb_obj._cache_adbd_pid()
+
+    @mock.patch.object(
+        adb.Adb, "run", side_effect=signals.TestAbortAll("abort"), autospec=True
+    )
+    def test_check_connection_does_not_wrap_unexpected_exceptions(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Test check_connection propagates non-host-command exceptions as-is."""
+        self._check_connection_patcher.stop()
+        try:
+            with self.assertRaises(signals.TestAbortAll):
+                self.adb_obj.check_connection()
+        finally:
+            self._check_connection_patcher.start()
+
+    @mock.patch.object(
+        host_shell,
+        "run",
         side_effect=errors.HostCmdError("error: device unauthorized."),
         autospec=True,
     )
@@ -545,9 +588,58 @@ class AdbTests(unittest.TestCase):
         autospec=True,
     )
     def test_run_timeout(self, mock_host_shell_run: mock.Mock) -> None:
-        """Test run timeout path."""
+        """Test run timeout path divides timeout by attempts."""
         with self.assertRaises(adb_errors.AdbTimeoutError):
-            self.adb_obj.run(["shell", "long_running"], timeout=0.1)
+            self.adb_obj.run(["shell", "long_running"], timeout=30.0)
+
+        mock_host_shell_run.assert_called_once_with(
+            cmd=[
+                "/custom/adb",
+                "-s",
+                _SERIAL_NUMBER,
+                "shell",
+                "long_running",
+            ],
+            capture_output=True,
+            capture_error_in_output=True,
+            timeout=10.0,
+            env=mock.ANY,
+        )
+
+    @mock.patch.object(
+        host_shell,
+        "run",
+        side_effect=errors.HostCmdError("error: device not found"),
+        autospec=True,
+    )
+    def test_run_custom_attempts(self, mock_host_shell_run: mock.Mock) -> None:
+        """Test run with custom attempts=1 does not retry and uses full timeout."""
+        mock_server = mock.Mock()
+        mock_server.host.return_value = "127.0.0.1"
+        mock_server.port.return_value = 12345
+        self.adb_obj._adb_server = mock_server
+
+        with self.assertRaises(adb_errors.AdbCommandError):
+            self.adb_obj.run(["shell", "some_cmd"], timeout=15.0, attempts=1)
+
+        mock_host_shell_run.assert_called_once_with(
+            cmd=[
+                "/custom/adb",
+                "-H",
+                "127.0.0.1",
+                "-P",
+                "12345",
+                "-s",
+                _SERIAL_NUMBER,
+                "shell",
+                "some_cmd",
+            ],
+            capture_output=True,
+            capture_error_in_output=True,
+            timeout=15.0,
+            env=mock.ANY,
+        )
+        mock_server.restart.assert_not_called()
 
     @mock.patch.object(host_shell, "run", autospec=True)
     @mock.patch("time.sleep", autospec=True)
@@ -681,6 +773,112 @@ class AdbTests(unittest.TestCase):
 
     @mock.patch.object(host_shell, "run", autospec=True)
     @mock.patch("time.sleep", autospec=True)
+    def test_run_retry_offline_reconnect_failure_escalates_to_server_restart(
+        self, mock_sleep: mock.Mock, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test run still retries and escalates to server restart when 'adb reconnect offline' fails."""
+        mock_server = mock.Mock()
+        mock_server.host.return_value = "127.0.0.1"
+        mock_server.port.return_value = 12345
+        self.adb_obj._adb_server = mock_server
+
+        # 1. Main command attempt 1 -> fails with "error: device offline"
+        # 2. Attempt 1 recovery -> "adb reconnect offline" itself fails
+        # 3. Main command attempt 2 -> still fails with "error: device offline"
+        # 4. Attempt 2 recovery -> _recover_adb_server() restarts server & runs _cache_adbd_pid()
+        # 5. Main command attempt 3 -> succeeds
+        mock_host_shell_run.side_effect = [
+            errors.HostCmdError("error: device offline"),
+            errors.HostCmdError("error: reconnect failed"),
+            errors.HostCmdError("error: device offline"),
+            "5555\n",
+            "success_output",
+        ]
+
+        output = self.adb_obj.run(["shell", "some_cmd"])
+
+        self.assertEqual(output, "success_output")
+        self.assertEqual(mock_host_shell_run.call_count, 5)
+        mock_server.restart.assert_called_once()
+
+    def test_run_chains_underlying_error(self) -> None:
+        """Test run chains the underlying error as __cause__ of the raised ADB error."""
+        cases: list[tuple[Exception, type[adb_errors.AdbError]]] = [
+            (errors.HostCmdError("error_text"), adb_errors.AdbCommandError),
+            (
+                errors.HostCmdError("error: device unauthorized."),
+                adb_errors.AdbUnauthorizedError,
+            ),
+            (
+                errors.HoneydewTimeoutError("timed out"),
+                adb_errors.AdbTimeoutError,
+            ),
+        ]
+        for underlying_err, expected_err_type in cases:
+            with self.subTest(underlying_err=underlying_err):
+                with mock.patch.object(
+                    host_shell, "run", side_effect=underlying_err, autospec=True
+                ):
+                    with self.assertRaises(expected_err_type) as context:
+                        self.adb_obj.run(["shell", "id"])
+
+                self.assertIs(context.exception.__cause__, underlying_err)
+
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_check_connection_chains_underlying_error(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Test check_connection chains the underlying error as __cause__ of AdbConnectionError."""
+        underlying_err = adb_errors.AdbCommandError("wait-for-device failed")
+        mock_run.side_effect = underlying_err
+        self._check_connection_patcher.stop()
+        try:
+            with self.assertRaises(adb_errors.AdbConnectionError) as context:
+                self.adb_obj.check_connection()
+        finally:
+            self._check_connection_patcher.start()
+
+        self.assertIs(context.exception.__cause__, underlying_err)
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_run_concurrent_calls_return_own_output(
+        self, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test concurrent run calls from multiple threads each get their own output."""
+        num_threads = 2
+        mock_server = mock.Mock()
+        mock_server.host.return_value = "127.0.0.1"
+        mock_server.port.return_value = 12345
+        self.adb_obj._adb_server = mock_server
+
+        # Hold every call until all threads are inside host_shell.run so the
+        # calls overlap.
+        barrier = threading.Barrier(num_threads)
+
+        def _fake_run(cmd: list[str], **unused_kwargs: Any) -> str:
+            barrier.wait(timeout=5)
+            return f"output_{cmd[-1]}"
+
+        mock_host_shell_run.side_effect = _fake_run
+
+        with concurrent.futures.ThreadPoolExecutor(num_threads) as executor:
+            futures = {
+                i: executor.submit(self.adb_obj.run, ["shell", "echo", str(i)])
+                for i in range(num_threads)
+            }
+            outputs = {i: f.result(timeout=10) for i, f in futures.items()}
+
+        self.assertEqual(
+            outputs, {i: f"output_{i}" for i in range(num_threads)}
+        )
+        self.assertEqual(mock_host_shell_run.call_count, num_threads)
+        mock_server.restart.assert_not_called()
+        self.assertEqual(
+            mock_server.reset_restart_count.call_count, num_threads
+        )
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    @mock.patch("time.sleep", autospec=True)
     def test_recover_adb_server_with_ffx_and_root_restoration(
         self, mock_sleep: mock.Mock, mock_host_shell_run: mock.Mock
     ) -> None:
@@ -723,12 +921,33 @@ class AdbTests(unittest.TestCase):
         self.assertEqual(self.adb_obj._cached_adbd_pid, "8765")
 
     def test_close(self) -> None:
-        """Test close stops the adb server if running."""
+        """Test close stops the adb server if running and drops the reference."""
         mock_server = mock.Mock()
         self.adb_obj._adb_server = mock_server
         self.adb_obj.close()
         mock_server.stop.assert_called_once()
-        self.assertIs(self.adb_obj._adb_server, mock_server)
+        self.assertIsNone(self.adb_obj._adb_server)
+
+    def test_close_is_idempotent(self) -> None:
+        """Test calling close multiple times only cleans up resources once."""
+        mock_server = mock.Mock()
+        mock_temp_dir = mock.Mock()
+        self.adb_obj._adb_server = mock_server
+        self.adb_obj._temp_vendor_keys_dir = mock_temp_dir
+
+        self.adb_obj.close()
+        self.adb_obj.close()
+
+        mock_server.stop.assert_called_once()
+        mock_temp_dir.cleanup.assert_called_once()
+
+    @mock.patch("atexit.unregister", autospec=True)
+    def test_close_unregisters_atexit_handler(
+        self, mock_unregister: mock.Mock
+    ) -> None:
+        """Test close unregisters its atexit handler."""
+        self.adb_obj.close()
+        mock_unregister.assert_called_once_with(self.adb_obj.close)
 
     def test_close_cleans_up_vendor_keys(self) -> None:
         """Test close cleans up temp vendor keys dir if present."""
@@ -884,6 +1103,34 @@ class AdbTests(unittest.TestCase):
             timeout=5.0,
         )
 
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_setprop_quotes_special_characters(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Test setprop quotes prop_name with spaces/metacharacters and empty value."""
+        self.adb_obj.setprop("debug.foo bar; echo $HOME", "")
+
+        mock_run.assert_called_once_with(
+            self.adb_obj,
+            ["shell", "setprop", "'debug.foo bar; echo $HOME'", "''"],
+            timeout=None,
+        )
+
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_getprop_quotes_special_characters(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Test getprop quotes prop_name with spaces and shell metacharacters."""
+        mock_run.return_value = ""
+
+        self.adb_obj.getprop("debug.foo bar; echo $HOME")
+
+        mock_run.assert_called_once_with(
+            self.adb_obj,
+            ["shell", "getprop", "'debug.foo bar; echo $HOME'"],
+            timeout=None,
+        )
+
     @mock.patch.object(adb.Adb, "getprop", autospec=True)
     def test_wait_for_boot_complete_success_immediately(
         self, mock_getprop: mock.Mock
@@ -893,7 +1140,11 @@ class AdbTests(unittest.TestCase):
 
         self.adb_obj.wait_for_boot_complete()
 
-        mock_getprop.assert_called_once_with(self.adb_obj, "sys.boot_completed")
+        mock_getprop.assert_called_once_with(
+            self.adb_obj,
+            "sys.boot_completed",
+            timeout=adb._BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
+        )
 
     @mock.patch("time.sleep", autospec=True)
     @mock.patch.object(adb.Adb, "getprop", autospec=True)
@@ -926,6 +1177,31 @@ class AdbTests(unittest.TestCase):
         mock_sleep.assert_has_calls([mock.call(0.5), mock.call(0.5)])
 
     @mock.patch("time.sleep", autospec=True)
+    @mock.patch.object(adb.Adb, "getprop", autospec=True)
+    def test_wait_for_boot_complete_retries_after_getprop_timeout(
+        self, mock_getprop: mock.Mock, mock_sleep: mock.Mock
+    ) -> None:
+        """Test a timed-out getprop poll is treated as not booted and polling continues."""
+        mock_getprop.side_effect = [
+            adb_errors.AdbTimeoutError("getprop timed out"),
+            "1",
+        ]
+
+        self.adb_obj.wait_for_boot_complete(poll_interval=0.5)
+
+        mock_getprop.assert_has_calls(
+            [
+                mock.call(
+                    self.adb_obj,
+                    "sys.boot_completed",
+                    timeout=adb._BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
+                )
+            ]
+            * 2
+        )
+        mock_sleep.assert_called_once_with(0.5)
+
+    @mock.patch("time.sleep", autospec=True)
     @mock.patch("time.time", autospec=True)
     @mock.patch.object(adb.Adb, "getprop", autospec=True)
     def test_wait_for_boot_complete_timeout(
@@ -941,7 +1217,11 @@ class AdbTests(unittest.TestCase):
         with self.assertRaises(adb_errors.AdbTimeoutError):
             self.adb_obj.wait_for_boot_complete(timeout=5.0)
 
-        mock_getprop.assert_called_once_with(self.adb_obj, "sys.boot_completed")
+        mock_getprop.assert_called_once_with(
+            self.adb_obj,
+            "sys.boot_completed",
+            timeout=adb._BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
+        )
         mock_sleep.assert_called_once_with(1.0)
 
 

@@ -35,14 +35,17 @@ use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalCheckpointV32};
-use crate::object_store::object_record::{ObjectItem, ObjectItemV56};
+use crate::object_store::object_record::{ObjectItem, ObjectItemV56, ObjectItemV59};
 use crate::object_store::transaction::{AssocObj, Options};
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{
     DataObjectHandle, HandleOptions, HandleOwner, Mutation, ObjectKey, ObjectStore, ObjectValue,
 };
 use crate::range::RangeExt;
-use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, Version, Versioned, VersionedLatest};
+use crate::serialized_types::{
+    EARLIEST_SUPPORTED_VERSION, Migrate, Version, Versioned, VersionedLatest, migrate_nodefault,
+    migrate_to_version,
+};
 use anyhow::{Context, Error, bail, ensure};
 use fprint::TypeFingerprint;
 use fuchsia_inspect::{Property as _, UintProperty};
@@ -205,20 +208,30 @@ impl<'de> Deserialize<'de> for UuidWrapper {
     }
 }
 
-pub type SuperBlockRecord = SuperBlockRecordV56;
+pub type SuperBlockRecord = SuperBlockRecordV59;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
-pub enum SuperBlockRecordV56 {
+pub enum SuperBlockRecordV59 {
     // When reading the super-block we know the initial extent, but not subsequent extents, so these
     // records need to exist to allow us to completely read the super-block.
     Extent(Range<u64>),
 
     // Following the super-block header are ObjectItem records that are to be replayed into the root
     // parent object store.
-    ObjectItem(ObjectItemV56),
+    ObjectItem(ObjectItemV59),
 
     // Marks the end of the full super-block.
+    End,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Migrate, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
+#[migrate_to_version(SuperBlockRecordV59)]
+#[migrate_nodefault]
+pub enum SuperBlockRecordV56 {
+    Extent(Range<u64>),
+    ObjectItem(ObjectItemV56),
     End,
 }
 

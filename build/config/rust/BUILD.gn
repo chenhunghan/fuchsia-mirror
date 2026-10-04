@@ -148,6 +148,7 @@ config("default_debug_assertions") {
   }
 }
 
+# LINT.IfChange(bootfs)
 # Best practices for Rust binaries that go into size-constrained bootfs.
 config("bootfs") {
   # Optimize for size.
@@ -160,9 +161,12 @@ config("bootfs") {
     # Force ThinLTO to squeeze Rust binaries further.
     # See: https://fxbug.dev/42160867
     # See: https://fxbug.dev/42172876
+    # TODO(https://fxbug.dev/568722249): Port this to //build/config/rust/BUILD.bazel.
     configs = [ "//build/config/lto:thinlto" ]
   }
 }
+
+# LINT.ThenChange(//build/config/rust/BUILD.bazel:bootfs)
 
 config("proc_macro_test") {
   rustflags = [

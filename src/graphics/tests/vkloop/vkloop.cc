@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zircon/availability.h>
 
 #include <vector>
 
@@ -356,11 +357,13 @@ bool VkLoopTest::InitCommandBuffer() {
 }
 
 void RestartDriver(uint32_t gpu_vendor_id) {
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   std::string driver_url = GetConfig().gpu_driver_url();
   ASSERT_TRUE(!driver_url.empty());
 
   // Only dfv2 drivers are supported
   magma::TestDeviceBase::RestartDFv2Driver(driver_url, gpu_vendor_id);
+#endif
 }
 
 bool VkLoopTest::Exec() {
@@ -426,6 +429,9 @@ TEST(VkLoop, EventHang) {
 }
 
 TEST(VkLoop, DriverDeath) {
+#if !FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  GTEST_SKIP() << "Driver restart not supported at API level < HEAD";
+#else
   if (GetConfig().gpu_driver_url().empty()) {
     GTEST_SKIP_("Skipping because no driver URL specified");
   }
@@ -447,6 +453,7 @@ TEST(VkLoop, DriverDeath) {
   }
 
   ASSERT_TRUE(test.Exec());
+#endif
 }
 
 }  // namespace

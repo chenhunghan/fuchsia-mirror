@@ -9,8 +9,7 @@
 #include <fuchsia/hardware/ethernet/c/banjo.h>
 #include <fuchsia/hardware/usb/c/banjo.h>
 #include <fuchsia/hardware/usb/descriptor/c/banjo.h>
-#include <lib/ddk/debug.h>
-#include <lib/ddk/device.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/sync/completion.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <lib/zx/result.h>
@@ -19,12 +18,10 @@
 #include <memory>
 
 #include <fbl/auto_lock.h>
-#include <src/lib/listnode/listnode.h>
 #include <usb/cdc.h>
 #include <usb/usb.h>
 
 namespace usb_cdc_ecm {
-namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 class EcmEndpoint {
  public:
@@ -55,27 +52,29 @@ class UsbCdcDescriptorParser {
 
   EcmInterface GetDefaultInterface() const { return default_ifc_; }
   EcmInterface GetDataInterface() const { return data_ifc_; }
+  EcmInterface GetCommInterface() const { return comm_ifc_; }
 
   uint16_t GetMtu() const { return mtu_; }
   MacAddress GetMacAddress() const { return mac_addr_; }
 
  private:
   explicit UsbCdcDescriptorParser(EcmEndpoint int_ep, EcmEndpoint tx_ep, EcmEndpoint rx_ep,
-                                  EcmInterface default_ifc, EcmInterface data_ifc, uint16_t mtu,
-                                  MacAddress mac_addr)
+                                  EcmInterface default_ifc, EcmInterface data_ifc,
+                                  EcmInterface comm_ifc, uint16_t mtu, MacAddress mac_addr)
       : int_ep_(int_ep),
         tx_ep_(tx_ep),
         rx_ep_(rx_ep),
         default_ifc_(default_ifc),
         data_ifc_(data_ifc),
+        comm_ifc_(comm_ifc),
         mtu_(mtu),
         mac_addr_(mac_addr) {}
 
-  static const uint16_t kCdcSupportedVersion = 0x0110; /* 1.10 */
+  static constexpr uint16_t kCdcSupportedVersion = 0x0110; /* 1.10 */
 
   // MAC address is stored in a string descriptor in UTF-16 format, so we get one byte of
   // address for each 32 bits of text.
-  static const size_t kExpectedStringSize =
+  static constexpr size_t kExpectedStringSize =
       sizeof(usb_string_descriptor_t) + ETH_MAC_SIZE * sizeof(uint32_t);
 
   static zx::result<MacAddress> ParseMacAddress(usb::UsbDevice& usb,
@@ -87,6 +86,7 @@ class UsbCdcDescriptorParser {
 
   EcmInterface default_ifc_;
   EcmInterface data_ifc_;
+  EcmInterface comm_ifc_;
 
   uint16_t mtu_;
   MacAddress mac_addr_;

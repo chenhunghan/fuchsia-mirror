@@ -2,10 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/// `RwLock` type exercised in the `selinux` crate when built for integration with starnix.
+/// `LockDepRwLock` and lock level types exercised in the `selinux` crate when built for
+/// integration with starnix.
 #[cfg(feature = "selinux_starnix")]
-pub(super) use starnix_sync::RwLock;
+pub(super) use starnix_sync::{
+    LockDepRwLock, SeLinuxQueryCacheResetLock, SeLinuxSecurityServerStateLock,
+};
 
-/// `RwLock` type exercised in the `selinux` crate when built for non-fuchsia platforms.
+/// Lock level placeholder types and `LockDepRwLock` alias exercised in the `selinux` crate when
+/// built for non-fuchsia platforms.
 #[cfg(not(feature = "selinux_starnix"))]
-pub(super) use parking_lot::RwLock;
+pub(super) enum SeLinuxQueryCacheResetLock {}
+
+#[cfg(not(feature = "selinux_starnix"))]
+pub(super) enum SeLinuxSecurityServerStateLock {}
+
+#[cfg(not(feature = "selinux_starnix"))]
+pub(super) type LockDepRwLock<T, _L> = parking_lot::RwLock<T>;

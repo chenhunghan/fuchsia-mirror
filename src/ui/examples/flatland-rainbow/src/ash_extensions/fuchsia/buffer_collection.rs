@@ -4,7 +4,6 @@
 
 use ash::prelude::*;
 use ash::{Device, Instance, RawPtr, vk};
-use std::mem;
 
 #[derive(Clone)]
 pub struct BufferCollection {
@@ -14,11 +13,8 @@ pub struct BufferCollection {
 
 impl BufferCollection {
     pub fn new(instance: &Instance, device: &Device) -> Self {
-        let handle = device.handle();
-        let fp = ash::fuchsia::buffer_collection::DeviceFn::load(|name| unsafe {
-            mem::transmute(instance.get_device_proc_addr(handle, name.as_ptr()))
-        });
-        Self { handle, fp }
+        let extension = ash::fuchsia::buffer_collection::Device::new(instance, device);
+        Self { handle: extension.device(), fp: extension.fp().clone() }
     }
 
     /// <https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/vkCreateBufferCollectionFUCHSIA.html>

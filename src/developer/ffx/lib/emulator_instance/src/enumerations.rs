@@ -167,6 +167,14 @@ pub enum GpuType {
     /// using software acceleration.
     #[serde(rename = "swiftshader_indirect")]
     SwiftshaderIndirect,
+
+    /// Use Mesa Lavapipe to render graphics using software acceleration.
+    #[serde(rename = "lavapipe")]
+    Lavapipe,
+
+    /// Alias for software rendering (such as SwiftShader or Lavapipe).
+    #[serde(rename = "software")]
+    Software,
 }
 
 impl Default for GpuType {
@@ -301,8 +309,15 @@ mod tests {
         let default = GpuType::default();
         // Verify we can use default formatting to print it.
         println!("{}", default);
-        // Deserialize a valid value.
-        assert!(GpuType::from_str("auto").is_ok());
+        // Deserialize valid values.
+        assert_eq!(GpuType::from_str("auto").unwrap(), GpuType::AutoExperimental);
+        assert_eq!(GpuType::from_str("host").unwrap(), GpuType::HostExperimental);
+        assert_eq!(
+            GpuType::from_str("swiftshader_indirect").unwrap(),
+            GpuType::SwiftshaderIndirect
+        );
+        assert_eq!(GpuType::from_str("lavapipe").unwrap(), GpuType::Lavapipe);
+        assert_eq!(GpuType::from_str("software").unwrap(), GpuType::Software);
         // Fail to deserialize an invalid value.
         assert!(GpuType::from_str("bad_value").is_err());
         Ok(())

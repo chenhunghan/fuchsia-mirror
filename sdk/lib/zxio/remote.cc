@@ -476,8 +476,8 @@ constexpr fio::NodeAttributesQuery BuildAttributeQuery(
     query |= fio::NodeAttributesQuery::kVerityEnabled;
   if (attr_has.casefold)
     query |= fio::NodeAttributesQuery::kCasefold;
-  if (attr_has.wrapping_key_id)
-    query |= fio::NodeAttributesQuery::kWrappingKeyId;
+  if (attr_has.encryption_policy)
+    query |= fio::NodeAttributesQuery::kEncryptionPolicy;
   if (attr_has.selinux_context)
     query |= fio::NodeAttributesQuery::kSelinuxContext;
   if (attr_has.pending_access_time_update)
@@ -492,6 +492,7 @@ struct MutableAttributesDataHolder {
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   fio::wire::SelinuxContext selinux_context_wrapper;
   fidl::VectorView<uint8_t> selinux_context_view;
+  fio::wire::FscryptPolicy encryption_policy;
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
 };
 
@@ -563,11 +564,13 @@ zx::result<fio::wire::MutableNodeAttributes> BuildMutableAttributes(
   if (mutable_attrs->has.casefold) {
     builder.casefold(mutable_attrs->casefold);
   }
-  if (mutable_attrs->has.wrapping_key_id) {
-    builder.wrapping_key_id(
-        fidl::ObjectView<fidl::Array<uint8_t, ZXIO_WRAPPING_KEY_ID_LENGTH>>::FromExternal(
-            reinterpret_cast<fidl::Array<uint8_t, ZXIO_WRAPPING_KEY_ID_LENGTH>*>(
-                const_cast<uint8_t*>(mutable_attrs->wrapping_key_id))));
+  if (mutable_attrs->has.encryption_policy) {
+    memcpy(holder->encryption_policy.key_identifier.data(),
+           mutable_attrs->encryption_policy.key_identifier, ZXIO_WRAPPING_KEY_ID_LENGTH);
+    holder->encryption_policy.flags =
+        fio::wire::FscryptPolicyFlags::TruncatingUnknown(mutable_attrs->encryption_policy.flags);
+    builder.encryption_policy(
+        fidl::ObjectView<fio::wire::FscryptPolicy>::FromExternal(&holder->encryption_policy));
   }
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   return zx::ok(builder.Build());
@@ -1531,15 +1534,17 @@ zx_status_t zxio_attr_from_wire(const fio::wire::NodeAttributes2& in, zxio_node_
     out->has.fsverity_root_hash = true;
   }
 
-  if (in.mutable_attributes.has_wrapping_key_id()) {
-    memcpy(std::begin(out->wrapping_key_id), in.mutable_attributes.wrapping_key_id().begin(),
-           ZXIO_WRAPPING_KEY_ID_LENGTH);
-    out->has.wrapping_key_id = true;
-  }
-
   if (in.immutable_attributes.has_verity_enabled()) {
     out->fsverity_enabled = in.immutable_attributes.verity_enabled();
     out->has.fsverity_enabled = true;
+  }
+
+  if (in.mutable_attributes.has_encryption_policy()) {
+    const auto& policy = in.mutable_attributes.encryption_policy();
+    memcpy(std::begin(out->encryption_policy.key_identifier), policy.key_identifier.begin(),
+           ZXIO_WRAPPING_KEY_ID_LENGTH);
+    out->encryption_policy.flags = static_cast<uint8_t>(policy.flags);
+    out->has.encryption_policy = true;
   }
 
   if (in.mutable_attributes.has_selinux_context()) {

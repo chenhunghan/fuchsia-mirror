@@ -10,9 +10,8 @@ use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_CLOCK_MONOTONIC, ZX_OBJ_TYPE_TIMER, ZX_RIGHT_DUPLICATE, ZX_RIGHT_INSPECT, ZX_RIGHT_SIGNAL,
-    ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT, ZX_RIGHT_WRITE, ZX_TIMER_SIGNALED, zx_clock_t, zx_duration_t,
-    zx_rights_t, zx_time_t,
+    ZX_CLOCK_MONOTONIC, ZX_DEFAULT_TIMER_RIGHTS, ZX_OBJ_TYPE_TIMER, ZX_TIMER_SIGNALED, zx_clock_t,
+    zx_duration_t, zx_rights_t, zx_time_t,
 };
 
 use crate::kernel::deadline::{Deadline, SlackMode, TimerSlack};
@@ -27,13 +26,6 @@ use super::timer_dispatcher_ffi::{
 use super::{DispatcherOps, KernelHandle};
 
 use object_constants_rs as object_constants;
-
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_SIGNAL;
 
 zr::static_assert_size_and_align!(
     TimerDispatcherState,
@@ -131,7 +123,7 @@ pub enum OnTimerFiredAction {
 
 impl TimerDispatcher {
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_TIMER_RIGHTS
     }
 
     /// Creates a new TimerDispatcher via C++ and returns its kernel handle and rights.
@@ -153,7 +145,7 @@ impl TimerDispatcher {
         let handle = unsafe {
             KernelHandle::create(|out| cpp_timer_dispatcher_create(options, clock_id, out))
         }?;
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_TIMER_RIGHTS))
     }
 
     pub fn on_zero_handles(&self) {

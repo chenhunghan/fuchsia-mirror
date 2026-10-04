@@ -1078,9 +1078,16 @@ class Controller {
   // Whether inline encryption is supported by the controller.
   virtual bool SupportsInlineEncryption() const { return false; }
 
-  // Serves the fuchsia.hardware.inlineencryption.Device protocol for a block device child.
-  virtual void ServeInlineEncryption(
-      fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) {}
+  // Programs an inline encryption key into a hardware slot and returns the slot index.
+  virtual zx::result<uint8_t> ProgramKeySlot(fidl::VectorView<uint8_t> wrapped_key,
+                                             uint32_t data_unit_size) {
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
+  }
+
+  // Derives a raw software secret from a hardware-wrapped inline encryption key.
+  virtual zx::result<std::vector<uint8_t>> DeriveRawSecret(fidl::VectorView<uint8_t> wrapped_key) {
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
+  }
 
   // Test whether the target-lun is ready.
   zx_status_t TestUnitReady(uint8_t target, uint16_t lun);

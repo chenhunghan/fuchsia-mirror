@@ -253,6 +253,44 @@ TEST_F(NodeManagerTest, NatCache) {
   }
 }
 
+TEST_F(NodeManagerTest, CacheNatEntryDoesNotOverwriteExistingEntry) {
+  NodeManager &node_manager = fs_->GetNodeManager();
+
+  std::vector<fbl::RefPtr<VnodeF2fs>> vnodes;
+  std::vector<uint32_t> inos;
+  FileTester::CreateChildren(fs_.get(), vnodes, inos, root_dir_, "CacheNatRace_", 1);
+  ASSERT_EQ(inos.size(), 1u);
+  const nid_t ino = inos[0];
+
+  NodeInfo before_ni;
+  ASSERT_EQ(node_manager.GetNodeInfo(ino, before_ni), ZX_OK);
+  ASSERT_EQ(before_ni.blk_addr, kNewAddr);
+  ASSERT_FALSE(node_manager.IsCheckpointedNode(ino));
+
+  // Simulate a concurrent GetNodeInfo() cache miss attempting to cache a stale on-disk RawNatEntry
+  // after SetNodeAddr() has already inserted a dirty entry in nat_cache_.
+  RawNatEntry stale_raw_entry = {
+      .version = static_cast<uint8_t>(before_ni.version + 1),
+      .ino = CpuToLe(ino),
+      .block_addr = CpuToLe(kNullAddr),
+  };
+  MapTester::CacheNatEntry(node_manager, ino, stale_raw_entry);
+
+  NodeInfo after_ni;
+  ASSERT_EQ(node_manager.GetNodeInfo(ino, after_ni), ZX_OK);
+  EXPECT_EQ(after_ni.blk_addr, before_ni.blk_addr);
+  EXPECT_EQ(after_ni.version, before_ni.version);
+  EXPECT_FALSE(node_manager.IsCheckpointedNode(ino));
+
+  ASSERT_EQ(fs_->SyncFs(), ZX_OK);
+  EXPECT_TRUE(node_manager.IsCheckpointedNode(ino));
+
+  for (auto &vnode_refptr : vnodes) {
+    ASSERT_EQ(vnode_refptr->Close(), ZX_OK);
+    vnode_refptr.reset();
+  }
+}
+
 TEST_F(NodeManagerTest, FreeNid) {
   NodeManager &node_manager = fs_->GetNodeManager();
   auto init_fcnt = node_manager.GetFreeNidCount();
@@ -277,6 +315,36 @@ TEST_F(NodeManagerTest, FreeNid) {
   fs_->GetNodeManager().AddFreeNid(*nid_or);
   nid = MapTester::GetNextFreeNidInList(node_manager);
   ASSERT_EQ(nid, static_cast<nid_t>(5));
+}
+
+TEST_F(NodeManagerTest, BuildFreeNidsSkipsAllocatedNids) {
+  NodeManager &node_manager = fs_->GetNodeManager();
+
+  // Allocate multiple inodes without checkpointing so their NAT entries are dirty in nat_cache_
+  // (blk_addr != kNullAddr) while still kNullAddr in the on-disk NAT block.
+  std::vector<fbl::RefPtr<VnodeF2fs>> vnodes;
+  std::vector<uint32_t> inos;
+  FileTester::CreateChildren(fs_.get(), vnodes, inos, root_dir_, "BuildFreeNids_", kMaxNodeCnt);
+  ASSERT_EQ(inos.size(), kMaxNodeCnt);
+
+  // Drain all currently cached free NIDs and rewind the scan cursor so the next AllocNid() call
+  // triggers BuildFreeNids() over the NAT block containing the uncheckpointed inodes.
+  while (node_manager.GetFreeNidCount() > 0) {
+    ASSERT_TRUE(node_manager.AllocNid().is_ok());
+  }
+  node_manager.SetNextScanNid(0);
+
+  zx::result nid_or = node_manager.AllocNid();
+  ASSERT_TRUE(nid_or.is_ok());
+  EXPECT_EQ(*nid_or, inos.back() + 1);
+
+  std::unordered_set<nid_t> inuse_nids(inos.begin(), inos.end());
+  MapTester::CheckNidsInuse(fs_.get(), inuse_nids);
+
+  for (auto &vnode_refptr : vnodes) {
+    ASSERT_EQ(vnode_refptr->Close(), ZX_OK);
+    vnode_refptr.reset();
+  }
 }
 
 TEST_F(NodeManagerTest, NodePage) TA_NO_THREAD_SAFETY_ANALYSIS {

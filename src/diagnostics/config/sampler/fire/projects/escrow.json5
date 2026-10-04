@@ -1,14 +1,14 @@
 {
     metrics: [
         {
-            metric_id: 5,
+            metric_name: "per_component_escrow_started_durations",
             metric_type: "IntHistogram",
             selector: [
                 "<component_manager>:root/escrow/started_durations/histogram:{MONIKER}",
             ],
         },
         {
-            metric_id: 6,
+            metric_name: "per_component_escrow_stopped_durations",
             metric_type: "IntHistogram",
             selector: [
                 "<component_manager>:root/escrow/stopped_durations/histogram:{MONIKER}",

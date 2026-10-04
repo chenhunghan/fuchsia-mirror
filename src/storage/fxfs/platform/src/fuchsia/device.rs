@@ -338,6 +338,9 @@ impl BlockServer {
                                     }
                                 }
                             }
+                            block::SessionRequest::RegisterKey { responder, .. } => {
+                                responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
+                            }
                             // TODO(https://fxbug.dev/293970391): close fifo
                             block::SessionRequest::Close { responder } => responder.send(Ok(()))?,
                         };

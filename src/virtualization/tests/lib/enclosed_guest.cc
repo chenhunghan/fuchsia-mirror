@@ -588,15 +588,11 @@ zx_status_t ZirconEnclosedGuest::WaitForSystemReady(zx::time deadline) {
   // Keep running the ready test until we get a reasonable result or run out of time. Ideally we
   // want to wait for the driver framework to have finished enumerating and binding devices, as
   // shutting down before this is a known bug that can lead to system hangs.
-  // Checking for this is difficult and for x86 we can wait for the ACPI driver to finish (which is
-  // the last thing to come up), but otherwise we just wait for some general system processes to
-  // come up, by inspecting ps, and hope that is good enough.
 #if __x86_64__
   auto acpi_check = [&]() {
     do {
       zx_status_t status =
-          Execute({"waitfor", "verbose", "class=acpi", "topo=/dev/sys/platform/pt/acpi/_SB_/pt",
-                   "&&", "echo", "ACPI_READY"},
+          Execute({"[", "-d", "/dev/sys/platform/pt/acpi/_SB_/pt", "]", "&&", "echo", "ACPI_READY"},
                   {}, deadline, &output);
       if (status != ZX_OK) {
         return status;

@@ -50,7 +50,17 @@ zx_status_t async_bind_irq(async_dispatcher_t* dispatcher, async_irq_t* irq);
 /// If successful, the IRQ will be unbound from the async loop and no further
 /// handler callbacks will be called.
 ///
-/// Returns |ZX_OK| if the IRQ has been successfully unbound.
+/// Thread safety note: Since callbacks can be called any time while the irq
+/// is bound to the dispatcher, and a callback may be in flight when unbind is
+/// called, care must be taken when this API is used in a multithreaded
+/// dispatcher not to free the |async_irq_t| struct until after all callbacks
+/// have settled and unbind has been called. This is unlike the |async_wait| api,
+/// where |async_cancel_wait| will return |ZX_ERR_NOT_FOUND| if the callback
+/// has already been started. This can be avoided by using only a single threaded
+/// or otherwise synchronized dispatcher.
+///
+/// Returns |ZX_OK| if the IRQ has been successfully unbound. |irq| can be
+/// destroyed as soon as there are no more callbacks in progress.
 /// Returns |ZX_ERR_BAD_STATE| if the dispatcher is shutting down.
 /// Returns |ZX_ERR_NOT_SUPPORTED| if not supported by the dispatcher.
 ///

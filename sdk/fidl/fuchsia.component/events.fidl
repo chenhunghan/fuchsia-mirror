@@ -146,7 +146,7 @@ type StoppedPayload = table {
     /// protocol channel. This is the exit status of the component. The
     /// possible status values and their meaning are described in the definition
     /// of the ComponentController protocol.
-    1: status zx.Status;
+    1: status zx.Result;
 
     /// The exit code of the component instance. Note that not all components
     /// will stop with an exit code.

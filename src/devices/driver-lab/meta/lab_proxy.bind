@@ -1,0 +1,10 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// The proxy binds only to nodes explicitly marked as proxy targets.
+// No production node carries this property, so the proxy can never
+// bind opportunistically.
+using fuchsia.driver.lab;
+
+fuchsia.driver.lab.PROXY_TARGET == fuchsia.driver.lab.PROXY_TARGET.SELECTED;

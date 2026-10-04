@@ -62,22 +62,27 @@ zx_status_t RndisHost::SendControlCommand(void* command) {
   rndis_header* header = static_cast<rndis_header*>(command);
   header->request_id = next_request_id_++;
 
-  return usb_.ControlOut(USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                         USB_CDC_SEND_ENCAPSULATED_COMMAND, 0, control_intf_, RNDIS_CONTROL_TIMEOUT,
-                         reinterpret_cast<uint8_t*>(command), header->msg_length);
+  return usb_.ControlOut(kClassInterfaceOut,
+                         fidl::ToUnderlying(fdescriptor::CdcRequest::kSendEncapsulatedCommand), 0,
+                         control_intf_, RNDIS_CONTROL_TIMEOUT, reinterpret_cast<uint8_t*>(command),
+                         header->msg_length);
 }
 
 zx_status_t RndisHost::ReceiveControlMessage(uint32_t request_id) {
   size_t len_read = 0;
-  zx_status_t status =
-      usb_.ControlIn(USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                     USB_CDC_GET_ENCAPSULATED_RESPONSE, 0, control_intf_, RNDIS_CONTROL_TIMEOUT,
-                     control_receive_buffer_, sizeof(control_receive_buffer_), &len_read);
-  if (len_read == 0) {
-    zxlogf(ERROR, "rndishost received a zero-length response on the control channel");
-    return ZX_ERR_IO_REFUSED;
+  zx_status_t status = usb_.ControlIn(
+      kClassInterfaceIn, fidl::ToUnderlying(fdescriptor::CdcRequest::kGetEncapsulatedResponse), 0,
+      control_intf_, RNDIS_CONTROL_TIMEOUT, control_receive_buffer_,
+      sizeof(control_receive_buffer_), &len_read);
+  if (status != ZX_OK) {
+    return status;
   }
   const auto* header = reinterpret_cast<rndis_header*>(control_receive_buffer_);
+  if (len_read < sizeof(rndis_header) || header->msg_length < sizeof(rndis_header) ||
+      header->msg_length > len_read) {
+    zxlogf(ERROR, "rndishost received short or truncated response on the control channel");
+    return ZX_ERR_IO;
+  }
   if (header->request_id != request_id) {
     zxlogf(ERROR, "rndishost received wrong packet ID on control channel: got %d, wanted %d",
            header->request_id, request_id);
@@ -633,8 +638,8 @@ static zx_status_t rndishost_bind(void* ctx, zx_device_t* parent) {
     // Find our endpoints.
     // We should have two interfaces: the CDC classified interface the bulk in
     // and out endpoints, and the RNDIS interface for control. The RNDIS
-    // interface will be classified as USB_CLASS_WIRELESS when the device is
-    // used for tethering.
+    // interface is classified as fuchsia.hardware.usb.descriptor/UsbClass.WIRELESS when the
+    // device is used for tethering.
     // TODO: Figure out how to handle other RNDIS use cases.
     std::optional<usb::InterfaceList> interfaces;
     status = usb::InterfaceList::Create(usb, false, &interfaces);
@@ -643,27 +648,27 @@ static zx_status_t rndishost_bind(void* ctx, zx_device_t* parent) {
     }
     for (const usb::Interface& interface : *interfaces) {
       const usb_interface_descriptor_t* intf = interface.descriptor();
-      if (intf->b_interface_class == USB_CLASS_WIRELESS) {
+      if (intf->b_interface_class == fdescriptor::UsbClass::kWireless) {
         control_intf = intf->b_interface_number;
         if (intf->b_num_endpoints != 1) {
           return ZX_ERR_NOT_SUPPORTED;
         }
         for (const auto& endp : interface.GetEndpointList()) {
-          if (usb_ep_direction(endp.descriptor()) == USB_ENDPOINT_IN &&
+          if (usb_ep_direction(endp.descriptor()) == fdescriptor::EndpointDirection::kIn &&
               usb_ep_type(endp.descriptor()) == fdescriptor::EndpointType::kInterrupt) {
             intr_addr = endp.descriptor()->b_endpoint_address;
           }
         }
-      } else if (intf->b_interface_class == USB_CLASS_CDC) {
+      } else if (intf->b_interface_class == fdescriptor::UsbClass::kCdc) {
         if (intf->b_num_endpoints != 2) {
           return ZX_ERR_NOT_SUPPORTED;
         }
         for (const auto& endp : interface.GetEndpointList()) {
-          if (usb_ep_direction(endp.descriptor()) == USB_ENDPOINT_OUT) {
+          if (usb_ep_direction(endp.descriptor()) == fdescriptor::EndpointDirection::kOut) {
             if (usb_ep_type(endp.descriptor()) == fdescriptor::EndpointType::kBulk) {
               bulk_out_addr = endp.descriptor()->b_endpoint_address;
             }
-          } else if (usb_ep_direction(endp.descriptor()) == USB_ENDPOINT_IN) {
+          } else if (usb_ep_direction(endp.descriptor()) == fdescriptor::EndpointDirection::kIn) {
             if (usb_ep_type(endp.descriptor()) == fdescriptor::EndpointType::kBulk) {
               bulk_in_addr = endp.descriptor()->b_endpoint_address;
             }
@@ -704,7 +709,7 @@ static zx_driver_ops_t rndis_driver_ops = []() {
   return ops;
 }();
 
-// TODO: Make sure we can bind to all RNDIS use cases. USB_CLASS_WIRELESS only
-// covers the tethered device case.
+// TODO: Make sure we can bind to all RNDIS use cases.
+// fuchsia.hardware.usb.descriptor/UsbClass.WIRELESS only covers the tethered device case.
 // clang-format off
 ZIRCON_DRIVER(rndishost, rndis_driver_ops, "zircon", "0.1");

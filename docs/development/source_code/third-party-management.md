@@ -26,6 +26,39 @@ Fuchsia checkout via [adding to this
 blocklist.](https://fuchsia.googlesource.com/fuchsia/+/main/scripts/shac/mirror_blocklists.star)
 Most licensing issues arise if it is to be used in the Fuchsia checkout.
 
+When adding a third-party dependency, the code owners take on the requirement
+to keep the dependency fresh. Freshness is monitored, and `OWNERS` are notified
+if their dependency falls out of compliance. The freshness of
+non-language-specific dependencies is sourced from each dependency's
+`README.fuchsia`, especially its `Revision` and `URL` fields, as described in
+the [`README.fuchsia` documentation][readme-fuchsia].
+
+For now, a dependency is considered **fresh** if it:
+
+-   Meets the update SLO (defined below) for new upstream releases.
+
+-   Is maintained by an active upstream project.
+
+    -   Active: the latest upstream release or commit is under 2 years old, and
+        the repository has not been archived or deprecated.
+
+An exception process for not staying fresh is managed via filing an
+[exception][freshness-exception].
+
+Later, to be considered fresh, a third-party dependency will also need to be
+enrolled in automated push updates; a separate exception process for that
+requirement will be managed.
+
+### Update SLO
+
+-   If the dependency is used in production, head-based dependencies must
+    track upstream within 30 days. If release-based, the dependency must track
+    a minor release within 30 days and a major release within 3 months.
+
+-   For other dependencies, head-based dependencies must track upstream within
+    90 days. If release-based, the dependency must track a minor release within
+    90 days and a major release within 1 year.
+
 ### Language-specific guides
 
 If you are adding Rust, Go or Python dependencies, follow the guides below:
@@ -192,6 +225,7 @@ You can validate the changes locally by running `jiri update
 -   [Source code layout][source-layout]
 
 [fuchsia-git]: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main
+[freshness-exception]: https://buganizer.corp.google.com/issues/new?component=613784&template=2336778
 [gitignore]: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/.gitignore
 [golibs]: /third_party/golibs/
 [googletest]: https://github.com/google/googletest

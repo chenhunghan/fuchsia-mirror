@@ -18,9 +18,12 @@
 #include <memory>
 
 #include <fbl/algorithm.h>
+#include <usb/descriptors.h>
 #include <usb/peripheral.h>
 #include <usb/request-cpp.h>
 #include <usb/usb.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb {
 
@@ -57,8 +60,8 @@ void HciTest::TestThread(RunCompleter::Async completer) {
     StartShortPacketTests = 0xE4,
   };
   size_t actual;
-  status = usb_.ControlOut(USB_TYPE_VENDOR | USB_DIR_OUT | USB_RECIP_DEVICE, StartShortPacketTests,
-                           0, 0, ZX_TIME_INFINITE, nullptr, 0);
+  status =
+      usb_.ControlOut(kVendorDeviceOut, StartShortPacketTests, 0, 0, ZX_TIME_INFINITE, nullptr, 0);
   bool correct_byte_count = true;
   if (status == ZX_OK) {
     {
@@ -153,9 +156,8 @@ void HciTest::TestThread(RunCompleter::Async completer) {
         correct_byte_count &= bytes == (4096 * 3) + 511;
       }
     }
-    status = usb_.ControlIn(USB_TYPE_VENDOR | USB_DIR_IN | USB_RECIP_DEVICE, StopTransfers, 0, 0,
-                            ZX_TIME_INFINITE, reinterpret_cast<uint8_t*>(&results), sizeof(results),
-                            &actual);
+    status = usb_.ControlIn(kVendorDeviceIn, StopTransfers, 0, 0, ZX_TIME_INFINITE,
+                            reinterpret_cast<uint8_t*>(&results), sizeof(results), &actual);
   } else {
     usb_.ResetEndpoint(0);
   }
@@ -175,17 +177,15 @@ void HciTest::TestThread(RunCompleter::Async completer) {
     Request::Queue(std::move(*request), usb_);
   }
   // E2 start, E3 stop
-  usb_.ControlOut(USB_TYPE_VENDOR | USB_DIR_OUT | USB_RECIP_DEVICE, StartTransfers, 0, 0,
-                  ZX_TIME_INFINITE, nullptr, 0);
+  usb_.ControlOut(kVendorDeviceOut, StartTransfers, 0, 0, ZX_TIME_INFINITE, nullptr, 0);
   constexpr auto kTestRuntime = 15;
   sleep(kTestRuntime);
   running = false;
   usb_.CancelAll(bulk_out_.b_endpoint_address);
   // Test the case where we haven't queued any data
   usb_.CancelAll(bulk_out_.b_endpoint_address);
-  status = usb_.ControlIn(USB_TYPE_VENDOR | USB_DIR_IN | USB_RECIP_DEVICE, StopTransfers, 0, 0,
-                          ZX_TIME_INFINITE, reinterpret_cast<uint8_t*>(&results), sizeof(results),
-                          &actual);
+  status = usb_.ControlIn(kVendorDeviceIn, StopTransfers, 0, 0, ZX_TIME_INFINITE,
+                          reinterpret_cast<uint8_t*>(&results), sizeof(results), &actual);
   if (status != ZX_OK) {
     completer.ReplyError(status);
     return;

@@ -57,8 +57,10 @@ func (c fakeBuildAPIClient) ExportDebugSymbols(ctx context.Context, dir string, 
 	return os.WriteFile(filepath.Join(dir, "debug_symbols.json"), []byte(`[]`), 0o600)
 }
 
-func (c fakeBuildAPIClient) AffectedTests(ctx context.Context, filesList string) ([]string, error) {
-	return c.affectedTests, nil
+func (c fakeBuildAPIClient) AffectedTests(ctx context.Context, filesList string) (*build.AffectedTestsResult, error) {
+	return &build.AffectedTestsResult{
+		Targets: c.affectedTests,
+	}, nil
 }
 
 // An enum type describing the presence of a build success stamp file
@@ -226,14 +228,13 @@ func TestBuild(t *testing.T) {
 				},
 			},
 			buildAPIClient: fakeBuildAPIClient{
-				affectedTests: []string{"//src:foo,host"},
+				affectedTests: []string{"//src:foo"},
 			},
 			expectedArtifacts: &fintpb.BuildArtifacts{
+				AffectedTests:       []string{"foo"},
 				BuildstatsJsonFiles: []string{filepath.Join(buildDir, buildstatsJSONName)},
 				LogFiles: map[string]string{
-					"affected_tests_comparison.json": filepath.Join(artifactDir, "affected_tests_comparison.json"),
-					"debug_symbols.json":             filepath.Join(artifactDir, "debug_symbols.json"),
-					"ninja dry run output":           filepath.Join(artifactDir, "ninja_dry_run_output"),
+					"debug_symbols.json": filepath.Join(artifactDir, "debug_symbols.json"),
 				},
 				NinjatraceJsonFiles: []string{filepath.Join(buildDir, ninjatraceJSONName)},
 			},

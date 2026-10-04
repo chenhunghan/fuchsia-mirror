@@ -50,6 +50,15 @@ _TOKIO_HOST_DEPS = [
 ]
 
 CRATE_ANNOTATION_OVERWRITES = {
+    "alloca": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
+            deps = [
+                "//third_party/rust_crates/compat/alloca-0.4.0:alloca-c",
+            ],
+        ),
+    ],
     "anyhow": [
         crate.annotation(
             version = "*",

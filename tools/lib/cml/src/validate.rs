@@ -464,9 +464,6 @@ which is almost certainly a mistake: {}",
         if capability.dictionary.as_ref().is_some() && capability.path.is_some() {
             self.features.check(Feature::DynamicDictionaries)?;
         }
-        if capability.delivery.is_some() {
-            self.features.check(Feature::DeliveryType)?;
-        }
         if let Some(from) = capability.from.as_ref() {
             self.validate_component_child_ref(
                 "\"capabilities\" source",

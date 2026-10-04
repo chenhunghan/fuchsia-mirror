@@ -68,6 +68,39 @@ impl RefCounted {
         false
     }
 
+    /// This method must only be called from make_ref_ptr_upgrade_from_raw.  See its
+    /// comments for details in the proper use of this method. The actual job of
+    /// this function is to atomically increment the refcount if the refcount is
+    /// greater than zero.
+    ///
+    /// This method returns false if the object was found with an invalid
+    /// refcount (refcount was <= 0), and true if the refcount was not zero and
+    /// it was incremented.
+    ///
+    /// The procedure used is the while-CAS loop with the advantage that
+    /// compare_exchange on failure updates |old| on failure (to exchange) so the
+    /// loop does not have to do a separate load.
+    #[must_use = "Result must be checked to determine if the object was adopted"]
+    pub(crate) fn add_ref_maybe_in_destructor(&self) -> bool {
+        let mut old = self.ref_count.load(Ordering::Acquire);
+        loop {
+            if old <= 0 {
+                return false;
+            }
+            match self.ref_count.compare_exchange_weak(
+                old,
+                old + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return true;
+                }
+                Err(actual) => old = actual,
+            }
+        }
+    }
+
     /// Current ref count. Only to be used for debugging purposes.
     pub fn ref_count_debug(&self) -> i32 {
         self.ref_count.load(Ordering::Relaxed)
@@ -81,6 +114,14 @@ pub trait HasRefCount {
     /// Returns a reference to the contained `RefCounted` field.
     fn ref_count(&self) -> &RefCounted;
 }
+
+/// Trait for an object to mark itself as allowing the `make_ref_ptr_upgrade_from_raw` operation,
+/// which can be used to give weak-pointer like behavior for very specific use cases.
+///
+/// Although an object does not need to do anything additional to support this trait, it requires an
+/// explicit implementation as this is only intended to resolve certain specific circular
+/// dependencies.
+pub trait HasRefCountUpgradeable: HasRefCount {}
 
 #[cfg(test)]
 mod tests {

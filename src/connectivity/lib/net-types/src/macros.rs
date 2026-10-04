@@ -266,6 +266,7 @@ fn with_type_param_replaced(
                     GenericArgument::Type(Type::Path(replacement.clone()))
                 } else {
                     GenericArgument::Type(Type::Path(TypePath {
+                        attrs: Vec::new(),
                         path: t.ident.clone().into(),
                         qself: None,
                     }))

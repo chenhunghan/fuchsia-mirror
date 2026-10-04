@@ -1202,8 +1202,7 @@ VmCowPages::~VmCowPages() {
   // during the dead transition.
   if (discardable_tracker_) {
     Guard<CriticalMutex> guard{lock()};
-    discardable_tracker_->assert_cow_pages_locked();
-    discardable_tracker_->RemoveFromDiscardableListLocked();
+    discardable_tracker_->RemoveFromDiscardableListLocked(lock_ref());
   }
 }
 
@@ -3927,10 +3926,9 @@ zx::result<VmCowPages::LookupCursor> VmCowPages::GetLookupCursorLocked(VmCowRang
   }
 
   if (discardable_tracker_) {
-    discardable_tracker_->assert_cow_pages_locked();
     // This vmo was discarded and has not been locked yet after the discard. Do not return any
     // pages.
-    if (discardable_tracker_->WasDiscardedLocked()) {
+    if (discardable_tracker_->WasDiscardedLocked(lock_ref())) {
       return zx::error{ZX_ERR_NOT_FOUND};
     }
   }
@@ -4790,8 +4788,7 @@ void VmCowPages::MoveToNotPinnedLocked(vm_page_t* page, uint64_t offset) {
         // If this is a discardable VMO but not currently unlocked, it cannot be reclaimed. The
         // reclamation code is tolerant to this, but avoid wasted work.
         if (is_discardable()) {
-          discardable_tracker_->assert_cow_pages_locked();
-          cannot_reclaim = !discardable_tracker_->IsEligibleForReclamationLocked();
+          cannot_reclaim = !discardable_tracker_->IsEligibleForReclamationLocked(lock_ref());
         }
         // If the VMO is mapped uncached, it cannot be reclaimed. The reclamation code is tolerant
         // to this and will skip the page anyway, but uncached memory is typically used by drivers
@@ -4842,8 +4839,7 @@ void VmCowPages::SetNotPinnedLocked(vm_page_t* page, uint64_t offset) {
         // If this is a discardable VMO but not currently unlocked, it cannot be reclaimed. The
         // reclamation code is tolerant to this, but avoid wasted work.
         if (is_discardable()) {
-          discardable_tracker_->assert_cow_pages_locked();
-          cannot_reclaim = !discardable_tracker_->IsEligibleForReclamationLocked();
+          cannot_reclaim = !discardable_tracker_->IsEligibleForReclamationLocked(lock_ref());
         }
         // If the VMO is mapped uncached, it cannot be reclaimed. The reclamation code is tolerant
         // to this and will skip the page anyway, but uncached memory is typically used by drivers
@@ -7822,10 +7818,9 @@ zx_status_t VmCowPages::LockRangeLocked(VmCowRange range, zx_vmo_lock_state_t* l
   lock_state_out->offset = range.offset;
   lock_state_out->size = range.len;
 
-  discardable_tracker_->assert_cow_pages_locked();
-
   bool was_discarded = false;
-  auto ret = discardable_tracker_->LockDiscardableLocked(/*try_lock=*/false, &was_discarded);
+  auto ret =
+      discardable_tracker_->LockDiscardableLocked(lock_ref(), /*try_lock=*/false, &was_discarded);
   zx_status_t status = ret.first;
   // Locking must succeed if try_lock was false.
   DEBUG_ASSERT(status == ZX_OK);
@@ -7859,9 +7854,8 @@ zx_status_t VmCowPages::TryLockRangeLocked(VmCowRange range) {
     return ZX_ERR_OUT_OF_RANGE;
   }
 
-  discardable_tracker_->assert_cow_pages_locked();
   bool unused;
-  auto ret = discardable_tracker_->LockDiscardableLocked(/*try_lock=*/true, &unused);
+  auto ret = discardable_tracker_->LockDiscardableLocked(lock_ref(), /*try_lock=*/true, &unused);
   zx_status_t status = ret.first;
   if (status != ZX_OK) {
     return status;
@@ -7893,8 +7887,7 @@ zx_status_t VmCowPages::UnlockRangeLocked(VmCowRange range) {
     return ZX_ERR_OUT_OF_RANGE;
   }
 
-  discardable_tracker_->assert_cow_pages_locked();
-  auto ret = discardable_tracker_->UnlockDiscardableLocked();
+  auto ret = discardable_tracker_->UnlockDiscardableLocked(lock_ref());
   zx_status_t status = ret.first;
   if (status != ZX_OK) {
     return status;
@@ -7903,7 +7896,7 @@ zx_status_t VmCowPages::UnlockRangeLocked(VmCowRange range) {
   // If the VMO just became reclaimable as a result of this unlock, refresh the page queue state of
   // all of its pages, which will move them into the reclaimable queue.
   if (ret.second) {
-    DEBUG_ASSERT(discardable_tracker_->IsEligibleForReclamationLocked());
+    DEBUG_ASSERT(discardable_tracker_->IsEligibleForReclamationLocked(lock_ref()));
     page_list_.ForEveryPage([this](const VmPageOrMarker* page_or_marker, uint64_t offset) {
       if (page_or_marker->IsPage()) {
         vm_page_t* page = page_or_marker->Page();
@@ -8008,9 +8001,8 @@ VmCowPages::DiscardablePageCounts VmCowPages::DebugGetDiscardablePageCounts() co
 
   Guard<CriticalMutex> guard{lock()};
 
-  discardable_tracker_->assert_cow_pages_locked();
   const DiscardableVmoTracker::DiscardableState state =
-      discardable_tracker_->discardable_state_locked();
+      discardable_tracker_->discardable_state_locked(lock_ref());
   // This is a discardable VMO but hasn't opted into locking / unlocking yet.
   if (state == DiscardableVmoTracker::DiscardableState::kUnset) {
     return counts;
@@ -8048,8 +8040,7 @@ zx::result<uint64_t> VmCowPages::DiscardPagesLocked(DeferredOps& deferred) {
     return zx::error(ZX_ERR_BAD_STATE);
   }
 
-  discardable_tracker_->assert_cow_pages_locked();
-  if (!discardable_tracker_->IsEligibleForReclamationLocked()) {
+  if (!discardable_tracker_->IsEligibleForReclamationLocked(lock_ref())) {
     return zx::error(ZX_ERR_BAD_STATE);
   }
 
@@ -8060,7 +8051,7 @@ zx::result<uint64_t> VmCowPages::DiscardPagesLocked(DeferredOps& deferred) {
     reclamation_event_count_++;
 
     // Set state to discarded.
-    discardable_tracker_->SetDiscardedLocked();
+    discardable_tracker_->SetDiscardedLocked(lock_ref());
   }
   return result;
 }

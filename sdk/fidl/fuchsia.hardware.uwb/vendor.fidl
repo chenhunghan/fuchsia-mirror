@@ -79,7 +79,7 @@ open protocol Uci {
     /// is in a known ready state, though the Driver may buffer a limited number
     /// of packets sent before initialization is complete.
     -> OnInitialized(table {
-        1: status zx.Status;
+        1: status zx.Result;
     });
 
     /// Send serialized UCI packets to the UWB Controller via the Driver. The

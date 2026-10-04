@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 mod legacy;
+pub use legacy::{EncryptionKeyV56, EncryptionKeysV56, ObjectItemV56, ObjectValueV56};
 
 // TODO(https://fxbug.dev/42178223): need validation after deserialization.
 use crate::checksum::Checksums;
@@ -19,6 +20,7 @@ use fxfs_crypto::{WrappedKey, WrappingKeyId};
 use fxfs_macros::SerializeKey;
 use fxfs_unicode::CasefoldString;
 use serde::{Deserialize, Serialize};
+use static_assertions::const_assert_eq;
 use std::collections::BTreeMap;
 use std::default::Default;
 use std::hash::Hash;
@@ -570,17 +572,206 @@ impl From<Timestamp> for std::time::Duration {
     }
 }
 
-pub type ObjectKind = ObjectKindV54;
+pub type ObjectKind = ObjectKindV59;
+pub type DirType = DirTypeV59;
+
+/// The default fscrypt policy flags implied for legacy fscrypt-encrypted nodes in Fxfs: 16-byte
+/// filename padding (`PAD_16`).
+///
+/// Prior to persisting policy flags in `DirType`, Fxfs only recorded `WrappingKeyId` on disk, so
+/// these are the fallback flags reported in `fuchsia.io/FscryptPolicy` for legacy encrypted
+/// directories and files.
+///
+/// TODO(https://fxbug.dev/527952709): Remove this fallback once all encrypted nodes persist their
+/// fscrypt policy flags on disk and legacy nodes without persisted flags are migrated.
+pub const LEGACY_FSCRYPT_FLAGS: fidl_fuchsia_io::FscryptPolicyFlags =
+    fidl_fuchsia_io::FscryptPolicyFlags::PAD_16;
+
+/// Bitfield of fscrypt encryption policy flags persisted on disk in `DirType`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct FscryptPolicyFlags(u8);
+
+impl FscryptPolicyFlags {
+    pub const PAD_8: Self = Self(0x01);
+    pub const PAD_16: Self = Self(0x02);
+    pub const DIRECT_KEY: Self = Self(0x04);
+    pub const IV_INO_LBLK_64: Self = Self(0x08);
+    pub const IV_INO_LBLK_32: Self = Self(0x10);
+    pub const ALL: Self = Self(
+        Self::PAD_8.0
+            | Self::PAD_16.0
+            | Self::DIRECT_KEY.0
+            | Self::IV_INO_LBLK_64.0
+            | Self::IV_INO_LBLK_32.0,
+    );
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if (bits & !Self::ALL.0) == 0 { Some(Self(bits)) } else { None }
+    }
+
+    pub const fn from_bits_retain(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(&self) -> u8 {
+        self.0
+    }
+
+    pub const fn contains(&self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn intersects(&self, other: Self) -> bool {
+        (self.0 & other.0) != 0
+    }
+}
+
+#[cfg(fuzz)]
+impl<'a> arbitrary::Arbitrary<'a> for FscryptPolicyFlags {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary::<u8>()? & Self::ALL.bits()))
+    }
+}
+
+const_assert_eq!(
+    FscryptPolicyFlags::PAD_8.bits(),
+    fidl_fuchsia_io::FscryptPolicyFlags::PAD_8.bits()
+);
+const_assert_eq!(
+    FscryptPolicyFlags::PAD_16.bits(),
+    fidl_fuchsia_io::FscryptPolicyFlags::PAD_16.bits()
+);
+const_assert_eq!(
+    FscryptPolicyFlags::DIRECT_KEY.bits(),
+    fidl_fuchsia_io::FscryptPolicyFlags::DIRECT_KEY.bits()
+);
+const_assert_eq!(
+    FscryptPolicyFlags::IV_INO_LBLK_64.bits(),
+    fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_64.bits()
+);
+const_assert_eq!(
+    FscryptPolicyFlags::IV_INO_LBLK_32.bits(),
+    fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32.bits()
+);
+
+impl core::ops::BitOr for FscryptPolicyFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for FscryptPolicyFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl core::ops::BitAnd for FscryptPolicyFlags {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl core::ops::Not for FscryptPolicyFlags {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self(!self.0)
+    }
+}
+
+impl From<fidl_fuchsia_io::FscryptPolicyFlags> for FscryptPolicyFlags {
+    fn from(flags: fidl_fuchsia_io::FscryptPolicyFlags) -> Self {
+        Self(flags.bits())
+    }
+}
+
+impl From<FscryptPolicyFlags> for fidl_fuchsia_io::FscryptPolicyFlags {
+    fn from(flags: FscryptPolicyFlags) -> Self {
+        Self::from_bits_retain(flags.bits())
+    }
+}
+
+impl TryFrom<u8> for FscryptPolicyFlags {
+    type Error = anyhow::Error;
+
+    fn try_from(bits: u8) -> Result<Self, Self::Error> {
+        Self::from_bits(bits)
+            .ok_or_else(|| anyhow::anyhow!("Unrecognized fscrypt policy flags: {bits:#x}"))
+    }
+}
+
+impl From<FscryptPolicyFlags> for u8 {
+    fn from(flags: FscryptPolicyFlags) -> Self {
+        flags.bits()
+    }
+}
+
+impl TypeFingerprint for FscryptPolicyFlags {
+    fn fingerprint() -> String {
+        "u8".to_owned()
+    }
+}
+
+/// Fscrypt policy metadata persisted in `DirType` for encrypted directories.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TypeFingerprint)]
+#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
+pub struct FscryptDirInfo {
+    pub wrapping_key_id: WrappingKeyId,
+    pub flags: FscryptPolicyFlags,
+}
+
+impl FscryptDirInfo {
+    pub fn new(wrapping_key_id: WrappingKeyId, flags: impl Into<FscryptPolicyFlags>) -> Self {
+        Self { wrapping_key_id, flags: flags.into() }
+    }
+}
+
+/// Prior to Fxfs v59, `DirType` only persisted the 16-byte `WrappingKeyId`, and all fscrypt
+/// directories implicitly used 16-byte filename padding (`PAD_16`). When migrating legacy records
+/// or constructing `FscryptDirInfo` from a bare `WrappingKeyId`, default to
+/// `FscryptPolicyFlags::PAD_16`.
+impl From<WrappingKeyId> for FscryptDirInfo {
+    fn from(wrapping_key_id: WrappingKeyId) -> Self {
+        Self { wrapping_key_id, flags: FscryptPolicyFlags::PAD_16 }
+    }
+}
+
+impl From<fidl_fuchsia_io::FscryptPolicy> for FscryptDirInfo {
+    fn from(policy: fidl_fuchsia_io::FscryptPolicy) -> Self {
+        Self {
+            wrapping_key_id: policy.key_identifier,
+            flags: FscryptPolicyFlags::from(policy.flags),
+        }
+    }
+}
+
+impl From<FscryptDirInfo> for fidl_fuchsia_io::FscryptPolicy {
+    fn from(info: FscryptDirInfo) -> Self {
+        fidl_fuchsia_io::FscryptPolicy {
+            key_identifier: info.wrapping_key_id,
+            flags: info.flags.into(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum DirType {
+pub enum DirTypeV59 {
     Normal,
-    Encrypted(WrappingKeyId),
-    /// Legacy casefolded mode.
+    Encrypted(FscryptDirInfo),
     LegacyCasefold,
     Casefold,
-    EncryptedCasefold(WrappingKeyId),
+    EncryptedCasefold(FscryptDirInfo),
 }
 
 impl DirType {
@@ -592,22 +783,22 @@ impl DirType {
         matches!(self, DirType::Encrypted(_) | DirType::EncryptedCasefold(_))
     }
 
-    pub fn with_encryption(self, id: WrappingKeyId) -> Self {
+    pub fn with_encryption(self, info: FscryptDirInfo) -> Self {
         match self {
-            DirType::Normal => DirType::Encrypted(id),
-            DirType::Casefold => DirType::EncryptedCasefold(id),
+            DirType::Normal => DirType::Encrypted(info),
+            DirType::Casefold => DirType::EncryptedCasefold(info),
             _ => self,
         }
     }
 
     pub fn with_casefold(self, val: bool) -> Self {
         match (val, self) {
-            (true, DirType::Encrypted(id) | DirType::EncryptedCasefold(id)) => {
-                DirType::EncryptedCasefold(id)
+            (true, DirType::Encrypted(info) | DirType::EncryptedCasefold(info)) => {
+                DirType::EncryptedCasefold(info)
             }
             (true, _) => DirType::Casefold,
-            (false, DirType::Encrypted(id) | DirType::EncryptedCasefold(id)) => {
-                DirType::Encrypted(id)
+            (false, DirType::Encrypted(info) | DirType::EncryptedCasefold(info)) => {
+                DirType::Encrypted(info)
             }
             (false, _) => DirType::Normal,
         }
@@ -615,9 +806,22 @@ impl DirType {
 
     pub fn wrapping_key_id(&self) -> Option<WrappingKeyId> {
         match self {
-            DirType::Encrypted(id) | DirType::EncryptedCasefold(id) => Some(*id),
+            DirType::Encrypted(info) | DirType::EncryptedCasefold(info) => {
+                Some(info.wrapping_key_id)
+            }
             _ => None,
         }
+    }
+
+    pub fn fscrypt_info(&self) -> Option<FscryptDirInfo> {
+        match self {
+            DirType::Encrypted(info) | DirType::EncryptedCasefold(info) => Some(*info),
+            _ => None,
+        }
+    }
+
+    pub fn fscrypt_policy(&self) -> Option<fidl_fuchsia_io::FscryptPolicy> {
+        self.fscrypt_info().map(Into::into)
     }
 }
 
@@ -629,7 +833,7 @@ impl Default for DirType {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectKindV54 {
+pub enum ObjectKindV59 {
     File {
         /// The number of references to this file.
         refs: u64,
@@ -788,14 +992,14 @@ pub enum FsverityMetadataV50 {
     F2fs(std::ops::Range<u64>),
 }
 
-pub type EncryptionKey = EncryptionKeyV56;
-pub type EncryptionKeyV56 = fxfs_crypto::EncryptionKey;
+pub type EncryptionKey = EncryptionKeyV59;
+pub type EncryptionKeyV59 = fxfs_crypto::EncryptionKey;
 
-pub type EncryptionKeys = EncryptionKeysV56;
+pub type EncryptionKeys = EncryptionKeysV59;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct EncryptionKeysV56(Vec<(u64, EncryptionKeyV56)>);
+pub struct EncryptionKeysV59(pub(super) Vec<(u64, EncryptionKeyV59)>);
 
 impl EncryptionKeys {
     pub fn get(&self, id: u64) -> Option<&EncryptionKey> {
@@ -837,14 +1041,14 @@ impl std::ops::Deref for EncryptionKeys {
 /// ObjectValue is the value of an item in the object store.
 /// Note that the tree stores deltas on objects, so these values describe deltas. Unless specified
 /// otherwise, a value indicates an insert/replace mutation.
-pub type ObjectValue = ObjectValueV56;
+pub type ObjectValue = ObjectValueV59;
 impl Value for ObjectValue {
     const DELETED_MARKER: Self = Self::None;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectValueV56 {
+pub enum ObjectValueV59 {
     /// Some keys have no value (this often indicates a tombstone of some sort).  Records with this
     /// value are always filtered when a major compaction is performed, so the meaning must be the
     /// same as if the item was not present.
@@ -853,9 +1057,9 @@ pub enum ObjectValueV56 {
     /// (None) i.e. their value is really a boolean: None => false, Some => true.
     Some,
     /// The value for an ObjectKey::Object record.
-    Object { kind: ObjectKindV54, attributes: ObjectAttributesV49 },
+    Object { kind: ObjectKindV59, attributes: ObjectAttributesV49 },
     /// Specifies encryption keys to use for an object.
-    Keys(EncryptionKeysV56),
+    Keys(EncryptionKeysV59),
     /// An attribute associated with a file object. |size| is the size of the attribute in bytes.
     Attribute { size: u64, has_overwrite_extents: bool },
     /// An extent associated with an object.
@@ -1019,9 +1223,9 @@ impl ObjectValue {
     }
 }
 
-pub type ObjectItem = ObjectItemV56;
+pub type ObjectItem = ObjectItemV59;
 
-pub type ObjectItemV56 = Item<ObjectKeyV54, ObjectValueV56>;
+pub type ObjectItemV59 = Item<ObjectKeyV54, ObjectValueV59>;
 
 impl ObjectItem {
     pub fn is_tombstone(&self) -> bool {

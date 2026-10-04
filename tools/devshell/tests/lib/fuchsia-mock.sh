@@ -26,13 +26,44 @@ btf::setup_fx() {
   # Fake fuchsia dir configuration.
   BT_ASSERT_FILE_EXISTS "${_FUCHSIA_DIR}/tools/devshell/lib/vars.sh"
   BT_ASSERT_FILE_EXISTS "${_FUCHSIA_DIR}/tools/devshell/lib/platform.sh"
-  BT_ASSERT_FILE_EXISTS "${_FUCHSIA_DIR}/tools/devshell/lib/fx-optional-features.sh"
   touch "${_FUCHSIA_DIR}/.ssh/fuchsia_ed25519" "${_FUCHSIA_DIR}/.ssh/fuchsia_authorized_keys"
   echo -e "${_FUCHSIA_DIR}/.ssh/fuchsia_ed25519\n${_FUCHSIA_DIR}/.ssh/fuchsia_authorized_keys" > "${_FUCHSIA_DIR}/.fx-ssh-path"
 
   # Fake a build directory with the minimal content so that fx works
   btf::make_out_dir "out/default"
   echo "out/default" > "${_FUCHSIA_DIR}/.fx-build-dir"
+
+  # Create centralized mock RBE settings for main_build.py to parse successfully
+  cat > "${_FUCHSIA_DIR}/out/default/rbe_settings.json" <<EOF
+{
+  "final": {
+    "bazel_enable": false,
+    "bazel_exec_strategy": "local",
+    "bazel_download_outputs": "all",
+    "cxx_download_objects": false,
+    "cxx_enable": false,
+    "cxx_exec_strategy": "local",
+    "cxx_minimalist_wrapper": false,
+    "link_download_unstripped_outputs": false,
+    "link_enable": false,
+    "link_exec_strategy": "local",
+    "rust_download_rlibs": false,
+    "rust_download_unstripped_binaries": false,
+    "rust_enable": false,
+    "rust_exec_strategy": "local",
+    "needs_reproxy": false,
+    "needs_auth": false
+  }
+}
+EOF
+
+  # Mock credentials.sh to avoid executing real credentials isolation in unit tests
+  btf::make_mock "${_FUCHSIA_DIR}/tools/devshell/lib/credentials.sh"
+  cat > "${_FUCHSIA_DIR}/tools/devshell/lib/credentials.sh.mock_side_effects" <<EOF
+function fx-setup-isolated-adc {
+  :
+}
+EOF
 
   if (( with_metrics )); then
     BT_ASSERT_FILE_EXISTS "${_FUCHSIA_DIR}/tools/devshell/lib/metrics.sh"

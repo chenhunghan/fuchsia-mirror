@@ -170,10 +170,10 @@ impl RootJobObserver {
     /// Once committed with the halt token, this function does not return.
     pub fn halt() {
         let boot_options = boot_options::BootOptions::get();
-        let Some(_halt_token) = HaltToken::take() else {
+        if !HaltToken::get().take() {
             kprint::kprintln!("root-job: halt/reboot already in progress; returning");
             return;
-        };
+        }
         // We now have the halt token so we're committed. There is no return from this point.
 
         if let Ok(notice) = CStr::from_bytes_until_nul(&boot_options.root_job_notice) {

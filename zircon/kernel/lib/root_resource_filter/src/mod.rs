@@ -264,11 +264,9 @@ mod tests {
     use unittest::{expect_eq, expect_false, expect_true};
     use zr::static_assert;
     use zx_types::{
-        ZX_RSRC_KIND_IOPORT, ZX_RSRC_KIND_IRQ, ZX_RSRC_KIND_MMIO, ZX_RSRC_KIND_SMC,
-        ZX_RSRC_KIND_SYSTEM, zx_rsrc_kind_t,
+        ZX_RSRC_KIND_COUNT, ZX_RSRC_KIND_IOPORT, ZX_RSRC_KIND_IRQ, ZX_RSRC_KIND_MMIO,
+        ZX_RSRC_KIND_SMC, ZX_RSRC_KIND_SYSTEM, zx_rsrc_kind_t,
     };
-
-    const ZX_RSRC_KIND_COUNT: u32 = ZX_RSRC_KIND_SYSTEM + 1;
 
     /// Test root_resource_filter default behaviour.
     #[test]

@@ -49,6 +49,7 @@ fidl("fuchsia.developer.ffx") {
     ":*",
     "//build/sdk/meta:*",
     "//src/developer/ffx/*",
+    "//src/developer/fuchsia-controller/*",
     "//src/sys/pkg/lib/*",
     "//tools/fidl/fidlgen_python/tests/*",
     "//tools/funnel/*",

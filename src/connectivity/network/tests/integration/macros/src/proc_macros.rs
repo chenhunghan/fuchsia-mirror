@@ -287,11 +287,11 @@ fn netstack_test_inner(
 ) -> TokenStream {
     let mut item = input.clone();
     let impl_attrs = std::mem::replace(&mut item.attrs, Vec::new());
-    let syn::ItemFn { attrs: _, vis: _, sig, block: _ } = &item;
+    let syn::ItemFn { attrs: _, vis: _, sig, block: _, modifiers: _ } = &item;
     let syn::Signature {
         constness: _,
         asyncness: _,
-        unsafety: _,
+        safety: _,
         abi: _,
         fn_token: _,
         ident: name,
@@ -328,6 +328,7 @@ fn netstack_test_inner(
 
         let arg_type = match arg_type.as_ref() {
             syn::Type::Reference(syn::TypeReference {
+                attrs: _,
                 and_token: _,
                 lifetime: _,
                 mutability: _,
@@ -345,7 +346,7 @@ fn netstack_test_inner(
         };
 
         let arg_type = match arg_type.as_ref() {
-            syn::Type::Path(syn::TypePath { qself: _, path }) => path,
+            syn::Type::Path(syn::TypePath { attrs: _, qself: _, path }) => path,
             other => return syn::Error::new_spanned(
                 inputs,
                 format!(

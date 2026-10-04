@@ -7,7 +7,7 @@ use bytes::{BufMut, BytesMut};
 use fuchsia_sync::Mutex;
 
 use ieee80211::MacAddr;
-use num::bigint::BigUint;
+use num_bigint::BigUint;
 use rand::RngExt as _;
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;

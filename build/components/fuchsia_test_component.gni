@@ -4,6 +4,7 @@
 
 import("fuchsia_component.gni")
 
+# LINT.IfChange(type_moniker_map)
 type_moniker_map = {
   chromium = "/core/testing/chromium-tests"
   component_framework = "/core/testing/component-framework-tests"
@@ -20,6 +21,8 @@ type_moniker_map = {
   bootstrap_driver_system = "/bootstrap/testing/driver-system-tests"
   driver_system = "/core/testing/driver-system-tests"
 }
+
+# LINT.ThenChange(//build/bazel/rules/components/fx_component.bzl:type_moniker_map)
 
 # Defines a Fuchsia component that is testonly.
 # See: https://fuchsia.dev/fuchsia-src/development/components/build

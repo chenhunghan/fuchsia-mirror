@@ -77,6 +77,7 @@ async fn serve_fidl(
     ap_listener_msgs: mpsc::UnboundedReceiver<util::listener::ApMessage>,
     regulatory_receiver: oneshot::Receiver<()>,
     telemetry_sender: TelemetrySender,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 ) -> Result<Infallible, Error> {
     // Wait a bit for the country code to be set before serving the policy APIs.
     let regulatory_listener_timeout = fasync::Timer::new(
@@ -127,6 +128,7 @@ async fn serve_fidl(
         iface_manager.start_client_connections().await?;
     }
 
+    let power_manager_clone = power_manager.clone();
     let _ = fs
         .dir("svc")
         .add_fidl_service(move |reqs| {
@@ -138,6 +140,7 @@ async fn serve_fidl(
                 client_provider_lock.clone(),
                 reqs,
                 telemetry_sender.clone(),
+                power_manager_clone.clone(),
             ))
             .detach()
         })
@@ -203,6 +206,7 @@ async fn saved_networks_manager_metrics_loop(saved_networks: Arc<dyn SavedNetwor
 async fn run_regulatory_manager(
     iface_manager: Arc<Mutex<dyn IfaceManagerApi>>,
     regulatory_sender: oneshot::Sender<()>,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 ) -> Result<(), Error> {
     // This initial connection will always succeed due to the presence of the protocol in the
     // component manifest.
@@ -228,7 +232,7 @@ async fn run_regulatory_manager(
     let regulatory_svc =
         req.connect().context("unable to connect RegulatoryRegionWatcher proxy")?;
 
-    let regulatory_manager = RegulatoryManager::new(regulatory_svc, iface_manager);
+    let regulatory_manager = RegulatoryManager::new(regulatory_svc, iface_manager, power_manager);
 
     // The only way to test for the presence of the RegulatoryRegionWatcher service is to actually
     // use the handle to poll for updates.  If the RegulatoryManager future exits, simply log the
@@ -328,6 +332,7 @@ async fn run_all_futures() -> Result<(), Error> {
     let connection_selection_service = serve_connection_selection_request_loop(
         connection_selector,
         connection_selection_request_receiver,
+        power_manager.clone(),
     );
     let connection_selection_requester =
         ConnectionSelectionRequester::new(connection_selection_request_sender);
@@ -380,6 +385,7 @@ async fn run_all_futures() -> Result<(), Error> {
         defect_receiver,
         recovery_receiver,
         component::inspector().root().create_child("iface_manager"),
+        power_manager.clone(),
     );
 
     let scanning_service = scan::serve_scanning_loop(
@@ -396,10 +402,16 @@ async fn run_all_futures() -> Result<(), Error> {
         legacy_client.clone(),
         phy_manager.clone(),
         iface_manager.clone(),
+        power_manager.clone(),
     );
 
     let (regulatory_sender, regulatory_receiver) = oneshot::channel();
-    let ap = AccessPoint::new(iface_manager.clone(), ap_sender, Arc::new(Mutex::new(())));
+    let ap = AccessPoint::new(
+        iface_manager.clone(),
+        ap_sender,
+        Arc::new(Mutex::new(())),
+        power_manager.clone(),
+    );
     let fidl_fut = serve_fidl(
         ap,
         configurator,
@@ -412,6 +424,7 @@ async fn run_all_futures() -> Result<(), Error> {
         ap_receiver,
         regulatory_receiver,
         telemetry_sender.clone(),
+        power_manager.clone(),
     );
 
     let dev_watcher_fut = watcher_proxy
@@ -425,7 +438,8 @@ async fn run_all_futures() -> Result<(), Error> {
         });
 
     let saved_networks_metrics_fut = saved_networks_manager_metrics_loop(saved_networks.clone());
-    let regulatory_fut = run_regulatory_manager(iface_manager.clone(), regulatory_sender);
+    let regulatory_fut =
+        run_regulatory_manager(iface_manager.clone(), regulatory_sender, power_manager.clone());
 
     let suspend_blocker_fut: future::LocalBoxFuture<'static, Result<(), Error>> =
         if let Some(requests) = suspend_blocker_requests {

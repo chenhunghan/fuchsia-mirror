@@ -23,6 +23,8 @@
 #include "usb-midi-sink.h"
 #include "usb-midi-source.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace audio {
 namespace usb {
 
@@ -107,8 +109,8 @@ zx_status_t UsbAudioDevice::Bind() {
   status = usb_claim_additional_interfaces(
       &usb_composite_proto,
       [](usb_interface_descriptor_t* intf, void* arg) -> bool {
-        return (intf->b_interface_class == USB_CLASS_AUDIO &&
-                intf->b_interface_sub_class != USB_SUBCLASS_AUDIO_CONTROL);
+        return (intf->b_interface_class == fdescriptor::UsbClass::kAudio &&
+                intf->b_interface_sub_class != fdescriptor::AudioSubclass::kControl);
       },
       NULL);
   if (status != ZX_OK) {
@@ -153,7 +155,7 @@ void UsbAudioDevice::Probe() {
     auto hdr = iter.hdr();
 
     // We are only prepared to find interface descriptors at this point.
-    if (hdr->b_descriptor_type != USB_DT_INTERFACE) {
+    if (hdr->b_descriptor_type != fdescriptor::DescriptorType::kInterface) {
       LOG(WARNING, "Skipping unexpected descriptor (len = %u, type = %u)", hdr->b_length,
           hdr->b_descriptor_type);
       continue;
@@ -166,17 +168,17 @@ void UsbAudioDevice::Probe() {
       continue;
     }
 
-    if ((ihdr->b_interface_class != USB_CLASS_AUDIO) ||
-        ((ihdr->b_interface_sub_class != USB_SUBCLASS_AUDIO_CONTROL) &&
-         (ihdr->b_interface_sub_class != USB_SUBCLASS_AUDIO_STREAMING) &&
-         (ihdr->b_interface_sub_class != USB_SUBCLASS_MIDI_STREAMING))) {
+    if ((ihdr->b_interface_class != fdescriptor::UsbClass::kAudio) ||
+        ((ihdr->b_interface_sub_class != fdescriptor::AudioSubclass::kControl) &&
+         (ihdr->b_interface_sub_class != fdescriptor::AudioSubclass::kStreaming) &&
+         (ihdr->b_interface_sub_class != fdescriptor::AudioSubclass::kMidiStreaming))) {
       LOG(WARNING, "Skipping unknown interface (class %u, subclass %u)", ihdr->b_interface_number,
           ihdr->b_interface_sub_class);
       continue;
     }
 
     switch (ihdr->b_interface_sub_class) {
-      case USB_SUBCLASS_AUDIO_CONTROL: {
+      case fidl::ToUnderlying(fdescriptor::AudioSubclass::kControl): {
         if (control_ifc != nullptr) {
           LOG(WARNING, "More than one audio control interface detected, skipping.");
           break;
@@ -203,7 +205,7 @@ void UsbAudioDevice::Probe() {
         break;
       }
 
-      case USB_SUBCLASS_AUDIO_STREAMING: {
+      case fidl::ToUnderlying(fdescriptor::AudioSubclass::kStreaming): {
         // We recognize this header and are going to consume it (whether or
         // not we successfully create or add to an existing audio stream
         // interface).  Cancel the cleanup lambda so that it does not skip
@@ -245,7 +247,7 @@ void UsbAudioDevice::Probe() {
       // Right now, we just look for a top level interface descriptor
       // along with a single endpoint descriptor, and skip pretty much
       // everything else.
-      case USB_SUBCLASS_MIDI_STREAMING: {
+      case fidl::ToUnderlying(fdescriptor::AudioSubclass::kMidiStreaming): {
         // We recognize this header and are going to consume it (whether or
         // not we successfully create or add to an existing audio stream
         // interface).  Cancel the cleanup lambda so that it does not skip
@@ -362,7 +364,7 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
 
     switch (hdr->b_descriptor_type) {
       // Generic interface
-      case USB_DT_INTERFACE: {
+      case fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface): {
         auto ihdr = iter->hdr_as<usb_interface_descriptor_t>();
         if (ihdr == nullptr) {
           return;
@@ -371,7 +373,7 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
         // If this is not a midi streaming interface, or it is a midi
         // streaming interface with a different interface id, than the ones
         // we have been seeing, then we are done.
-        if ((ihdr->b_interface_sub_class != USB_SUBCLASS_MIDI_STREAMING) ||
+        if ((ihdr->b_interface_sub_class != fdescriptor::AudioSubclass::kMidiStreaming) ||
             (ihdr->b_interface_number != info.ifc->b_interface_number)) {
           return;
         }
@@ -396,7 +398,7 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
       } break;
 
       // Class specific interface
-      case USB_AUDIO_CS_INTERFACE: {
+      case fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface): {
         auto aud_hdr = iter->hdr_as<usb_audio_desc_header>();
         if (aud_hdr == nullptr) {
           return;
@@ -404,10 +406,14 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
 
         // Silently skip the class specific MIDI headers which go
         // along with this streaming interface descriptor.
-        if ((aud_hdr->bDescriptorSubtype == USB_MIDI_MS_HEADER) ||
-            (aud_hdr->bDescriptorSubtype == USB_MIDI_IN_JACK) ||
-            (aud_hdr->bDescriptorSubtype == USB_MIDI_OUT_JACK) ||
-            (aud_hdr->bDescriptorSubtype == USB_MIDI_ELEMENT)) {
+        if ((aud_hdr->bDescriptorSubtype ==
+             static_cast<uint8_t>(fdescriptor::MidiMsDescriptorSubtype::kHeader)) ||
+            (aud_hdr->bDescriptorSubtype ==
+             static_cast<uint8_t>(fdescriptor::MidiMsDescriptorSubtype::kInJack)) ||
+            (aud_hdr->bDescriptorSubtype ==
+             static_cast<uint8_t>(fdescriptor::MidiMsDescriptorSubtype::kOutJack)) ||
+            (aud_hdr->bDescriptorSubtype ==
+             static_cast<uint8_t>(fdescriptor::MidiMsDescriptorSubtype::kElement))) {
           LOG(TRACE, "Skipping class specific MIDI interface subtype = %u",
               aud_hdr->bDescriptorSubtype);
           continue;
@@ -419,7 +425,7 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
       } break;
 
       // Generic Endpoint
-      case USB_DT_ENDPOINT: {
+      case fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint): {
         auto ep_desc = iter->hdr_as<usb_endpoint_descriptor_t>();
         if (ep_desc == nullptr) {
           return;
@@ -427,7 +433,7 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
 
         // If this is not a bulk transfer endpoint, then we are not quite sure what to do with
         // it.  Log a warning and skip it.
-        if (usb_ep_type(ep_desc) != fuchsia_hardware_usb_descriptor::EndpointType::kBulk) {
+        if (usb_ep_type(ep_desc) != fdescriptor::EndpointType::kBulk) {
           LOG(WARNING,
               "Skipping Non-bulk transfer endpoint (%u) found for MIDI streaming interface "
               "(iid %u, alt %u)",
@@ -436,8 +442,12 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
           continue;
         }
 
-        auto& ep_tgt = (usb_ep_direction(ep_desc) == USB_ENDPOINT_OUT) ? info.out_ep : info.in_ep;
-        const char* log_tag = (usb_ep_direction(ep_desc) == USB_ENDPOINT_OUT) ? "output" : "input";
+        auto& ep_tgt = (usb_ep_direction(ep_desc) == fdescriptor::EndpointDirection::kOut)
+                           ? info.out_ep
+                           : info.in_ep;
+        const char* log_tag = (usb_ep_direction(ep_desc) == fdescriptor::EndpointDirection::kOut)
+                                  ? "output"
+                                  : "input";
 
         // If we have already found an endpoint for this interface, log a
         // warning and skip this one.
@@ -458,13 +468,14 @@ void UsbAudioDevice::ParseMidiStreamingIfc(DescriptorListMemory::Iterator* iter,
         ep_tgt = ep_desc;
       } break;
 
-      case USB_AUDIO_CS_ENDPOINT: {
+      case fidl::ToUnderlying(fdescriptor::DescriptorType::kCsEndpoint): {
         auto ep_desc = iter->hdr_as<usb_midi_ms_endpoint_desc>();
         if (ep_desc == nullptr) {
           return;
         }
 
-        if (ep_desc->bDescriptorSubtype == USB_MIDI_MS_GENERAL) {
+        if (ep_desc->bDescriptorSubtype ==
+            static_cast<uint8_t>(fdescriptor::MidiEpDescriptorSubtype::kGeneral)) {
           LOG(TRACE, "Skipping class specific MIDI endpoint");
           continue;
         }

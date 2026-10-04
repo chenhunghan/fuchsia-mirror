@@ -17,13 +17,8 @@ void ModulesFini() {
   // TODO(https://fxbug.dev/338239201): Mitigate dlopen/dlclose calls either
   // racing in other threads or directly in fini functions.
 
-  constexpr auto module_fini = [](const auto& module) {
-    module.fini.CallFini(module.link_map.addr);
-  };
-
-  // Initializers ran in reverse load order in StartupCtors(), so finalizers
-  // are in load order here: the executable's run first.
-  std::ranges::for_each(ld::AbiLoadedModules(_ld_abi), module_fini);
+  auto fini = ld::AbiCallableFini(_ld_abi);
+  fini();
 }
 
 }  // namespace

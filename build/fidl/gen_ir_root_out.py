@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Create FIDL IR path directory. Symlinks to original file."
         "Intended to transition away from all_fidl_json.txt"

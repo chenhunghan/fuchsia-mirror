@@ -15,6 +15,10 @@ pub enum Error {
     #[error("could not create gce watcher from path {path:?}: {err}")]
     GceWatcher { path: PathBuf, err: String },
 
+    /// Failed to initialize the UART filesystem watcher on `path`.
+    #[error("could not create uart watcher from path {path:?}: {err}")]
+    UartWatcher { path: PathBuf, err: String },
+
     #[error("could not create fastboot watcher from path {path:?}: {err}")]
     FastbootWatcher { path: PathBuf, err: String },
 

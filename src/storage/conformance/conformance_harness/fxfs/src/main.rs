@@ -101,7 +101,8 @@ async fn run(mut stream: TestHarnessRequestStream, fixture: &TestFixture) -> Res
                         | fio::NodeAttributesQuery::ACCESS_TIME
                         | fio::NodeAttributesQuery::CASEFOLD
                         | fio::NodeAttributesQuery::SELINUX_CONTEXT
-                        | fio::NodeAttributesQuery::PENDING_ACCESS_TIME_UPDATE,
+                        | fio::NodeAttributesQuery::PENDING_ACCESS_TIME_UPDATE
+                        | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
                     supports_services: false,
                     supports_xattrs: true,
                     supports_symlinks: true,

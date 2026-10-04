@@ -12,6 +12,8 @@
 
 #include <mutex>
 
+#include <usb/descriptors.h>
+
 #include "src/devices/usb/drivers/dwc3/dwc3.h"
 
 namespace dwc3 {
@@ -40,7 +42,11 @@ zx_status_t Dwc3::Ep0Init() {
 
 void Dwc3::Ep0Start() {
   TRACE_DURATION("dwc3", "Dwc3::Ep0Start");
-  CmdStartNewConfig(ep0_.out, 0);
+  if (!CmdStartNewConfig(ep0_.out, 0)) {
+    fdf::error("CmdStartNewConfig failed");
+    ResetEndpoints();
+    return;
+  }
   EpSetConfig(ep0_.out, true);
   EpSetConfig(ep0_.in, true);
 
@@ -49,6 +55,13 @@ void Dwc3::Ep0Start() {
 
 void Dwc3::Ep0QueueSetup() {
   TRACE_DURATION("dwc3", "Dwc3::Ep0QueueSetup");
+  if (is_active()) {
+    for (Endpoint* ep : {&ep0_.out, &ep0_.in}) {
+      if (ep->transfer_state == Endpoint::TransferState::kStartingSingle) {
+        ep->stale_starts_to_end++;
+      }
+    }
+  }
   ep0_.in.transfer_state = Endpoint::TransferState::kIdle;
   ep0_.out.transfer_state = Endpoint::TransferState::kIdle;
   if (auto status = ep0_.buffer->CacheFlushInvalidate(0, sizeof(fdescriptor::wire::UsbSetup));
@@ -79,6 +92,10 @@ void Dwc3::Ep0StartEndpoints() {
 void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
   TRACE_DURATION("dwc3", "Dwc3::HandleEp0TransferCompleteEvent", "ep_num", ep_num);
   ZX_ASSERT(is_ep0_num(ep_num));
+  auto& ep = (ep_num == kEp0Out) ? ep0_.out : ep0_.in;
+  ep.transfer_state = Endpoint::TransferState::kIdle;
+  ep.rsrc_id = Endpoint::kInvalidResourceId;
+  ep.stale_starts_to_end = 0;
 
   // Only DataOut and DataIn states need TRB read.
   dwc3_trb_t trb{};
@@ -117,7 +134,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
                  ep0_.cur_setup.w_index, ep0_.cur_setup.w_length);
 
       const bool is_two_stage = ep0_.cur_setup.w_length == 0;
-      const bool is_out = ((ep0_.cur_setup.bm_request_type & USB_DIR_MASK) == USB_DIR_OUT);
+      const bool is_out = usb_request_is_out(ep0_.cur_setup.bm_request_type);
 
       if (is_two_stage) {
         ep0_.state = Ep0::State::TwoStage;
@@ -157,7 +174,16 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
         break;
       }
 
-      zx_off_t received = ep0_.cur_transfer_len - TRB_BUFSIZ(trb.status);
+      const size_t expected = ep0_.cur_transfer_len;
+      const size_t remaining = TRB_BUFSIZ(trb.status);
+      zx_off_t received = 0;
+      if (remaining > expected) {
+        fdf::error(
+            "Underflow detected on Ep0 OUT: expected {}, remaining {}. Clamping received to 0",
+            expected, remaining);
+      } else {
+        received = expected - remaining;
+      }
       ep0_.out.total_transfers++;
       ep0_.out.total_bytes += received;
       ep0_.state = Ep0::State::WaitNrdyIn;
@@ -183,7 +209,16 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
         Ep0QueueSetup();
         break;
       }
-      zx_off_t transferred = ep0_.cur_transfer_len - TRB_BUFSIZ(trb.status);
+      const size_t expected = ep0_.cur_transfer_len;
+      const size_t remaining = TRB_BUFSIZ(trb.status);
+      zx_off_t transferred = 0;
+      if (remaining > expected) {
+        fdf::error(
+            "Underflow detected on Ep0 IN: expected {}, remaining {}. Clamping transferred to 0",
+            expected, remaining);
+      } else {
+        transferred = expected - remaining;
+      }
       ep0_.in.total_transfers++;
       ep0_.in.total_bytes += transferred;
 
@@ -299,9 +334,13 @@ void Dwc3::HandleEp0TransferNotReadyEvent(uint8_t ep_num, uint32_t stage) {
 
 void Dwc3::Ep0EndAndStall(Endpoint& ep) {
   ep0_.shared_fifo.Clear();
-  if (ep.rsrc_id != Endpoint::kInvalidResourceId) {
-    CmdEpEndTransfer(ep);
+  if (is_active() && ep.transfer_state == Endpoint::TransferState::kStartingSingle) {
+    ep.stale_starts_to_end++;
+  } else if (ep.rsrc_id != Endpoint::kInvalidResourceId) {
+    CmdEpEndTransfer(ep, /*cmd_ioc=*/false);
   }
+  ep.rsrc_id = Endpoint::kInvalidResourceId;
+  ep.transfer_state = Endpoint::TransferState::kIdle;
   EpSetStall(ep, true);
 }
 
@@ -310,23 +349,34 @@ void Dwc3::HandleEp0Setup(size_t length) {
   // Copy the setup packet to ensure it is correctly captured in the Then closure.
   fdescriptor::wire::UsbSetup setup = ep0_.cur_setup;
 
-  if (setup.bm_request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE)) {
+  if (setup.bm_request_type == kStandardDeviceOut) {
     // handle some special setup requests in this driver
     switch (setup.b_request) {
-      case USB_REQ_SET_ADDRESS:
+      case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress):
         SetDeviceAddress(setup.w_value);
         ep0_.state = Ep0::State::WaitHost;
         return;
-      case USB_REQ_SET_CONFIGURATION:
+      case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration):
         ResetConfiguration();
-        Ep0StartEndpoints();
-        break;
+        WaitForAllUserEndpointsIdle([this, setup, length](bool idle) {
+          if (!idle || !power_on_ ||
+              (ep0_.state != Ep0::State::TwoStage && ep0_.state != Ep0::State::WaitFidl)) {
+            return;
+          }
+          Ep0StartEndpoints();
+          DoControlCall(setup, length);
+        });
+        return;
       default:
         // fall through to the common DoControlCall
         break;
     }
   }
 
+  DoControlCall(setup, length);
+}
+
+void Dwc3::DoControlCall(fdescriptor::wire::UsbSetup setup, size_t length) {
   auto fail = [this]() {
     ep0_.shared_fifo.Clear();
     EpSetStall(ep0_.out, true);
@@ -337,7 +387,7 @@ void Dwc3::HandleEp0Setup(size_t length) {
     return;
   }
 
-  const bool is_out = (setup.bm_request_type & USB_DIR_MASK) == USB_DIR_OUT;
+  const bool is_out = usb_request_is_out(setup.bm_request_type);
 
   // We can't fit this in FIDL so we can't dispatch. Log loudly and fail.
   if (is_out && length > fuchsia_hardware_usb_dci::kMaxControlRequestLen) {
@@ -449,8 +499,8 @@ void Dwc3::HandleEp0Setup(size_t length) {
             }
         }
 
-        if (setup.bm_request_type == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
-            setup.b_request == USB_REQ_SET_CONFIGURATION) {
+        if (setup.bm_request_type == kStandardDeviceOut &&
+            setup.b_request == fdescriptor::StandardRequest::kSetConfiguration) {
           SetDeviceState(fpolicy::DeviceState::kConfigured);
         }
       });

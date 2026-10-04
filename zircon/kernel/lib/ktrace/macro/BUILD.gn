@@ -8,9 +8,4 @@ import("//zircon/kernel/kernel_rust_crate.gni")
 
 kernel_rust_crate("ktrace-macro") {
   sources = [ "src/lib.rs" ]
-
-  # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
-  if (is_kernel) {
-    configs += [ "//zircon/kernel/switch:allow-crate-in-macro-def" ]
-  }
 }

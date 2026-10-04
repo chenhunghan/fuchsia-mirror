@@ -4,6 +4,7 @@
 
 import("//build/bazel2gn_verification_targets.gni")
 import("//build/python/python_host_test.gni")
+import("//build/python/python_library.gni")
 import("//build/testing/host_test_data.gni")
 import("//build/testing/python_build_time_tests.gni")
 import("//sdk/fidl/bazel2gn_verification_targets.gni")
@@ -24,14 +25,24 @@ group("tests") {
     ":build_tests_json_tests($host_toolchain)",
     ":regenerator_tests($host_toolchain)",
     ":target_metadata_test($host_toolchain)",
+    ":type_checked_scripts($host_toolchain)",
+    ":type_checked_toolchain_copy($host_toolchain)",
+    "api:tests",
+    "assembly:host_tests($host_toolchain)",
+    "auth:tests",
     "bazel:tests",
+    "bazel/scripts:type_checked_scripts($host_toolchain)",
+    "bazel_sdk:type_checked_scripts($host_toolchain)",
     "beads:tests",
+    "dist:tests",
     "fidl:tests",
     "go:tests",
     "licenses:tests",
+    "packages:tests",
     "profile:tests",
     "python:tests($host_toolchain)",
     "rbe:tests",
+    "rbe:type_checked_scripts($host_toolchain)",
     "rust:tests",
     "scripts:tests",
     "sdk:tests",
@@ -75,6 +86,7 @@ if (is_host) {
                "//build/bazel/scripts/get_git_head_commit.py",
                "//build/regenerator.py",
              ] + libc_headers.idk_generate_inputs
+    deps = [ "//build/rbe:rbe_settings" ]
   }
 
   python_build_time_tests("build_tests_json_tests") {
@@ -85,6 +97,139 @@ if (is_host) {
       "//build/bazel/scripts/bazel_tests_utils.py",
     ]
     deps = [ "//build/python/modules/serialization" ]
+  }
+
+  # Python scripts under //build that aren't part of any other Python target,
+  # usually because they're run directly by action() or Bazel rules. Listing
+  # them here makes them subject to type checking. Directories with many
+  # such scripts (//build/bazel/scripts, //build/bazel_sdk and //build/rbe)
+  # have their own type_checked_scripts targets instead.
+  #
+  # Cross-directory modules that a script imports via sys.path manipulation
+  # must be in library_deps. Otherwise mypy either treats them as Any due to
+  # `ignore_missing_imports` in //pyproject.toml or, worse, resolves them to
+  # a same-named directory in the build directory, since mypy always searches
+  # its working directory. The latter makes type checking depend on the
+  # build configuration.
+  python_library("type_checked_scripts") {
+    testonly = true
+
+    # This target only exists for type checking; depending on it would package
+    # a grab-bag of unrelated scripts.
+    visibility = [ ":*" ]
+    library_deps = [
+      # For packages/generate_package_debug_symbols_manifest.py.
+      "//build/api:debug_symbols",
+    ]
+    source_root = "//build"
+    sources = [
+      "assembly/scripts/bootfs_distribution_manifest.py",
+      "bazel/assembly/size_checker/verify_verbose_size_report.py",
+      "bazel/bazel_idk/prebuild_info.py",
+      "bazel/bazel_sdk/compare_bazel_sdks.py",
+      "bazel/bazel_sdk/idk_to_bazel_sdk.py",
+      "bazel/debug_symbols/tests/check_debug_binaries.py",
+      "bazel/drivers/verify_driver_package.py",
+      "bazel/examples/hello_python/bin.py",
+      "bazel/examples/hello_python/lib.py",
+      "bazel/examples/hello_python/test.py",
+      "bazel/fuchsia_idk/generate_repository_validation.py",
+      "bazel/rules/host_tests/tests/py/lib_for_test.py",
+      "bazel/rules/host_tests/tests/py/list_unittests_test.py",
+      "bazel/rules/host_tests/tests/py/simple_test.py",
+      "bazel/rules/host_tests/tests/py/test_with_py_binary.py",
+      "bazel/rules/host_tests/tests/py/test_with_py_library.py",
+      "bazel/rules/host_tests/tests/py/test_with_unittests.py",
+      "bazel/update-rustc-third-party/remove_incorrect_aliases.py",
+      "check_product_bundles_manifest.py",
+      "config/clang/generate_config_json.py",
+      "config/fuchsia/get_platform_version.py",
+      "copy_tree.py",
+      "cpp/binaries.py",
+      "cpp/verify_pragma_once.py",
+      "cpp/verify_public_headers.py",
+      "dart/gen_app_invocation.py",
+      "dart/gen_dart_test_invocation.py",
+      "dart/group_tests.py",
+      "dart/merge_deps_sources.py",
+      "dart/verify_sources.py",
+      "depfile_path_to_relative.py",
+      "dist/convert_fini_to_manifest.py",
+      "dist/convert_manifest_to_fini.py",
+      "dist/distribution-manifest-copy.py",
+      "drivers/assert_driver_components.py",
+      "drivers/check_included_drivers.py",
+      "drivers/create_driver_doc.py",
+      "drivers/create_driver_manifest.py",
+      "fidl/gen_ir_root_out.py",
+      "fidl/gen_response_file.py",
+      "force_clean/force_clean_if_needed.py",
+      "git/resolve_git_paths.py",
+      "git/resolve_git_revisions.py",
+      "go/build.py",
+      "go/gen_hermetic_inputs.py",
+      "go/gen_library_metadata.py",
+      "images/updates/create-universe-package-manifests-list.py",
+      "images/updates/merge_package_manifests_list.py",
+      "images/updates/package_names_list.py",
+      "info/gen_latest_commit_date.py",
+      "ninja_implicit_inputs/check_tool.py",
+      "ninja_implicit_inputs/ninja_implicit_inputs.py",
+      "packages/generate_package_archive_metadata.py",
+      "packages/generate_package_debug_symbols_manifest.py",
+      "packages/generate_package_metadata.py",
+      "packages/publish_archive.py",
+      "python/add_proto_copyright.py",
+      "python/create_c_extension_import_hook.py",
+      "python/modules/distribution_manifest/expand_and_find_conflicting_dist_entries.py",
+      "python/mypy_checker.py",
+      "python/package_python_binary.py",
+      "python/pyright_config.py",
+      "python/python_action_runner.py",
+      "rust/bindgen.py",
+      "rust/clippy_wrapper.py",
+      "rust/discover_rust_project.py",
+      "rust/generate_cargo.py",
+      "rust/new-bindgen.py",
+      "rust/rustdoc_wrapper.py",
+      "rust/tests/create_rustdoc_tests.py",
+      "scripts/compare_gn.py",
+      "scripts/count_build_targets.py",
+      "scripts/count_critical_actions.py",
+      "scripts/generate_target_metadata.py",
+      "sdk/compute_atom_api.py",
+      "sdk/filter_host_tools_from_sdk_api.py",
+      "sdk/generate_prebuild_idk/generate_prebuild_idk_validation.py",
+      "sdk/verify_final_manifest.py",
+      "subbuild.py",
+      "testing/boot_tests/create_efi_partition_config.py",
+      "testing/boot_tests/rebase_metadata_paths.py",
+      "testing/copy_unstripped_binaries.py",
+      "testing/python_build_time_tests.py",
+      "testing/run_target_test_and_host_script.py",
+      "testing/verify_files_match.py",
+      "testing/verify_golden_files.py",
+      "toolchain/get_concurrent_jobs.py",
+      "toolchain/verify-undefined-symbols.py",
+      "toolchain/verify_depfile.py",
+      "tools/json_validator/test/json_validator_valico_test_runner.py",
+      "tracer/hermetic_inputs_action.py",
+      "weights/generate_weights.py",
+      "weights/merge_weights_files.py",
+      "weights/ninjalog_to_weights.py",
+      "zbi/run_zbi.py",
+      "zircon/read_zircon_binaries.py",
+      "zircon/sdk_build_id.py",
+    ]
+  }
+
+  # Staged separately from type_checked_scripts because it would otherwise
+  # shadow the standard library's `copy` module for the other scripts there.
+  python_library("type_checked_toolchain_copy") {
+    testonly = true
+    visibility = [ ":*" ]
+    source_root = "//build"
+    sources = [ "toolchain/copy.py" ]
   }
 }
 

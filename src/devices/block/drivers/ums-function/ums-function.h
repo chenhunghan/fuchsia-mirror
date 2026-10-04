@@ -100,7 +100,9 @@ class UmsFunction : public fdf::DriverBase2,
   void CswComplete(fuchsia_hardware_usb_endpoint::Completion completion);
   void DataComplete(fuchsia_hardware_usb_endpoint::Completion completion);
 
-  bool IsInData() const { return current_cbw_.bmCBWFlags & USB_DIR_IN; }
+  bool IsInData() const {
+    return current_cbw_.bmCBWFlags & fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn);
+  }
   bool IsOutData() const { return !IsInData(); }
 
   fidl::SyncClient<fuchsia_hardware_usb_function::UsbFunction> function_;
@@ -137,30 +139,30 @@ class UmsFunction : public fdf::DriverBase2,
       .intf =
           {
               .b_length = sizeof(usb_interface_info_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               //      .b_interface_number set later
               .b_alternate_setting = 0,
               .b_num_endpoints = 2,
-              .b_interface_class = USB_CLASS_MSC,
-              .b_interface_sub_class = USB_SUBCLASS_MSC_SCSI,
-              .b_interface_protocol = USB_PROTOCOL_MSC_BULK_ONLY,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kMsc),
+              .b_interface_sub_class = fidl::ToUnderlying(fdescriptor::MscSubclass::kScsi),
+              .b_interface_protocol = fidl::ToUnderlying(fdescriptor::MscProtocol::kBulkOnly),
               .i_interface = 0,
           },
       .out_ep =
           {
               .b_length = sizeof(usb_endpoint_info_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               //      .b_endpoint_address set later
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(UmsFunction::kBulkMaxPacket),
               .b_interval = 0,
           },
       .in_ep =
           {
               .b_length = sizeof(usb_endpoint_info_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               //      .b_endpoint_address set later
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(UmsFunction::kBulkMaxPacket),
               .b_interval = 0,
           },

@@ -63,6 +63,7 @@ void rs_test_trace_future_disabled_with_arg();
 uint8_t rs_check_trace_state();
 void rs_wait_trace_state_is(uint32_t expected);
 void rs_setup_trace_observer();
+int32_t rs_test_flush_buffer();
 }
 
 #endif  // SRC_LIB_TRACE_RUST_TEST_LIB_H_

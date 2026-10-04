@@ -15,6 +15,7 @@ pub use fdf_core::handle::*;
 
 // re-export useful parts of libasync as well
 pub use libasync::{
-    AfterDeadline, AsAsyncDispatcherRef, AsyncDispatcher, AsyncDispatcherRef, DispatcherTimerExt,
-    GetAsyncDispatcher, JoinHandle, OnDispatcher, Task,
+    AfterDeadline, AsAsyncDispatcherRef, AsyncDispatcher, AsyncDispatcherRef,
+    DispatcherInterruptExt, DispatcherTimerExt, GetAsyncDispatcher, JoinHandle, OnDispatcher,
+    OnInterrupt, Task,
 };

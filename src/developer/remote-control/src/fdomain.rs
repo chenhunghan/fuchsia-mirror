@@ -163,7 +163,8 @@ pub async fn serve_fdomain_connection(
         let mut processed_any = false;
         let mut offset = 0;
         while in_queue.len() - offset >= 4 {
-            let payload_len = u32::from_le_bytes(in_queue[offset..offset+4].try_into().unwrap()) as usize;
+            let payload_len =
+                u32::from_le_bytes(in_queue[offset..offset + 4].try_into().unwrap()) as usize;
             let packet_len = payload_len + 4;
             if in_queue.len() - offset < packet_len {
                 break;
@@ -236,7 +237,7 @@ mod tests {
     use fuchsia_async as fasync;
     use futures::AsyncReadExt;
 
-    #[fasync::run_singlethreaded(test)]
+    #[fuchsia::test]
     async fn test_out_packet_writing() {
         let (local_sock, remote_sock) = fidl::Socket::create_stream();
         let local_sock = fasync::Socket::from_socket(local_sock);

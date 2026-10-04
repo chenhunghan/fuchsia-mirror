@@ -927,6 +927,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             reboot_affordance=self.fd_fc_obj,
             fuchsia_device_close=self.fd_fc_obj,
             location=self.fd_fc_obj.location,
+            suspend_resume_affordance=self.fd_fc_obj,
         )
 
     @mock.patch.object(
@@ -959,6 +960,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             fuchsia_controller=self.fd_fc_obj.fuchsia_controller,
             reboot_affordance=self.fd_fc_obj,
             fuchsia_device_close=self.fd_fc_obj,
+            suspend_resume_affordance=self.fd_fc_obj,
         )
 
     # List all the tests related to static properties
@@ -1076,6 +1078,12 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         """Test case to make sure fuchsia device is reboot capable"""
         self.assertIsInstance(
             self.fd_fc_obj, affordances_capable.RebootCapableDevice
+        )
+
+    def test_fuchsia_device_is_suspend_resume_capable(self) -> None:
+        """Test case to make sure fuchsia device is suspend resume capable"""
+        self.assertIsInstance(
+            self.fd_fc_obj, affordances_capable.SuspendResumeCapableDevice
         )
 
     # List all the tests related to public methods

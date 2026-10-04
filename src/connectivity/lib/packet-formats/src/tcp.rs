@@ -625,6 +625,23 @@ impl<B: SplitByteSlice> TcpSegment<B> {
         [self.hdr_prefix.as_bytes(), self.options.bytes(), &self.body]
     }
 
+    /// Consumes this segment and constructs a builder with the same contents.
+    ///
+    /// Unlike [`TcpSegment::builder`], the returned builder's options borrow
+    /// from `B` rather than from `self`, so the builder can outlive this
+    /// `TcpSegment`.
+    pub fn into_builder<A: IpAddress>(
+        self,
+        src_ip: A,
+        dst_ip: A,
+    ) -> TcpSegmentBuilderWithOptions<A, TcpOptionsRef<B>> {
+        let Self { hdr_prefix, options, body: _ } = self;
+        TcpSegmentBuilderWithOptions {
+            prefix_builder: hdr_prefix.deref().builder(src_ip, dst_ip),
+            options,
+        }
+    }
+
     /// Consumes this segment and constructs a [`Serializer`] with the same
     /// contents.
     ///
@@ -992,6 +1009,11 @@ impl<A: IpAddress, O> TcpSegmentBuilderWithOptions<A, O> {
         &self.prefix_builder
     }
 
+    /// Returns a mutable reference to the prefix builder of the segment.
+    pub fn prefix_builder_mut(&mut self) -> &mut TcpSegmentBuilder<A> {
+        &mut self.prefix_builder
+    }
+
     /// Returns the options in this builder.
     pub fn options(&self) -> &O {
         &self.options
@@ -1172,6 +1194,11 @@ impl<A: IpAddress> TcpSegmentBuilder<A> {
     /// Returns the sequence number for the builder
     pub fn seq_num(&self) -> u32 {
         self.seq_num
+    }
+
+    /// Sets the sequence number for the builder.
+    pub fn set_seq_num(&mut self, seq_num: u32) {
+        self.seq_num = seq_num;
     }
 
     /// Returns the ACK number, if present.
@@ -1377,7 +1404,7 @@ pub mod options {
     /// Note, for options that are small (< 16 bytes), this type will hold owned
     /// copies, as they're cheaper than storing a `Ref<B, _>`.
     #[derive(Derivative)]
-    #[derivative(Debug(bound = "B: ByteSlice"))]
+    #[derivative(Debug(bound = "B: ByteSlice"), Clone(bound = "B: CloneableByteSlice"))]
     pub struct TcpOptionsRef<B> {
         #[derivative(Debug = "ignore")]
         bytes: B,
@@ -1601,7 +1628,7 @@ pub mod options {
     }
 
     /// A type capable of serializing TCP Options.
-    #[derive(Debug, Default)]
+    #[derive(Clone, Debug, Default)]
     pub struct TcpOptionsBuilder<'a> {
         /// The MSS Option to serialize, if any.
         pub mss: Option<u16>,

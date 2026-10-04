@@ -6,6 +6,7 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 
@@ -21,7 +22,7 @@ Entry = dm.Entry
 
 
 class TestExpandManifestItems(unittest.TestCase):
-    def test_regular_entries(self):
+    def test_regular_entries(self) -> None:
         input = [
             {
                 "source": "some/file",
@@ -35,7 +36,7 @@ class TestExpandManifestItems(unittest.TestCase):
             },
         ]
 
-        opened_files = set()
+        opened_files: set[str] = set()
         result = dm.expand_manifest_items(input, opened_files)
 
         expected = [
@@ -48,7 +49,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertListEqual(result, expected)
         self.assertEqual(opened_files, set())
 
-    def test_regular_entries_with_elf_runtime_dir(self):
+    def test_regular_entries_with_elf_runtime_dir(self) -> None:
         input = [
             {
                 "source": "some/file",
@@ -69,7 +70,7 @@ class TestExpandManifestItems(unittest.TestCase):
             },
         ]
 
-        opened_files = set()
+        opened_files: set[str] = set()
         result = dm.expand_partial_manifest_items(input, opened_files)
 
         # Here the elf_runtime_dir should be ignored / removed from the output
@@ -96,7 +97,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertDictEqual(result.elf_runtime_map, expected_elf_runtime_map)
         self.assertEqual(opened_files, set())
 
-    def test_regular_entries_with_elf_runtime_dir_conflicts(self):
+    def test_regular_entries_with_elf_runtime_dir_conflicts(self) -> None:
         input = [
             {
                 "source": "some/file",
@@ -112,7 +113,7 @@ class TestExpandManifestItems(unittest.TestCase):
             },
         ]
 
-        opened_files = set()
+        opened_files: set[str] = set()
         result = dm.expand_partial_manifest_items(input, opened_files)
 
         expected_errors = [
@@ -123,7 +124,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertEqual(opened_files, set())
         self.assertListEqual(result.errors, expected_errors)
 
-    def test_default_label(self):
+    def test_default_label(self) -> None:
         input = [
             {
                 "source": "some/file",
@@ -136,7 +137,7 @@ class TestExpandManifestItems(unittest.TestCase):
             },
         ]
 
-        opened_files = set()
+        opened_files: set[str] = set()
         result = dm.expand_manifest_items(
             input, opened_files, default_label="//default"
         )
@@ -151,7 +152,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertListEqual(result, expected)
         self.assertEqual(opened_files, set())
 
-    def test_file_entries(self):
+    def test_file_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdirname:
             inner_file1 = os.path.join(tmpdirname, "1.dist")
             inner1 = [
@@ -180,7 +181,7 @@ class TestExpandManifestItems(unittest.TestCase):
                 },
             ]
 
-            opened_files = set()
+            opened_files: set[str] = set()
             result = dm.expand_manifest_items(input, opened_files, "//other")
 
             expected = [
@@ -192,7 +193,7 @@ class TestExpandManifestItems(unittest.TestCase):
             self.assertListEqual(result, expected)
             self.assertSetEqual(opened_files, {inner_file1, inner_file2})
 
-    def test_renamed_entries(self):
+    def test_renamed_entries(self) -> None:
         input = [
             {
                 "destination": "bin/foo",
@@ -209,7 +210,7 @@ class TestExpandManifestItems(unittest.TestCase):
                 "label": "//other",
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result, error = dm.expand_manifest(input, opened_files)
 
         expected = [
@@ -220,8 +221,8 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertEqual(opened_files, set())
         self.assertFalse(error)
 
-    def test_renamed_entries_with_persistent_entry(self):
-        input = [
+    def test_renamed_entries_with_persistent_entry(self) -> None:
+        input: list[dm.PartialEntry] = [
             {
                 "destination": "bin/foo",
                 "source": "some/file",
@@ -234,7 +235,7 @@ class TestExpandManifestItems(unittest.TestCase):
                 "keep_original": True,
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result, error = dm.expand_manifest(input, opened_files)
 
         expected = [
@@ -245,7 +246,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertEqual(opened_files, set())
         self.assertFalse(error)
 
-    def test_renamed_entries_with_errors(self):
+    def test_renamed_entries_with_errors(self) -> None:
         input = [
             {
                 "destination": "bin/foo",
@@ -266,7 +267,7 @@ class TestExpandManifestItems(unittest.TestCase):
                 "renamed_source": "some/foo2",
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result = dm.expand_partial_manifest_items(input, opened_files)
 
         expected_errors = []
@@ -282,7 +283,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertEqual(result.errors, expected_errors)
         self.assertEqual(opened_files, set())
 
-    def test_renamed_entries_with_resource_errors(self):
+    def test_renamed_entries_with_resource_errors(self) -> None:
         input = [
             {
                 "destination": "bin/foo",
@@ -300,7 +301,7 @@ class TestExpandManifestItems(unittest.TestCase):
                 "label": "//other",
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result = dm.expand_partial_manifest_items(input, opened_files)
 
         expected_errors = []
@@ -318,7 +319,7 @@ class TestExpandManifestItems(unittest.TestCase):
         self.assertEqual(result.errors, expected_errors)
         self.assertEqual(opened_files, set())
 
-    def test_renamed_entries_with_copy(self):
+    def test_renamed_entries_with_copy(self) -> None:
         input = [
             {
                 "destination": "bin/foo",
@@ -335,7 +336,7 @@ class TestExpandManifestItems(unittest.TestCase):
                 "renamed_source": "foo",
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result, errors = dm.expand_manifest(input, opened_files)
 
         expected = [
@@ -351,7 +352,7 @@ class TestExpandManifestItems(unittest.TestCase):
 
 
 class TestExpandManifest(unittest.TestCase):
-    def test_simple_case_no_conflicts(self):
+    def test_simple_case_no_conflicts(self) -> None:
         input = [
             {
                 "source": "some/file",
@@ -364,7 +365,7 @@ class TestExpandManifest(unittest.TestCase):
                 "label": "//src/bar",
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result, error = dm.expand_manifest(input, opened_files)
 
         expected = [
@@ -378,7 +379,7 @@ class TestExpandManifest(unittest.TestCase):
         self.assertEqual(opened_files, set())
         self.assertFalse(error)
 
-    def test_duplicates_same_path(self):
+    def test_duplicates_same_path(self) -> None:
         input = [
             {
                 "source": "some/file",
@@ -396,7 +397,7 @@ class TestExpandManifest(unittest.TestCase):
                 "label": "//src/foo",
             },
         ]
-        opened_files = set()
+        opened_files: set[str] = set()
         result, error = dm.expand_manifest(input, opened_files)
 
         expected = [
@@ -410,7 +411,7 @@ class TestExpandManifest(unittest.TestCase):
         self.assertEqual(opened_files, set())
         self.assertFalse(error)
 
-    def test_duplicates_same_content(self):
+    def test_duplicates_same_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdirname:
             # Create two different files with the same content.
             content = "Some test data"
@@ -438,7 +439,7 @@ class TestExpandManifest(unittest.TestCase):
                     "label": "//src/foo",
                 },
             ]
-            opened_files = set()
+            opened_files: set[str] = set()
             result, error = dm.expand_manifest(input, opened_files)
 
             expected = [
@@ -456,7 +457,7 @@ class TestExpandManifest(unittest.TestCase):
             self.assertEqual(opened_files, {file1_path, file2_path})
             self.assertFalse(error)
 
-    def test_duplicates_source_conflict(self):
+    def test_duplicates_source_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdirname:
             # Create two different files with different content.
             content = "Some test data"
@@ -484,7 +485,7 @@ class TestExpandManifest(unittest.TestCase):
                     "label": "//src/foo2",
                 },
             ]
-            opened_files = set()
+            opened_files: set[str] = set()
             result, error = dm.expand_manifest(input, opened_files)
 
             expected = [
@@ -511,20 +512,20 @@ class TestExpandManifest(unittest.TestCase):
 
 
 class TestVerifyElfDependencies(unittest.TestCase):
-    def test_simple_dependencies(self):
+    def test_simple_dependencies(self) -> None:
         binary = "bin/foo"
         binary_deps = ["libbar.so", "libc.so"]
         lib_dir = "LIB"
 
-        def get_deps(lib_path):
-            _DEPS_MAP = {
+        def get_deps(lib_path: str) -> list[str] | None:
+            _DEPS_MAP: dict[str, list[str]] = {
                 "LIB/ld.so.1": [],
                 "LIB/libbar.so": ["libzoo.so"],
                 "LIB/libzoo.so": ["libc.so"],
             }
             return _DEPS_MAP.get(lib_path, None)
 
-        visited_libs = set()
+        visited_libs: set[str] = set()
         error = dm.verify_elf_dependencies(
             binary, lib_dir, binary_deps, get_deps, visited_libs
         )
@@ -533,20 +534,20 @@ class TestVerifyElfDependencies(unittest.TestCase):
             visited_libs, {"LIB/libbar.so", "LIB/libzoo.so", "LIB/ld.so.1"}
         )
 
-    def test_circular_dependencies(self):
+    def test_circular_dependencies(self) -> None:
         binary = "bin/foo"
         binary_deps = ["libbar.so", "libc.so"]
         lib_dir = "LIB"
 
-        def get_deps(lib_path):
-            _DEPS_MAP = {
+        def get_deps(lib_path: str) -> list[str] | None:
+            _DEPS_MAP: dict[str, list[str]] = {
                 "LIB/ld.so.1": [],
                 "LIB/libbar.so": ["libzoo.so"],
                 "LIB/libzoo.so": ["libbar.so", "libc.so"],
             }
             return _DEPS_MAP.get(lib_path, None)
 
-        visited_libs = set()
+        visited_libs: set[str] = set()
         error = dm.verify_elf_dependencies(
             binary, lib_dir, binary_deps, get_deps, visited_libs
         )
@@ -555,20 +556,20 @@ class TestVerifyElfDependencies(unittest.TestCase):
             visited_libs, {"LIB/libbar.so", "LIB/libzoo.so", "LIB/ld.so.1"}
         )
 
-    def test_missing_dependencies(self):
+    def test_missing_dependencies(self) -> None:
         binary = "bin/foo"
         binary_deps = ["libbar.so", "libc.so"]
         lib_dir = "LIB"
 
-        def get_deps(lib_path):
-            _DEPS_MAP = {
+        def get_deps(lib_path: str) -> list[str] | None:
+            _DEPS_MAP: dict[str, list[str]] = {
                 "LIB/ld.so.1": [],
                 "LIB/libbar.so": ["libzoo.so"],
                 "LIB/libzoo.so": ["libmissing.so", "libc.so"],
             }
             return _DEPS_MAP.get(lib_path, None)
 
-        visited_libs = set()
+        visited_libs: set[str] = set()
         error = dm.verify_elf_dependencies(
             binary, lib_dir, binary_deps, get_deps, visited_libs
         )

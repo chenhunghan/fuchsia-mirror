@@ -89,6 +89,9 @@ toc:
   - title: test.inheritancewithrecursivedecl
     path: /test.inheritancewithrecursivedecl
     version_added: ""
+  - title: test.nonzero
+    path: /test.nonzero
+    version_added: ""
   - title: test.nullable
     path: /test.nullable
     version_added: ""

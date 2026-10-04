@@ -370,20 +370,22 @@ async fn main_inner() -> Result<(), Error> {
         let base_package_resolver = Arc::clone(&base_package_resolver);
         let () = svc_dir
             .add_entry(
-                fpkg::PackageResolverMarker::PROTOCOL_NAME,
+                format!("{}-base", fpkg::PackageResolverMarker::PROTOCOL_NAME),
                 vfs::service::host(move |stream: fpkg::PackageResolverRequestStream| {
                     Arc::clone(&base_package_resolver).serve_request_stream(stream).unwrap_or_else(
-                        |e: anyhow::Error| error!("serving fuchsia.pkg/PackageResolver: {e:#}"),
+                        |e: anyhow::Error| {
+                            error!("serving fuchsia.pkg/PackageResolver-base: {e:#}")
+                        },
                     )
                 }),
             )
-            .context("adding fuchsia.pkg/PackageResolver to /svc")?;
+            .context("adding fuchsia.pkg/PackageResolver-base to /svc")?;
     }
     {
         let base_package_resolver = Arc::clone(&base_package_resolver);
         let () = svc_dir
             .add_entry(
-                fcomponent_resolution::ResolverMarker::PROTOCOL_NAME,
+                format!("{}-base", fcomponent_resolution::ResolverMarker::PROTOCOL_NAME),
                 vfs::service::host(move |stream: fcomponent_resolution::ResolverRequestStream| {
                     component_resolver::serve_request_stream(
                         stream,
@@ -391,11 +393,11 @@ async fn main_inner() -> Result<(), Error> {
                         "base component resolver",
                     )
                     .unwrap_or_else(|e: anyhow::Error| {
-                        error!("serving fuchsia.component.resolution/Resolver: {e:#}")
+                        error!("serving fuchsia.component.resolution/Resolver-base: {e:#}")
                     })
                 }),
             )
-            .context("adding fuchsia.component.resolution/Resolver to /svc")?;
+            .context("adding fuchsia.component.resolution/Resolver-base to /svc")?;
     }
     let (blob_fetcher_fut, blob_fetcher) = blob_fetcher::BlobFetcher::new(
         blob_fetch_concurrency_limit.into(),
@@ -409,8 +411,7 @@ async fn main_inner() -> Result<(), Error> {
             .download_resumption_attempts_limit(blob_download_resumption_attempts_limit)
             .build(),
         blobfs.clone(),
-        fuchsia_component::client::connect_to_protocol::<fpkg_http::ClientMarker>()
-            .context("error connecting to fuchsia.pkg.http/Client")?,
+        fidl_connector::ServiceReconnector::<fpkg_http::ClientMarker>::new(),
     );
     let blob_fetcher_fut = Task::spawn(blob_fetcher_fut);
     {
@@ -437,8 +438,7 @@ async fn main_inner() -> Result<(), Error> {
         inspector.root().create_child("package_fetcher"),
     );
     let package_fetcher_fut = Task::spawn(package_fetcher_fut);
-    let tuf_authority = fuchsia_component::client::connect_to_protocol::<fpkg::AuthorityMarker>()
-        .context("error connecting to fuchsia.pkg/Authority")?;
+    let tuf_authority = fidl_connector::ServiceReconnector::<fpkg::AuthorityMarker>::new();
     {
         let resolver = ota_resolver::Resolver::new(
             tuf_authority.clone(),

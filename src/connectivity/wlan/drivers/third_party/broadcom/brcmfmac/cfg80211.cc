@@ -62,6 +62,7 @@
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/fwil_types.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/inspect/device_inspect.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/linuxisms.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/locks.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/proto.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/stats.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/workqueue.h"
@@ -1600,10 +1601,10 @@ static bool brcmf_valid_wpa_oui(uint8_t* oui, bool is_rsn_ie) {
 }
 
 static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcmf_vs_tlv* wpa_ie,
-                                         bool is_rsn_ie, bool is_ap) {
+                                         size_t max_len, bool is_rsn_ie, bool is_ap) {
   uint16_t count;
   zx_status_t err = ZX_OK;
-  int32_t len;
+  uint32_t len;
   uint32_t i;
   uint32_t wsec;
   uint32_t pval = 0;
@@ -1619,7 +1620,19 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
   if (wpa_ie == nullptr) {
     goto exit;
   }
+  // First make sure we can even access the len field.
+  if (max_len < TLV_HDR_LEN) {
+    BRCMF_ERR("no TLV header, need %d bytes, got %zu", TLV_HDR_LEN, max_len);
+    err = ZX_ERR_BUFFER_TOO_SMALL;
+    goto exit;
+  }
   len = wpa_ie->len + TLV_HDR_LEN;
+  // Then check that the value in the len field is within bounds.
+  if (len > max_len) {
+    BRCMF_ERR("invalid len field %u in TLV, max_len %zu", len, max_len);
+    err = ZX_ERR_BUFFER_TOO_SMALL;
+    goto exit;
+  }
   data = (uint8_t*)wpa_ie;
   offset = TLV_HDR_LEN;
   if (!is_rsn_ie) {
@@ -1629,7 +1642,7 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
   }
 
   /* check for multicast cipher suite */
-  if ((int32_t)offset + WPA_IE_MIN_OUI_LEN > len) {
+  if (offset + WPA_IE_MIN_OUI_LEN > len) {
     err = ZX_ERR_INVALID_ARGS;
     BRCMF_ERR("no multicast cipher suite");
     goto exit;
@@ -1668,11 +1681,17 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
   }
 
   offset++;
+  if (offset + WPA_IE_SUITE_COUNT_LEN > len) {
+    err = ZX_ERR_INVALID_ARGS;
+    BRCMF_ERR("no multicast cipher suite count, offset %u > len %u",
+              offset + WPA_IE_SUITE_COUNT_LEN, len);
+    goto exit;
+  }
   /* walk thru unicast cipher list and pick up what we recognize */
   count = data[offset] + (data[offset + 1] << 8);
   offset += WPA_IE_SUITE_COUNT_LEN;
   /* Check for unicast suite(s) */
-  if ((int32_t)(offset + (WPA_IE_MIN_OUI_LEN * count)) > len) {
+  if (offset + (WPA_IE_MIN_OUI_LEN * count) > len) {
     err = ZX_ERR_INVALID_ARGS;
     BRCMF_ERR("no unicast cipher suite");
     goto exit;
@@ -1706,11 +1725,18 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
     }
     offset++;
   }
+
+  if (offset + WPA_IE_SUITE_COUNT_LEN > len) {
+    err = ZX_ERR_INVALID_ARGS;
+    BRCMF_ERR("no auth key mgmt suite count, offset %u > len %u", offset + WPA_IE_SUITE_COUNT_LEN,
+              len);
+    goto exit;
+  }
   /* walk thru auth management suite list and pick up what we recognize */
   count = data[offset] + (data[offset + 1] << 8);
   offset += WPA_IE_SUITE_COUNT_LEN;
   /* Check for auth key management suite(s) */
-  if ((int32_t)(offset + (WPA_IE_MIN_OUI_LEN * count)) > len) {
+  if (offset + (WPA_IE_MIN_OUI_LEN * count) > len) {
     err = ZX_ERR_INVALID_ARGS;
     BRCMF_ERR("no auth key mgmt suite");
     goto exit;
@@ -1768,7 +1794,7 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
   if (is_rsn_ie) {
     if (is_ap) {
       wme_bss_disable = 1;
-      if (((int32_t)offset + RSN_CAP_LEN) <= len) {
+      if (offset + RSN_CAP_LEN <= len) {
         rsn_cap = data[offset] + (data[offset + 1] << 8);
         if (rsn_cap & RSN_CAP_PTK_REPLAY_CNTR_MASK) {
           wme_bss_disable = 0;
@@ -1810,8 +1836,7 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
       offset += RSN_PMKID_COUNT_LEN;
 
       /* See if there is BIP wpa suite left for MFP */
-      if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFP) &&
-          ((int32_t)(offset + WPA_IE_MIN_OUI_LEN) <= len)) {
+      if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFP) && (offset + WPA_IE_MIN_OUI_LEN <= len)) {
         err = brcmf_fil_bsscfg_data_set(ifp, "bip", &data[offset], WPA_IE_MIN_OUI_LEN);
         if (err != ZX_OK) {
           BRCMF_ERR("bip error %d", err);
@@ -1822,7 +1847,7 @@ static zx_status_t brcmf_configure_wpaie(struct brcmf_if* ifp, const struct brcm
       // Client path: honour the RSN-capabilities word SME placed in
       // security_ie (MFPR/MFPC) so the firmware "mfp" knob matches what the
       // host actually negotiated. Mirrors bcmdhd wl_set_key_mgmt().
-      if ((static_cast<int32_t>(offset) + RSN_CAP_LEN) <= len) {
+      if ((offset + RSN_CAP_LEN) <= len) {
         rsn_cap = data[offset] + (data[offset + 1] << 8);
         if (rsn_cap & RSN_CAP_MFPR_MASK) {
           mfp = BRCMF_MFP_REQUIRED;
@@ -2257,7 +2282,7 @@ zx_status_t brcmf_cfg80211_connect(struct net_device* ndev,
 
   if (req->security_ie().has_value() && req->security_ie()->size() > 0) {
     struct brcmf_vs_tlv* tmp_ie = (struct brcmf_vs_tlv*)req->security_ie()->data();
-    err = brcmf_configure_wpaie(ifp, tmp_ie, is_rsn_ie, false);
+    err = brcmf_configure_wpaie(ifp, tmp_ie, req->security_ie()->size(), is_rsn_ie, false);
     if (err != ZX_OK) {
       BRCMF_ERR("Failed to install RSNE: %s", zx_status_get_string(err));
       goto fail;
@@ -2706,33 +2731,32 @@ static void cfg80211_signal_ind(net_device* ndev) {
 
   // Send signal report indication only if client is in connected state
   if (brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
-    fuchsia_wlan_fullmac_wire::WlanFullmacSignalReportIndication signal_ind = {};
     int8_t rssi, snr;
     if (brcmf_get_rssi_snr(ndev, &rssi, &snr) == ZX_OK) {
-      signal_ind.rssi_dbm = rssi;
-      signal_ind.snr_db = snr;
+      auto arena = fdf::Arena::Create(0, 0);
+      if (arena.is_error()) {
+        BRCMF_ERR("Failed to create Arena status=%s", arena.status_string());
+        return;
+      }
+      auto builder = fuchsia_wlan_fullmac_wire::WlanFullmacSignalReportIndication::Builder(*arena);
+      builder.rssi_dbm(rssi);
+      builder.snr_db(snr);
 
       // Get the negotiated rate
       uint32_t rate = 0;
       bcme_status_t fw_err = BCME_OK;
       int status = brcmf_fil_cmd_data_get(ifp, BRCMF_C_GET_RATE, &rate, sizeof(rate), &fw_err);
       if (status == ZX_OK) {
-        signal_ind.tx_rate_500kbps = rate;
+        builder.tx_rate_500kbps(rate);
       } else {
         BRCMF_INFO("Failed to get rate: %s, fw err %s", zx_status_get_string(status),
                    brcmf_fil_get_errstr(fw_err));
-        signal_ind.tx_rate_500kbps = 0;
       }
 
       // Store the value in ndev (dumped out when link goes down)
       ndev->last_known_rssi_dbm = rssi;
       ndev->last_known_snr_db = snr;
-      auto arena = fdf::Arena::Create(0, 0);
-      if (arena.is_error()) {
-        BRCMF_ERR("Failed to create Arena status=%s", arena.status_string());
-        return;
-      }
-      auto result = ndev->if_proto.buffer(*arena)->SignalReport(signal_ind);
+      auto result = ndev->if_proto.buffer(*arena)->SignalReport(builder.Build());
       if (!result.ok()) {
         BRCMF_ERR("Failed to send signal report result.status: %s", result.status_string());
         return;
@@ -3698,6 +3722,10 @@ static fuchsia_wlan_fullmac_wire::StopResult brcmf_cfg80211_stop_ap(struct net_d
   struct brcmf_join_params join_params;
   struct brcmf_cfg80211_info* cfg = ifp->drvr->config;
 
+  // Stop the timer and cancel pending timeout work.
+  cfg->ap_start_timer->Stop();
+  cfg->ap_start_timeout_work.Cancel();
+
   if (!brcmf_test_bit(brcmf_vif_status_bit_t::AP_CREATED, &ifp->vif->sme_state) &&
       !brcmf_test_bit(brcmf_vif_status_bit_t::AP_START_PENDING, &ifp->vif->sme_state)) {
     BRCMF_INFO("attempt to stop already stopped AP");
@@ -3832,7 +3860,7 @@ static fuchsia_wlan_fullmac_wire::StartResult brcmf_cfg80211_start_ap(
   // Configure RSN IE
   if (req->has_rsne() && req->rsne().size() != 0) {
     struct brcmf_vs_tlv* tmp_ie = (struct brcmf_vs_tlv*)req->rsne().data();
-    status = brcmf_configure_wpaie(ifp, tmp_ie, true, true);
+    status = brcmf_configure_wpaie(ifp, tmp_ie, req->rsne().size(), true, true);
     if (status != ZX_OK) {
       BRCMF_ERR("Failed to install RSNE: %s", zx_status_get_string(status));
       goto fail;
@@ -4413,8 +4441,17 @@ static void brcmf_if_start_conf(net_device* ndev, fuchsia_wlan_fullmac_wire::Sta
 static void brcmf_ap_start_timeout_worker(WorkItem* work) {
   struct brcmf_cfg80211_info* cfg =
       containerof(work, struct brcmf_cfg80211_info, ap_start_timeout_work);
+  ScopedSharedReadLock lock(cfg->pub->if_mutex);
   struct net_device* ndev = cfg_to_softap_ndev(cfg);
+  if (ndev == nullptr) {
+    BRCMF_ERR("AP interface already deleted, ignoring AP start timeout.");
+    return;
+  }
   struct brcmf_if* ifp = ndev_to_if(ndev);
+  if (!ifp) {
+    BRCMF_ERR("ifp is null in ap_start_timeout_worker, interface may already be deleted.");
+    return;
+  }
 
   // Indicate status only if AP start pending is set
   if (brcmf_test_and_clear_bit(brcmf_vif_status_bit_t::AP_START_PENDING, &ifp->vif->sme_state)) {

@@ -46,7 +46,7 @@ class ParseResult:
 # can be merged into a single one. Otherwise, it is a build error.
 #
 
-PartialEntry = dict[str, str]
+PartialEntry = dict[str, Any]
 
 
 def expand_manifest_items_inner(
@@ -371,7 +371,7 @@ def _entries_have_same_source(
 
 
 def expand_manifest(
-    manifest_items: Iterable[dict[str, str]], opened_files: set[str]
+    manifest_items: Iterable[PartialEntry], opened_files: set[str]
 ) -> tuple[list[Entry], str]:
     """Expand the content of a distribution manifest into an Entry list.
 

@@ -7,170 +7,89 @@
 #ifndef ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CHANNEL_DISPATCHER_H_
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CHANNEL_DISPATCHER_H_
 
+#include <lib/object-constants.h>
 #include <stdint.h>
-#include <zircon/rights.h>
 #include <zircon/types.h>
 
-#include <fbl/canary.h>
-#include <fbl/intrusive_double_list.h>
-#include <fbl/ref_counted.h>
-#include <kernel/event.h>
-#include <kernel/mutex.h>
-#include <ktl/unique_ptr.h>
+#include <kernel/owned_wait_queue.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
 #include <object/message_packet.h>
+#include <object/opaque_storage.h>
 
-class ChannelDispatcher final
-    : public PeeredDispatcher<ChannelDispatcher, ZX_DEFAULT_CHANNEL_RIGHTS> {
+class ChannelDispatcher;
+
+DECLARE_PEERED_DISPATCHER_RUST_PROTOS(ChannelDispatcher, rust_channel_dispatcher)
+
+extern "C" {
+zx_status_t rust_channel_dispatcher_create(KernelHandle<ChannelDispatcher>* handle0,
+                                           KernelHandle<ChannelDispatcher>* handle1,
+                                           zx_rights_t* rights);
+zx_status_t rust_channel_dispatcher_write(const ChannelDispatcher* disp, zx_koid_t owner,
+                                          MessagePacket* msg);
+void rust_channel_dispatcher_set_owner(const ChannelDispatcher* disp, zx_koid_t new_owner);
+bool rust_channel_dispatcher_peer_has_closed(const ChannelDispatcher* disp);
+void rust_channel_dispatcher_get_message_counts(const ChannelDispatcher* disp, uint64_t* current,
+                                                uint64_t* max);
+int64_t rust_channel_dispatcher_get_channel_full_count();
+void rust_message_waiter_init(void* waiter);
+void rust_message_waiter_destroy(void* waiter);
+}  // extern "C"
+
+class ChannelDispatcher final : public Dispatcher {
  public:
-  class MessageWaiter;
+  struct MessageCounts {
+    uint64_t current;
+    uint64_t max;
+  };
 
   static zx_status_t Create(KernelHandle<ChannelDispatcher>* handle0,
-                            KernelHandle<ChannelDispatcher>* handle1, zx_rights_t* rights);
-
-  ~ChannelDispatcher() final;
-  zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_CHANNEL; }
-
-  // Read from this endpoint's message queue.
-  // |owner| is the handle table koid of the process attempting to read from the channel.
-  // |msg_size| and |msg_handle_count| are in-out parameters. As input, they specify the maximum
-  // size and handle count, respectively. On ZX_OK or ZX_ERR_BUFFER_TOO_SMALL, they specify the
-  // actual size and handle count of the next message. The next message is returned in |*msg| on
-  // ZX_OK and also on ZX_ERR_BUFFER_TOO_SMALL when |may_discard| is set.
-  zx_status_t Read(zx_koid_t owner, uint32_t* msg_size, uint32_t* msg_handle_count,
-                   MessagePacketPtr* msg, bool may_disard);
-
-  // Write to the opposing endpoint's message queue. |owner| is the handle table koid of the process
-  // attempting to write to the channel, or ZX_KOID_INVALID if kernel is doing it.
-  zx_status_t Write(zx_koid_t owner, MessagePacketPtr msg);
-
-  // Perform a transacted Write + Read. |owner| is the handle table koid of the process attempting
-  // to write to the channel, or ZX_KOID_INVALID if kernel is doing it.
-  zx_status_t Call(zx_koid_t owner, MessagePacketPtr msg, zx_instant_mono_t deadline,
-                   MessagePacketPtr* reply);
-
-  // Performs the wait-then-read half of Call.  This is meant for retrying
-  // after an interruption caused by suspending.
-  zx_status_t ResumeInterruptedCall(MessageWaiter* waiter, const Deadline& deadline,
-                                    MessagePacketPtr* reply);
-
-  // Cancels any channel_call message waiters waiting on this endpoint.
-  void CancelMessageWaiters() {
-    Guard<CriticalMutex> guard{get_lock()};
-    CancelMessageWaitersLocked(ZX_ERR_CANCELED);
+                            KernelHandle<ChannelDispatcher>* handle1, zx_rights_t* rights) {
+    return rust_channel_dispatcher_create(handle0, handle1, rights);
   }
 
-  // MessageWaiter's state is guarded by the lock of the
-  // owning ChannelDispatcher, and Deliver(), Signal(), Cancel(),
-  // and EndWait() methods must only be called under
-  // that lock.
-  //
-  // MessageWaiters are embedded in ThreadDispatchers, and the channel_ pointer
-  // can only be manipulated by their thread (via BeginWait() or EndWait()), and
-  // only transitions to nullptr while holding the ChannelDispatcher's lock.
-  //
-  // See also: comments in ChannelDispatcher::Call()
-  class MessageWaiter : public fbl::DoublyLinkedListable<MessageWaiter*> {
-   public:
-    ~MessageWaiter();
+  static int64_t get_channel_full_count() {
+    return rust_channel_dispatcher_get_channel_full_count();
+  }
 
-    zx_status_t BeginWait(fbl::RefPtr<ChannelDispatcher> channel);
-    void Deliver(MessagePacketPtr msg);
-    void Cancel(zx_status_t status);
-    fbl::RefPtr<ChannelDispatcher> get_channel() { return channel_; }
-    OwnedWaitQueue* get_wait_queue() { return &wait_queue_; }
-    zx_txid_t get_txid() const { return txid_; }
-    void set_txid(zx_txid_t txid) { txid_ = txid; }
-    zx_status_t Wait(const Deadline& deadline);
-    // Returns any delivered message via out and the status.
-    zx_status_t EndWait(MessagePacketPtr* out);
+  explicit ChannelDispatcher(void* holder);
+  ~ChannelDispatcher() final;
+
+  DECLARE_PEERED_DISPATCHER_RUST_METHODS(rust_channel_dispatcher, ZX_OBJ_TYPE_CHANNEL, true)
+
+  zx_status_t Write(zx_koid_t owner, MessagePacketPtr msg) const {
+    return rust_channel_dispatcher_write(this, owner, msg.release());
+  }
+
+  void set_owner(zx_koid_t new_owner) final { rust_channel_dispatcher_set_owner(this, new_owner); }
+
+  bool PeerHasClosed() const { return rust_channel_dispatcher_peer_has_closed(this); }
+
+  MessageCounts get_message_counts() const {
+    MessageCounts counts{};
+    rust_channel_dispatcher_get_message_counts(this, &counts.current, &counts.max);
+    return counts;
+  }
+
+  class MessageWaiter {
+   public:
+    MessageWaiter() { rust_message_waiter_init(&opaque_storage_); }
+    ~MessageWaiter() { rust_message_waiter_destroy(&opaque_storage_); }
+
+    MessageWaiter(const MessageWaiter&) = delete;
+    MessageWaiter& operator=(const MessageWaiter&) = delete;
+    MessageWaiter(MessageWaiter&&) = delete;
+    MessageWaiter& operator=(MessageWaiter&&) = delete;
 
    private:
-    void Signal();
-
-    fbl::RefPtr<ChannelDispatcher> channel_;
-    MessagePacketPtr msg_;
-    // TODO(teisenbe/swetland): Investigate hoisting this outside to reduce
-    // userthread size
-    OwnedWaitQueue wait_queue_;
-    bool signaled_ TA_GUARDED(wait_queue_.get_lock()) = false;
-    zx_txid_t txid_ = 0;
-    zx_status_t status_ = ZX_ERR_BAD_STATE;
+    OpaqueStorage<kMessageWaiterSize, kMessageWaiterAlign> opaque_storage_;
   };
 
-  struct MessageCounts {
-    uint64_t current{};
-    uint64_t max{};
-  };
-  MessageCounts get_message_counts() const TA_EXCL(&channel_lock_) {
-    Guard<CriticalMutex> guard{&channel_lock_};
-    return {messages_.size(), max_message_count_};
-  }
-
-  // Returns the number of times a channel reached the max pending message count,
-  // |kMaxPendingMessageCount|.
-  static int64_t get_channel_full_count();
-
-  // PeeredDispatcher implementation.
-  void on_zero_handles_locked() TA_REQ(get_lock());
-  void OnPeerZeroHandlesLocked() TA_REQ(get_lock());
-
-  void set_owner(zx_koid_t new_owner) final;
+ protected:
+  Lock<CriticalMutex>* get_lock() const final;
 
  private:
-  using MessageList = fbl::SizedDoublyLinkedList<MessagePacketPtr>;
-  using WaiterList = fbl::DoublyLinkedList<MessageWaiter*>;
-
-  explicit ChannelDispatcher(fbl::RefPtr<PeerHolder<ChannelDispatcher>> holder);
-
-  void RemoveWaiter(MessageWaiter* waiter);
-
-  // Cancels (with |status|) any channel_call message waiters waiting on this endpoint.
-  void CancelMessageWaitersLocked(zx_status_t status) TA_REQ(get_lock());
-
-  // Attempt to deliver the message to a waiting MessageWaiter.
-  //
-  // Returns true and takes ownership of |msg| iff the message was delivered.
-  bool TryWriteToMessageWaiter(MessagePacketPtr& msg) TA_REQ(get_lock());
-
-  void WriteSelf(MessagePacketPtr msg, OwnedWaitQueue* queue_to_own) TA_REQ(get_lock());
-
-  // Generate a unique txid to be used in a channel call.
-  zx_txid_t GenerateTxid() TA_REQ(get_lock());
-
-  // By using a dedicated lock to protect the fields accessed by Read, we can
-  // avoid acquiring |get_lock()| in the Read path.  Why do we care?
-  // |get_lock()| is held when raising signals and notifying matching observers.
-  // And there can be a lot of matching observers.  By use two locks and never
-  // acquiring |get_lock()| in the Read path we can allow Read to execute
-  // concurrently with the observer notification.
-  //
-  // When acquiring both |get_lock()| and |channel_lock_| be sure to acquire
-  // |get_lock()| first.
-  mutable DECLARE_CRITICAL_MUTEX(ChannelDispatcher) channel_lock_ TA_ACQ_AFTER(get_lock());
-  MessageList messages_ TA_GUARDED(channel_lock_);
-  uint64_t max_message_count_ TA_GUARDED(channel_lock_) = 0;
-
-  // Tracks the process that is allowed to issue calls, for example write
-  // to the opposite end. Without it, one can see writes out of order with
-  // respect of the previous and current owner. We avoid locking and updating
-  // the |owner_| if the new owner is kernel, which happens when the endpoint
-  // is written into a channel or during process destruction.
-  //
-  // The locking protocol for this field is a little tricky.  The Read method,
-  // which only ever acquires the channel_lock_, must read this field.  The
-  // Write method also needs to read this field, however, it needs to do so
-  // before it would otherwise need to acquire the channel_lock_.  So to avoid
-  // having Write prematurely acquire and release the channel_lock_, we instead
-  // require that either |get_lock()| or channel_lock_ are held when reading
-  // this field and both are held when writing it.
-  zx_koid_t owner_ = ZX_KOID_INVALID;
-  WaiterList waiters_ TA_GUARDED(get_lock());
-  uint32_t txid_ TA_GUARDED(get_lock()) = 0;
-  // True if the this object's peer has been closed.  This field exists so that
-  // |Read| can check for peer closed without having to acquire |get_lock()|.
-  bool peer_has_closed_ TA_GUARDED(channel_lock_) = false;
+  OpaqueStorage<kChannelDispatcherStateSize, kChannelDispatcherStateAlign> opaque_storage_;
 };
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CHANNEL_DISPATCHER_H_

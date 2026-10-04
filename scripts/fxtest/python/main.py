@@ -483,6 +483,12 @@ class AsyncMain:
         "package_manifests_from_metadata.list",
     ]
 
+    # LINT.IfChange(bazel_test_packages_list)
+    _BAZEL_TEST_PACKAGE_MANIFESTS_PATH = [
+        "bazel_test_packages.list",
+    ]
+    # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:bazel_test_packages_list)
+
     def __init__(
         self,
         flags: args.Flags,
@@ -829,7 +835,12 @@ class AsyncMain:
 
         need_emulator = False
         emulator_started = False
-        if selections.has_device_test() and not await self._has_active_device():
+        if (
+            flags.preflight
+            and flags.allow_temporary_emulator
+            and selections.has_device_test()
+            and not await self._has_active_device()
+        ):
             need_emulator = True
 
         async def end_execution(
@@ -888,13 +899,14 @@ class AsyncMain:
                 return 1
             emulator_started = True
 
-        # If there is exactly one active device and no target is explicitly specified,
-        # set it as the default target via FUCHSIA_NODENAME so that all child commands
-        # (like the package server and tests) target this device.
-        if selections.has_device_test() and not os.environ.get(
-            "FUCHSIA_NODENAME"
-        ):
-            await self._bind_to_active_device()
+        if flags.preflight:
+            # If there is exactly one active device and no target is explicitly specified,
+            # set it as the default target via FUCHSIA_NODENAME so that all child commands
+            # (like the package server and tests) target this device.
+            if selections.has_device_test() and not os.environ.get(
+                "FUCHSIA_NODENAME"
+            ):
+                await self._bind_to_active_device()
 
         if not flags.list_runtime_deps:
             package_server_behavior = (
@@ -907,17 +919,18 @@ class AsyncMain:
                     pass
                 case self._PackageServerBehavior.START:
                     self._start_package_server()
-
-        if selections.has_device_test() and not flags.list_runtime_deps:
-            recorder.emit_info_message("Waiting for repository registration...")
-            if await self._wait_for_repository_registration():
-                recorder.emit_info_message(
-                    "Repository registered successfully!"
-                )
-            else:
-                recorder.emit_warning_message(
-                    "Timeout waiting for repository registration. Tests may fail to resolve package URLs."
-                )
+                    if selections.has_device_test():
+                        recorder.emit_info_message(
+                            "Waiting for repository registration..."
+                        )
+                        if await self._wait_for_repository_registration():
+                            recorder.emit_info_message(
+                                "Repository registered successfully!"
+                            )
+                        else:
+                            recorder.emit_warning_message(
+                                "Timeout waiting for repository registration. Tests may fail to resolve package URLs."
+                            )
 
         # Generate a new test-list.json file based on the built tests.
         try:
@@ -1366,14 +1379,18 @@ class AsyncMain:
         # '('. Both toolchain and '//' need to be omitted for building
         # device tests through fx build.
         gn_label_to_rule = re.compile(r"//([^()]+)\((.+)\)")
-        build_bazel_targets: list[str] = []
+        build_bazel_host_targets: list[str] = []
+        build_bazel_device_targets: list[str] = []
         build_gn_targets_by_toolchain: defaultdict[
             str, list[str]
         ] = defaultdict(list)
         for selection in tests.selected:
             test_label = selection.build.test.label
             if test_label.startswith("@@"):
-                build_bazel_targets.append(test_label)
+                if selection.build.test.os == "fuchsia":
+                    build_bazel_device_targets.append(test_label)
+                else:
+                    build_bazel_host_targets.append(test_label)
                 continue
 
             label = selection.build.test.package_label or test_label
@@ -1504,11 +1521,19 @@ class AsyncMain:
                     log_path=build_log_path,
                 )
 
-        # Second, launch another command line to build and export Bazel host tests
-        if build_bazel_targets:
+        # Second, launch more command lines to build and export Bazel tests.
+        # Host and device tests must be built in different Bazel
+        # configurations, so they cannot share an invocation.
+        for build_flag, bazel_targets in (
+            ("--host", build_bazel_host_targets),
+            ("--fuchsia_platform", build_bazel_device_targets),
+        ):
+            if not bazel_targets:
+                continue
+
             build_output = await run_build(
                 exec_env,
-                ["--host", "--quiet"] + build_bazel_targets,
+                [build_flag, "--quiet"] + bazel_targets,
                 recorder=self._recorder,
                 parent=build_id,
                 abort_signal=self._end_execution_request_event,
@@ -1621,6 +1646,40 @@ class AsyncMain:
                         if (stripped_line := l.strip()) != ""
                     ]
             manifest_list = list(set(manifest_list).union(meta_manifests))
+
+        # Bazel test packages are not part of the GN metadata graph, so their
+        # manifests are enumerated in a separate list written at regen time.
+        # Full builds merge this list into `all_package_manifests.list`, while
+        # reading it directly here ensures newly added Bazel tests are also
+        # published when `fx test` builds a specific target without a full
+        # `fx build`.
+        bazel_manifests_path = os.path.join(
+            exec_env.out_dir,
+            *self._BAZEL_TEST_PACKAGE_MANIFESTS_PATH,
+        )
+        if os.path.isfile(bazel_manifests_path):
+            with open(bazel_manifests_path) as f:
+                try:
+                    bazel_manifests = (
+                        json.load(f).get("content", {}).get("manifests", [])
+                    )
+                except json.JSONDecodeError:
+                    raise self._PublishException(
+                        "BUG: Failed to load manifest list from bazel_test_packages.list\nPlease file a bug."
+                    )
+            # `bazel_test_packages.list` is written at `fx gen` time and lists
+            # every `fx_test` in the graph. When `fx test` builds a
+            # single Bazel test on demand (`fx build --fuchsia_platform <label>`),
+            # sibling packages in the list may not have been built yet, so only
+            # publish manifests that exist on disk.
+            existing_bazel_manifests = [
+                m
+                for m in bazel_manifests
+                if os.path.isfile(os.path.join(exec_env.out_dir, m))
+            ]
+            manifest_list = list(
+                set(manifest_list).union(existing_bazel_manifests)
+            )
 
         package_manifest = {
             "content": {"manifests": sorted(manifest_list)},
@@ -1862,7 +1921,9 @@ class AsyncMain:
             return False
 
         device_environment: environment.DeviceEnvironment | None = None
-        if tests.has_device_test():
+        if tests.has_device_test() and (
+            tests.has_e2e_test() or flags.use_test_pilot
+        ):
             try:
                 device_environment = (
                     await execution.get_device_environment_from_exec_env(

@@ -30,6 +30,7 @@
 #include <fbl/ref_ptr.h>
 #include <gtest/gtest.h>
 
+#include "src/devices/pci/drivers/pci/bridge.h"
 #include "src/devices/pci/drivers/pci/bus.h"
 #include "src/devices/pci/drivers/pci/test/fakes/fake_pciroot.h"
 #include "src/devices/testing/mock-ddk/mock-device.h"
@@ -934,6 +935,76 @@ TEST_F(PciBusTests, MetadataPopulated) {
   EXPECT_FALSE(owned_bus->GetBoardConfiguration().IsEmpty());
   EXPECT_TRUE(owned_bus->GetBoardConfiguration().use_intx_workaround().has_value());
   [[maybe_unused]] auto* bus = owned_bus.release();
+}
+
+TEST_F(PciBusTests, ScanBusInvalidBridgeDoesNotCrash) {
+  auto& ecam = pciroot().ecam();
+  ecam.get_bridge({0, 1, 0})
+      ->set_vendor_id(0x8086)
+      .set_device_id(1)
+      .set_header_type(kHeaderTypePciBridge)
+      .set_primary_bus_number(0)
+      .set_secondary_bus_number(0);
+  ecam.get_device({0, 2, 0})->set_vendor_id(0x8086).set_device_id(2);
+
+  g_pci_composite_spec_add_count = 0;
+  auto owned_bus =
+      std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(), std::nullopt);
+  ASSERT_OK(owned_bus->Initialize());
+  auto* bus = owned_bus.release();
+  ASSERT_EQ(bus->GetDeviceCount(), 1u);
+  EXPECT_NE(bus->GetDevice({0, 2, 0}), nullptr);
+  EXPECT_EQ(g_pci_composite_spec_add_count, 1);
+}
+
+TEST_F(PciBusTests, BridgeWindowsSurviveBusRestart) {
+  auto& ecam = pciroot().ecam();
+  ecam.get_bridge({0, 1, 0})
+      ->set_vendor_id(0x8086)
+      .set_device_id(1)
+      .set_header_type(kHeaderTypePciBridge)
+      .set_io_base(0x10)
+      .set_io_limit(0xF0)
+      .set_memory_base(0x1000)
+      .set_memory_limit(0xBFFF)
+      .set_primary_bus_number(0)
+      .set_secondary_bus_number(1)
+      .set_subordinate_bus_number(1);
+  ecam.get_device({1, 0, 0})->set_vendor_id(0x8086).set_device_id(2);
+
+  {
+    auto owned_bus =
+        std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(), std::nullopt);
+    ASSERT_OK(owned_bus->Initialize());
+    auto* bus = owned_bus.release();
+    ASSERT_EQ(bus->GetDeviceCount(), 2u);
+    EXPECT_TRUE(ecam.get_bridge({0, 1, 0})->mem_space_en());
+    EXPECT_TRUE(ecam.get_bridge({0, 1, 0})->io_space_en());
+    bus->zxdev()->ReleaseOp();
+  }
+
+  // Verify that Bridge::Disable() disabled command decoding without wiping out
+  // the pre-configured bridge window registers in hardware config space.
+  EXPECT_FALSE(ecam.get_bridge({0, 1, 0})->mem_space_en());
+  EXPECT_FALSE(ecam.get_bridge({0, 1, 0})->io_space_en());
+  EXPECT_EQ(ecam.get_bridge({0, 1, 0})->io_base(), 0x10u);
+  EXPECT_EQ(ecam.get_bridge({0, 1, 0})->io_limit(), 0xF0u);
+  EXPECT_EQ(ecam.get_bridge({0, 1, 0})->memory_base(), 0x1000u);
+  EXPECT_EQ(ecam.get_bridge({0, 1, 0})->memory_limit(), 0xBFFFu);
+
+  // Initializing a second TestBus against the same ECAM must parse the preserved
+  // bridge windows and re-enable bridge decoding (PCI_COMMAND_MEM_EN / PCI_COMMAND_IO_EN).
+  auto owned_bus2 =
+      std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(), std::nullopt);
+  ASSERT_OK(owned_bus2->Initialize());
+  auto* bus2 = owned_bus2.release();
+  ASSERT_EQ(bus2->GetDeviceCount(), 2u);
+  EXPECT_TRUE(ecam.get_bridge({0, 1, 0})->mem_space_en());
+  EXPECT_TRUE(ecam.get_bridge({0, 1, 0})->io_space_en());
+  auto* bridge = static_cast<pci::Bridge*>(bus2->GetDevice({0, 1, 0}));
+  ASSERT_NE(bridge, nullptr);
+  EXPECT_LE(bridge->mem_base(), bridge->mem_limit());
+  EXPECT_LE(bridge->io_base(), bridge->io_limit());
 }
 
 }  // namespace pci

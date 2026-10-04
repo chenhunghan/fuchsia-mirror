@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.virtual.bus/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.virtualbustest/cpp/fidl.h>
@@ -13,6 +14,8 @@
 #include <fbl/string.h>
 #include <gtest/gtest.h>
 #include <usb/usb.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_virtual_bus {
 namespace {
@@ -92,7 +95,7 @@ void VirtualBusTest::InitUsbVirtualBus() {
   device_desc.id_product = 2;
 
   usb_peripheral::wire::FunctionDescriptor usb_cdc_ecm_function_desc = {
-      .interface_class = USB_CLASS_VENDOR,
+      .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
       .interface_subclass = 0,
       .interface_protocol = 0,
   };

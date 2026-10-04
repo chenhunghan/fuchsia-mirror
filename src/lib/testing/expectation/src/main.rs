@@ -34,6 +34,19 @@ struct CaseEnd {
     result: fidl_fuchsia_test::Result_,
 }
 
+/// Outcome of processing a single test case stream from the inner test runner.
+#[derive(Debug, PartialEq)]
+enum CaseResult {
+    /// Case reported a valid status and forwarded `Finished` to the upstream listener,
+    /// yielding `Some` if the outcome did not match expectations.
+    Completed(Option<(fidl_fuchsia_test::Invocation, ExpectationError)>),
+    /// Case stream closed or was malformed before reporting a valid status; `Finished` was
+    /// intentionally omitted and `OnFinished` must be withheld for the suite run so `test_manager`
+    /// records `CaseStatus::Error` and `SuiteStatus::DidNotFinish` without aborting the `Suite`
+    /// connection.
+    Incomplete,
+}
+
 #[derive(Debug)]
 struct ExpectationsComparer {
     expectations: ser::Expectations,
@@ -68,21 +81,6 @@ impl ExpectationsComparer {
             }
         }
     }
-}
-
-/// Outcome of processing a single test case stream from the inner test runner.
-enum CaseResult {
-    /// Case reported a valid status and forwarded `Finished` to the upstream listener,
-    /// yielding `Some` if the outcome did not match expectations.
-    Completed(Option<(fidl_fuchsia_test::Invocation, ExpectationError)>),
-    /// Case stream closed or was malformed before reporting a valid status; `Finished` was
-    /// intentionally omitted and `OnFinished` must be withheld for the suite run so `test_manager`
-    /// records `CaseStatus::Error` and `SuiteStatus::DidNotFinish` without aborting the `Suite`
-    /// connection.
-    Incomplete,
-}
-
-impl ExpectationsComparer {
     async fn handle_case(
         &self,
         run_listener_proxy: &fidl_fuchsia_test::RunListenerProxy,
@@ -396,6 +394,7 @@ mod tests {
     use super::*;
 
     use assert_matches::assert_matches;
+    use fidl::endpoints::Proxy as _;
     use test_case::test_case;
 
     fn all_pass_comparer() -> ExpectationsComparer {
@@ -513,17 +512,28 @@ mod tests {
         assert_eq!(finish_observed, send_finish);
     }
 
+    enum IncompleteCaseKind {
+        DroppedWithoutFinished,
+        MultipleFinished,
+        MissingStatus,
+        StreamError,
+    }
+
+    #[test_case(IncompleteCaseKind::DroppedWithoutFinished; "dropped_without_finished")]
+    #[test_case(IncompleteCaseKind::MultipleFinished; "multiple_finished")]
+    #[test_case(IncompleteCaseKind::MissingStatus; "missing_status")]
+    #[test_case(IncompleteCaseKind::StreamError; "stream_error")]
     #[fuchsia::test(logging = false)]
-    async fn incomplete_case_withholds_on_finish() {
+    async fn incomplete_case_withholds_on_finish(kind: IncompleteCaseKind) {
         let comparer = all_pass_comparer();
         let (suite_proxy, mut suite_request_stream) =
             fidl::endpoints::create_proxy_and_stream::<fidl_fuchsia_test::SuiteMarker>();
         let (listener, listener_request_stream) = fidl::endpoints::create_request_stream();
 
-        let fake_invocations = fake_invocations(1);
+        let invocations: Vec<_> = fake_invocations(3).collect();
         let run_fut = comparer.handle_suite_run_request(
             &suite_proxy,
-            fake_invocations.clone().collect(),
+            invocations.clone(),
             fidl_fuchsia_test::RunOptions::default(),
             listener,
         );
@@ -535,21 +545,75 @@ mod tests {
                 .expect("suite request stream closed");
             let (tests, listener) = assert_matches!(req, fidl_fuchsia_test::SuiteRequest::Run { tests, listener, .. } => (tests, listener));
             let listener = listener.into_proxy();
-            for test in tests {
-                let (_case_listener, server_end) = fidl::endpoints::create_proxy();
-                listener
-                    .on_test_case_started(&test, Default::default(), server_end)
-                    .expect("call on_test_case_started");
-                // Drop `_case_listener` without calling `finished(...)`.
+            let mut tests = tests.into_iter();
+
+            // Case 0: Incomplete according to `kind`.
+            let test0 = tests.next().unwrap();
+            let (case_listener, server_end) = fidl::endpoints::create_proxy();
+            listener
+                .on_test_case_started(&test0, Default::default(), server_end)
+                .expect("call on_test_case_started");
+            match kind {
+                IncompleteCaseKind::DroppedWithoutFinished => drop(case_listener),
+                IncompleteCaseKind::MultipleFinished => {
+                    for _ in 0..2 {
+                        case_listener
+                            .finished(&fidl_fuchsia_test::Result_ {
+                                status: Some(fidl_fuchsia_test::Status::Passed),
+                                ..Default::default()
+                            })
+                            .expect("call finished");
+                    }
+                }
+                IncompleteCaseKind::MissingStatus => {
+                    case_listener
+                        .finished(&fidl_fuchsia_test::Result_ {
+                            status: None,
+                            ..Default::default()
+                        })
+                        .expect("call finished");
+                }
+                IncompleteCaseKind::StreamError => {
+                    case_listener
+                        .into_channel()
+                        .expect("into_channel")
+                        .into_zx_channel()
+                        .write(b"invalid fidl message", &mut [])
+                        .expect("write malformed bytes");
+                }
             }
+
+            // Case 1 (Passed -> matches expectation) and Case 2 (Failed -> Mismatch).
+            let test1 = tests.next().unwrap();
+            let test2 = tests.next().unwrap();
+            fake_test_outcomes(
+                &listener,
+                [
+                    (test1, fidl_fuchsia_test::Status::Passed),
+                    (test2, fidl_fuchsia_test::Status::Failed),
+                ],
+            );
             listener.on_finished().expect("called on finished");
         };
         let listener_fut = collect_test_outcomes(listener_request_stream);
 
         let (run, (), (tests, finish_observed)) =
             futures::future::join3(run_fut, suite_fut, listener_fut).await;
-        assert_eq!(run.expect("run error"), vec![]);
-        assert_eq!(tests, fake_invocations.clone().map(|t| (t, None)).collect::<Vec<_>>());
+        assert_eq!(
+            run.expect("run error"),
+            vec![(
+                invocations[2].clone(),
+                ExpectationError::Mismatch { got: Outcome::Fail, want: Outcome::Pass },
+            )]
+        );
+        assert_eq!(
+            tests,
+            vec![
+                (invocations[0].clone(), None),
+                (invocations[1].clone(), Some(fidl_fuchsia_test::Status::Passed)),
+                (invocations[2].clone(), Some(fidl_fuchsia_test::Status::Failed)),
+            ]
+        );
         assert!(!finish_observed);
     }
 }

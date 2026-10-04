@@ -222,7 +222,7 @@ mod tests {
         let mut product = 2usize;
         let res = iovec.for_each(|_buf, cap| {
             product = product.wrapping_mul(cap);
-            Ok(())
+            Status::NEXT
         });
         unwrap_ok!(res);
         assert_eq!(product, 2002);

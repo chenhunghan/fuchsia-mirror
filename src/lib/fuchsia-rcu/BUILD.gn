@@ -8,7 +8,10 @@ import("//build/rust/rustc_macro.gni")
 
 group("tests") {
   testonly = true
-  deps = [ ":fuchsia-rcu-tests" ]
+  deps = [
+    ":fuchsia-rcu-atomic-tests-pkg",
+    ":fuchsia-rcu-tests",
+  ]
 }
 
 group("benchmarks") {
@@ -18,6 +21,17 @@ group("benchmarks") {
 
 fuchsia_unittest_package("fuchsia-rcu-tests") {
   deps = [ ":fuchsia-rcu_test" ]
+
+  # The state machine tests spawn multiple threads and make assertion about
+  # shared global state, so we can't run multiple tests in parallel.
+  test_specs = {
+    parallel = 1
+  }
+}
+
+fuchsia_unittest_package("fuchsia-rcu-atomic-tests-pkg") {
+  package_name = "fuchsia-rcu-atomic-tests"
+  deps = [ ":fuchsia-rcu-atomic-tests" ]
 
   # The state machine tests spawn multiple threads and make assertion about
   # shared global state, so we can't run multiple tests in parallel.
@@ -103,19 +117,26 @@ rustc_macro("fuchsia-rcu-derive") {
 }
 rustc_library("fuchsia-rcu") {
   sources = _COMMON_SRCS
+  features = [ "rseq_backend" ]
   edition = "2024"
   proc_macro_deps = [ ":fuchsia-rcu-derive" ]
   version = "0.1.0"
   with_unit_tests = true
-  deps = _COMMON_DEPS
+  deps = _COMMON_DEPS + [ "//src/lib/fuchsia-rseq" ]
 }
-rustc_library("fuchsia-rcu-rseq") {
+rustc_library("fuchsia-rcu-atomic") {
   testonly = true
   sources = _COMMON_SRCS
-  features = [ "rseq_backend" ]
   crate_name = "fuchsia_rcu"
   edition = "2024"
   proc_macro_deps = [ ":fuchsia-rcu-derive" ]
   version = "0.1.0"
-  deps = _COMMON_DEPS + [ "//src/lib/fuchsia-rseq" ]
+  deps = _COMMON_DEPS
+}
+rustc_test("fuchsia-rcu-atomic-tests") {
+  sources = _COMMON_SRCS
+  edition = "2024"
+  proc_macro_deps = [ ":fuchsia-rcu-derive" ]
+  version = "0.1.0"
+  deps = _COMMON_DEPS
 }

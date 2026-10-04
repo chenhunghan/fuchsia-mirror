@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_proc_macro")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_proc_macro", "rustc_test")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -51,27 +51,38 @@ rustc_proc_macro(
 rustc_library(
     name = "fuchsia-rcu",
     srcs = _COMMON_SRCS,
+    crate_features = ["rseq_backend"],
     edition = "2024",
     proc_macro_deps = [
         ":fuchsia-rcu-derive",
     ],
     version = "0.1.0",
     with_unit_tests = True,
-    deps = _COMMON_DEPS,
+    deps = _COMMON_DEPS + [
+        "//src/lib/fuchsia-rseq",
+    ],
 )
 
 rustc_library(
-    name = "fuchsia-rcu-rseq",
+    name = "fuchsia-rcu-atomic",
     testonly = True,
     srcs = _COMMON_SRCS,
-    crate_features = ["rseq_backend"],
     crate_name = "fuchsia_rcu",
     edition = "2024",
     proc_macro_deps = [
         ":fuchsia-rcu-derive",
     ],
     version = "0.1.0",
-    deps = _COMMON_DEPS + [
-        "//src/lib/fuchsia-rseq",
+    deps = _COMMON_DEPS,
+)
+
+rustc_test(
+    name = "fuchsia-rcu-atomic-tests",
+    srcs = _COMMON_SRCS,
+    edition = "2024",
+    proc_macro_deps = [
+        ":fuchsia-rcu-derive",
     ],
+    version = "0.1.0",
+    deps = _COMMON_DEPS,
 )

@@ -15,7 +15,7 @@ This script is intended to work for both developer (fx) and infra builds.
 import argparse
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 
@@ -39,7 +39,7 @@ def build_config_option(config: str, options: str) -> str:
     return f"build:{config} {options}"
 
 
-def metadata_bazelrc(env: dict[str, str]) -> Iterable[str]:
+def metadata_bazelrc(env: Mapping[str, str]) -> Iterable[str]:
     uuid = env.get("FX_BUILD_UUID")  # set by 'fx build'
     bbid = env.get("BUILDBUCKET_ID")  # set by infra builds
     if not uuid and not bbid:
@@ -107,7 +107,7 @@ def metadata_bazelrc(env: dict[str, str]) -> Iterable[str]:
     # )
 
 
-def service_proxies_bazelrc(env: dict[str, str]) -> Iterable[str]:
+def service_proxies_bazelrc(env: Mapping[str, str]) -> Iterable[str]:
     # LINT.IfChange(bazel_socket_env_vars)
     # Redirect traffic to proxies (infra only).
     # Remote service configuration.
@@ -139,7 +139,7 @@ def service_proxies_bazelrc(env: dict[str, str]) -> Iterable[str]:
 
 
 def generate_bazelrc(
-    sub_builds_link: str, env: dict[str, str]
+    sub_builds_link: str, env: Mapping[str, str]
 ) -> Iterable[str]:
     header = [
         "# This bazelrc file contains ephemeral options that are not intended",
@@ -159,7 +159,7 @@ def generate_bazelrc(
     yield from service_proxies_bazelrc(env)
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--sub_builds_link",
@@ -170,6 +170,7 @@ def main(argv):
     args = parser.parse_args(argv)
     for line in generate_bazelrc(args.sub_builds_link, os.environ):
         print(line)
+    return 0
 
 
 if __name__ == "__main__":

@@ -97,14 +97,12 @@ std::atomic<uint32_t> g_next_generation{1u};
 
 trace_context::trace_context(void* buffer, size_t buffer_num_bytes,
                              trace_buffering_mode_t buffering_mode, trace_handler_t* handler)
-    : generation_(trace::g_next_generation.fetch_add(1u, std::memory_order_relaxed) + 1u),
-      buffering_mode_(buffering_mode),
+    : buffering_mode_(buffering_mode),
       buffer_(reinterpret_cast<uint8_t*>(buffer), buffer_num_bytes),
       header_(reinterpret_cast<trace_buffer_header*>(buffer)),
       handler_(handler) {
   ZX_DEBUG_ASSERT(buffer_num_bytes >= kMinPhysicalBufferSize);
   ZX_DEBUG_ASSERT(buffer_num_bytes <= kMaxPhysicalBufferSize);
-  ZX_DEBUG_ASSERT(generation_ != 0u);
   ComputeBufferSizes();
   ResetBufferPointers();
 }
@@ -243,8 +241,14 @@ void trace_context::ComputeBufferSizes() {
 }
 
 void trace_context::ResetBufferPointers() {
+  generation_ = trace::g_next_generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+  ZX_DEBUG_ASSERT(generation_ != 0u);
   durable_buffer_.Reset();
   rolling_buffer_.Reset();
+  next_thread_index_.store(TRACE_ENCODED_THREAD_REF_MIN_INDEX, std::memory_order_relaxed);
+  next_string_index_.store(TRACE_ENCODED_STRING_REF_MIN_INDEX, std::memory_order_relaxed);
+  std::scoped_lock lock(string_table_mutex_);
+  string_table_.clear();
 }
 
 void trace_context::InitBufferHeader() {

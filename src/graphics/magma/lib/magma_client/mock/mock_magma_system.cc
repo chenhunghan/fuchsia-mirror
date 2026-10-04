@@ -65,8 +65,9 @@ magma_status_t magma_device_query(magma_device_t device, uint64_t id, uint32_t* 
   return MAGMA_STATUS_INVALID_ARGS;
 }
 
-magma_status_t magma_connection_create_context(magma_connection_t connection,
-                                               uint32_t* context_id_out) {
+magma_status_t magma_connection_create_context2(magma_connection_t connection,
+                                                magma_priority_t priority,
+                                                uint32_t* context_id_out) {
   *context_id_out = reinterpret_cast<MockConnection*>(connection)->next_context_id();
   return MAGMA_STATUS_OK;
 }

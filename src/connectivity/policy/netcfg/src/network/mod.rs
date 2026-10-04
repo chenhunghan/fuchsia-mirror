@@ -20,11 +20,13 @@ mod reachability;
 mod token_registry;
 
 use fidl_fuchsia_net as fnet;
+use fidl_fuchsia_net_ext as fnet_ext;
 use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
 use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_posix_socket as fposix_socket;
+use fuchsia_inspect::Property as _;
 use fuchsia_inspect_derive::{IValue, Inspect, Unit, WithInspect as _};
 pub use reachability::ReachabilityWatcherConnectionId;
 use reachability::{ReachabilityHandler, ReachabilityStream};
@@ -248,8 +250,9 @@ impl NetworksClient {
 struct NetworkProperties {
     socket_marks: Option<fnet::Marks>,
     dns_servers: Vec<fnet_name::DnsServer_>,
-    // TODO(https://fxbug.dev/486892417): Use this field for snapshot metrics.
-    #[allow(dead_code)]
+    // TODO(https://fxbug.dev/567965129): Remove the following optional fields for shared
+    // Fuchsia/Starnix networks once all networks received from Starnix are required to
+    // have these fields.
     connectivity_state: Option<fnp_socketproxy::ConnectivityState>,
     name: Option<String>,
     network_type: Option<fnp_socketproxy::NetworkType>,
@@ -260,6 +263,42 @@ impl NetworkProperties {
         self.socket_marks.as_ref()
     }
 }
+
+impl std::fmt::Display for NetworkProperties {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let NetworkProperties { name, network_type, connectivity_state, socket_marks, dns_servers } =
+            self;
+
+        if let Some(name) = name {
+            write!(f, "name={name}")?;
+        }
+        if let Some(network_type) = network_type {
+            write!(f, ", type={}", network_type.as_str())?;
+        }
+        if let Some(connectivity_state) = connectivity_state {
+            write!(f, ", state={}", connectivity_state.as_str())?;
+        }
+        if let Some(marks) = socket_marks {
+            write!(f, ", mark={:?}", marks.mark_1)?;
+        }
+        if socket_marks.is_some() || !dns_servers.is_empty() {
+            write!(f, ", dns=[")?;
+            let mut servers = dns_servers.iter().filter_map(|s| {
+                s.address.map(|a| fidl_fuchsia_net_ext::SocketAddress::from(a).0.ip().to_string())
+            });
+            if let Some(first) = servers.next() {
+                write!(f, "{first}")?;
+                for s in servers {
+                    write!(f, ", {s}")?;
+                }
+            }
+            write!(f, "]")?;
+        }
+        Ok(())
+    }
+}
+
+const NETWORK_REGISTRY_LOG_TAG: &str = "network_registry";
 
 /// The current state of all networks sent to the NetworkRegistry.
 #[derive(Default, Clone)]
@@ -273,7 +312,26 @@ struct RegisteredNetworks {
     dns_servers: Vec<fnet_name::DnsServer_>,
 }
 
+fn format_opt_network_id(id: Option<NetworkId>) -> String {
+    match id {
+        Some(id) => id.to_string(),
+        None => "None".to_string(),
+    }
+}
+
 impl RegisteredNetworks {
+    fn set_starnix_default(&mut self, next_starnix_default: Option<NetworkId>) {
+        if self.starnix_default != next_starnix_default {
+            info!(
+                tag = NETWORK_REGISTRY_LOG_TAG;
+                "SetStarnixDefault {} (prev={})",
+                format_opt_network_id(next_starnix_default),
+                format_opt_network_id(self.starnix_default),
+            );
+            self.starnix_default = next_starnix_default;
+        }
+    }
+
     // Determine the active default network based on the starnix_default and network registry.
     // When one or more Fuchsia networks are present, they should be prioritized over Starnix
     // networks. The 'most prioritized' Fuchsia network is the one with the lowest ID.
@@ -301,6 +359,12 @@ impl RegisteredNetworks {
         let next_default = self.calculate_active_default();
         if next_default != self.default_network {
             let old_default = self.default_network;
+            info!(
+                tag = NETWORK_REGISTRY_LOG_TAG;
+                "SetDefault {} (prev={})",
+                format_opt_network_id(next_default),
+                format_opt_network_id(old_default),
+            );
             self.default_network = next_default;
             Some(DefaultChangedEvent { previous_default: old_default })
         } else {
@@ -312,7 +376,7 @@ impl RegisteredNetworks {
         match update {
             NetworkRegistryUpdate::UnsetDefaultNetwork => {
                 // Handle Starnix unsetting its default network.
-                self.starnix_default = None;
+                self.set_starnix_default(None);
                 RegistryUpdateResult {
                     event: UpdateApplied::None,
                     default_changed: self.handle_default_network_update(),
@@ -331,7 +395,11 @@ impl RegisteredNetworks {
                                 event: UpdateApplied::None,
                                 default_changed: None,
                             }
-                        } else if self.networks.remove(&network_id).is_some() {
+                        } else if let Some(properties) = self.networks.remove(&network_id) {
+                            info!(
+                                tag = NETWORK_REGISTRY_LOG_TAG;
+                                "Remove {network_id} ({properties})"
+                            );
                             // Elect fallback default network internally.
                             RegistryUpdateResult {
                                 event: UpdateApplied::NetworkRemoved(network_id),
@@ -353,7 +421,7 @@ impl RegisteredNetworks {
                             // Fuchsia networks are always the default network when present. Netcfg
                             // does not use this API to set a Fuchsia network as the default.
                             NetworkId::Fuchsia(_) => {}
-                            NetworkId::Delegated(_) => self.starnix_default = Some(network_id),
+                            NetworkId::Delegated(_) => self.set_starnix_default(Some(network_id)),
                         }
                         let default_changed = self.handle_default_network_update();
                         RegistryUpdateResult { event: UpdateApplied::None, default_changed }
@@ -436,6 +504,19 @@ impl RegisteredNetworks {
                 properties.connectivity_state = connectivity_state;
                 properties.network_type = network_type;
                 properties.name = name.clone();
+                match &entry {
+                    Entry::Occupied(e) => {
+                        // Only log network updates when they have changed.
+                        if *e.get() != properties {
+                            info!(
+                                tag = NETWORK_REGISTRY_LOG_TAG; "Update {network_id} ({properties})"
+                            );
+                        }
+                    }
+                    Entry::Vacant(_) => {
+                        info!(tag = NETWORK_REGISTRY_LOG_TAG; "Add {network_id} ({properties})");
+                    }
+                }
                 let _ = entry.insert_entry(properties);
                 UpdateApplied::NetworkChanged {
                     network_id,
@@ -473,6 +554,37 @@ impl RegisteredNetworks {
         }
     }
 
+    fn dns_servers_for_network<'a>(
+        &'a self,
+        network_id: NetworkId,
+        properties: &'a NetworkProperties,
+    ) -> Vec<&'a fnet_name::DnsServer_> {
+        match network_id {
+            NetworkId::Delegated(_) => properties.dns_servers.iter().collect(),
+            NetworkId::Fuchsia(InterfaceId(if_id)) => {
+                if !properties.dns_servers.is_empty() {
+                    properties.dns_servers.iter().collect()
+                } else {
+                    self.dns_servers
+                        .iter()
+                        .filter(|s| match &s.source {
+                            Some(fnet_name::DnsServerSource::Dhcp(d)) => {
+                                d.source_interface == Some(if_id.get())
+                            }
+                            Some(fnet_name::DnsServerSource::Dhcpv6(d)) => {
+                                d.source_interface == Some(if_id.get())
+                            }
+                            Some(fnet_name::DnsServerSource::Ndp(d)) => {
+                                d.source_interface == Some(if_id.get())
+                            }
+                            _ => false,
+                        })
+                        .collect()
+                }
+            }
+        }
+    }
+
     fn update_inspect(&self, node: &fuchsia_inspect::Node) {
         node.clear_recorded();
 
@@ -482,6 +594,16 @@ impl RegisteredNetworks {
 
         if let Some(starnix_default) = &self.starnix_default {
             node.record_string("starnix_default", starnix_default.to_string());
+        }
+
+        // The cross-source set handed to the resolver, including static servers no network
+        // owns. Not `Self::consolidated_dns_servers`, the registry's SocketProxy contribution.
+        if !self.dns_servers.is_empty() {
+            node.record_child("system_dns_servers", |system_node| {
+                for (i, server) in self.dns_servers.iter().enumerate() {
+                    server.record_inspect(system_node, &i.to_string());
+                }
+            });
         }
 
         let mut sorted_networks: Vec<_> = self.networks.iter().collect();
@@ -505,8 +627,40 @@ impl RegisteredNetworks {
                 if let Some(connectivity_state) = &properties.connectivity_state {
                     net_node.record_string("connectivity_state", connectivity_state.as_str());
                 }
+
+                let network_dns_servers = self.dns_servers_for_network(*network_id, properties);
+
+                if !network_dns_servers.is_empty() {
+                    net_node.record_child("dns_servers", |dns_node| {
+                        for (i, server) in network_dns_servers.iter().enumerate() {
+                            server.record_inspect(dns_node, &i.to_string());
+                        }
+                    });
+                }
             });
         }
+    }
+}
+
+trait DnsServerInspectExt {
+    fn record_inspect(&self, node: &fuchsia_inspect::Node, name: &str);
+}
+
+impl DnsServerInspectExt for fnet_name::DnsServer_ {
+    fn record_inspect(&self, node: &fuchsia_inspect::Node, name: &str) {
+        let Some(address) = &self.address else {
+            return;
+        };
+        let server_str = fnet_ext::SocketAddress::from(*address).to_string();
+        let (source_type, iface_id) = dns_source_info(&self.source);
+
+        node.record_child(name, |entry_node| {
+            entry_node.record_string("server", server_str);
+            entry_node.record_string("type", source_type);
+            if let Some(iface_id) = iface_id {
+                entry_node.record_uint("interface_id", iface_id);
+            }
+        });
     }
 }
 
@@ -540,6 +694,17 @@ impl ConnectivityStateInspectExt for fnp_socketproxy::ConnectivityState {
             fnp_socketproxy::ConnectivityState::FullConnectivity => "FullConnectivity",
             fnp_socketproxy::ConnectivityState::__SourceBreaking { .. } => "Unknown",
         }
+    }
+}
+
+fn dns_source_info(source: &Option<fnet_name::DnsServerSource>) -> (&'static str, Option<u64>) {
+    match source {
+        Some(fnet_name::DnsServerSource::StaticSource(_)) => ("Static", None),
+        Some(fnet_name::DnsServerSource::Dhcp(dhcp)) => ("Dhcpv4", dhcp.source_interface),
+        Some(fnet_name::DnsServerSource::Dhcpv6(dhcpv6)) => ("Dhcpv6", dhcpv6.source_interface),
+        Some(fnet_name::DnsServerSource::Ndp(ndp)) => ("Ndp", ndp.source_interface),
+        Some(fnet_name::DnsServerSource::SocketProxy(_)) => ("SocketProxy", None),
+        Some(fnet_name::DnsServerSource::__SourceBreaking { .. }) | None => ("Unknown", None),
     }
 }
 
@@ -1017,7 +1182,6 @@ struct MethodInspect {
 
 #[derive(Unit, Debug, Default, Clone)]
 struct RegistryMetrics {
-    default_network_id: Option<u32>,
     adds: MethodInspect,
     removes: MethodInspect,
     /// Counts invocations of the `SetDefault` FIDL method. Both setting a
@@ -1070,6 +1234,9 @@ impl OperationsMetrics {
     }
 }
 
+/// Name of the Inspect property recording how many networks are registered.
+const NETWORK_COUNT_PROPERTY_NAME: &str = "network_count";
+
 #[derive(Default)]
 pub struct NetpolNetworksService {
     // The current generation
@@ -1097,8 +1264,12 @@ pub struct NetpolNetworksService {
 
     // Inspect metrics for operations
     metrics: OperationsMetrics,
-    // Inspect node for network topology & properties
+    // Inspect node for network topology & DNS servers
     networks_inspect_node: Option<fuchsia_inspect::Node>,
+    // The number of registered networks. Recorded alongside the network
+    // registry node rather than within it so that a registry that holds no
+    // networks can be told apart from one whose contents are missing.
+    network_count: Option<fuchsia_inspect::UintProperty>,
 }
 
 impl NetpolNetworksService {
@@ -1116,10 +1287,20 @@ impl NetpolNetworksService {
         parent: &fuchsia_inspect::Node,
         name: impl AsRef<str>,
     ) -> Self {
-        let network_registry_node = parent.create_child(name.as_ref());
-        self.network_registry.update_inspect(&network_registry_node);
-        self.networks_inspect_node = Some(network_registry_node);
+        self.networks_inspect_node = Some(parent.create_child(name.as_ref()));
+        self.network_count = Some(parent.create_uint(NETWORK_COUNT_PROPERTY_NAME, 0));
+        self.update_network_inspect();
         self
+    }
+
+    /// Records the current contents of the network registry to Inspect.
+    fn update_network_inspect(&self) {
+        if let Some(networks_node) = &self.networks_inspect_node {
+            self.network_registry.update_inspect(networks_node);
+        }
+        if let Some(network_count) = &self.network_count {
+            network_count.set(self.network_registry.networks.len() as u64);
+        }
     }
 
     pub fn with_inspect(
@@ -1836,13 +2017,7 @@ impl NetpolNetworksService {
     pub async fn update(&mut self, update: NetworkRegistryUpdate) {
         let RegistryUpdateResult { event, default_changed } = self.network_registry.apply(update);
 
-        if default_changed.is_some() {
-            self.metrics.delegated.as_mut().default_network_id =
-                self.network_registry.starnix_default.map(|id| id.get().get() as u32);
-        }
-        if let Some(networks_node) = &self.networks_inspect_node {
-            self.network_registry.update_inspect(networks_node);
-        }
+        self.update_network_inspect();
 
         if let UpdateApplied::None = event {
             if default_changed.is_none() {
@@ -3272,7 +3447,6 @@ mod tests {
                                 successes: 1u64,
                                 errors: 0u64,
                             },
-                            default_network_id: 1u64,
                         }
                     }
                 }
@@ -3384,12 +3558,14 @@ mod tests {
             .expect("failed to initialize inspect");
         inspector.root().record(telemetry_node);
 
-        // Initial check: empty network_registry node
+        // Initial check: no networks, reported both as a zero count and as an
+        // empty network_registry node.
         let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
         assert_data_tree!(
             hierarchy,
             root: contains {
                 telemetry: contains {
+                    network_count: 0u64,
                     network_registry: {}
                 }
             }
@@ -3439,6 +3615,7 @@ mod tests {
             hierarchy,
             root: contains {
                 telemetry: contains {
+                    network_count: 2u64,
                     network_registry: {
                         default_network: "fuchsia:2",
                         starnix_default: "delegated:100",
@@ -3477,6 +3654,7 @@ mod tests {
             hierarchy,
             root: contains {
                 telemetry: contains {
+                    network_count: 2u64,
                     network_registry: {
                         default_network: "fuchsia:2",
                         starnix_default: "delegated:100",
@@ -3506,6 +3684,7 @@ mod tests {
             hierarchy,
             root: contains {
                 telemetry: contains {
+                    network_count: 1u64,
                     network_registry: {
                         default_network: "delegated:100",
                         starnix_default: "delegated:100",
@@ -3531,6 +3710,7 @@ mod tests {
             hierarchy,
             root: contains {
                 telemetry: contains {
+                    network_count: 0u64,
                     network_registry: {}
                 }
             }
@@ -3829,6 +4009,225 @@ mod tests {
             )
             .await,
             Ok(())
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_networks_and_dns_inspect() {
+        const FUCHSIA_ID_2: NetworkId = NetworkId::Fuchsia(ID_2);
+        const DELEGATED_ID_100: NetworkId =
+            NetworkId::Delegated(InterfaceId(NonZeroU64::new(100).unwrap()));
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let telemetry_node = inspector.root().create_child("telemetry");
+        let mut service = NetpolNetworksService::default()
+            .with_inspect(&telemetry_node, "operations", &telemetry_node, "network_registry")
+            .expect("failed to initialize inspect");
+        inspector.root().record(telemetry_node);
+
+        // Initial check: empty network_registry node
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {}
+                }
+            }
+        );
+
+        // Update DNS with static and dynamic (DHCPv4, NDP, DHCPv6) servers.
+        let static_server_1 = fnet_name::DnsServer_ {
+            address: Some(net_declare::fidl_socket_addr!("8.8.8.8:53")),
+            source: Some(fnet_name::DnsServerSource::StaticSource(
+                fnet_name::StaticDnsServerSource::default(),
+            )),
+            ..Default::default()
+        };
+        let static_server_2 = fnet_name::DnsServer_ {
+            address: Some(net_declare::fidl_socket_addr!("8.8.4.4:53")),
+            source: Some(fnet_name::DnsServerSource::StaticSource(
+                fnet_name::StaticDnsServerSource::default(),
+            )),
+            ..Default::default()
+        };
+        let dhcp_server = fnet_name::DnsServer_ {
+            address: Some(net_declare::fidl_socket_addr!("192.168.1.1:53")),
+            source: Some(fnet_name::DnsServerSource::Dhcp(fnet_name::DhcpDnsServerSource {
+                source_interface: Some(ID_2.get()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let ndp_server = fnet_name::DnsServer_ {
+            address: Some(net_declare::fidl_socket_addr!("[fe80::1%1]:53")),
+            source: Some(fnet_name::DnsServerSource::Ndp(fnet_name::NdpDnsServerSource {
+                source_interface: Some(ID_2.get()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let dhcpv6_server = fnet_name::DnsServer_ {
+            address: Some(net_declare::fidl_socket_addr!("[2001:4860:4860::8888]:53")),
+            source: Some(fnet_name::DnsServerSource::Dhcpv6(fnet_name::Dhcpv6DnsServerSource {
+                source_interface: Some(ID_2.get()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        service
+            .update(NetworkRegistryUpdate::UpdateDns(vec![
+                dhcp_server.clone(),
+                ndp_server.clone(),
+                dhcpv6_server.clone(),
+                static_server_1.clone(),
+                static_server_2.clone(),
+            ]))
+            .await;
+
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: contains {
+                        system_dns_servers: {
+                            "0": {
+                                server: "192.168.1.1:53",
+                                type: "Dhcpv4",
+                                interface_id: 2u64,
+                            },
+                            "1": {
+                                server: "[fe80::1%1]:53",
+                                type: "Ndp",
+                                interface_id: 2u64,
+                            },
+                            "2": {
+                                server: "[2001:4860:4860::8888]:53",
+                                type: "Dhcpv6",
+                                interface_id: 2u64,
+                            },
+                            "3": {
+                                server: "8.8.8.8:53",
+                                type: "Static",
+                            },
+                            "4": {
+                                server: "8.8.4.4:53",
+                                type: "Static",
+                            },
+                        },
+                    }
+                }
+            }
+        );
+
+        // Add a Fuchsia network (ID_2)
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                FUCHSIA_ID_2,
+                NetworkUpdate::Properties(NetworkPropertiesChange {
+                    added: true,
+                    name: Some("wlan0".to_string()),
+                    network_type: Some(fnp_socketproxy::NetworkType::Wifi),
+                    connectivity_state: Some(fnp_socketproxy::ConnectivityState::FullConnectivity),
+                    ..Default::default()
+                }),
+            ))
+            .await;
+
+        // Add a Delegated network (ID 100) with SocketProxy DNS.
+        let socketproxy_dns = fnet_name::DnsServer_ {
+            address: Some(net_declare::fidl_socket_addr!("192.168.1.2:53")),
+            source: Some(fnet_name::DnsServerSource::SocketProxy(
+                fnet_name::SocketProxyDnsServerSource::default(),
+            )),
+            ..Default::default()
+        };
+        let mut marks = fnet::Marks::default();
+        marks.mark_1 = Some(100);
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                DELEGATED_ID_100,
+                NetworkUpdate::Properties(NetworkPropertiesChange {
+                    added: true,
+                    marks: Some(marks),
+                    dns_servers: Some(vec![socketproxy_dns]),
+                    name: Some("wlan0".to_string()),
+                    network_type: Some(fnp_socketproxy::NetworkType::Wifi),
+                    connectivity_state: Some(fnp_socketproxy::ConnectivityState::FullConnectivity),
+                }),
+            ))
+            .await;
+
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {
+                        default_network: "fuchsia:2",
+                        system_dns_servers: {
+                            "0": {
+                                server: "192.168.1.1:53",
+                                type: "Dhcpv4",
+                                interface_id: 2u64,
+                            },
+                            "1": {
+                                server: "[fe80::1%1]:53",
+                                type: "Ndp",
+                                interface_id: 2u64,
+                            },
+                            "2": {
+                                server: "[2001:4860:4860::8888]:53",
+                                type: "Dhcpv6",
+                                interface_id: 2u64,
+                            },
+                            "3": {
+                                server: "8.8.8.8:53",
+                                type: "Static",
+                            },
+                            "4": {
+                                server: "8.8.4.4:53",
+                                type: "Static",
+                            },
+                        },
+                        fuchsia_2: {
+                            name: "wlan0",
+                            network_type: "Wifi",
+                            connectivity_state: "FullConnectivity",
+                            dns_servers: {
+                                "0": {
+                                    server: "192.168.1.1:53",
+                                    type: "Dhcpv4",
+                                    interface_id: 2u64,
+                                },
+                                "1": {
+                                    server: "[fe80::1%1]:53",
+                                    type: "Ndp",
+                                    interface_id: 2u64,
+                                },
+                                "2": {
+                                    server: "[2001:4860:4860::8888]:53",
+                                    type: "Dhcpv6",
+                                    interface_id: 2u64,
+                                },
+                            },
+                        },
+                        delegated_100: {
+                            name: "wlan0",
+                            network_type: "Wifi",
+                            connectivity_state: "FullConnectivity",
+                            dns_servers: {
+                                "0": {
+                                    server: "192.168.1.2:53",
+                                    type: "SocketProxy",
+                                },
+                            },
+                        },
+                    }
+                }
+            }
         );
     }
 }

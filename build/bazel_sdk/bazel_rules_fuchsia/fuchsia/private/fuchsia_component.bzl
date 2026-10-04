@@ -53,7 +53,7 @@ def fuchsia_component(
     """
 
     # Prevent callers from passing through these attributes, which are set appropriately below.
-    for attr in ["is_driver", "is_test"]:
+    for attr in ["is_driver", "is_test", "test_realm"]:
         if attr in kwargs:
             fail("Attribute `%s` is not supported. Use the appropriate macro instead." % attr)
 
@@ -68,6 +68,8 @@ def fuchsia_component(
         tags = tags,
         is_driver = False,
         is_test = False,
+        # The SDK does not use test realms.
+        test_realm = "",
         **kwargs
     )
 
@@ -93,7 +95,7 @@ def fuchsia_test_component(
     """
 
     # Prevent passing through these attributes, which are set appropriately below.
-    for attr in ["moniker", "is_driver", "is_test"]:
+    for attr in ["moniker", "is_driver", "is_test", "test_realm"]:
         if attr in kwargs:
             fail("Attribute `%s` is not supported." % attr)
 
@@ -109,6 +111,8 @@ def fuchsia_test_component(
         is_driver = False,
         is_test = True,
         testonly = True,
+        # The SDK does not use test realms.
+        test_realm = "",
         **kwargs
     )
 
@@ -141,7 +145,7 @@ def fuchsia_driver_component(
     """
 
     # Prevent passing through these attributes, which are set appropriately below.
-    for attr in ["moniker", "is_driver", "is_test"]:
+    for attr in ["moniker", "is_driver", "is_test", "test_realm"]:
         if attr in kwargs:
             fail("Attribute `%s` is not supported." % attr)
 
@@ -159,5 +163,7 @@ def fuchsia_driver_component(
         tags = tags,
         is_driver = True,
         is_test = False,
+        # The SDK does not use test realms.
+        test_realm = "",
         **kwargs
     )

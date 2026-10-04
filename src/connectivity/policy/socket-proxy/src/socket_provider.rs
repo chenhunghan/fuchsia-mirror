@@ -7,16 +7,17 @@
 use anyhow::{Context as _, Error};
 use fidl::endpoints::{ClientEnd, ProtocolMarker, Proxy as _};
 use fidl_fuchsia_net::{self as fnet, MarkDomain};
+use fidl_fuchsia_posix as fposix;
 use fidl_fuchsia_posix_socket::{
     self as fposix_socket, OptionalUint32, ProviderDatagramSocketResponse,
     ProviderDatagramSocketWithOptionsResponse,
 };
+use fidl_fuchsia_posix_socket_raw as fposix_socket_raw;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_inspect_derive::{IValue, Inspect, Unit};
 use futures::lock::Mutex;
 use futures::{Future, StreamExt as _, TryStreamExt as _};
 use std::sync::Arc;
-use {fidl_fuchsia_posix as fposix, fidl_fuchsia_posix_socket_raw as fposix_socket_raw};
 
 /// Inspect node for socket provider.
 ///
@@ -125,14 +126,14 @@ where
 
 #[derive(Inspect, Clone)]
 pub(crate) struct SocketProvider {
-    marks: Arc<Mutex<crate::SocketMarks>>,
+    marks: Arc<Mutex<IValue<crate::SocketMarks>>>,
 
     #[inspect(forward)]
     metrics: Arc<Mutex<IValue<SocketProviderInspect>>>,
 }
 
 impl SocketProvider {
-    pub(crate) fn new(mark: Arc<Mutex<crate::SocketMarks>>) -> Self {
+    pub(crate) fn new(mark: Arc<Mutex<IValue<crate::SocketMarks>>>) -> Self {
         Self { marks: mark, metrics: Default::default() }
     }
 
@@ -148,7 +149,7 @@ impl SocketProvider {
             .try_for_each(|request| async {
                 match request {
                     fposix_socket::ProviderRequest::StreamSocket { domain, proto, responder } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;
@@ -168,7 +169,7 @@ impl SocketProvider {
                         responder,
                         opts,
                     } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;
@@ -195,7 +196,7 @@ impl SocketProvider {
                         proto,
                         responder,
                     } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;
@@ -208,7 +209,7 @@ impl SocketProvider {
                         )?;
                     }
                     fposix_socket::ProviderRequest::DatagramSocket { domain, proto, responder } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;
@@ -243,7 +244,7 @@ impl SocketProvider {
                         opts,
                         responder,
                     } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;
@@ -310,7 +311,7 @@ impl SocketProvider {
             .try_for_each(|request| async {
                 match request {
                     fposix_socket_raw::ProviderRequest::Socket { domain, proto, responder } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;
@@ -334,7 +335,7 @@ impl SocketProvider {
                         opts,
                         responder,
                     } => {
-                        let marks = *self.marks.lock().await;
+                        let marks = **self.marks.lock().await;
                         let mut metrics_lock = self.metrics.lock().await;
                         let mut metrics = metrics_lock.as_mut();
                         metrics.sockets += 1;

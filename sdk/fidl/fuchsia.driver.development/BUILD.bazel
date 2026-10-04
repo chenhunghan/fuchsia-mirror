@@ -17,7 +17,7 @@ fidl_library(
     api_area = "Driver SDK",
     category = "partner",
     enable_hlcpp = True,
-    stable = True,
+    stable = False,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.component.decl",

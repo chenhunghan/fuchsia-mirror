@@ -662,6 +662,7 @@ _BAZEL_BUILD_PATHS_TO_IGNORE = [
     "sdk/fidl/fuchsia.boot/BUILD.bazel",
     "sdk/fidl/fuchsia.driver.compat/BUILD.bazel",
     "sdk/fidl/fuchsia.hardware.clock.measure/BUILD.bazel",
+    "sdk/fidl/fuchsia.hardware.power.stats/BUILD.bazel",
     "sdk/fidl/fuchsia.hardware.qcom.hvdcpopti/BUILD.bazel",
     "sdk/fidl/fuchsia.hardware.sockettunnel/BUILD.bazel",
     "sdk/fidl/fuchsia.power.battery/BUILD.bazel",

@@ -67,7 +67,7 @@ const ConstraintStorage<ConstraintKind::kSize>::ValueType
 ConstraintStorage<ConstraintKind::kSize>::ValueType LayoutInvocation::*
     ConstraintStorage<ConstraintKind::kSize>::kLayoutInvocationValue =
         &LayoutInvocation::size_resolved;
-const Constant* LayoutInvocation::*ConstraintStorage<ConstraintKind::kSize>::kLayoutInvocationRaw =
+const Constant* LayoutInvocation::* ConstraintStorage<ConstraintKind::kSize>::kLayoutInvocationRaw =
     &LayoutInvocation::size_raw;
 
 bool ConstraintStorage<ConstraintKind::kSize>::ResolveConstraint(TypeResolver* resolver,
@@ -124,7 +124,7 @@ bool ConstraintStorage<ConstraintKind::kProtocol>::ResolveConstraint(TypeResolve
 template class Constraint<ConstraintKind::kUtf8>;
 ConstraintStorage<ConstraintKind::kUtf8>::ValueType LayoutInvocation::*
     ConstraintStorage<ConstraintKind::kUtf8>::kLayoutInvocationValue = &LayoutInvocation::utf8;
-const Constant* LayoutInvocation::*ConstraintStorage<ConstraintKind::kUtf8>::kLayoutInvocationRaw =
+const Constant* LayoutInvocation::* ConstraintStorage<ConstraintKind::kUtf8>::kLayoutInvocationRaw =
     nullptr;
 
 bool ConstraintStorage<ConstraintKind::kUtf8>::ResolveConstraint(TypeResolver* resolver,
@@ -138,6 +138,29 @@ bool ConstraintStorage<ConstraintKind::kUtf8>::ReportMergeFailure(Reporter* repo
                                                                   const Name& layout_name,
                                                                   const Constant* param) const {
   return reporter->Fail(ErrCannotBoundTwice, param->span, layout_name);
+}
+
+////////// Zeroability
+template class Constraint<ConstraintKind::kZeroability>;
+ConstraintStorage<ConstraintKind::kZeroability>::ValueType LayoutInvocation::*
+    ConstraintStorage<ConstraintKind::kZeroability>::kLayoutInvocationValue =
+        &LayoutInvocation::zeroability;
+const Constant* LayoutInvocation::*
+    ConstraintStorage<ConstraintKind::kZeroability>::kLayoutInvocationRaw = nullptr;
+
+bool ConstraintStorage<ConstraintKind::kZeroability>::ResolveConstraint(TypeResolver* resolver,
+                                                                        Constant* param,
+                                                                        Resource* resource) {
+  if (resolver->ResolveAsNonZero(param)) {
+    zeroability = ValueType::kNotZeroable;
+    return true;
+  }
+  return false;
+}
+
+bool ConstraintStorage<ConstraintKind::kZeroability>::ReportMergeFailure(
+    Reporter* reporter, const Name& layout_name, const Constant* param) const {
+  return reporter->Fail(ErrCannotIndicateNonZeroTwice, param->span, layout_name);
 }
 
 ////////// ConstraintsBase

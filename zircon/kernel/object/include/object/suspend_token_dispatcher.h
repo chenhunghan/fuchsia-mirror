@@ -33,7 +33,7 @@ class SuspendTokenDispatcher final : public Dispatcher {
 
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_SUSPEND_TOKEN; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
-  bool is_waitable() const final { return true; }
+  bool is_waitable() const final { return ZX_DEFAULT_SUSPEND_TOKEN_RIGHTS & ZX_RIGHT_WAIT; }
 
   void on_zero_handles() final;
 

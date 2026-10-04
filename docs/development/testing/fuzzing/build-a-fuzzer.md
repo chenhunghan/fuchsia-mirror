@@ -149,10 +149,12 @@ fuchsia_fuzzer_component("my-fuzzer-component") {
 }
 ```
 
-The [component manifest source][glossary.manifest] for library fuzzers must include the default
-shard for libfuzzer. The output name of the fuzzer must be provided as the first program argument
-as a package-relative path. Additional arguments may include libFuzzer [options][options]{:.external},
-or package-relative paths to directories of seed inputs known as [seed corpora][corpus]{:.external}.
+The [component manifest source][glossary.component-manifest-source] for library
+fuzzers must include the default shard for libfuzzer. The output name of the
+fuzzer must be provided as the first program argument as a package-relative
+path. Additional arguments may include libFuzzer [options][options]{:.external},
+or package-relative paths to directories of seed inputs known as
+[seed corpora][corpus]{:.external}.
 
 For example:
 
@@ -279,8 +281,8 @@ compiler configuration changes. If building fails, try [`fx clean-build`][fx-bui
 After running `fx set`, you can view the currently configured fuzzers with `ffx fuzz list`.
 Additional `ffx fuzz` commands can be used to [run a fuzzer](run-a-fuzzer.md).
 
+[glossary.component-manifest-source]: /docs/glossary/README.md#component-manifest-source
 [glossary.package]: /docs/glossary/README.md#package
-[glossary.manifest]: /docs/glossary/README.md#component-manifest-source
 [asan]: https://clang.llvm.org/docs/AddressSanitizer.html
 [asan-hbo]: https://github.com/google/sanitizers/wiki/AddressSanitizerExampleHeapOutOfBounds
 [asan-sbo]: https://github.com/google/sanitizers/wiki/AddressSanitizerExampleStackOutOfBounds

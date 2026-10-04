@@ -5,7 +5,7 @@
                 // Broadcom core dumps (ID 109)
                 {
                     event_codes: [],
-                    metric_id: 109,
+                    metric_name: "broadcom_core_dumps",
                     metric_type: "Occurrence",
                     selector: "bootstrap/*-drivers\\:*:[name=bt-hci-broadcom]root:core_dump_count",
                 },

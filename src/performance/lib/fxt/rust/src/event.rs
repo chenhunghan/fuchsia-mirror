@@ -142,7 +142,7 @@ impl<'a> RawEventRecord<'a> {
         header
     }
 
-    pub fn serialize(&self) -> Result<Vec<u8>, SerializeError> {
+    pub fn serialize(&self) -> Result<Vec<u64>, SerializeError> {
         let mut event_record = FxtBuilder::new(self.make_header());
 
         event_record = event_record.atom(self.ticks.0.to_le_bytes());
@@ -164,7 +164,7 @@ impl<'a> RawEventRecord<'a> {
         }
 
         for arg in &self.args {
-            event_record = event_record.atom(arg.serialize()?);
+            event_record = event_record.atom_words(arg.serialize()?);
         }
 
         match &self.payload {
@@ -339,14 +339,14 @@ mod tests {
             // name
             .atom("event_name")
             // first arg
-            .atom(
+            .atom_words(
                 FxtBuilder::new(first_arg_header)
                     .atom(first_arg_name)
                     .atom(first_arg_value)
                     .build(),
             )
             // second arg
-            .atom(
+            .atom_words(
                 FxtBuilder::new(second_arg_header)
                     .atom(second_arg_name)
                     .atom(123456u64.to_le_bytes())

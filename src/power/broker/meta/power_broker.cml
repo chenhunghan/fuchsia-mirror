@@ -26,6 +26,26 @@
     },
     capabilities: [
         { protocol: "fuchsia.power.broker.Topology" },
+        {
+            config: "fuchsia.power.broker.SetLevelTimeoutSeconds",
+            type: "uint32",
+            value: 60,
+        },
+    ],
+    use: [
+        {
+            protocol: [ "fuchsia.feedback.CrashReporter" ],
+            availability: "optional",
+        },
+
+        // Timeout in seconds before filing a crash report for a stuck SetLevel call.
+        // A value of 0 means never (disabled).
+        {
+            config: "fuchsia.power.broker.SetLevelTimeoutSeconds",
+            from: "self",
+            key: "set_level_timeout_seconds",
+            type: "uint32",
+        },
     ],
     expose: [
         {

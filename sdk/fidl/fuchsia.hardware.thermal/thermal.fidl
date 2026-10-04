@@ -104,13 +104,13 @@ closed protocol Device {
 
     /// Get information about the device's current state.
     strict GetInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         info box<ThermalInfo>;
     });
 
     /// Get information about the device's thermal capabilities and trip points.
     strict GetDeviceInfo() -> (struct {
-        status zx.Status;
+        status zx.Result;
         info box<ThermalDeviceInfo>;
     });
 
@@ -119,20 +119,20 @@ closed protocol Device {
     strict GetDvfsInfo(struct {
         power_domain PowerDomain;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         info box<OperatingPoint>;
     });
 
     /// Get an event to get trip point notifications on. `ZX_USER_SIGNAL_`0 is changed when either
     /// trip point is reached. It is deasserted when the state is read via GetInfo.
     strict GetStateChangeEvent() -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         handle zx.Handle:<EVENT, optional>;
     });
 
     /// Get a port to get trip point notification packets.
     strict GetStateChangePort() -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         handle zx.Handle:<PORT, optional>;
     });
 
@@ -142,14 +142,14 @@ closed protocol Device {
         id uint32;
         temp float32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Get the current operating point index.
     strict GetDvfsOperatingPoint(struct {
         power_domain PowerDomain;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         op_idx uint16;
     });
 
@@ -158,7 +158,7 @@ closed protocol Device {
         op_idx uint16;
         power_domain PowerDomain;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

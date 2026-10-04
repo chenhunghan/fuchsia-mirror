@@ -30,7 +30,7 @@ class TestFunction : public fdf::DriverBase2,
   void Stop(fdf::StopCompleter completer) override { completer(zx::ok()); }
 
  protected:
-  zx::result<std::vector<uint8_t>> DoControl(const fuchsia_hardware_usb_descriptor::UsbSetup& setup,
+  zx::result<std::vector<uint8_t>> DoControl(const fdescriptor::UsbSetup& setup,
                                              std::vector<uint8_t> write_data);
 
   virtual zx::result<> SetFunctionInterface(bool connect) = 0;
@@ -43,7 +43,7 @@ class TestFunction : public fdf::DriverBase2,
       .interface =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,
               .b_alternate_setting = 0,
               .b_num_endpoints = 1,
@@ -55,18 +55,18 @@ class TestFunction : public fdf::DriverBase2,
       .bulk_out =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
-              .b_endpoint_address = USB_ENDPOINT_OUT,
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+              .b_endpoint_address = fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = 512,
               .b_interval = 0,
           },
       .bulk_in =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
-              .b_endpoint_address = USB_ENDPOINT_IN,
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+              .b_endpoint_address = fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = 512,
               .b_interval = 0,
           },

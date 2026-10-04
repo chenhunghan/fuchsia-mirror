@@ -1,7 +1,7 @@
 {
     metrics: [
         {
-            metric_id: 7,
+            metric_name: "per_component_minfs_storage_size",
             metric_type: "Integer",
             selector: [
                 "bootstrap/fshost:root/data_stats/data/persistent/{INSTANCE_ID}:storage_size",

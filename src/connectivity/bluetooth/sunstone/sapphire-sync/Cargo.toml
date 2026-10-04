@@ -13,3 +13,6 @@ parking_lot = { version = "0.12.5", optional = true }
 [features]
 default = []
 std = ["dep:parking_lot"]
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }

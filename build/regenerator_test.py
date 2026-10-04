@@ -187,6 +187,25 @@ class ContentHashTest(unittest.TestCase):
                 msg=test_case["name"],
             )
 
+    def test_patch_build_ninja_d(self) -> None:
+        build_ninja_d_path = self.build_dir / "build.ninja.d"
+        build_ninja_d_path.write_text("build.ninja.stamp: ../../BUILD.gn\n")
+
+        regenerator.patch_build_ninja_d(
+            build_ninja_d_path,
+            [
+                "../../build/regenerator.py",
+                "../../local/rust/lib/rustlib/rustc-src/rust/compiler/rustc/Windows Manifest.xml",
+            ],
+        )
+
+        self.assertEqual(
+            build_ninja_d_path.read_text(),
+            "build.ninja.stamp: ../../BUILD.gn"
+            " ../../build/regenerator.py"
+            " ../../local/rust/lib/rustlib/rustc-src/rust/compiler/rustc/Windows\\ Manifest.xml",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

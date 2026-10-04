@@ -10,9 +10,8 @@ use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_COUNTER_NON_POSITIVE, ZX_COUNTER_POSITIVE, ZX_OBJ_TYPE_COUNTER, ZX_RIGHT_DUPLICATE,
-    ZX_RIGHT_INSPECT, ZX_RIGHT_READ, ZX_RIGHT_SIGNAL, ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT,
-    ZX_RIGHT_WRITE, zx_rights_t,
+    ZX_COUNTER_NON_POSITIVE, ZX_COUNTER_POSITIVE, ZX_DEFAULT_COUNTER_RIGHTS, ZX_OBJ_TYPE_COUNTER,
+    zx_rights_t,
 };
 
 use super::counter_dispatcher_ffi::cpp_counter_dispatcher_create;
@@ -20,16 +19,6 @@ use super::counter_dispatcher_ffi::cpp_counter_dispatcher_create;
 use super::{DispatcherOps, KernelHandle};
 
 use object_constants_rs as object_constants;
-
-// TODO(https://fxbug.dev/532573303): Share this definition with
-// zircon/system/public/zircon/rights.h
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_SIGNAL;
 
 // Ensure size and alignment match the constants in object-constants.
 zr::static_assert_size_and_align!(
@@ -129,6 +118,6 @@ impl CounterDispatcher {
     pub fn create() -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
         // SAFETY: `cpp_counter_dispatcher_create` initializes the handle on success.
         let handle = unsafe { KernelHandle::create(|out| cpp_counter_dispatcher_create(out)) }?;
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_COUNTER_RIGHTS))
     }
 }

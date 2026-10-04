@@ -130,11 +130,6 @@ magma_status_t magma_connection_flush(magma_connection_t connection) {
   return magma::PlatformConnectionClient::cast(connection)->Flush();
 }
 
-magma_status_t magma_connection_create_context(magma_connection_t connection,
-                                               uint32_t* context_id_out) {
-  return magma::PlatformConnectionClient::cast(connection)->CreateContext(context_id_out);
-}
-
 magma_status_t magma_connection_create_context2(magma_connection_t connection,
                                                 magma_priority_t priority,
                                                 uint32_t* context_id_out) {
@@ -422,16 +417,24 @@ void magma_semaphore_reset(magma_semaphore_t semaphore) {
 magma_status_t magma_poll(magma_poll_item_t* items, uint32_t count, uint64_t timeout_ns) {
   TRACE_DURATION("magma", "poll");
 
-  // Optimize for simple case
-  if (count == 1 && items[0].type == MAGMA_POLL_TYPE_SEMAPHORE &&
-      items[0].condition == MAGMA_POLL_CONDITION_SIGNALED) {
-    items[0].result = 0;
+  // Reset item results, and enable optimization for a single non-zero condition item.
+  uint32_t active_count = 0;
+  uint32_t active_index = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    items[i].result = 0;
+    if (items[i].condition) {
+      active_count++;
+      active_index = i;
+    }
+  }
+  if (active_count == 1 && items[active_index].type == MAGMA_POLL_TYPE_SEMAPHORE &&
+      items[active_index].condition == MAGMA_POLL_CONDITION_SIGNALED) {
     // TODO(https://fxbug.dev/42126035): change WaitNoReset to take ns
-    if (!reinterpret_cast<magma::PlatformSemaphore*>(items[0].semaphore)
+    if (!reinterpret_cast<magma::PlatformSemaphore*>(items[active_index].semaphore)
              ->WaitNoReset(magma::ns_to_ms(timeout_ns)))
       return MAGMA_STATUS_TIMED_OUT;
 
-    items[0].result = items[0].condition;
+    items[active_index].result = items[active_index].condition;
     return MAGMA_STATUS_OK;
   }
 
@@ -443,8 +446,6 @@ magma_status_t magma_poll(magma_poll_item_t* items, uint32_t count, uint64_t tim
   std::map<uint64_t, uint32_t> map;
 
   for (uint32_t i = 0; i < count; i++) {
-    items[i].result = 0;
-
     if (!items[i].condition)
       continue;
 

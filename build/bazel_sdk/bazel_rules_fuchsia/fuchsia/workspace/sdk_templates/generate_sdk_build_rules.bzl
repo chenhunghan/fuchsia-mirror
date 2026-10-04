@@ -1725,7 +1725,7 @@ def _generate_sdk_build_rules(
         component_manifest_targets = [],
         constants = constants,
         visibility_templates = {
-            key: [Label(v) for v in _expand_values(values)]
+            key: _expand_values(values)
             for key, values in ctx.attr.visibility_templates.items()
         },
     )

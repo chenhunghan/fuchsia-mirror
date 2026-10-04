@@ -147,7 +147,7 @@ Some test frameworks may allocate a device for a test to run. The isolate reads 
 configuration.
 
 Note: A side effect of providing the `FUCHSIA_DEVICE_ADDR` value is that `mdns` discovery
-of devices is disabled in the `ffx` daemon to improve isolation.
+of devices is disabled in `ffx` to improve isolation.
 
 ### Analytics configuration
 

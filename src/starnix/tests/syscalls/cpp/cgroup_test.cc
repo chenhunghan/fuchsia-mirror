@@ -4,6 +4,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <lib/fit/defer.h>
 #include <poll.h>
 #include <sys/mount.h>
 #include <unistd.h>
@@ -162,8 +163,8 @@ class CgroupTest : public ::testing::Test {
     return CheckFileForLine(path, line, false);
   }
 
-  void CreateCgroup(std::string path) {
-    ASSERT_THAT(mkdir(path.c_str(), 0777), SyscallSucceeds()) << "Could not create " << path;
+  void CreateCgroup(std::string path, mode_t mode = 0777) {
+    ASSERT_THAT(mkdir(path.c_str(), mode), SyscallSucceeds()) << "Could not create " << path;
     cgroup_paths_.push_back(std::move(path));
   }
 
@@ -671,6 +672,26 @@ TEST_F(CgroupTest, ChownDirectoryDoesNotPropagate) {
   EXPECT_THAT(procs_path, HasUidAndGid(0u, 0u));
 }
 
+TEST_F(CgroupTest, RootDirectoryPermissions) {
+  struct stat st;
+  ASSERT_THAT(stat(root_path().c_str(), &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 0777, 0555u);
+}
+
+TEST_F(CgroupTest, MkdirWithPermissions) {
+  mode_t old_umask = umask(0);
+  auto restore_umask = fit::defer([old_umask]() { umask(old_umask); });
+
+  std::string child_path = root_path() + "/child_mode";
+  CreateCgroup(child_path, 0700);
+
+  struct stat st;
+  ASSERT_THAT(stat(child_path.c_str(), &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 0777, 0700u);
+}
+
 class CgroupV1Test : public ::testing::Test {
  public:
   void SetUp() override {
@@ -769,8 +790,8 @@ class CgroupV1Test : public ::testing::Test {
     return mountpoint.path();
   }
 
-  void CreateCgroup(std::string path) {
-    ASSERT_THAT(mkdir(path.c_str(), 0777), SyscallSucceeds()) << "Could not create " << path;
+  void CreateCgroup(std::string path, mode_t mode = 0777) {
+    ASSERT_THAT(mkdir(path.c_str(), mode), SyscallSucceeds()) << "Could not create " << path;
     cgroup_paths_.push_back(std::move(path));
   }
 
@@ -991,4 +1012,34 @@ TEST_F(CgroupV1Test, CpusetController) {
       EXPECT_EQ(val, "0-1");
     }
   }
+}
+
+TEST_F(CgroupV1Test, RootDirectoryPermissions) {
+  std::string root = MountCgroupV1("none,name=starnix_test");
+  if (root.empty()) {
+    GTEST_SKIP() << "cgroup v1 is unavailable on this Linux system";
+    return;
+  }
+  struct stat st;
+  ASSERT_THAT(stat(root.c_str(), &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 0777, 0555u);
+}
+
+TEST_F(CgroupV1Test, MkdirWithPermissions) {
+  std::string root = MountCgroupV1("none,name=starnix_test");
+  if (root.empty()) {
+    GTEST_SKIP() << "cgroup v1 is unavailable on this Linux system";
+    return;
+  }
+  mode_t old_umask = umask(0);
+  auto restore_umask = fit::defer([old_umask]() { umask(old_umask); });
+
+  std::string child = root + "/child_mode";
+  CreateCgroup(child, 0700);
+
+  struct stat st;
+  ASSERT_THAT(stat(child.c_str(), &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 0777, 0700u);
 }

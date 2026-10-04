@@ -14,7 +14,6 @@ use futures::stream::Stream;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum DnsServersUpdateSource {
     Default,
-    Netstack,
     Dhcpv4 { interface_id: u64 },
     Dhcpv6 { interface_id: u64 },
     Ndp { interface_id: u64 },
@@ -104,7 +103,7 @@ mod tests {
             futures::future::abortable(MockDnsServerWatcher::serve(watcher.clone(), rs));
 
         let (serve_result, mut stream) = futures::future::join(serve_fut, async move {
-            let mut stream = new_dns_server_stream(DnsServersUpdateSource::Netstack, proxy);
+            let mut stream = new_dns_server_stream(DnsServersUpdateSource::Default, proxy);
             assert!(stream.next().now_or_never().is_none());
             assert!(stream.next().now_or_never().is_none());
             {
@@ -113,11 +112,11 @@ mod tests {
                 w.push_config(vec![static_server()]);
             }
             let (source, res) = stream.next().await.expect("stream ended unexpectedly");
-            assert_eq!(source, DnsServersUpdateSource::Netstack);
+            assert_eq!(source, DnsServersUpdateSource::Default);
             assert_eq!(vec![ndp_server()], res.expect("FIDL error occurred"));
 
             let (source, res) = stream.next().await.expect("stream ended unexpectedly");
-            assert_eq!(source, DnsServersUpdateSource::Netstack);
+            assert_eq!(source, DnsServersUpdateSource::Default);
             assert_eq!(vec![static_server()], res.expect("FIDL error occurred"));
 
             // Abort the serving future so join will end.
@@ -127,7 +126,7 @@ mod tests {
         .await;
         let _aborted = serve_result.expect_err("Future must've been aborted");
         let (source, res) = stream.next().await.expect("Stream must yield a final value");
-        assert_eq!(source, DnsServersUpdateSource::Netstack);
+        assert_eq!(source, DnsServersUpdateSource::Default);
         let _fidl_error: fidl::Error = res.expect_err("Stream must yield an error");
         assert!(stream.next().await.is_none(), "Stream must end after error");
     }

@@ -1,0 +1,18 @@
+Subject: [rules_rust] Add riscv64gc-unknown-fuchsia platform triple
+
+rustc supports riscv64gc-unknown-fuchsia as a Tier 2 target, but
+rules_rust does not list it, so no
+@rules_rust//rust/platform:riscv64gc-unknown-fuchsia config_setting
+exists. crate_universe generated BUILD files need it to mark vendored
+crates as compatible with Fuchsia riscv64.
+---
+--- a/third_party/bazel_vendor/rules_rust+/rust/platform/triple_mappings.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/platform/triple_mappings.bzl
+@@ -60,6 +60,7 @@
+     "powerpc-unknown-linux-gnu": _support(std = True, host_tools = True),
+     "riscv32imac-unknown-none-elf": _support(std = True, host_tools = False),
+     "riscv32imc-unknown-none-elf": _support(std = True, host_tools = False),
++    "riscv64gc-unknown-fuchsia": _support(std = True, host_tools = False),
+     "riscv64gc-unknown-linux-gnu": _support(std = True, host_tools = True),
+     "riscv64gc-unknown-none-elf": _support(std = True, host_tools = False),
+     "s390x-unknown-linux-gnu": _support(std = True, host_tools = True),

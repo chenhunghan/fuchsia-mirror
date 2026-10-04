@@ -6,6 +6,7 @@
 
 use super::pmm::node as pmm_node;
 use crate::kernel::types::PAddr;
+use core::mem::MaybeUninit;
 use core::ops::Deref;
 use core::pin::Pin;
 use debug::{ltracef, ltracef_level};
@@ -20,7 +21,7 @@ use vm_page_list_bindings as bindings;
 use zr::{Opaque, pin_init_ffi, unsafe_pinned_drop_ffi};
 use zx_status::Status;
 
-use crate::vm::page::VmPagePtr;
+use crate::vm::page::{VmPageDoublyLinkedList, VmPagePtr};
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -62,6 +63,11 @@ const LOCAL_TRACE: u32 = 0;
 pub struct VmPageOrMarker {
     raw: u32,
 }
+
+// `VmPageSpliceList::pop` has C++ move-construct a `VmPageOrMarker` directly into Rust-owned
+// storage, so the two representations must agree on size and alignment.
+zr::static_assert!(core::mem::size_of::<VmPageOrMarker>() == 4);
+zr::static_assert!(core::mem::align_of::<VmPageOrMarker>() == 4);
 
 /// The types of sparse page interval types that are supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3259,6 +3265,43 @@ impl VmPageSpliceList {
     pub fn is_processed(&self) -> bool {
         // SAFETY: `self.opaque` holds a valid `VmPageSpliceList`.
         unsafe { bindings::cpp_vm_page_splice_list_is_processed(self.opaque.get()) }
+    }
+
+    /// Creates a splice list from `pages`, returning it already finalized.
+    ///
+    /// The pages are moved out of `pages`, which is left empty on success. May return
+    /// `ZX_ERR_NO_MEMORY`, in which case an unspecified number of pages will have been moved into
+    /// this splice list.
+    pub fn create_from_page_list(
+        self: Pin<&mut Self>,
+        length: u64,
+        pages: Pin<&mut VmPageDoublyLinkedList>,
+    ) -> Result<(), Status> {
+        // SAFETY: `DoublyLinkedList` is `repr(C)` and mirrors `VmPageDoublyLinkedList` -- a bare
+        // head pointer with the same sentinel encoding -- so C++ can drain it in place. Neither
+        // `pages` nor `self` is moved by taking a raw pointer to them.
+        let status = unsafe {
+            bindings::cpp_vm_page_splice_list_create_from_page_list(
+                length,
+                (pages.get_unchecked_mut() as *mut VmPageDoublyLinkedList).cast(),
+                self.as_raw(),
+            )
+        };
+        Status::ok(status)
+    }
+
+    /// Pops the next page off of the splice list. It is invalid to pop a page from a non-finalized
+    /// splice list.
+    pub fn pop(self: Pin<&mut Self>) -> VmPageOrMarker {
+        let mut content = MaybeUninit::<VmPageOrMarker>::uninit();
+        // SAFETY: `as_raw` yields a valid `VmPageSpliceList`, and `content` is properly aligned,
+        // writable storage of exactly the size of a `VmPageOrMarker` (asserted above), which C++
+        // move-constructs the popped content into. Ownership of any contained page or reference
+        // transfers to the returned `VmPageOrMarker`.
+        unsafe {
+            bindings::cpp_vm_page_splice_list_pop(self.as_raw(), content.as_mut_ptr().cast());
+            content.assume_init()
+        }
     }
 
     /// Returns a raw pointer to the underlying C++ `VmPageSpliceList`.

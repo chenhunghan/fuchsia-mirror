@@ -569,9 +569,9 @@ bool PortDispatcher::CancelQueued(const void* handle, uint64_t key) {
     packet_removed = CancelQueuedPacketsLocked(handle, key, &free_list);
   }
 
-  // Note: free_list is provably always empty in practice because ephemeral packets are queued
-  // with handle == nullptr, whereas sys_port_cancel always passes a non-null handle.
-  DEBUG_ASSERT(free_list.is_empty());
+  while (!free_list.is_empty()) {
+    free_list.pop_front()->Free();
+  }
 
   return packet_removed;
 }

@@ -46,12 +46,6 @@ FFI_ALWAYS_INLINE bool cpp_verify_continuous_attribution_bytes(VmObject* vmo,
   return vm_unittest::verify_continuous_attribution_bytes(*vmo, expected_bytes);
 }
 
-FFI_ALWAYS_INLINE void cpp_make_private_attribution_counts(uint64_t uncompressed,
-                                                           uint64_t compressed,
-                                                           vm::AttributionCounts* out_counts) {
-  *out_counts = vm_unittest::make_private_attribution_counts(uncompressed, compressed);
-}
-
 FFI_ALWAYS_INLINE void cpp_change_vmo_high_priority_count(VmObjectPaged* vmo, int64_t delta) {
   vm_unittest::change_vmo_high_priority_count(*vmo, delta);
 }

@@ -37,7 +37,7 @@ type UsbFlowTrace = struct {
 type UsbResponse = struct {
     /// Status of transaction.
     /// ZX_ERR_IO_INVALID indicates that the device stalled the transfer.
-    status zx.Status;
+    status zx.Result;
     /// Number of bytes actually transferred (on success).
     actual zx.Off;
     /// Number of consecutive requests that were silently completed immediately prior to this

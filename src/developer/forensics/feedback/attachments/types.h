@@ -53,6 +53,13 @@ class AttachmentData {
     return *value_;
   }
 
+  std::string ReleaseValue() && {
+    FX_CHECK(HasValue());
+    std::string value = std::move(*value_);
+    value_.reset();
+    return value;
+  }
+
   bool HasError() const { return error_.has_value(); }
 
   enum Error Error() const {
@@ -66,14 +73,15 @@ class AttachmentData {
 
   AttachmentData Clone() const {
     if (HasValue() && HasError()) {
-      return AttachmentData(*value_, *error_, metadata_);
+      return AttachmentData(*value_, Error(), metadata_);
     }
 
     if (HasValue()) {
       return AttachmentData(*value_, metadata_);
     }
 
-    return AttachmentData(*error_, metadata_);
+    FX_CHECK(state_ == AttachmentState::kMissing);
+    return AttachmentData(Error(), metadata_);
   }
 
  private:
@@ -102,6 +110,8 @@ class AttachmentValue {
   bool HasValue() const { return data_.HasValue(); }
 
   std::string_view Value() const { return data_.Value(); }
+
+  std::string ReleaseValue() && { return std::move(data_).ReleaseValue(); }
 
   bool HasError() const { return data_.HasError(); }
 

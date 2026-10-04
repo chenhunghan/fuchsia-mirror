@@ -2,13 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-visibility(["//build/bazel/rules/idk/private"])
-
 """Lists of FIDL libraries in each category.
 
 For information on categories, see
 https://fuchsia.dev/fuchsia-src/contribute/sdk/categories.
 """
+
+visibility(["//build/bazel/rules/idk/private"])
 
 # Stable FIDL libraries in the partner category.
 # All are included in the IDK.
@@ -59,8 +59,6 @@ PARTNER_IDK_STABLE_FIDL_LIBRARY_ATOMS_LIST = [
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_idk",
     "//sdk/fidl/fuchsia.diagnostics.system:fuchsia.diagnostics.system_idk",
     "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_idk",
-    "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_idk",
-    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_idk",
     "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_idk",
     "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_idk",
     "//sdk/fidl/fuchsia.element:fuchsia.element_idk",
@@ -83,7 +81,6 @@ PARTNER_IDK_STABLE_FIDL_LIBRARY_ATOMS_LIST = [
     "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_idk",
     "//sdk/fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_idk",
     "//sdk/fidl/fuchsia.hardware.pinimpl:fuchsia.hardware.pinimpl_idk",
-    "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_idk",
     "//sdk/fidl/fuchsia.hardware.power.sensor:fuchsia.hardware.power.sensor_idk",
     "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_idk",
     "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_idk",
@@ -205,6 +202,8 @@ PARTNER_IDK_UNSTABLE_FIDL_LIBRARY_ATOMS_LIST = [
     "//sdk/fidl/fuchsia.boot.metadata:fuchsia.boot.metadata_idk",
     "//sdk/fidl/fuchsia.buttons:fuchsia.buttons_idk",
     "//sdk/fidl/fuchsia.driver.debug:fuchsia.driver.debug_idk",
+    "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_idk",
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_idk",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_idk",
     "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_idk",
     "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl_idk",
@@ -224,6 +223,7 @@ PARTNER_IDK_UNSTABLE_FIDL_LIBRARY_ATOMS_LIST = [
     "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_idk",
     "//sdk/fidl/fuchsia.hardware.nfc:fuchsia.hardware.nfc_idk",
     "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_idk",
+    "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_idk",
     "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_idk",
     "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_idk",
     "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_idk",
@@ -326,5 +326,6 @@ COMPAT_TEST_FIDL_LIBRARY_ATOMS_LIST = [
     "//sdk/fidl/fuchsia.ui.pointer.augment:fuchsia.ui.pointer.augment_idk",
     "//sdk/fidl/fuchsia.ui.test.conformance:fuchsia.ui.test.conformance_idk",
     "//sdk/fidl/fuchsia.ui.test.context:fuchsia.ui.test.context_idk",
+    "//src/sys/pkg/tests/pkgdir/test_realm_proxy/fidl:fuchsia.pkg.test_idk",
 ]
 # LINT.ThenChange(BUILD.gn:compat_test_libraries)

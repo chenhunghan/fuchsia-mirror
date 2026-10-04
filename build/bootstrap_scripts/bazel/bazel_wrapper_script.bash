@@ -66,21 +66,37 @@ readonly BAZEL_INSTALL_BASE="${BAZEL_INSTALL_DIR}"/install_base
 # Bazel will refuse to run if the timestamps for BAZEL_INSTALL_BASE are
 # not at least 10 years in the future. Our CIPD archive does not preserve
 # input timestamps, even if they were set correctly by install.sh, so
-# just reset them directly (this takes < 0.06s on Linux), and trying
-# to do that conditionally leads to incremental build breakages on
-# infra bots (see https://fxbug.dev/129051).
+# reset any files whose mtime is not already in the future.
+#
+# Don't touch files whose mtime is already in the future: `touch` still
+# updates their ctime, and Bazel includes ctime in its FileStateValue for
+# `@bazel_tools` (`install_base/embedded_tools`), so doing so invalidates
+# `@bazel_tools` and forces Bzlmod module resolution and full package
+# reloading on every Bazel invocation.
+#
+# The mtime check must be per-file rather than based on a single stamp
+# file or directory, since a CIPD update can replace arbitrary files deep
+# in the tree (see https://fxbug.dev/129051).
+#
+# STALE_BEFORE must stay just below FUTURE_TIMESTAMP (update them together)
+# so that bumping FUTURE_TIMESTAMP also retouches files that were set to
+# the previous value.
 case "$OSTYPE" in
   linux*)
     # A future timestamp in a format supported by GNU touch, which does
     # not support the same format as BSD touch.
     FUTURE_TIMESTAMP="2042-07-29 00:00:00"
-    touch -d "${FUTURE_TIMESTAMP}" $(find "${BAZEL_INSTALL_BASE}")
+    STALE_BEFORE="2042-07-28"
+    find "${BAZEL_INSTALL_BASE}" ! -newermt "${STALE_BEFORE}" \
+      -exec touch -d "${FUTURE_TIMESTAMP}" {} +
     ;;
   darwin*|*bsd)
     # A future timestamp that is supported by MacOS filesystems.
     # See https://apple.fandom.com/wiki/2040_date_limit
     FUTURE_TIMESTAMP=204002050000
-    touch -t "${FUTURE_TIMESTAMP}" $(find "${BAZEL_INSTALL_BASE}")
+    STALE_BEFORE="2040-02-04"
+    find "${BAZEL_INSTALL_BASE}" ! -newermt "${STALE_BEFORE}" \
+      -exec touch -t "${FUTURE_TIMESTAMP}" {} +
     ;;
   *)
     echo >&2 "ERROR: Unsupported system: $OSTYPE"

@@ -1368,10 +1368,24 @@ impl ClientState {
                     if matches!(state.link_state, LinkState::LinkUp(_)) {
                         state
                             .connect_txn_sink
-                            .send(ConnectTransactionEvent::OnSignalReport { ind });
+                            .send(ConnectTransactionEvent::OnSignalReport { ind: ind.clone() });
                     }
-                    state.latest_ap_state.rssi_dbm = ind.rssi_dbm;
-                    state.latest_ap_state.snr_db = ind.snr_db;
+                    if let Some(rssi) = ind.rssi_dbm {
+                        state.latest_ap_state.rssi_dbm = rssi;
+                    }
+                    if let Some(snr) = ind.snr_db {
+                        state.latest_ap_state.snr_db = snr;
+                    }
+                    if ind.rssi_dbm.is_some() || ind.snr_db.is_some() {
+                        state.last_signal_report_time = now();
+                    }
+                    state.into()
+                }
+                MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm } => {
+                    state
+                        .connect_txn_sink
+                        .send(ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm });
+                    state.latest_ap_state.rssi_dbm = cur_rssi_dbm;
                     state.last_signal_report_time = now();
                     state.into()
                 }
@@ -5628,9 +5642,14 @@ mod tests {
 
         let (cmd, mut connect_txn_stream) = connect_command_one();
         let state = link_up_state(cmd);
-        let input_ind =
-            fidl_internal::SignalReportIndication { rssi_dbm: -42, snr_db: 20, tx_rate_500kbps: 0 };
-        let state = state.on_mlme_event(MlmeEvent::SignalReport { ind: input_ind }, &mut h.context);
+        let input_ind = fidl_internal::SignalReportIndication {
+            rssi_dbm: Some(-42),
+            snr_db: Some(20),
+            tx_rate_500kbps: Some(0),
+            ..Default::default()
+        };
+        let state =
+            state.on_mlme_event(MlmeEvent::SignalReport { ind: input_ind.clone() }, &mut h.context);
         let serving_ap_info = assert_matches!(state.status(),
                                                      ClientSmeStatus::Connected(serving_ap_info) =>
                                                      serving_ap_info);
@@ -5647,9 +5666,14 @@ mod tests {
                                                  serving_ap_info.signal_report_time);
         assert!(signal_report_time < time_b);
 
-        let input_ind =
-            fidl_internal::SignalReportIndication { rssi_dbm: -24, snr_db: 10, tx_rate_500kbps: 0 };
-        let state = state.on_mlme_event(MlmeEvent::SignalReport { ind: input_ind }, &mut h.context);
+        let input_ind = fidl_internal::SignalReportIndication {
+            rssi_dbm: Some(-24),
+            snr_db: Some(10),
+            tx_rate_500kbps: Some(0),
+            ..Default::default()
+        };
+        let state =
+            state.on_mlme_event(MlmeEvent::SignalReport { ind: input_ind.clone() }, &mut h.context);
         let serving_ap_info = assert_matches!(state.status(),
                                                      ClientSmeStatus::Connected(serving_ap_info) =>
                                                      serving_ap_info);
@@ -5668,6 +5692,24 @@ mod tests {
                                                  ClientSmeStatus::Connected(serving_ap_info) =>
                                                  serving_ap_info.signal_report_time);
         assert!(signal_report_time < time_c);
+
+        // Verify that absent fields (None) retain the previous values (-24, 10).
+        let input_ind_none = fidl_internal::SignalReportIndication {
+            rssi_dbm: None,
+            snr_db: None,
+            tx_rate_500kbps: Some(54),
+            ..Default::default()
+        };
+        let state = state
+            .on_mlme_event(MlmeEvent::SignalReport { ind: input_ind_none.clone() }, &mut h.context);
+        let serving_ap_info = assert_matches!(state.status(),
+                                                     ClientSmeStatus::Connected(serving_ap_info) =>
+                                                     serving_ap_info);
+        assert_eq!(serving_ap_info.rssi_dbm, -24);
+        assert_eq!(serving_ap_info.snr_db, 10);
+        assert_matches!(connect_txn_stream.try_recv(), Ok(ConnectTransactionEvent::OnSignalReport { ind }) => {
+            assert_eq!(input_ind_none, ind);
+        });
     }
 
     fn test_sae_frame_rx_tx(
@@ -5886,6 +5928,25 @@ mod tests {
         assert_eq!(wmm_param.ac_vo_params.ecw_min_max.ecw_min(), 14);
         assert_eq!(wmm_param.ac_vo_params.ecw_min_max.ecw_max(), 15);
         assert_eq!({ wmm_param.ac_vo_params.txop_limit }, 16);
+    }
+
+    #[test]
+    fn on_rssi_threshold_breached_while_associated() {
+        let mut h = TestHelper::new();
+        let (cmd, mut connect_txn_stream) = connect_command_one();
+        let state = link_up_state(cmd);
+
+        let state = state.on_mlme_event(
+            MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm: -77 },
+            &mut h.context,
+        );
+        assert_matches!(
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm: -77 })
+        );
+        let status = state.status();
+        let ap_info = assert_matches!(status, ClientSmeStatus::Connected(info) => info);
+        assert_eq!(ap_info.rssi_dbm, -77);
     }
 
     // Helper functions and data structures for tests

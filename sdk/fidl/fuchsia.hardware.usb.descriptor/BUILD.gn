@@ -35,8 +35,13 @@ if (is_host) {
 
 fidl("fuchsia.hardware.usb.descriptor") {
   sources = [
+    "audio.fidl",
+    "cdc.fidl",
+    "hid.fidl",
     "hub.fidl",
+    "msc.fidl",
     "usb.fidl",
+    "video.fidl",
   ]
   sdk_area = "Drivers"
   sdk_category = "partner"

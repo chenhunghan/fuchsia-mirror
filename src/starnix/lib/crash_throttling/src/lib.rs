@@ -5,7 +5,7 @@
 use fuchsia_inspect::{Inspector, Node};
 use futures::FutureExt;
 use starnix_logging::log_info;
-use starnix_sync::Mutex;
+use starnix_sync::{CrashesPerProcessLock, LockDepMutex, ThrottledCoreDumpsLock};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use zx::{self as zx};
@@ -24,10 +24,10 @@ const REPORT_EVERY_X_WHILE_THROTTLED: u32 = 100;
 pub struct CrashThrottler {
     /// Diagnostics information. A mapping from process name -> number of crashes for that process
     /// that weren't uploaded because of process throttling.
-    throttled_core_dumps: Arc<Mutex<HashMap<String, i64>>>,
+    throttled_core_dumps: Arc<LockDepMutex<HashMap<String, i64>, ThrottledCoreDumpsLock>>,
 
     /// Tracks when crashes occurred for each process name.
-    crashes_per_process: Arc<Mutex<HashMap<String, CrashInfo>>>,
+    crashes_per_process: Arc<LockDepMutex<HashMap<String, CrashInfo>, CrashesPerProcessLock>>,
 
     /// The period before a crash is no longer considered for detecting crash loops.
     pub crash_loop_age_out: zx::MonotonicDuration,
@@ -55,8 +55,8 @@ impl CrashThrottler {
         enable_throttling: bool,
     ) -> Self {
         let throttler = Self {
-            throttled_core_dumps: Arc::new(Mutex::new(Default::default())),
-            crashes_per_process: Arc::new(Mutex::new(Default::default())),
+            throttled_core_dumps: Arc::new(LockDepMutex::new(Default::default())),
+            crashes_per_process: Arc::new(LockDepMutex::new(Default::default())),
             crash_loop_age_out,
             enable_throttling,
         };

@@ -4,6 +4,10 @@
 
 #include "src/devices/usb/drivers/usb-bus/tests/common.h"
 
+#include <usb/descriptors.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_bus {
 
 const char16_t* kStringDescriptors[][2] = {{u"Fuchsia", u"Fucsia"}, {u"Device", u"Dispositivo"}};
@@ -41,13 +45,12 @@ void FakeHci::UsbHciRequestQueue(usb_request_t* usb_request_,
     return;
   }
   if ((request.request()->header.ep_address == 0) && !custom_control_) {
-    if ((request.request()->setup.bm_request_type ==
-         (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE)) &&
-        (request.request()->setup.b_request == USB_REQ_GET_DESCRIPTOR)) {
-      uint8_t type = static_cast<uint8_t>(request.request()->setup.w_value >> 8);
-      uint8_t index = static_cast<uint8_t>(request.request()->setup.w_value);
+    if (request.request()->setup.bm_request_type == kStandardDeviceIn &&
+        request.request()->setup.b_request == fdescriptor::StandardRequest::kGetDescriptor) {
+      auto type = usb_descriptor_type_from_w_value(request.request()->setup.w_value);
+      uint8_t index = usb_descriptor_index_from_w_value(request.request()->setup.w_value);
       switch (type) {
-        case USB_DT_DEVICE: {
+        case fdescriptor::DescriptorType::kDevice: {
           usb_device_descriptor_t* descriptor;
           request.Mmap(reinterpret_cast<void**>(&descriptor));
           descriptor->b_num_configurations = 2;
@@ -59,7 +62,7 @@ void FakeHci::UsbHciRequestQueue(usb_request_t* usb_request_,
           request.Complete(ZX_OK, sizeof(*descriptor));
         }
           return;
-        case USB_DT_CONFIG: {
+        case fdescriptor::DescriptorType::kConfiguration: {
           usb_configuration_descriptor_t* descriptor;
           request.Mmap(reinterpret_cast<void**>(&descriptor));
           descriptor->w_total_length = sizeof(*descriptor);
@@ -67,7 +70,7 @@ void FakeHci::UsbHciRequestQueue(usb_request_t* usb_request_,
           request.Complete(ZX_OK, sizeof(*descriptor));
         }
           return;
-        case USB_DT_STRING: {
+        case fdescriptor::DescriptorType::kString: {
           if (index == 0) {
             // Fetch language table
             usb_langid_desc_t* languages;
@@ -98,12 +101,15 @@ void FakeHci::UsbHciRequestQueue(usb_request_t* usb_request_,
             request.Complete(ZX_OK, descriptor->b_length);
             return;
           }
+          break;
         }
+        default:
+          break;
       }
     }
-    if ((request.request()->setup.bm_request_type ==
-         (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE)) &&
-        (request.request()->setup.b_request == USB_REQ_SET_CONFIGURATION)) {
+    if ((request.request()->setup.bm_request_type == kStandardDeviceOut) &&
+        (request.request()->setup.b_request ==
+         fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration))) {
       selected_configuration_ = static_cast<uint8_t>(request.request()->setup.w_value);
       request.Complete(ZX_OK, 0);
       return;

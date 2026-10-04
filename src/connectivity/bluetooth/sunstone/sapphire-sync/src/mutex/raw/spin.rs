@@ -4,7 +4,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::mutex::raw::RawMutex;
+use crate::mutex::raw::{ConstInit, RawMutex};
 
 /// A lightweight atomic spinlock implementation for multithreaded execution contexts.
 pub struct Mutex {
@@ -16,6 +16,10 @@ impl Mutex {
     pub const fn new() -> Self {
         Self { locked: AtomicBool::new(false) }
     }
+}
+
+impl ConstInit for Mutex {
+    const INIT: Self = Self::new();
 }
 
 impl Default for Mutex {

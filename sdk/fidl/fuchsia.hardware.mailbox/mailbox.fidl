@@ -17,8 +17,14 @@ open protocol Listener {
     ///
     /// If the client fails to respond to `OnMessage` in a timely manner, the
     /// mailbox driver may run out of memory and drop subsequent messages.
-    flexible OnMessage(struct {
+    ///
+    /// `lease` is an optional wake lease baton passed by the mailbox driver when
+    /// the message caused or arrived during a wake event, keeping the system
+    /// awake until the listener has handled the message (or acquired its own
+    /// wake lease).
+    flexible OnMessage(resource struct {
         message vector<uint8>:MAX;
+        lease zx.Handle:<EVENTPAIR, optional>;
     }) -> () error zx.Status;
 
     /// Called when a request is received on the mailbox channel.
@@ -31,8 +37,12 @@ open protocol Listener {
     /// and no response is returned to the remote core.
     ///
     /// The same concurrency rules as `OnMessage` apply.
-    flexible OnRequest(struct {
+    ///
+    /// `lease` is an optional wake lease baton with the same semantics as in
+    /// `OnMessage`.
+    flexible OnRequest(resource struct {
         message vector<uint8>:MAX;
+        lease zx.Handle:<EVENTPAIR, optional>;
     }) -> (struct {
         response vector<uint8>:MAX;
     }) error zx.Status;

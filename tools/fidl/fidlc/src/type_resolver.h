@@ -32,6 +32,7 @@ class TypeResolver {
   bool ResolveType(TypeConstructor* type, bool compile_decls);
   bool ResolveSizeBound(Constant* size_constant, const SizeValue** out_size);
   bool ResolveAsOptional(Constant* constant);
+  bool ResolveAsNonZero(Constant* constant);
   bool ResolveAsHandleSubtype(Resource* resource, Constant* constant, HandleSubtype* out_obj_type);
   bool ResolveAsHandleRights(Resource* resource, Constant* constant,
                              const HandleRightsValue** out_rights);

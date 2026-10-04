@@ -408,6 +408,7 @@ mod tests {
     use crate::scheduling::{LegacyContextSwitchEvent, SchedulingRecord, ThreadState};
     use crate::{RawEventRecord, RawTraceRecord};
     use futures::{StreamExt, TryStreamExt};
+    use zerocopy::IntoBytes;
 
     static SIMPLE_TRACE_FXT: &[u8] =
         include_bytes!("../../../../trace2json/test_data/simple_trace.fxt");
@@ -448,7 +449,8 @@ mod tests {
         // Add our bogus record with an unknown type, expecting to skip over it.
         let mut header = crate::BaseTraceHeader::empty();
         header.set_raw_type(14); // not currently a valid ordinal
-        session.extend(FxtBuilder::new(header).atom(&(0u8..27u8).collect::<Vec<u8>>()).build());
+        let record = FxtBuilder::new(header).atom(&(0u8..27u8).collect::<Vec<u8>>()).build();
+        session.extend_from_slice(record.as_bytes());
 
         // Add the rest of the simple trace.
         session.extend(&SIMPLE_TRACE_FXT[8..]);
@@ -473,7 +475,7 @@ mod tests {
 
         let kobj_record =
             FxtBuilder::new(header).atom(1234u64.to_le_bytes()).atom(name_bytes).build();
-        session.extend(kobj_record);
+        session.extend_from_slice(kobj_record.as_bytes());
 
         let mut parser = SessionParser::new(std::io::Cursor::new(session));
         let mut records = vec![];
@@ -535,7 +537,9 @@ mod tests {
             .atom(513u64.to_le_bytes()) // thread
             .atom(category)
             .atom(name)
-            .build();
+            .build()
+            .as_bytes()
+            .to_vec();
         let byte_to_make_valid = final_record.pop().unwrap();
 
         for byte in final_record {

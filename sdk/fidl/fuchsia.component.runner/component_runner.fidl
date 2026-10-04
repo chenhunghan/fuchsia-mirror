@@ -330,7 +330,7 @@ closed(removed=24) open(added=24) protocol ComponentController {
         ///
         /// The caller should set this field. If it is absent, the framework will assume
         /// a value of ZX_OK.
-        1: termination_status zx.Status;
+        1: termination_status zx.Result;
 
         /// (Optional) The exit code of the component instance.
         ///

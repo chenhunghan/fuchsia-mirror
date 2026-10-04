@@ -8,12 +8,15 @@
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/driver.h>
+#include <lib/zx/time.h>
 
 #include <fbl/alloc_checker.h>
 #include <usb/cdc.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 #include <usb/usb.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_cdc_acm_serial {
 
@@ -341,14 +344,14 @@ zx_status_t UsbCdcAcmDevice::ConfigureDevice(uint32_t baud_rate, uint32_t flags)
   const bool baud_rate_only = flags & fuchsia_hardware_serialimpl::wire::kSerialSetBaudRateOnly;
   if (baud_rate_only) {
     size_t coding_length;
-    status = usb_client_.ControlIn(
-        USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, kUsbCdcAcmGetLineCoding, 0, 0,
-        ZX_TIME_INFINITE, reinterpret_cast<uint8_t*>(&coding), sizeof(coding), &coding_length);
-    if (coding_length != sizeof(coding)) {
-      zxlogf(TRACE, "usb-cdc-acm: failed to fetch line coding");
-    }
+    status =
+        usb_client_.ControlIn(kClassInterfaceIn, kUsbCdcAcmGetLineCoding, 0, 0, ZX_TIME_INFINITE,
+                              reinterpret_cast<uint8_t*>(&coding), sizeof(coding), &coding_length);
     if (status != ZX_OK) {
       return status;
+    }
+    if (coding_length != sizeof(coding)) {
+      zxlogf(TRACE, "usb-cdc-acm: failed to fetch line coding");
     }
   } else {
     switch (flags & fuchsia_hardware_serialimpl::wire::kSerialStopBitsMask) {
@@ -394,9 +397,9 @@ zx_status_t UsbCdcAcmDevice::ConfigureDevice(uint32_t baud_rate, uint32_t flags)
 
   coding.dwDTERate = baud_rate;
 
-  status = usb_client_.ControlOut(USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                                  kUsbCdcAcmSetLineCoding, 0, 0, ZX_TIME_INFINITE,
-                                  reinterpret_cast<uint8_t*>(&coding), sizeof(coding));
+  status =
+      usb_client_.ControlOut(kClassInterfaceOut, kUsbCdcAcmSetLineCoding, 0, 0, ZX_TIME_INFINITE,
+                             reinterpret_cast<uint8_t*>(&coding), sizeof(coding));
 
   if (status == ZX_OK) {
     baud_rate_ = baud_rate;
@@ -429,9 +432,10 @@ zx_status_t UsbCdcAcmDevice::Bind() {
     if (interface.descriptor()->b_num_endpoints > 1) {
       for (auto& endpoint : interface.GetEndpointList()) {
         if (usb_ep_type(endpoint.descriptor()) == fdescriptor::EndpointType::kBulk) {
-          if (usb_ep_direction(endpoint.descriptor()) == USB_ENDPOINT_IN) {
+          if (usb_ep_direction(endpoint.descriptor()) == fdescriptor::EndpointDirection::kIn) {
             bulk_in_address = endpoint.descriptor()->b_endpoint_address;
-          } else if (usb_ep_direction(endpoint.descriptor()) == USB_ENDPOINT_OUT) {
+          } else if (usb_ep_direction(endpoint.descriptor()) ==
+                     fdescriptor::EndpointDirection::kOut) {
             bulk_out_address = endpoint.descriptor()->b_endpoint_address;
           }
         }

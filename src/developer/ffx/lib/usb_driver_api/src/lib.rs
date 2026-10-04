@@ -833,4 +833,315 @@ mod test {
                 .is_err()
         );
     }
+
+    #[fuchsia::test]
+    async fn test_telemetry_launch_shutdown_and_unique_device_counts() {
+        use ffx_metrics::{UsbDriverTelemetryEvent, UsbProtocolCounts};
+        use usb_vsock_host::UsbVsockHostEvent;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test_sock");
+        let (
+            TestConnection {
+                cid,
+                connection,
+                serial,
+                mut incoming_requests,
+                abort_transfer: _,
+                scope,
+            },
+            mut handle,
+        ) = HostDriver::new_for_test_with_telemetry(sock_path.clone());
+
+        assert_eq!(handle.next_telemetry_event().await, Some(UsbDriverTelemetryEvent::Launch));
+
+        let driver = Arc::new(Driver::init(sock_path).await.unwrap());
+        let mut device_stream = Box::pin(driver.listen_for_devices().await.unwrap());
+
+        // Initial device appearance from active_devices().
+        let first_event = device_stream.next().await.unwrap().unwrap();
+        let DeviceEvent::Added { cid: got_cid, serial: got_serial } = first_event else {
+            panic!("Expected Added event");
+        };
+        assert_eq!(got_cid, cid);
+        assert_eq!(got_serial.as_deref(), Some(serial.as_str()));
+
+        // Simulate same physical device re-appearing with a new CID and same serial,
+        // plus a second distinct device appearing and disappearing.
+        handle.send_host_event(UsbVsockHostEvent::AddedCid {
+            cid: cid + 10,
+            serial: Some(serial.clone()),
+        });
+        let re_added = device_stream.next().await.unwrap().unwrap();
+        assert!(matches!(re_added, DeviceEvent::Added { cid: c, .. } if c == cid + 10));
+
+        handle.send_host_event(UsbVsockHostEvent::AddedCid {
+            cid: cid + 20,
+            serial: Some("second-unique-serial".to_owned()),
+        });
+        let second_added = device_stream.next().await.unwrap().unwrap();
+        assert!(matches!(second_added, DeviceEvent::Added { cid: c, .. } if c == cid + 20));
+
+        handle.send_host_event(UsbVsockHostEvent::RemovedCid(cid + 20));
+        let second_removed = device_stream.next().await.unwrap().unwrap();
+        assert!(matches!(second_removed, DeviceEvent::Removed { cid: c } if c == cid + 20));
+
+        // Dropping device_stream while no USB events are occurring must immediately close
+        // the ListDevices socket and emit ConnectionClosed telemetry.
+        std::mem::drop(device_stream);
+        let Some(UsbDriverTelemetryEvent::ConnectionClosed(list_conn_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected ConnectionClosed event for ListDevices stream");
+        };
+        assert_eq!(list_conn_event.rx_bytes, 20);
+        assert!(list_conn_event.tx_bytes > 36);
+        assert_eq!(
+            list_conn_event.protocol_counts,
+            UsbProtocolCounts {
+                initialize_list_devices: 1,
+                on_device_appeared: 3,
+                on_device_disappeared: 1,
+                ..Default::default()
+            }
+        );
+
+        // Failed connection attempt to non-existent CID 999 must not count as a communicated device.
+        assert!(driver.connect(999, 1234).await.is_err());
+        let Some(UsbDriverTelemetryEvent::ConnectionClosed(failed_conn_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected ConnectionClosed event for failed connect");
+        };
+        assert_eq!(failed_conn_event.rx_bytes, 28);
+        assert!(failed_conn_event.tx_bytes > 0);
+        assert_eq!(
+            failed_conn_event.protocol_counts,
+            UsbProtocolCounts { initialize_connect_to: 1, ..Default::default() }
+        );
+
+        // Establish two separate VSOCK connections to the same device (cid) to verify
+        // byte counting across bridged streams and deduplication of communicated devices.
+        static PAYLOAD_TARGET_TO_HOST: &[u8] = b"telemetry payload from target to host";
+        static PAYLOAD_HOST_TO_TARGET: &[u8] = b"telemetry payload from host to target!!";
+
+        for port in [1234u32, 1235u32] {
+            let driver_clone = Arc::clone(&driver);
+            let got_conn =
+                scope.compute_local(async move { driver_clone.connect(cid, port).await });
+            let incoming = incoming_requests.next().await.unwrap();
+            let (mut target_sock, other_end) = UnixStream::pair().unwrap();
+            let _state = connection.accept(incoming, other_end.into()).await.unwrap();
+            let mut host_sock = got_conn.await.unwrap();
+
+            target_sock.write_all(PAYLOAD_TARGET_TO_HOST).await.unwrap();
+            let mut rx_buf = [0u8; PAYLOAD_TARGET_TO_HOST.len()];
+            host_sock.read_exact(&mut rx_buf).await.unwrap();
+            assert_eq!(&rx_buf, PAYLOAD_TARGET_TO_HOST);
+
+            host_sock.write_all(PAYLOAD_HOST_TO_TARGET).await.unwrap();
+            let mut tx_buf = [0u8; PAYLOAD_HOST_TO_TARGET.len()];
+            target_sock.read_exact(&mut tx_buf).await.unwrap();
+            assert_eq!(&tx_buf, PAYLOAD_HOST_TO_TARGET);
+
+            std::mem::drop(host_sock);
+            std::mem::drop(target_sock);
+
+            let Some(UsbDriverTelemetryEvent::ConnectionClosed(vsock_conn_event)) =
+                handle.next_telemetry_event().await
+            else {
+                panic!("Expected ConnectionClosed event for bridged VSOCK stream");
+            };
+            assert_eq!(
+                vsock_conn_event.rx_bytes,
+                28 + u64::try_from(PAYLOAD_HOST_TO_TARGET.len()).unwrap()
+            );
+            assert_eq!(
+                vsock_conn_event.tx_bytes,
+                36 + u64::try_from(PAYLOAD_TARGET_TO_HOST.len()).unwrap()
+            );
+            assert_eq!(
+                vsock_conn_event.protocol_counts,
+                UsbProtocolCounts { initialize_connect_to: 1, ..Default::default() }
+            );
+        }
+
+        // Drop control connection and verify its ConnectionClosed event.
+        std::mem::drop(driver);
+        let Some(UsbDriverTelemetryEvent::ConnectionClosed(ctrl_conn_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected ConnectionClosed event for Control stream");
+        };
+        assert_eq!(ctrl_conn_event.rx_bytes, 20);
+        assert!(ctrl_conn_event.tx_bytes > 0);
+        assert_eq!(
+            ctrl_conn_event.protocol_counts,
+            UsbProtocolCounts { initialize_control: 1, ..Default::default() }
+        );
+
+        // Shut down the driver and verify unique discovered (2) and communicated (1) device counts.
+        handle.shutdown();
+        let Some(UsbDriverTelemetryEvent::Shutdown(shutdown_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected Shutdown telemetry event");
+        };
+        assert_eq!(shutdown_event.unique_devices_discovered, 2);
+        assert_eq!(shutdown_event.unique_devices_communicated, 1);
+        assert_eq!(
+            shutdown_event.protocol_counts,
+            UsbProtocolCounts {
+                initialize_control: 1,
+                initialize_list_devices: 1,
+                initialize_connect_to: 3,
+                on_device_appeared: 3,
+                on_device_disappeared: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_telemetry_control_listen_accept_reject_and_protocol_counts() {
+        use ffx_metrics::{UsbDriverTelemetryEvent, UsbProtocolCounts};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test_sock");
+        let (
+            TestConnection {
+                cid,
+                connection,
+                serial: _,
+                incoming_requests: _,
+                abort_transfer: _,
+                scope,
+            },
+            mut handle,
+        ) = HostDriver::new_for_test_with_telemetry(sock_path.clone());
+
+        assert_eq!(handle.next_telemetry_event().await, Some(UsbDriverTelemetryEvent::Launch));
+
+        let driver = Driver::init(sock_path).await.unwrap();
+        driver.listen(1234).await.unwrap();
+
+        let connection = Arc::new(connection);
+
+        // First incoming connection: reject it via stop_listening(..., Reject) or accept_next.
+        // Here we establish an incoming connection and accept it, then establish a second incoming
+        // connection and reject it when stopping listening.
+        let connection_clone = Arc::clone(&connection);
+        let (mut target_sock, other_end) = UnixStream::pair().unwrap();
+        let got_conn = scope.compute_local(async move {
+            connection_clone
+                .connect(
+                    usb_vsock::Address {
+                        device_cid: cid,
+                        device_port: 9090,
+                        host_cid: CID_HOST,
+                        host_port: 1234,
+                    },
+                    other_end.into(),
+                )
+                .await
+        });
+
+        let (mut host_sock, conn_id) = driver.accept_next().await.unwrap();
+        let _target_conn_state = got_conn.await.unwrap();
+        assert_eq!(conn_id.remote_cid, cid);
+
+        static MSG_1: &[u8] = b"incoming vsock data 1";
+        static MSG_2: &[u8] = b"incoming vsock reply 2";
+
+        target_sock.write_all(MSG_1).await.unwrap();
+        let mut buf1 = [0u8; MSG_1.len()];
+        host_sock.read_exact(&mut buf1).await.unwrap();
+        assert_eq!(&buf1, MSG_1);
+
+        host_sock.write_all(MSG_2).await.unwrap();
+        let mut buf2 = [0u8; MSG_2.len()];
+        target_sock.read_exact(&mut buf2).await.unwrap();
+        assert_eq!(&buf2, MSG_2);
+
+        std::mem::drop(host_sock);
+        std::mem::drop(target_sock);
+
+        let Some(UsbDriverTelemetryEvent::ConnectionClosed(accept_conn_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected ConnectionClosed event for accepted VSOCK connection");
+        };
+        assert_eq!(accept_conn_event.rx_bytes, 44 + u64::try_from(MSG_2.len()).unwrap());
+        assert_eq!(accept_conn_event.tx_bytes, 36 + u64::try_from(MSG_1.len()).unwrap());
+        assert_eq!(
+            accept_conn_event.protocol_counts,
+            UsbProtocolCounts { initialize_accept: 1, ..Default::default() }
+        );
+
+        // Now queue another incoming connection on port 1234 and reject it via StopListenQueueBehavior::Reject.
+        let connection_clone = Arc::clone(&connection);
+        let (_unused_sock, other_end) = UnixStream::pair().unwrap();
+        let rejected_conn = scope.compute_local(async move {
+            connection_clone
+                .connect(
+                    usb_vsock::Address {
+                        device_cid: cid,
+                        device_port: 9091,
+                        host_cid: CID_HOST,
+                        host_port: 1234,
+                    },
+                    other_end.into(),
+                )
+                .await
+        });
+
+        // Wait until OnIncoming has been received by the client's incoming queue before stopping listen with Reject.
+        while driver.incoming.lock().unwrap().0.is_empty() {
+            fuchsia_async::Timer::new(std::time::Duration::from_millis(5)).await;
+        }
+
+        driver.stop_listening(1234, StopListenQueueBehavior::Reject).await.unwrap();
+        assert!(rejected_conn.await.is_err());
+
+        std::mem::drop(driver);
+        let Some(UsbDriverTelemetryEvent::ConnectionClosed(ctrl_conn_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected ConnectionClosed event for Control stream");
+        };
+        assert!(ctrl_conn_event.rx_bytes > 20);
+        assert!(ctrl_conn_event.tx_bytes > 60);
+        assert_eq!(
+            ctrl_conn_event.protocol_counts,
+            UsbProtocolCounts {
+                initialize_control: 1,
+                listen: 1,
+                stop_listen: 1,
+                reject: 1,
+                on_incoming: 2,
+                ..Default::default()
+            }
+        );
+
+        handle.shutdown();
+        let Some(UsbDriverTelemetryEvent::Shutdown(shutdown_event)) =
+            handle.next_telemetry_event().await
+        else {
+            panic!("Expected Shutdown telemetry event");
+        };
+        assert_eq!(shutdown_event.unique_devices_discovered, 1);
+        assert_eq!(shutdown_event.unique_devices_communicated, 1);
+        assert_eq!(
+            shutdown_event.protocol_counts,
+            UsbProtocolCounts {
+                initialize_control: 1,
+                initialize_accept: 1,
+                listen: 1,
+                stop_listen: 1,
+                reject: 1,
+                on_incoming: 2,
+                ..Default::default()
+            }
+        );
+    }
 }

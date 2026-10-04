@@ -9,13 +9,11 @@
 
 #include <zircon/types.h>
 
-#include <fbl/array.h>
-#include <fbl/macros.h>
-#include <fbl/ring_buffer.h>
-#include <kernel/mutex.h>
-#include <kernel/thread.h>
-#include <vm/page.h>
+#include <object/opaque_storage.h>
+#include <vm/vm_constants.h>
 
+struct vm_page;
+using vm_page_t = struct vm_page;
 class VmCowPages;
 
 // A debug compressor that can be given references to pages in VMOs and will randomly compress a
@@ -23,7 +21,7 @@ class VmCowPages;
 // can be given with arbitrary locks held.
 class VmDebugCompressor {
  public:
-  VmDebugCompressor() = default;
+  VmDebugCompressor();
   ~VmDebugCompressor();
 
   // Initializes the debug compressor. This method may acquire Mutexes, and so must not be called
@@ -47,48 +45,7 @@ class VmDebugCompressor {
   void Resume();
 
  private:
-  struct Entry {
-    fbl::RefPtr<VmCowPages> cow;
-    vm_page_t* page = nullptr;
-    uint64_t offset = 0;
-  };
-
-  // Entry point for the |thread_| that performs the actual compression.
-  void CompressThread();
-
-  // Helper that Pops an entry from the list_. Will return an entry with a null cow if the list is
-  // empty.
-  Entry Pop() TA_EXCL(lock_);
-
-  // Shuts down and cleans up |thread_|.
-  void Shutdown() TA_EXCL(lock_);
-
-  // Size of the |list_| that will be allocated.
-  static constexpr size_t kArraySize = 128;
-
-  DECLARE_SPINLOCK(VmDebugCompressor) lock_;
-
-  // Reference to the thread that does compression so we can shut it down later.
-  Thread* thread_ TA_GUARDED(lock_) = nullptr;
-
-  // The array of entries is used to transfer pages from the synchronous |Add| call to the
-  // compression thread. The list is finite and if full pages will be silently dropped, which is
-  // equivalent to as if those pages were randomly chosen to not be added.
-  ktl::unique_ptr<fbl::RingBuffer<Entry, kArraySize>> list_ TA_GUARDED(lock_);
-
-  enum class State {
-    Shutdown,
-    Running,
-    Paused,
-  };
-  // State is initially shutdown to require |Init| to be called.
-  State state_ TA_GUARDED(lock_) = State::Shutdown;
-
-  // Private rng state to avoid further synchronization overhead with the global rand().
-  uintptr_t rng_state_ TA_GUARDED(lock_) = 0;
-
-  // Used to signal the compression thread if the list_ goes from empty->non-empty.
-  AutounsignalEvent event_;
+  OpaqueStorage<kVmDebugCompressorStorageSize, kVmDebugCompressorStorageAlign> storage_;
 };
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_DEBUG_COMPRESSOR_H_

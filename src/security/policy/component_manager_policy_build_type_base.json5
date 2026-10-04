@@ -58,7 +58,7 @@
                 // access it.
                 source_moniker: "/bootstrap/pkg-cache",
                 source: "component",
-                source_name: "fuchsia.component.resolution.Resolver",
+                source_name: "fuchsia.component.resolution.Resolver-base",
                 capability: "protocol",
                 target_monikers: [
                     "/bootstrap",

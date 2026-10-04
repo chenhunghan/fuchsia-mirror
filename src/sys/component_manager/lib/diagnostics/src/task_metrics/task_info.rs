@@ -13,7 +13,7 @@ use log::debug;
 use moniker::ExtendedMoniker;
 use std::fmt::Debug;
 use std::sync::{Arc, Weak};
-use zx::sys::{self as zx_sys, zx_system_get_num_cpus};
+use zx::sys as zx_sys;
 
 pub(crate) fn create_cpu_histogram(
     node: &inspect::Node,
@@ -26,9 +26,7 @@ pub(crate) fn create_cpu_histogram(
 }
 
 fn num_cpus() -> i64 {
-    // zx_system_get_num_cpus() is FFI to C++. It simply returns a value from a static struct
-    // so it should always be safe to call.
-    (unsafe { zx_system_get_num_cpus() }) as i64
+    zx::system_get_num_cpus() as i64
 }
 
 #[derive(Debug)]

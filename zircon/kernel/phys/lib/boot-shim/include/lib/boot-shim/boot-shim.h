@@ -23,6 +23,7 @@
 
 #include <fbl/alloc_checker.h>
 
+#include "boot-properties.h"
 #include "item-base.h"
 
 namespace boot_shim {
@@ -181,6 +182,28 @@ class BootShim : public BootShimBase {
     return *this;
   }
 
+  constexpr BootShim& set_linux_boot_config(std::string_view contents) {
+    return set_linux_boot_config(std::as_bytes(std::span{contents}));
+  }
+
+  constexpr BootShim& set_linux_boot_config(const linux_boot_config::LinuxBootConfig& boot_config) {
+    return set_linux_boot_config(boot_config.contents());
+  }
+
+  constexpr BootProperties legacy_boot_properties() const {
+    std::string_view boot_config;
+    if (std::span payload = Get<LinuxBootConfig>().payload(); !payload.empty()) {
+      boot_config = {
+          reinterpret_cast<const char*>(payload.data()),
+          payload.size_bytes(),
+      };
+    }
+    return BootProperties{
+        legacy_cmdline(),
+        linux_boot_config::LinuxBootConfig{boot_config},
+    };
+  }
+
   // Log how things look after calling set_* methods.
   void Log(ByteView ramdisk) const { BootShimBase::Log(Get<Cmdline>(), ramdisk); }
 
@@ -203,17 +226,11 @@ class BootShim : public BootShimBase {
   }
 
   // Get the item object of a particular type (among Items).
-  template <typename T>
-  constexpr T& Get() {
-    static_assert(std::is_same_v<T, Cmdline> || std::is_same_v<T, LinuxBootConfig> ||
-                  (std::is_same_v<T, Items> || ...));
-    return std::get<T>(items_);
-  }
-  template <typename T>
-  constexpr const T& Get() const {
-    static_assert(std::is_same_v<T, Cmdline> || std::is_same_v<T, LinuxBootConfig> ||
-                  (std::is_same_v<T, Items> || ...));
-    return std::get<T>(items_);
+  template <class T>
+    requires(std::same_as<T, Cmdline> || std::same_as<T, LinuxBootConfig> ||
+             (std::same_as<T, Items> || ...))
+  constexpr decltype(auto) Get(this auto&& self) {
+    return std::get<T>(self.items_);
   }
 
   // This calls item.Init(args..., shim_name(), log()).
@@ -230,12 +247,8 @@ class BootShim : public BootShimBase {
 
   // Returns callback(Items&...).
   template <std::invocable<Cmdline&, Items&...> T>
-  constexpr decltype(auto) OnItems(T&& callback) {
-    return std::apply(std::forward<T>(callback), items_);
-  }
-  template <std::invocable<Cmdline&, Items&...> T>
-  constexpr decltype(auto) OnItems(T&& callback) const {
-    return std::apply(std::forward<T>(callback), items_);
+  constexpr decltype(auto) OnItems(this auto&& self, T&& callback) {
+    return std::apply(std::forward<T>(callback), self.items_);
   }
 
   // Returns the result of `callback(item_0, ... , item_n)`, where each item
@@ -253,46 +266,29 @@ class BootShim : public BootShimBase {
   // `callback(std::get<1>(items_), std::get<2>(items)`.
   template <template <typename> typename Predicate, typename T>
     requires(kCanApply<T, decltype(SelectItems<Predicate>(std::declval<ItemsTuple&>()))>)
-  constexpr decltype(auto) OnSelectItems(T&& callback) {
-    return std::apply(std::forward<T>(callback), SelectItems<Predicate>(items_));
-  }
-  template <template <typename> typename Predicate, typename T>
-    requires(kCanApply<T, decltype(SelectItems<Predicate>(std::declval<const ItemsTuple&>()))>)
-  constexpr decltype(auto) OnSelectItems(T&& callback) const {
-    return std::apply(std::forward<T>(callback), SelectItems<Predicate>(items_));
+  constexpr decltype(auto) OnSelectItems(this auto&& self, T&& callback) {
+    return std::apply(std::forward<T>(callback), SelectItems<Predicate>(self.items_));
   }
 
   // Calls callback(item) for each of Items.
   // If Base is given, the items not derived from Base are skipped.
   template <typename Base = void>
-  constexpr void ForEachItem(auto&& callback) {
-    OnItems([&](auto&... item) { (IfBase<Base>(item, callback), ...); });
-  }
-  template <typename Base = void>
-  constexpr void ForEachItem(auto&& callback) const {
-    OnItems([&](auto&... item) { (IfBase<Base>(item, callback), ...); });
+  constexpr void ForEachItem(this auto&& self, auto&& callback) {
+    self.OnItems([&](auto&... item) { (IfBase<Base>(item, callback), ...); });
   }
 
   // Returns callback(item) && ... for each of Items.
   // If Base is given, the items not derived from Base are skipped.
   template <typename Base = void>
-  constexpr bool EveryItem(auto&& callback) {
-    return OnItems([&](auto&... item) { return (IfBase<Base, true>(item, callback), ...); });
-  }
-  template <typename Base = void>
-  constexpr bool EveryItem(auto&& callback) const {
-    return OnItems([&](auto&... item) { return (IfBase<Base, true>(item, callback), ...); });
+  constexpr bool EveryItem(this auto&& self, auto&& callback) {
+    return self.OnItems([&](auto&... item) { return (IfBase<Base, true>(item, callback), ...); });
   }
 
   // Returns callback(item) || ... for each of Items.
   // If Base is given, the items not derived from Base are skipped.
   template <typename Base = void>
-  constexpr bool AnyItem(auto&& callback) {
-    return OnItems([&](auto&... item) { return (IfBase<Base, false>(item, callback), ...); });
-  }
-  template <typename Base = void>
-  constexpr bool AnyItem(auto&& callback) const {
-    return OnItems([&](auto&... item) { return (IfBase<Base, false>(item, callback), ...); });
+  constexpr bool AnyItem(this auto&& self, auto&& callback) {
+    return self.OnItems([&](auto&... item) { return (IfBase<Base, false>(item, callback), ...); });
   }
 
   // This takes any number of callbacks invocable as void(Item&) for some Item
@@ -307,12 +303,8 @@ class BootShim : public BootShimBase {
   // this, runtime tests are required to ensure that each callback has the
   // correct signature to get called when it's meant to be.
   template <typename... T>
-  constexpr void OnInvocableItems(T&&... callbacks) {
-    return OnItems(OnInvocableCallback(callbacks...));
-  }
-  template <typename... T>
-  constexpr void OnInvocableItems(T&&... callbacks) const {
-    return OnItems(OnInvocableCallback(callbacks...));
+  constexpr void OnInvocableItems(this auto&& self, T&&... callbacks) {
+    return self.OnItems(OnInvocableCallback(callbacks...));
   }
 
  private:

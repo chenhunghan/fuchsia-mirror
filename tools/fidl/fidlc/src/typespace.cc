@@ -216,6 +216,7 @@ Type* Typespace::Creator::Create() {
     case Builtin::Identity::kFrameworkErr:
       return CreateInternalType(BuiltinToInternalSubtype(builtin->id).value());
     case Builtin::Identity::kOptional:
+    case Builtin::Identity::kNonZero:
     case Builtin::Identity::kMax:
     case Builtin::Identity::kNext:
     case Builtin::Identity::kHead:

@@ -53,6 +53,8 @@ def _write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
         path.unlink()
+    elif path.exists() and path.read_text() == content:
+        return
     path.write_text(content)
 
 
@@ -63,7 +65,11 @@ def _create_symlink(dst_path: Path, target_path: Path) -> None:
     if not target_path.is_absolute():
         target_path = target_path.resolve()
     target_path = Path(os.path.relpath(target_path, dst_dir))
-    if dst_path.is_symlink() or dst_path.exists():
+    if dst_path.is_symlink():
+        if os.readlink(dst_path) == str(target_path):
+            return
+        dst_path.unlink()
+    elif dst_path.exists():
         dst_path.unlink()
     dst_path.symlink_to(target_path)
 
@@ -223,6 +229,15 @@ class OutputIdk(object):
     def add_file(
         self, relpath: str, content: str, is_meta: bool = False
     ) -> None:
+        self.add_unexported_file(relpath, content)
+        self.add_final_file(relpath, is_meta)
+
+    def add_unexported_file(self, relpath: str, content: str) -> None:
+        """Add a file without exporting it from a Bazel package.
+
+        Unlike add_file(), this does not create a BUILD.bazel file in the
+        file's directory.
+        """
         cur_content = self._files.setdefault(relpath, content)
         assert (
             cur_content == content
@@ -230,7 +245,6 @@ class OutputIdk(object):
         assert (
             relpath not in self._symlinks
         ), f"Cannot add file {relpath} over existing symlink"
-        self.add_final_file(relpath, is_meta)
 
     def add_json_file(
         self, relpath: str, json_content: T.Any, is_meta: bool = False
@@ -271,8 +285,7 @@ class OutputIdk(object):
         # Write all package BUILD.bazel files.
         for package_dir, package_info in self._packages.items():
             package_path = self._output_dir / package_dir / "BUILD.bazel"
-            package_path.parent.mkdir(parents=True, exist_ok=True)
-            package_path.write_text(package_info.generate_build_bazel())
+            _write_file(package_path, package_info.generate_build_bazel())
 
         # Create symlinks.
         for link_relpath, target_path in self._symlinks.items():
@@ -282,8 +295,7 @@ class OutputIdk(object):
         # Write files.
         for file_relpath, content in self._files.items():
             file_path = self._output_dir / file_relpath
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content)
+            _write_file(file_path, content)
 
 
 class PathRewriter(object):
@@ -618,11 +630,16 @@ def GenerateIdkRepository(
 
     output_idk = OutputIdk(output_dir)
 
-    # Symlink then source meta/manifest.json
+    # Write meta/manifest.json directly rather than symlinking to input_dir,
+    # since IdkGenerator recreates input_dir from scratch on every regen and
+    # bumping meta/manifest.json's mtime would invalidate @fuchsia_sdk in Bazel.
+    # Don't export it, since a meta/BUILD.bazel file would break references
+    # to meta/manifest.json from the root package.
     input_manifest_path = input_dir / _IDK_MANIFEST_RELPATH
-    input_manifest = json.load(input_manifest_path.open())
+    input_manifest_text = input_manifest_path.read_text()
+    input_manifest = json.loads(input_manifest_text)
 
-    output_idk.add_symlink(_IDK_MANIFEST_RELPATH, input_manifest_path)
+    output_idk.add_unexported_file(_IDK_MANIFEST_RELPATH, input_manifest_text)
 
     rewriter = PathRewriter(name, output_idk, input_dir, ninja_build_dir)
 

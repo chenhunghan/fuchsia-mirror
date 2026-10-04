@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use crate::config_management::{self};
-use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_policy as fidl_policy;
 use fidl_fuchsia_wlan_sme as fidl_sme;
 use fuchsia_async::MonotonicInstant;
@@ -139,12 +138,6 @@ pub struct Signal {
     pub rssi_dbm: i8,
     /// Signal to noise ratio  for the beacon/probe response.
     pub snr_db: i8,
-}
-
-impl From<fidl_internal::SignalReportIndication> for Signal {
-    fn from(ind: fidl_internal::SignalReportIndication) -> Signal {
-        Signal { rssi_dbm: ind.rssi_dbm, snr_db: ind.snr_db }
-    }
 }
 
 // For tracking the past signal reports

@@ -268,6 +268,60 @@ constexpr bool OnModuleWritableSegments(const auto& module,
   return elfldltl::OnPhdrWritableSegments(module.phdrs.get(), on_segment);
 }
 
+// Return a callable object (also a random_access_range of F*) for calling the
+// module's initializers.
+template <typename F = elfldltl::InitFiniFunction, class Module = abi::Abi<>::Module>
+constexpr elfldltl::InitFiniCallableApi<F> auto ModuleCallableInit(const Module& module) {
+  return module.init.template callable_init<F>(module.link_map.addr);
+}
+
+// Return a callable object (also a random_access_range of F*) for calling the
+// module's finalizers.
+template <typename F = elfldltl::InitFiniFunction, class Module = abi::Abi<>::Module>
+[[nodiscard]] constexpr elfldltl::InitFiniCallableApi<F> auto ModuleCallableFini(
+    const Module& module) {
+  return module.fini.template callable_fini<F>(module.link_map.addr);
+}
+
+template <typename T, typename F = elfldltl::InitFiniFunction>
+concept InitFiniRange =  //
+    elfldltl::InvocableAs<T, F> && std::ranges::bidirectional_range<T> &&
+    elfldltl::InitFiniCallableApi<std::ranges::range_value_t<T>, F>;
+
+// Turn a list of modules into a list of InitFiniCallableApi<F> initializers
+// that is itself callable like F to call all of them in turn.  Modules get
+// their initializers run in reverse load order: the executable's run last.
+template <typename F = elfldltl::InitFiniFunction, std::ranges::input_range R>
+[[nodiscard]] constexpr InitFiniRange<F> auto CallableInitList(R&& modules) {
+  using Module = std::ranges::range_value_t<R>;
+  return elfldltl::CallableAs<F>(  //
+      std::views::transform(std::views::reverse(std::forward<R>(modules)),
+                            ModuleCallableInit<F, Module>));
+}
+
+// Turn a list of modules into a list of InitFiniCallableApi<F> finalizers.
+// that is itself callable like F to call all of them in turn.  Initializers
+// ran in reverse load order via CallableInitList(), so finalizers are in load
+// order here: the executable's run first.
+template <typename F = elfldltl::InitFiniFunction, std::ranges::forward_range R>
+[[nodiscard]] constexpr InitFiniRange<F> auto CallableFiniList(R&& modules) {
+  using Module = std::ranges::range_value_t<R>;
+  return elfldltl::CallableAs<F>(
+      std::views::transform(std::forward<R>(modules), ModuleCallableFini<F, Module>));
+}
+
+template <typename F = elfldltl::InitFiniFunction, class Elf = elfldltl::Elf<>>
+[[nodiscard]] constexpr std::ranges::bidirectional_range auto AbiCallableInit(
+    const abi::Abi<Elf>& abi) {
+  return CallableInitList<F>(AbiLoadedModules(abi));
+}
+
+template <typename F = elfldltl::InitFiniFunction, class Elf = elfldltl::Elf<>>
+[[nodiscard]] constexpr std::ranges::bidirectional_range auto AbiCallableFini(
+    const abi::Abi<Elf>& abi) {
+  return CallableFiniList<F>(AbiLoadedModules(abi));
+}
+
 }  // namespace ld
 
 #endif  // LIB_LD_MODULE_H_

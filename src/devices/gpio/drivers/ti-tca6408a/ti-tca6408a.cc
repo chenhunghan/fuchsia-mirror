@@ -91,8 +91,7 @@ zx::result<> TiTca6408aDevice::CreateNode() {
     offers.push_back(std::move(scheduler_role_name_offer.value()));
   }
 
-  zx::result child =
-      AddChild(kDeviceName, std::vector<fuchsia_driver_framework::NodeProperty>{}, offers);
+  zx::result child = AddChild(kDeviceName, {}, offers);
   if (child.is_error()) {
     fdf::error("Failed to add child: {}", child);
     return child.take_error();

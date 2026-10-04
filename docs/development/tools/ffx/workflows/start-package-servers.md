@@ -59,24 +59,16 @@ packages based on the target device's network connection. For example, when
 non-ffx commands are needed for tunneling or firewall configuration, specifying
 a port is needed to match configuration in these other tools.
 
-#### --background, --daemon, --foreground
+#### --background, --foreground
 
 The execution mode of the package server. These options are mutually exclusive;
 only 1 of the execution modes can be used at a time.
 
 * `--background` Indicates the package server will be started in the
-   background. This is mutually exclusive with `--foreground` and `--daemon`.
-
-* `--daemon`  Indicates the package server will be started as part of the ffx
-   daemon. This mode should be considered deprecated and only be used when using
-   `--background` or `--foreground` is not acceptable. Until the deprecation and
-   removal is complete, `--daemon` is the default mode to ensure backwards
-   compatibility.
-    Note: If you must use `--daemon`, please [file an issue][ffx-bug] explaining the
-    missing functionality so the package server can be improved.
+   background. This is mutually exclusive with `--foreground`.
 
 * `--foreground` Indicates the package server will be started in the foreground.
-   This is mutually exclusive with `--background` and `--daemon`.
+   This is the default mode. This is mutually exclusive with `--background`.
 
 There are no configuration properties that affect the execution mode. The
 execution mode of the package server is the source of many, sometimes subtle,
@@ -90,9 +82,7 @@ These are specific switches vs. an option with enumerated values so insight can
 be gathered via command line analytics. Switches appear in the analytics, the
 value of an option does not.
 
-Since the default behavior via the SDK is to run a daemon based package server,
-that is the default for the time being. The package server is migrating to the
-foreground being the default so it is obvious that the package server is
+Foreground is the default so it is obvious that the package server is
 running, and is the most simplistic execution model.
 
 Background is a desirable mode for remote workflows so there can be one remote
@@ -108,9 +98,6 @@ The default value is devhost. Primarily for historic reasons.
 
 There is no configuration properties affecting `repo-name`; Server names
 must be unique.
-
-In `--daemon` mode, this option is not allowed, since repositories are managed
-using other commands such as `ffx repository add-from-pm`.
 
 #### --repo-path
 
@@ -132,9 +119,6 @@ as the package server.
 
 This value is also referred to by the publishing tools, and represents a core
 characteristic of a development project environment.
-
-In `--daemon` mode, this option is not allowed,since repositories are managed
-using other commands such as `ffx repository add-from-pm`.
 
 #### --trusted-root
 

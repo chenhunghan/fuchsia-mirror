@@ -117,5 +117,6 @@ rustc_library("emboss_runtime") {
   visibility += [
     "//src/connectivity/bluetooth/sunstone:*",
     "//src/connectivity/bluetooth/sunstone/*",
+    "//third_party/rust_crates:*",
   ]
 }

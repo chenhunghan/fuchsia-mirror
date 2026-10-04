@@ -102,6 +102,7 @@ class DebugAdapterContext : public ThreadObserver,
 
   // BreakpointObserver implementation:
   void OnBreakpointMatched(Breakpoint* breakpoint, bool user_requested) override;
+  void OnBreakpointUpdateFailure(Breakpoint* breakpoint, const Err& err) override;
 
   // SystemObserver implementation:
   void WillDestroyFilter(Filter* filter) override;
@@ -139,6 +140,10 @@ class DebugAdapterContext : public ThreadObserver,
     return function_bps_;
   }
 
+  // Helper methods to get/set data breakpoint (watchpoint) mapping.
+  void StoreDataBreakpoint(Breakpoint* bp);
+  const std::vector<fxl::WeakPtr<Breakpoint>>& GetDataBreakpoints() const { return data_bps_; }
+
   // Helper methods to get/set breakpoint to ID mapping
   int64_t IdForBreakpoint(Breakpoint* breakpoint);
 
@@ -146,6 +151,7 @@ class DebugAdapterContext : public ThreadObserver,
   // Breakpoints added from console are not deleted.
   void DeleteBreakpointsForSource(const std::filesystem::path& source);
   void DeleteAllFunctionBreakpoints();
+  void DeleteAllDataBreakpoints();
   void DeleteAllBreakpoints();
 
   void StoreFilter(Filter* filter);
@@ -208,6 +214,9 @@ class DebugAdapterContext : public ThreadObserver,
 
   // Stores all function breakpoints added by the debug adapter client.
   std::vector<fxl::WeakPtr<Breakpoint>> function_bps_;
+
+  // Stores all data breakpoints (watchpoints) added by the debug adapter client.
+  std::vector<fxl::WeakPtr<Breakpoint>> data_bps_;
 
   // Stores all filters added by the debug adapter client.
   std::vector<Filter*> filters_;

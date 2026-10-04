@@ -388,7 +388,6 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
                     "obj/bazel/target2.bazel_outputs/foo",
                     "obj/bazel/target2.bazel_outputs/package_manifest.json",
                     "obj/some/target2.out",
-                    "build.ninja.stamp",
                     "test-list.json",
                     "test-config.json",
                 ]
@@ -465,6 +464,20 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         )
         self.assertSetEqual(result.affected_tests, set())
         self.assertTrue(result.build_not_affected)
+
+    def test_build_gn_change_affects_build(self) -> None:
+        # A BUILD.gn or .gni change that does not directly define a test (e.g.
+        # a test bundle in bundles/buildbot/.../BUILD.gn) causes Ninja to output
+        # build.ninja.stamp. Because build.ninja.stamp is part of this builder's
+        # build plan, build_not_affected must be False so all tests are run.
+        result = affected_tests.find_tests_affected_by_changed_files(
+            ["bundles/buildbot/some_bundle/BUILD.gn"],
+            self.root,
+            MockNinjaRunner(self.build_dir, "build.ninja.stamp\n"),
+            MockBazelLauncher.new_with_empty_outputs(),
+        )
+        self.assertSetEqual(result.affected_tests, set())
+        self.assertFalse(result.build_not_affected)
 
     def test_one_target_affected(self) -> None:
         targets = affected_tests.find_tests_affected_by_changed_files(

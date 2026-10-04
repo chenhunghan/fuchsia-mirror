@@ -2,6 +2,7 @@
 
 * [Supporting new languages](/docs/development/languages/new/structure.md)
 * [Linting and Formatting](/docs/development/languages/lint_and_format.md)
+* [Bazel (build files)](/docs/development/languages/bazel)
 * [C/C++](/docs/development/languages/c-cpp)
 * [FIDL](/docs/development/languages/fidl)
 * [Go](/docs/development/languages/go)

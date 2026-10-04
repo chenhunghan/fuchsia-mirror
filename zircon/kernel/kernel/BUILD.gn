@@ -48,6 +48,7 @@ source_set("kernel") {
     "timer.cc",
     "timer_ffi.cc",
     "wait.cc",
+    "wait_ffi.cc",
   ]
 
   deps = [
@@ -60,6 +61,7 @@ source_set("kernel") {
     "//zircon/kernel/lib/boot-options:headers",
     "//zircon/kernel/lib/console",
     "//zircon/kernel/lib/counters",
+    "//zircon/kernel/lib/cxxabi-dynamic-init",
     "//zircon/kernel/lib/fbl",
     "//zircon/kernel/lib/heap",
     "//zircon/kernel/lib/init",
@@ -86,14 +88,6 @@ source_set("kernel") {
     "//zircon/system/ulib/zircon-internal",
     "//zircon/system/ulib/zx",
   ]
-
-  # TODO(https://fxbug.dev/42101573): This dependency is conditional because when built
-  # with GCC the kernel uses function scoped statics requiring dynamic
-  # initialization. Once https://fxbug.dev/42101573 is fixed, this dependency can be made
-  # unconditional.
-  if (!is_gcc) {
-    deps += [ "//zircon/kernel/lib/cxxabi-dynamic-init" ]
-  }
 }
 
 library_headers("headers") {

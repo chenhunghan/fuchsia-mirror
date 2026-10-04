@@ -396,7 +396,7 @@ zx_status_t AmlClock::ClkToggle(uint32_t id, bool enable) {
 }
 
 void AmlClock::ClkToggleHw(const meson_clk_gate_t* gate, bool enable) {
-  uint32_t mask = gate->mask ? gate->mask : (1 << gate->bit);
+  uint32_t mask = gate->mask ? gate->mask : (1u << gate->bit);
   fdf::MmioBuffer* mmio;
   switch (gate->register_set) {
     case kMesonRegisterSetHiu:
@@ -410,9 +410,17 @@ void AmlClock::ClkToggleHw(const meson_clk_gate_t* gate, bool enable) {
   }
 
   if (enable) {
+    if (gate->hiu_mask) {
+      ZX_ASSERT(hiu_mmio_.has_value());
+      hiu_mmio_->ModifyBits32(gate->hiu_enable_val, gate->hiu_mask, gate->hiu_reg);
+    }
     mmio->SetBits32(mask, gate->reg);
   } else {
     mmio->ClearBits32(mask, gate->reg);
+    if (gate->hiu_mask) {
+      ZX_ASSERT(hiu_mmio_.has_value());
+      hiu_mmio_->ModifyBits32(gate->hiu_disable_val, gate->hiu_mask, gate->hiu_reg);
+    }
   }
 }
 
@@ -742,6 +750,7 @@ void AmlClock::GetCount(GetCountCompleter::Sync& completer) {
 }
 
 AmlClock::~AmlClock() {
+  hiudev_.reset();
   hiu_mmio_.reset();
 
   if (msr_mmio_) {
@@ -781,7 +790,9 @@ zx_status_t AmlClock::GetMesonRateClock(const uint32_t id, MesonRateClock** out)
 
 void AmlClock::InitHiu() {
   pllclk_.reserve(pll_count_);
-  s905d2_hiu_init_etc(&*hiudev_, hiu_mmio_->View(0));
+  ZX_ASSERT(hiu_mmio_.has_value());
+  s905d2_hiu_init_etc(&hiudev_, hiu_mmio_->View(0));
+  ZX_ASSERT(hiudev_.has_value());
   for (unsigned int pllnum = 0; pllnum < pll_count_; pllnum++) {
     const hhi_plls_t pll = static_cast<hhi_plls_t>(pllnum);
     pllclk_.emplace_back(pll, &*hiudev_);

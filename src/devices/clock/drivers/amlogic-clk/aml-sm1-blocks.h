@@ -11,15 +11,15 @@
 #include "aml-g12a-blocks.h"
 
 namespace sm1_clk {
-constexpr uint32_t kHhiGp1PllCntl0 = 0x18;
-constexpr uint32_t kHhiSysCpuClkCntl5 = 0x87;
-constexpr uint32_t kHhiSysCpuClkCntl6 = 0x88;
+constexpr uint32_t kHhiGp1PllCntl0 = (0x18u << 2u);
+constexpr uint32_t kHhiSysCpuClkCntl5 = (0x87u << 2u);
+constexpr uint32_t kHhiSysCpuClkCntl6 = (0x88u << 2u);
 
 constexpr uint32_t kDosGclkEn0 = (0x3f01 << 2);
 
 }  // namespace sm1_clk
 
-static constexpr meson_clk_gate_t sm1_clk_gates[] = {
+inline constexpr meson_clk_gate_t sm1_clk_gates[] = {
     // SYS CPU Clock gates.
     {.reg = kHhiSysCpuClkCntl1, .bit = 24},  // CLK_SYS_PLL_DIV16
     {.reg = kHhiSysCpuClkCntl1, .bit = 1},   // CLK_SYS_CPU_CLK_DIV16
@@ -99,10 +99,16 @@ static constexpr meson_clk_gate_t sm1_clk_gates[] = {
     {.reg = kHhiSpiccClkCntl, .bit = 6},   // CLK_SPICC0_GATE
     {.reg = kHhiSpiccClkCntl, .bit = 22},  // CLK_SPICC1_GATE
 
-    {.reg = kDosGclkEn0,
-     .bit = 0,
-     .register_set = kMesonRegisterSetDos,
-     .mask = 0x3ff},  // CLK_DOS_GCLK_VDEC
+    {
+        .reg = kDosGclkEn0,
+        .bit = 0,
+        .register_set = kMesonRegisterSetDos,
+        .mask = 0x3ff,
+        .hiu_reg = kHhiVdecClkCntl,
+        .hiu_mask = kHhiVdecClkCntlVdecMask,
+        .hiu_enable_val = kHhiVdecClkCntlVdecEnableVal,
+        .hiu_disable_val = kHhiVdecClkCntlVdecDisableVal,
+    },  // CLK_DOS_GCLK_VDEC
 
     // SM1 Specific Clock Gates.
     {.reg = kHhiGclkMpeg1, .bit = 18},  // CLK_CSI_DIG
@@ -117,9 +123,9 @@ static constexpr meson_clk_gate_t sm1_clk_gates[] = {
 static_assert(sm1_clk::CLK_SM1_GATE_COUNT == std::size(sm1_clk_gates),
               "sm1_clk_gates[] and CLK_SM1_COUNT count mismatch");
 
-static constexpr uint32_t kGenClkSelInputs[] = {0, 5, 6, 7, 20, 21, 22, 23, 24, 25, 26, 27, 28};
-static constexpr uint32_t kClk81Inputs[] = {6, 5, 7};
-static constexpr meson_clk_mux_t sm1_muxes[] = {
+inline constexpr uint32_t kGenClkSelInputs[] = {0, 5, 6, 7, 20, 21, 22, 23, 24, 25, 26, 27, 28};
+inline constexpr uint32_t kClk81Inputs[] = {6, 5, 7};
+inline constexpr meson_clk_mux_t sm1_muxes[] = {
     {.reg = kHhiGenClkCntl,
      .mask = 0x1f,
      .shift = 12,
@@ -175,12 +181,12 @@ static constexpr meson_clk_mux_t sm1_muxes[] = {
 static_assert(sm1_clk::CLK_SM1_MUX_COUNT == std::size(sm1_muxes),
               "sm1_clk_muxes and CLK_SM1_MUX_COUNT count mismatch");
 
-static constexpr meson_clk_msr_t sm1_clk_msr = {
+inline constexpr meson_clk_msr_t sm1_clk_msr = {
     .reg0_offset = (0x1 << 2),
     .reg2_offset = (0x3 << 2),
 };
 
-static const char* const sm1_clk_table[] = {
+inline constexpr const char* const sm1_clk_table[] = {
     "am_ring_osc_clk_out_ee[0]",
     "am_ring_osc_clk_out_ee[1]",
     "am_ring_osc_clk_out_ee[2]",

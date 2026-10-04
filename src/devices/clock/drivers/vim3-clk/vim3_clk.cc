@@ -313,14 +313,20 @@ zx_status_t Vim3Clock::GetMesonRateClock(uint32_t clk, MesonRateClock** out) {
 
 void Vim3Clock::InitGates() {
   ZX_ASSERT_MSG(gates_.empty(), "Gates has already been initialized");
+  ZX_ASSERT(hiu_mmio_.has_value());
+  ZX_ASSERT(dos_mmio_.has_value());
+  gates_.reserve(std::size(kGateDescriptors));
+
+  const fdf::MmioView hiu_view = hiu_mmio_->View(0);
+  const fdf::MmioView dos_view = dos_mmio_->View(0);
 
   for (const meson_gate_descriptor_t& desc : kGateDescriptors) {
     switch (desc.bank) {
       case RegisterBank::Hiu:
-        gates_.emplace_back(desc.id, desc.offset, desc.mask, hiu_mmio_->View(0));
+        gates_.emplace_back(desc, hiu_view, hiu_view);
         break;
       case vim3_clock::RegisterBank::Dos:
-        gates_.emplace_back(desc.id, desc.offset, desc.mask, dos_mmio_->View(0));
+        gates_.emplace_back(desc, dos_view, hiu_view);
         break;
     }
   }
@@ -330,7 +336,9 @@ void Vim3Clock::InitGates() {
 
 void Vim3Clock::InitHiu() {
   plls_.reserve(HIU_PLL_COUNT);
-  s905d2_hiu_init_etc(&*hiudev_, hiu_mmio_->View(0));
+  ZX_ASSERT(hiu_mmio_.has_value());
+  s905d2_hiu_init_etc(&hiudev_, hiu_mmio_->View(0));
+  ZX_ASSERT(hiudev_.has_value());
   for (unsigned int pllnum = 0; pllnum < HIU_PLL_COUNT; pllnum++) {
     const hhi_plls_t pll = static_cast<hhi_plls_t>(pllnum);
     auto& newpll = plls_.emplace_back(pll, &*hiudev_);

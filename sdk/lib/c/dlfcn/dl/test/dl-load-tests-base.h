@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef LIB_DL_TEST_DL_LOAD_TESTS_BASE_H_
-#define LIB_DL_TEST_DL_LOAD_TESTS_BASE_H_
+#ifndef LIB_C_DLFCN_DL_TEST_DL_LOAD_TESTS_BASE_H_
+#define LIB_C_DLFCN_DL_TEST_DL_LOAD_TESTS_BASE_H_
 
 #include <lib/elfldltl/mmap-loader.h>
 #include <lib/elfldltl/unique-fd.h>
@@ -91,4 +91,4 @@ class DlLoadTestsBase : public DlTestsBase {
 
 }  // namespace dl::testing
 
-#endif  // LIB_DL_TEST_DL_LOAD_TESTS_BASE_H_
+#endif  // LIB_C_DLFCN_DL_TEST_DL_LOAD_TESTS_BASE_H_

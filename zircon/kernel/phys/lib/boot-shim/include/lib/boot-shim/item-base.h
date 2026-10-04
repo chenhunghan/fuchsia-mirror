@@ -8,6 +8,7 @@
 #define ZIRCON_KERNEL_PHYS_LIB_BOOT_SHIM_INCLUDE_LIB_BOOT_SHIM_ITEM_BASE_H_
 
 #include <lib/fit/result.h>
+#include <lib/stdcompat/inplace_vector.h>
 #include <lib/zbi-format/zbi.h>
 #include <lib/zbitl/image.h>
 #include <lib/zbitl/view.h>
@@ -179,6 +180,32 @@ class SingleVariantItemBase : public ItemBase {
 
  private:
   std::variant<std::monostate, Payload...> payload_;
+};
+
+// This uses an inplace_vector to store a variable number, up to a fixed,
+// in-object limit, of any Item type (some other ItemBase subclass).  Use this
+// when some other class implements a singleton item, but there may be a
+// dynamic need for multiple items of that same type.
+template <class Item, size_t N>
+class Multiple : public ItemBase, public cpp26::inplace_vector<Item, N> {
+ public:
+  constexpr size_t size_bytes() const {
+    size_t total = 0;
+    for (const auto& item : *this) {
+      total += item.size_bytes();
+    }
+    return total;
+  }
+
+  fit::result<DataZbi::Error> AppendItems(DataZbi& zbi) const {
+    for (const auto& item : *this) {
+      fit::result<DataZbi::Error> result = item.AppendItems(zbi);
+      if (result.is_error()) {
+        return result;
+      }
+    }
+    return fit::ok();
+  }
 };
 
 }  // namespace boot_shim

@@ -11,7 +11,7 @@ using zx;
 closed protocol IhdaCodec {
     /// Fetch a zx_handle_t to a channel which can be used to communicate with the codec device.
     strict GetDriverChannel() -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         channel zx.Handle:CHANNEL;
     });
 };

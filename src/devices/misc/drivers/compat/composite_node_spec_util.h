@@ -12,22 +12,19 @@
 
 #include <bind/fuchsia/cpp/bind.h>
 
-inline zx::result<fuchsia_driver_framework::wire::BindRule> ConvertBindRuleToFidl(
+inline zx::result<fuchsia_driver_framework::wire::BindRule2> ConvertBindRuleToFidl(
     fidl::AnyArena& allocator, const bind_rule_t& bind_rule) {
-  fuchsia_driver_framework::wire::NodePropertyKey property_key;
+  fidl::StringView key;
 
   switch (bind_rule.key.key_type) {
     case DEVICE_BIND_PROPERTY_KEY_INT: {
-      property_key =
-          fuchsia_driver_framework::wire::NodePropertyKey::WithIntValue(bind_rule.key.data.int_key);
-      break;
+      return zx::error(ZX_ERR_NOT_SUPPORTED);
     }
     case DEVICE_BIND_PROPERTY_KEY_STRING: {
       if (bind_rule.key.data.str_key == nullptr) {
         return zx::error(ZX_ERR_INVALID_ARGS);
       }
-      property_key = fuchsia_driver_framework::wire::NodePropertyKey::WithStringValue(
-          allocator, allocator, bind_rule.key.data.str_key);
+      key = fidl::StringView(allocator, bind_rule.key.data.str_key);
       break;
     }
     default: {
@@ -95,29 +92,26 @@ inline zx::result<fuchsia_driver_framework::wire::BindRule> ConvertBindRuleToFid
     }
   }
 
-  return zx::ok(fuchsia_driver_framework::wire::BindRule{
-      .key = property_key,
+  return zx::ok(fuchsia_driver_framework::wire::BindRule2{
+      .key = key,
       .condition = condition,
       .values = bind_rule_values,
   });
 }
 
-inline zx::result<fuchsia_driver_framework::wire::NodeProperty> ConvertBindPropToFidl(
+inline zx::result<fuchsia_driver_framework::wire::NodeProperty2> ConvertBindPropToFidl(
     fidl::AnyArena& allocator, const device_bind_prop_t& bind_prop) {
-  auto node_property = fuchsia_driver_framework::wire::NodeProperty{};
+  fidl::StringView key;
 
   switch (bind_prop.key.key_type) {
     case DEVICE_BIND_PROPERTY_KEY_INT: {
-      node_property.key =
-          fuchsia_driver_framework::wire::NodePropertyKey::WithIntValue(bind_prop.key.data.int_key);
-      break;
+      return zx::error(ZX_ERR_NOT_SUPPORTED);
     }
     case DEVICE_BIND_PROPERTY_KEY_STRING: {
       if (bind_prop.key.data.str_key == nullptr) {
         return zx::error(ZX_ERR_INVALID_ARGS);
       }
-      node_property.key = fuchsia_driver_framework::wire::NodePropertyKey::WithStringValue(
-          allocator, allocator, bind_prop.key.data.str_key);
+      key = fidl::StringView(allocator, bind_prop.key.data.str_key);
       break;
     }
     default: {
@@ -125,9 +119,10 @@ inline zx::result<fuchsia_driver_framework::wire::NodeProperty> ConvertBindPropT
     }
   }
 
+  fuchsia_driver_framework::wire::NodePropertyValue node_property_value;
   switch (bind_prop.value.data_type) {
     case ZX_DEVICE_PROPERTY_VALUE_INT: {
-      node_property.value = fuchsia_driver_framework::wire::NodePropertyValue::WithIntValue(
+      node_property_value = fuchsia_driver_framework::wire::NodePropertyValue::WithIntValue(
           bind_prop.value.data.int_value);
       break;
     }
@@ -135,12 +130,12 @@ inline zx::result<fuchsia_driver_framework::wire::NodeProperty> ConvertBindPropT
       if (bind_prop.value.data.str_value == nullptr) {
         return zx::error(ZX_ERR_INVALID_ARGS);
       }
-      node_property.value = fuchsia_driver_framework::wire::NodePropertyValue::WithStringValue(
+      node_property_value = fuchsia_driver_framework::wire::NodePropertyValue::WithStringValue(
           allocator, allocator, bind_prop.value.data.str_value);
       break;
     }
     case ZX_DEVICE_PROPERTY_VALUE_BOOL: {
-      node_property.value = fuchsia_driver_framework::wire::NodePropertyValue::WithBoolValue(
+      node_property_value = fuchsia_driver_framework::wire::NodePropertyValue::WithBoolValue(
           bind_prop.value.data.bool_value);
       break;
     }
@@ -148,7 +143,7 @@ inline zx::result<fuchsia_driver_framework::wire::NodeProperty> ConvertBindPropT
       if (bind_prop.value.data.enum_value == nullptr) {
         return zx::error(ZX_ERR_INVALID_ARGS);
       }
-      node_property.value = fuchsia_driver_framework::wire::NodePropertyValue::WithEnumValue(
+      node_property_value = fuchsia_driver_framework::wire::NodePropertyValue::WithEnumValue(
           fidl::ObjectView<fidl::StringView>(allocator, allocator,
                                              bind_prop.value.data.enum_value));
       break;
@@ -158,10 +153,13 @@ inline zx::result<fuchsia_driver_framework::wire::NodeProperty> ConvertBindPropT
     }
   }
 
-  return zx::ok(node_property);
+  return zx::ok(fuchsia_driver_framework::wire::NodeProperty2{
+      .key = key,
+      .value = node_property_value,
+  });
 }
 
-inline zx::result<fuchsia_driver_framework::wire::ParentSpec> ConvertNodeRepresentation(
+inline zx::result<fuchsia_driver_framework::wire::ParentSpec2> ConvertNodeRepresentation(
     fidl::AnyArena& allocator, const parent_spec_t& node) {
   if (node.bind_rule_count > 0 && node.bind_rules == nullptr) {
     return zx::error(ZX_ERR_INVALID_ARGS);
@@ -170,8 +168,8 @@ inline zx::result<fuchsia_driver_framework::wire::ParentSpec> ConvertNodeReprese
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
-  fidl::VectorView<fuchsia_driver_framework::wire::BindRule> bind_rules(allocator,
-                                                                        node.bind_rule_count);
+  fidl::VectorView<fuchsia_driver_framework::wire::BindRule2> bind_rules(allocator,
+                                                                         node.bind_rule_count);
   for (size_t i = 0; i < node.bind_rule_count; i++) {
     auto bind_rule_result = ConvertBindRuleToFidl(allocator, node.bind_rules[i]);
     if (!bind_rule_result.is_ok()) {
@@ -199,7 +197,7 @@ inline zx::result<fuchsia_driver_framework::wire::ParentSpec> ConvertNodeReprese
 
   const bool add_service_prop = !has_service_property && !service_name.empty();
   const size_t prop_count = node.property_count + (add_service_prop ? 1 : 0);
-  fidl::VectorView<fuchsia_driver_framework::wire::NodeProperty> props(allocator, prop_count);
+  fidl::VectorView<fuchsia_driver_framework::wire::NodeProperty2> props(allocator, prop_count);
   for (size_t i = 0; i < node.property_count; i++) {
     auto prop_result = ConvertBindPropToFidl(allocator, node.properties[i]);
     if (!prop_result.is_ok()) {
@@ -209,15 +207,14 @@ inline zx::result<fuchsia_driver_framework::wire::ParentSpec> ConvertNodeReprese
   }
 
   if (add_service_prop) {
-    props[node.property_count] = fuchsia_driver_framework::wire::NodeProperty{
-        .key = fuchsia_driver_framework::wire::NodePropertyKey::WithStringValue(
-            allocator, allocator, bind_fuchsia::SERVICE),
+    props[node.property_count] = fuchsia_driver_framework::wire::NodeProperty2{
+        .key = fidl::StringView(allocator, bind_fuchsia::SERVICE),
         .value = fuchsia_driver_framework::wire::NodePropertyValue::WithStringValue(
             allocator, allocator, service_name),
     };
   }
 
-  return zx::ok(fuchsia_driver_framework::wire::ParentSpec{
+  return zx::ok(fuchsia_driver_framework::wire::ParentSpec2{
       .bind_rules = bind_rules,
       .properties = props,
   });

@@ -27,7 +27,7 @@ pub enum Nat64State {
 
 impl From<otNat64State> for Nat64State {
     fn from(x: otNat64State) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x).unwrap_or_else(|| panic!("Unknown otNat64State value: {x}"))
     }
 }

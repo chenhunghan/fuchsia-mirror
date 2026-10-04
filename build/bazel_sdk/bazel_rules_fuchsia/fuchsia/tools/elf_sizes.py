@@ -5,6 +5,7 @@
 # found in the LICENSE file.
 
 import argparse
+import errno
 import json
 import math
 import mmap
@@ -12,10 +13,11 @@ import os
 import struct
 import sys
 from collections import namedtuple
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, Protocol
 
 # Standard ELF constants.
 ELFMAG = b"\x7fELF"
@@ -68,18 +70,18 @@ class elf_note(
     )
 ):
     # An ELF note is identified by (name_string, type_integer).
-    def ident(self):
+    def ident(self) -> tuple[str, int]:
         return (self.name, self.type)
 
-    def is_build_id(self):
+    def is_build_id(self) -> bool:
         return self.ident() == ("GNU\0", NT_GNU_BUILD_ID)
 
-    def build_id_hex(self):
+    def build_id_hex(self) -> str | None:
         if self.is_build_id():
             return "".join(("%02x" % byte) for byte in self.desc)
         return None
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "elf_note(%r, %#x, <%d bytes>)" % (
             self.name,
             self.type,
@@ -87,10 +89,77 @@ class elf_note(
         )
 
 
-def gen_elf():
+# The contents of a file as yielded by mmapper().
+ElfFileContents = mmap.mmap | bytes
+
+
+# The records returned by ElfStructAccessor.read() are namedtuples created at
+# runtime, so these Protocols describe the fields this module uses.
+class Ehdr(Protocol):
+    e_type: int
+    e_machine: int
+    e_phoff: int
+    e_shoff: int
+    e_phentsize: int
+    e_phnum: int
+    e_shnum: int
+    e_shstrndx: int
+
+
+class Phdr(Protocol):
+    p_type: int
+    p_flags: int
+    p_offset: int
+    p_vaddr: int
+    p_filesz: int
+    p_memsz: int
+    p_align: int
+
+
+class Shdr(Protocol):
+    sh_name: int
+    sh_type: int
+    sh_flags: int
+    sh_offset: int
+    sh_size: int
+
+
+class Dyn(Protocol):
+    d_tag: int
+    d_val: int
+
+
+class ElfStructAccessor(NamedTuple):
+    """Decoder/encoder for one ELF struct type, e.g. Ehdr."""
+
+    size: int
+    # Like struct.Struct.unpack_from, but returns a namedtuple of the fields.
+    read: Callable[..., Any]
+    write: Callable[..., None]
+    pack: Callable[..., bytes]
+
+
+class ElfAccessor(NamedTuple):
+    """All the struct accessors for one ELF (class, byte-order) format."""
+
+    Ehdr: ElfStructAccessor
+    Phdr: ElfStructAccessor
+    Shdr: ElfStructAccessor
+    Dyn: ElfStructAccessor
+    Nhdr: ElfStructAccessor
+    dwarf2_line_header: ElfStructAccessor
+    dwarf4_line_header: ElfStructAccessor
+
+
+_StructFields = list[tuple[str, str]]
+
+
+def gen_elf() -> Iterator[tuple[tuple[int, int], ElfAccessor]]:
     # { 'Struct1': (ELFCLASS32 fields, ELFCLASS64 fields),
     #   'Struct2': fields_same_for_both, ... }
-    elf_types = {
+    elf_types: dict[
+        str, _StructFields | tuple[_StructFields, _StructFields]
+    ] = {
         "Ehdr": (
             [
                 ("e_ident", "16s"),
@@ -211,18 +280,14 @@ def gen_elf():
         ],
     }
 
-    # There is an accessor for each struct, e.g. Ehdr.
-    # Ehdr.read is a function like Struct.unpack_from.
-    # Ehdr.size is the size of the struct.
-    elf_accessor = namedtuple("elf_accessor", ["size", "read", "write", "pack"])
-
-    # All the accessors for a format (class, byte-order) form one elf,
-    # e.g. use elf.Ehdr and elf.Phdr.
-    elf = namedtuple("elf", list(elf_types.keys()))
-
-    def gen_accessors(is64, struct_byte_order):
-        def make_accessor(type, decoder):
-            return elf_accessor(
+    def gen_accessors(
+        is64: bool, struct_byte_order: str
+    ) -> Iterator[tuple[str, ElfStructAccessor]]:
+        # The record type is a namedtuple created at runtime.
+        def make_accessor(
+            type: Any, decoder: struct.Struct
+        ) -> ElfStructAccessor:
+            return ElfStructAccessor(
                 size=decoder.size,
                 read=lambda buffer, offset=0: type._make(
                     decoder.unpack_from(buffer, offset)
@@ -236,22 +301,28 @@ def gen_elf():
         for name, fields in elf_types.items():
             if isinstance(fields, tuple):
                 fields = fields[1 if is64 else 0]
-            type = namedtuple(name, [field_name for field_name, fmt in fields])
+            # The field names are computed, which mypy can't analyze.
+            type = namedtuple(  # type: ignore[misc]
+                name, [field_name for field_name, fmt in fields]
+            )
             decoder = struct.Struct(
                 struct_byte_order + "".join(fmt for field_name, fmt in fields)
             )
-            yield make_accessor(type, decoder)
+            yield name, make_accessor(type, decoder)
 
     for elfclass, is64 in [(ELFCLASS32, False), (ELFCLASS64, True)]:
         for elf_bo, struct_bo in [(ELFDATA2LSB, "<"), (ELFDATA2MSB, ">")]:
-            yield ((elfclass, elf_bo), elf(*gen_accessors(is64, struct_bo)))
+            yield (
+                (elfclass, elf_bo),
+                ElfAccessor(**dict(gen_accessors(is64, struct_bo))),
+            )
 
 
 # e.g. ELF[file[EI_CLASS], file[EI_DATA]].Ehdr.read(file).e_phnum
 ELF = dict(gen_elf())
 
 
-def get_elf_accessor(file):
+def get_elf_accessor(file: ElfFileContents) -> ElfAccessor | None:
     # If it looks like an ELF file, whip out the decoder ring.
     if file[: len(ELFMAG)] == ELFMAG:
         return ELF.get(
@@ -264,12 +335,16 @@ def get_elf_accessor(file):
     return None
 
 
-def gen_phdrs(file, elf, ehdr):
+def gen_phdrs(
+    file: ElfFileContents, elf: ElfAccessor, ehdr: Ehdr
+) -> Iterator[Phdr]:
     for pos in range(0, ehdr.e_phnum * elf.Phdr.size, elf.Phdr.size):
         yield elf.Phdr.read(file, ehdr.e_phoff + pos)
 
 
-def gen_shdrs(file, elf, ehdr):
+def gen_shdrs(
+    file: ElfFileContents, elf: ElfAccessor, ehdr: Ehdr
+) -> Iterator[Shdr]:
     for pos in range(0, ehdr.e_shnum * elf.Shdr.size, elf.Shdr.size):
         yield elf.Shdr.read(file, ehdr.e_shoff + pos)
 
@@ -295,7 +370,7 @@ ELF_MACHINE_TO_CPU = {
 
 
 @contextmanager
-def mmapper(filename):
+def mmapper(filename: str) -> Iterator[tuple[int, ElfFileContents, int]]:
     """A context manager that yields (fd, file_contents) given a file name.
     This ensures that the mmap and file objects are closed at the end of the
     'with' statement."""
@@ -305,7 +380,7 @@ def mmapper(filename):
     if size == 0:
         # mmap can't handle empty files.
         try:
-            yield fd, "", 0
+            yield fd, b"", 0
         finally:
             fileobj.close()
     else:
@@ -317,11 +392,11 @@ def mmapper(filename):
             fileobj.close()
 
 
-def makedirs(dirs):
+def makedirs(dirs: str) -> None:
     try:
         os.makedirs(dirs)
     except OSError as e:
-        if e.errno != os.errno.EEXIST:
+        if e.errno != errno.EEXIST:
             raise e
 
 
@@ -361,31 +436,35 @@ class elf_info(
         ],
     )
 ):
-    def rename(self, filename):
+    # Set by get_elf_info() and copied by _replace().
+    elf: ElfAccessor
+
+    def rename(self, filename: str) -> "elf_info":
         assert os.path.samefile(self.filename, filename)
         return self._replace(filename=filename)
 
-    def with_soname(self, soname):
+    def with_soname(self, soname: str | None) -> "elf_info":
         return self._replace(soname=soname)
 
-    def copy(self):
+    def copy(self) -> "elf_info":
         return self._replace()
 
-    def _replace(self, **kwargs):
+    def _replace(self, **kwargs: object) -> "elf_info":
         # Copy the tuple.
         clone = self.__class__(*super()._replace(**kwargs))
         # Copy the lazy state.
         clone.elf = self.elf
         if self.get_sources == clone.get_sources:
             raise Exception("uninitialized elf_info object!")
-        clone.get_sources = self.get_sources
+        # get_sources is replaced per-instance with a closure.
+        clone.get_sources = self.get_sources  # type: ignore[method-assign]
         return clone
 
     # This is replaced with a closure by the creator in get_elf_info.
-    def get_sources(self):
+    def get_sources(self) -> set[str]:
         raise Exception("uninitialized elf_info object!")
 
-    def strip(self, stripped_filename):
+    def strip(self, stripped_filename: str) -> bool:
         """Write stripped output to the given file unless it already exists
         with identical contents.  Returns True iff the file was changed."""
         with mmapper(self.filename) as mapped:
@@ -403,11 +482,11 @@ class elf_info(
                 <= stripped_size
             )
 
-            def gen_stripped_contents():
+            def gen_stripped_contents() -> Iterator[bytes]:
                 yield self.elf.Ehdr.pack(stripped_ehdr)
                 yield file[self.elf.Ehdr.size : stripped_size]
 
-            def old_file_matches():
+            def old_file_matches() -> bool:
                 old_size = os.path.getsize(stripped_filename)
                 new_size = sum(len(x) for x in gen_stripped_contents())
                 if old_size != new_size:
@@ -438,14 +517,15 @@ class elf_info(
 
 
 def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
-    file = None
-    elf = None
-    ehdr = None
-    phdrs = None
+    # These are set below, before any of the closures that use them are called.
+    file: ElfFileContents
+    elf: ElfAccessor
+    ehdr: Ehdr
+    phdrs: list[Phdr]
 
     # Yields an elf_note for each note in any PT_NOTE segment.
-    def gen_notes():
-        def round_up_to(size):
+    def gen_notes() -> Iterator[elf_note]:
+        def round_up_to(size: int) -> int:
             return ((size + 3) // 4) * 4
 
         for phdr in phdrs:
@@ -464,7 +544,7 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
                     pos += round_up_to(nhdr.n_descsz)
                     yield elf_note(name, nhdr.n_type, desc)
 
-    def gen_sections():
+    def gen_sections() -> Iterator[tuple[Shdr, str]]:
         shdrs = list(gen_shdrs(file, elf, ehdr))
         if not shdrs:
             return
@@ -479,7 +559,7 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
 
     # Generates '\0'-terminated strings starting at the given offset,
     # until an empty string.
-    def gen_strings(start):
+    def gen_strings(start: int) -> Iterator[str]:
         while True:
             end = file.find(b"\0", start)
             assert end >= start, "%s: Unterminated string at %#x" % (
@@ -491,13 +571,13 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
             yield file[start:end].decode()
             start = end + 1
 
-    def extract_C_string(start):
+    def extract_C_string(start: int) -> str:
         for string in gen_strings(start):
             return string
         return ""
 
     # Returns a string of hex digits (or None).
-    def get_build_id():
+    def get_build_id() -> str | None:
         build_id = None
         for note in gen_notes():
             # Note that the last build_id note needs to be used due to https://fxbug.dev/42101443.
@@ -507,7 +587,7 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
         return build_id
 
     # Returns a list of elf_note objects.
-    def get_matching_notes():
+    def get_matching_notes() -> list[elf_note]:
         if isinstance(match_notes, bool):
             if match_notes:
                 return list(gen_notes())
@@ -517,16 +597,16 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
         return [note for note in gen_notes() if note.ident() in match_notes]
 
     # Returns a string (without trailing '\0'), or None.
-    def get_interp():
+    def get_interp() -> str | None:
         # PT_INTERP points directly to a string in the file.
-        for interp in (phdr for phdr in phdrs if phdr.p_type == PT_INTERP):
-            interp = file[interp.p_offset : interp.p_offset + interp.p_filesz]
+        for phdr in (phdr for phdr in phdrs if phdr.p_type == PT_INTERP):
+            interp = file[phdr.p_offset : phdr.p_offset + phdr.p_filesz]
             if interp[-1:] == b"\0":
                 interp = interp[:-1]
             return interp.decode()
         return None
 
-    def get_dynamic():
+    def get_dynamic() -> list[Dyn] | None:
         # PT_DYNAMIC points to the list of ElfNN_Dyn tags.
         for dynamic in (phdr for phdr in phdrs if phdr.p_type == PT_DYNAMIC):
             return [
@@ -535,16 +615,18 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
             ]
         return None
 
-    def dyn_get(dyn, tag):
+    def dyn_get(dyn: list[Dyn], tag: int) -> int | None:
         for dt in dyn:
             if dt.d_tag == tag:
                 return dt.d_val
         return None
 
     # Returns a string (or None) and a set of strings.
-    def get_soname_and_needed(dyn):
+    def get_soname_and_needed(
+        dyn: list[Dyn] | None,
+    ) -> tuple[str | None, set[str]]:
         # Each DT_NEEDED or DT_SONAME points to a string in the .dynstr table.
-        def GenDTStrings(tag):
+        def GenDTStrings(dyn: list[Dyn], tag: int) -> Iterator[str]:
             return (
                 extract_C_string(strtab_offset + dt.d_val)
                 for dt in dyn
@@ -556,6 +638,7 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
 
         # DT_STRTAB points to the string table's vaddr (.dynstr).
         strtab_vaddr = dyn_get(dyn, DT_STRTAB)
+        assert strtab_vaddr is not None, "%s: no DT_STRTAB" % filename
 
         # Find the PT_LOAD containing the vaddr to compute the file offset.
         [strtab_offset] = [
@@ -568,33 +651,33 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
             )
         ]
 
-        soname = None
-        for soname in GenDTStrings(DT_SONAME):
+        soname: str | None = None
+        for soname in GenDTStrings(dyn, DT_SONAME):
             break
 
-        return soname, set(GenDTStrings(DT_NEEDED))
+        return soname, set(GenDTStrings(dyn, DT_NEEDED))
 
-    def get_stripped():
+    def get_stripped() -> bool:
         return all(
             (shdr.sh_flags & SHF_ALLOC) != 0
             or (shdr.sh_type != SHT_SYMTAB and not name.startswith(".debug_"))
             for shdr, name in gen_sections()
         )
 
-    def get_memory_size():
+    def get_memory_size() -> int:
         segments = [phdr for phdr in phdrs if phdr.p_type == PT_LOAD]
         first = segments[0]
         last = segments[-1]
         start = first.p_vaddr & -first.p_align
-        last = (last.p_vaddr + last.p_memsz + last.p_align - 1) & -last.p_align
-        return last - start
+        end = (last.p_vaddr + last.p_memsz + last.p_align - 1) & -last.p_align
+        return end - start
 
-    def get_relro_size():
+    def get_relro_size() -> int:
         return sum(
             phdr.p_memsz for phdr in phdrs if phdr.p_type == PT_GNU_RELRO
         )
 
-    def get_segment_size(phdr, file, mem):
+    def get_segment_size(phdr: Phdr, file: bool, mem: bool) -> int:
         start = phdr.p_vaddr & -phdr.p_align
         file_end = phdr.p_vaddr + phdr.p_filesz
         mem_end = phdr.p_vaddr + phdr.p_memsz
@@ -606,52 +689,52 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
             return file_end - start
         return mem_end - file_end
 
-    def gen_executable_segments():
+    def gen_executable_segments() -> Iterator[Phdr]:
         return (
             phdr
             for phdr in phdrs
             if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_X) != 0
         )
 
-    def gen_writable_segments():
+    def gen_writable_segments() -> Iterator[Phdr]:
         return (
             phdr
             for phdr in phdrs
             if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_W) != 0
         )
 
-    def gen_rodata_segments():
+    def gen_rodata_segments() -> Iterator[Phdr]:
         return (
             phdr
             for phdr in phdrs
             if phdr.p_type == PT_LOAD and phdr.p_flags == PF_R
         )
 
-    def get_code_size():
+    def get_code_size() -> int:
         return sum(
             get_segment_size(phdr, file=True, mem=False)
             for phdr in gen_executable_segments()
         )
 
-    def get_rodata_size():
+    def get_rodata_size() -> int:
         return sum(
             get_segment_size(phdr, file=True, mem=False)
             for phdr in gen_rodata_segments()
         )
 
-    def get_data_size():
+    def get_data_size() -> int:
         return sum(
             get_segment_size(phdr, file=True, mem=False)
             for phdr in gen_writable_segments()
         )
 
-    def get_bss_size():
+    def get_bss_size() -> int:
         return sum(
             get_segment_size(phdr, file=False, mem=True)
             for phdr in gen_writable_segments()
         )
 
-    def get_relsz(dyn, tag, sizetag):
+    def get_relsz(dyn: list[Dyn] | None, tag: int, sizetag: int) -> int:
         if dyn is None:
             return 0
         relsz = dyn_get(dyn, sizetag)
@@ -663,22 +746,22 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
                 relsz += pltrelsz
         return relsz
 
-    def get_relcount(dyn):
+    def get_relcount(dyn: list[Dyn] | None) -> int:
         if dyn is None:
             return 0
         return (dyn_get(dyn, DT_RELCOUNT) or 0) + (
             dyn_get(dyn, DT_RELACOUNT) or 0
         )
 
-    def get_cpu():
+    def get_cpu() -> cpu | None:
         return ELF_MACHINE_TO_CPU.get(ehdr.e_machine)
 
-    def gen_source_files():
+    def gen_source_files() -> Iterator[str]:
         # Given the file position of a CU header (starting with the
         # beginning of the .debug_line section), return the position
         # of the include_directories portion and the position of the
         # next CU header.
-        def read_line_header(pos):
+        def read_line_header(pos: int) -> tuple[int, int]:
             # Decode DWARF .debug_line per-CU header.
             hdr_type = elf.dwarf2_line_header
             hdr = hdr_type.read(file, pos)
@@ -697,13 +780,13 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
             )
 
         # Decode include_directories portion of DWARF .debug_line format.
-        def read_include_dirs(pos):
+        def read_include_dirs(pos: int) -> tuple[int, list[str]]:
             include_dirs = list(gen_strings(pos))
             pos += sum(len(dir) + 1 for dir in include_dirs) + 1
             return pos, include_dirs
 
         # Decode file_paths portion of DWARF .debug_line format.
-        def gen_file_paths(start, limit):
+        def gen_file_paths(start: int, limit: int) -> Iterator[tuple[str, int]]:
             while start < limit:
                 end = file.find(b"\0", start, limit)
                 assert end >= start, "%s: Unterminated string at %#x" % (
@@ -750,18 +833,19 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
                         yield os.path.normpath(name)
 
     # This closure becomes the elf_info object's `get_sources` method.
-    def lazy_get_sources():
+    def lazy_get_sources() -> set[str]:
         # Run the generator and cache its results as a set.
         sources_cache = set(gen_source_files())
         # Replace the method to just return the cached set next time.
-        info.get_sources = lambda: sources_cache
+        info.get_sources = lambda: sources_cache  # type: ignore[method-assign]
         return sources_cache
 
     # Map in the whole file's contents and use it as a string.
     with mmapper(filename) as mapped:
         fd, file, filesize = mapped
-        elf = get_elf_accessor(file)
-        if elf is not None:
+        accessor = get_elf_accessor(file)
+        if accessor is not None:
+            elf = accessor
             # ELF header leads to program headers.
             ehdr = elf.Ehdr.read(file)
             if ehdr.e_type not in (ET_EXEC, ET_DYN):
@@ -796,7 +880,7 @@ def get_elf_info(filename: str, match_notes: bool = False) -> None | elf_info:
                 *get_soname_and_needed(dyn),
             )
             info.elf = elf
-            info.get_sources = lazy_get_sources
+            info.get_sources = lazy_get_sources  # type: ignore[method-assign]
             return info
 
     return None

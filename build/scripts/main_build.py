@@ -37,6 +37,14 @@ from typing import Any, TextIO
 
 import signal_utils
 
+# Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
+_FUCHSIA_ROOT = pathlib.Path(__file__).parent.parent.parent
+if str(_FUCHSIA_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FUCHSIA_ROOT))
+
+from build.auth import gcloud
+from build.rbe import rbe_settings
+
 _JSONPrimitive = str | int | float | bool | None
 JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
 JSONObject = dict[str, JSONValue]
@@ -67,35 +75,26 @@ def ts_msg(
         print(f"[{time.time():.9f}] [{_SCRIPT.name}]: {text}", file=file)
 
 
-GLOBAL_RESULTSTORE_CONFIG = pathlib.Path(".fx/config/resultstore")
-LOCAL_RESULTSTORE_CONFIG = pathlib.Path(".resultstore")
-DEFAULT_RBE_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
-DEFAULT_RESULTSTORE_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
-DEFAULT_CAS_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
-BAZEL_CRED_HELPER = pathlib.Path(
-    "/google/src/head/depot/google3/devtools/blaze/bazel/credhelper/credhelper"
-)
-
-
-@dataclasses.dataclass
-class BuildResult(object):
-    return_code: int
-
-
 def _parse_cfg_text(text: str) -> dict[str, str]:
-    """Parses key-value pairs from a raw .cfg string, ignoring comments and stripping lines."""
-    cfg_data = {}
+    """Parses a key-value .cfg string into a dictionary.
+
+    Lines starting with '#' or empty lines are ignored.
+    """
+    cfg_data: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
-        if line and not line.startswith("#"):
-            key, sep, value = line.partition("=")
-            if sep:
-                cfg_data[key.strip()] = value.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Key-value lines are formatted as 'key=value'
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            cfg_data[key] = value.strip()
     return cfg_data
 
 
 def _parse_cfg_file(config_path: pathlib.Path) -> dict[str, str]:
-    """Safely reads a .cfg file and parses it into a dictionary of key-value pairs."""
+    """Safely reads a key-value .cfg file and parses it into a dictionary."""
     try:
         if config_path.is_file():
             return _parse_cfg_text(config_path.read_text())
@@ -107,6 +106,40 @@ def _parse_cfg_file(config_path: pathlib.Path) -> dict[str, str]:
             file=sys.stderr,
         )
     return {}
+
+
+def _extract_project_id_from_instance(instance_val: str) -> str | None:
+    """Extracts the GCP project ID from an RBE/ResultStore instance string.
+
+    Format expected: 'projects/<project-id>/instances/...'
+    """
+    if instance_val.startswith("projects/"):
+        _, _, projects_tail = instance_val.partition("projects/")
+        project_id, _, _ = projects_tail.partition("/")
+        if project_id:
+            return project_id
+    return None
+
+
+GLOBAL_RESULTSTORE_CONFIG = pathlib.Path(".fx/config/resultstore")
+LOCAL_RESULTSTORE_CONFIG = pathlib.Path(".resultstore")
+DEFAULT_RBE_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
+DEFAULT_RESULTSTORE_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
+DEFAULT_CAS_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
+# LINT.IfChange(ninja_build_trace_filename)
+NINJA_BUILD_TRACE_GZ = "ninja_build_trace.json.gz"
+# LINT.ThenChange(/tools/integration/fint/fint_build.py:ninja_build_trace_filename)
+FINT_BUILD_PY_RELATIVE_PATH = pathlib.Path(
+    "tools/integration/fint/fint_build.py"
+)
+BAZEL_CRED_HELPER = pathlib.Path(
+    "/google/src/head/depot/google3/devtools/blaze/bazel/credhelper/credhelper"
+)
+
+
+@dataclasses.dataclass
+class BuildResult(object):
+    return_code: int
 
 
 class BuildConfigurationError(Exception):
@@ -156,6 +189,7 @@ class FuchsiaBuildConfig(object):
     resultstore_instance: str | None = None
     cas_instance: str | None = None
     rbe_instance: str | None = None
+    log_dir: pathlib.Path | None = None
 
     @staticmethod
     def from_args(
@@ -181,6 +215,7 @@ class FuchsiaBuildConfig(object):
             resultstore_instance=args.resultstore_instance,
             cas_instance=args.cas_instance,
             rbe_instance=args.rbe_instance,
+            log_dir=args.log_dir,
         )
 
 
@@ -205,7 +240,9 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
         log files, CAS upload candidates (.rrpl/.rpl), and serialized proto logs.
     """
     rbe_metadata: JSONObject = {}
+    # LINT.IfChange(reproxy_logs_dir)
     reproxy_log_dir = log_dir / "reproxy_logs"
+    # LINT.ThenChange(//build/scripts/top_build_wrap.sh:reproxy_logs_dir)
     if not reproxy_log_dir.exists():
         return rbe_metadata
 
@@ -225,7 +262,7 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
         for item in reproxy_log_dir_abs.iterdir():
             if item.is_file() and item.suffix in (".rrpl", ".rpl"):
                 cas_candidates.append(str(item.resolve()))
-    except Exception:
+    except OSError:
         pass
     if cas_candidates:
         rbe_metadata["cas_upload_candidates"] = cas_candidates
@@ -239,6 +276,98 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
             rbe_metadata[pb_name] = str(candidate)
 
     return rbe_metadata
+
+
+def _collect_resultstore_metadata(log_dir: pathlib.Path) -> JSONObject:
+    """Scans the active build invocation's log directory for rsproxy diagnostic logs.
+
+    Collects direct top-level rsproxy logs as well as recursively discovered sub-build
+    rsproxy logs. Note: Sub-build log isolation assumes that sub-build directory basenames
+    do not collide across different paths in the build graph (as structured by
+    build/resultstore/fuchsia-rsproxy-wrap.sh).
+
+    Args:
+        log_dir: Path to the active build invocation's log directory.
+
+    Returns:
+        A dictionary containing paths to rsproxy diagnostic log files.
+    """
+    resultstore_metadata: JSONObject = {}
+    # LINT.IfChange(rsproxy_logs_dir)
+    rsproxy_log_dir = log_dir / "rsproxy_logs"
+    # LINT.ThenChange(//build/scripts/top_build_wrap.sh:rsproxy_logs_dir)
+    if not rsproxy_log_dir.exists():
+        return resultstore_metadata
+
+    diagnostic_logs = {}
+    rsproxy_names = {"rsproxy.INFO", "rsproxy.WARNING", "rsproxy.ERROR"}
+
+    # Recursively collect direct and nested sub-build rsproxy logs.
+    for candidate in sorted(rsproxy_log_dir.rglob("rsproxy.*")):
+        if candidate.is_file() and candidate.name in rsproxy_names:
+            rel_path = candidate.relative_to(rsproxy_log_dir)
+            diagnostic_logs[str(rel_path)] = str(candidate.resolve())
+
+    if diagnostic_logs:
+        resultstore_metadata["diagnostic_logs"] = diagnostic_logs
+
+    return resultstore_metadata
+
+
+def _iter_directory_file_map(
+    root_dir: pathlib.Path,
+) -> Iterable[tuple[str, list[str]]]:
+    """Walks root_dir and yields (relative_subdir, list_of_filenames) tuples.
+
+    Args:
+        root_dir: Base directory on disk.
+
+    Yields:
+        Tuples of (relative_subdir_path, list_of_filenames) for each subdirectory
+        containing non-symlink regular files.
+    """
+    if not root_dir.exists():
+        return
+
+    for root, dirnames, filenames in os.walk(root_dir, followlinks=False):
+        dirnames.sort()  # Ensures deterministic, chronological traversal
+        dir_path = pathlib.Path(root)
+        if dir_path == root_dir:
+            continue
+        try:
+            rel_dir = str(dir_path.relative_to(root_dir))
+            real_files = [
+                f
+                for f in sorted(filenames)
+                if not os.path.islink(os.path.join(root, f))
+            ]
+            if real_files:
+                yield rel_dir, real_files
+        except (OSError, ValueError):
+            continue
+
+
+def _collect_bazel_metadata(log_dir: pathlib.Path) -> JSONObject:
+    """Scans the active build invocation's log directory for Bazel diagnostic logs.
+
+    Args:
+        log_dir: Path to the active build invocation's log directory.
+
+    Returns:
+        A dictionary containing the bazel log_dir and a mapping of invocation
+        directory names to the list of artifact filenames present in each invocation.
+    """
+    # LINT.IfChange(bazel_logs_dir)
+    bazel_log_dir = log_dir / "bazel_logs"
+    # LINT.ThenChange(//build/bazel/wrapper.bazel.sh:bazel_logs_dir)
+    invocations = dict(_iter_directory_file_map(bazel_log_dir))
+    if not invocations:
+        return {}
+
+    return {
+        "log_dir": str(bazel_log_dir.resolve()),
+        "invocations": invocations,
+    }
 
 
 def exists(path: pathlib.Path) -> bool:
@@ -270,8 +399,7 @@ def read_json(path: pathlib.Path) -> Any:
             f"{path} does not exist. Make sure you have run 'fx set'."
         )
     try:
-        with open(path) as f:
-            return json.load(f)
+        return json.loads(path.read_text())
     except json.JSONDecodeError as e:
         raise BuildConfigurationError(f"Failed to parse {path}: {e}")
     except Exception as e:
@@ -526,6 +654,122 @@ class FuchsiaBuildContext(object):
             user = "builder"
         return user
 
+    @functools.cached_property
+    def rbe_instance(self) -> str | None:
+        """Returns the active RBE instance name, prioritizing CLI flag over configs."""
+        if self.config.rbe_instance:
+            return self.config.rbe_instance
+
+        if not self.rbe_enabled:
+            return None
+
+        for config_path in self.get_reproxy_configs():
+            cfg_dict = _parse_cfg_file(config_path)
+            instance = cfg_dict.get("instance")
+            if instance:
+                return instance
+        return None
+
+    @functools.cached_property
+    def resultstore_instance(self) -> str | None:
+        """Returns the active ResultStore instance name, prioritizing CLI flag over configs."""
+        if self.config.resultstore_instance:
+            return self.config.resultstore_instance
+
+        if not self.needs_auth:
+            return None
+
+        for config_path in self.get_rsproxy_configs():
+            cfg_dict = _parse_cfg_file(config_path)
+            instance = cfg_dict.get("rs_instance")
+            if instance:
+                return instance
+        return None
+
+    @functools.cached_property
+    def cas_instance(self) -> str | None:
+        """Returns the active CAS instance name, prioritizing CLI flag over configs."""
+        if self.config.cas_instance:
+            return self.config.cas_instance
+
+        if not self.needs_auth:
+            return None
+
+        for config_path in self.get_rsproxy_configs():
+            cfg_dict = _parse_cfg_file(config_path)
+            instance = cfg_dict.get("cas_instance")
+            if instance:
+                return instance
+        return None
+
+    @functools.cached_property
+    def rbe_quota_project(self) -> str:
+        """Returns the GCP project ID used for RBE quota billing.
+
+        Infers from the active RBE instance name.
+        """
+        if self.rbe_instance:
+            project_id = _extract_project_id_from_instance(self.rbe_instance)
+            if project_id:
+                return project_id
+        return ""
+
+    @functools.cached_property
+    def resultstore_quota_project(self) -> str:
+        """Returns the GCP project ID used for ResultStore quota billing.
+
+        Infers from the active ResultStore instance name.
+        """
+        if self.resultstore_instance:
+            project_id = _extract_project_id_from_instance(
+                self.resultstore_instance
+            )
+            if project_id:
+                return project_id
+        return ""
+
+    def _isolate_gcloud_credentials(self) -> pathlib.Path | None:
+        """Invokes the credential isolation script to isolate Google Application Credentials.
+
+        Returns:
+            The Path to the isolated credentials file, or None if isolation failed
+            or was bypassed.
+        """
+        if self.resolved_auth_mode in ("machine", "none"):
+            return None
+
+        isolate_script = self.gcloud_creds_script
+        if not is_executable(isolate_script):
+            raise BuildConfigurationError(
+                f"Required in-tree credentials management script is missing or unreadable: {isolate_script}"
+            )
+
+        quota_project = self.rbe_quota_project
+        if not quota_project:
+            return None
+
+        try:
+            output = subprocess.check_output(
+                [
+                    str(PYTHON_BIN),
+                    str(isolate_script),
+                    "isolate",
+                    "--out-dir",
+                    str(self.out_dir),
+                    "--quota-project",
+                    quota_project,
+                ],
+                text=True,
+                stderr=None,
+                env=self.env,
+            ).strip()
+            if output:
+                return pathlib.Path(output)
+        except subprocess.CalledProcessError:
+            pass
+
+        return None
+
     @property
     def auth_env(self) -> dict[str, str]:
         """Returns a dictionary of authentication-related environment variables."""
@@ -537,17 +781,17 @@ class FuchsiaBuildContext(object):
 
         env["FX_BUILD_LOAS_TYPE"] = self.loas_type
 
-        # Forward Google Application Credentials if present or fallback to defaults safely
-        if "GOOGLE_APPLICATION_CREDENTIALS" in self.env:
+        # Isolate Google Application Credentials to avoid global quota_project_id contamination.
+        local_adc_path = self._isolate_gcloud_credentials()
+        if local_adc_path:
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = str(local_adc_path)
+        elif "GOOGLE_APPLICATION_CREDENTIALS" in self.env:
             env["GOOGLE_APPLICATION_CREDENTIALS"] = self.env[
                 "GOOGLE_APPLICATION_CREDENTIALS"
             ]
         elif self.resolved_auth_mode != "machine":
             try:
-                default_adc = (
-                    pathlib.Path.home()
-                    / ".config/gcloud/application_default_credentials.json"
-                )
+                default_adc = pathlib.Path.home() / gcloud.ADC_SUBPATH
                 env["GOOGLE_APPLICATION_CREDENTIALS"] = str(default_adc)
             except (RuntimeError, KeyError):
                 pass
@@ -592,16 +836,16 @@ class FuchsiaBuildContext(object):
         #   //build/bazel_sdk/tests/scripts/bazel_test.py:bazel_socket_env_vars
         # )
 
-        # Forward ResultStore/CAS instance names passed from CLI arguments unconditionally.
+        # Forward ResultStore/CAS instance names unconditionally.
         # These RS_ variables directly drive/influence the rsproxy daemon.
-        if self.config.resultstore_instance:
-            env["RS_rs_instance"] = self.config.resultstore_instance
-        if self.config.cas_instance:
-            env["RS_cas_instance"] = self.config.cas_instance
+        if self.resultstore_instance:
+            env["RS_rs_instance"] = self.resultstore_instance
+        if self.cas_instance:
+            env["RS_cas_instance"] = self.cas_instance
 
-        # Forward RBE instance name passed from CLI arguments unconditionally.
-        if self.config.rbe_instance:
-            env["RBE_instance"] = self.config.rbe_instance
+        # Forward RBE instance name unconditionally.
+        if self.rbe_instance:
+            env["RBE_instance"] = self.rbe_instance
 
         return env
 
@@ -670,13 +914,15 @@ class FuchsiaBuildContext(object):
 
     @property
     def fint_build_py(self) -> pathlib.Path:
-        return self.source_dir / "tools/integration/fint/fint_build.py"
+        """Returns the path to the fint_build.py script."""
+        return self.source_dir / FINT_BUILD_PY_RELATIVE_PATH
 
     def _fint_wrapper_cmd(
         self,
         static_path: pathlib.Path | None = None,
         context_path: pathlib.Path | None = None,
         print_artifact_dir: bool = False,
+        print_job_count: bool = False,
         ninja_error_logging_output: pathlib.Path | None = None,
     ) -> Iterable[str]:
         """Constructs and yields command-line arguments for executing fint_build.py.
@@ -686,6 +932,8 @@ class FuchsiaBuildContext(object):
             context_path: Path to the Fint context parameters textproto.
             print_artifact_dir: If True, appends the query flag to print the
               artifact directory path and exits instead of running the build.
+            print_job_count: If True, appends the query flag to print the
+              job_count value and exits instead of running the build.
             ninja_error_logging_output: Path where Ninja should write its error logs (ninja_errors.json).
         """
         yield str(PYTHON_BIN)
@@ -703,6 +951,8 @@ class FuchsiaBuildContext(object):
             yield "--verbose"
         if print_artifact_dir:
             yield "--print-artifact-dir"
+        elif print_job_count:
+            yield "--print-job-count"
         else:
             if ninja_error_logging_output:
                 yield "--ninja-error-logging-output"
@@ -748,6 +998,33 @@ class FuchsiaBuildContext(object):
             )
         return None
 
+    @functools.cached_property
+    def fint_job_count(self) -> int | None:
+        """Parses and returns the Fint job count from context parameters if specified."""
+        if not self.config.fint_context_path:
+            return None
+
+        try:
+            cmd = list(
+                self._fint_wrapper_cmd(
+                    context_path=self.config.fint_context_path,
+                    print_job_count=True,
+                )
+            )
+            output = subprocess.check_output(
+                cmd,
+                text=True,
+                stderr=subprocess.PIPE,
+            ).strip()
+            if output:
+                return int(output)
+        except (subprocess.CalledProcessError, OSError, ValueError) as e:
+            msg(
+                f"Failed to delegate job_count parsing to fint_build.py: {e}",
+                file=sys.stderr,
+            )
+        return None
+
     @property
     def rbe_config_json(self) -> pathlib.Path:
         return self.build_dir / "rbe_config.json"
@@ -755,6 +1032,10 @@ class FuchsiaBuildContext(object):
     @property
     def check_loas_script(self) -> pathlib.Path:
         return self.source_dir / "build/auth/check_loas_restrictions.sh"
+
+    @property
+    def gcloud_creds_script(self) -> pathlib.Path:
+        return self.source_dir / "build/auth/gcloud_creds.py"
 
     @property
     def top_build_wrapper(self) -> pathlib.Path:
@@ -770,6 +1051,11 @@ class FuchsiaBuildContext(object):
         return self.build_dir / "fuchsia_gn_trace.json"
 
     @property
+    def ninja_build_trace_path(self) -> pathlib.Path:
+        """The path where Ninja's raw Chrome build trace is recorded."""
+        return self.build_dir / NINJA_BUILD_TRACE_GZ
+
+    @property
     def rsninja_sh(self) -> pathlib.Path:
         return self.source_dir / "build/resultstore/rsninja.sh"
 
@@ -777,13 +1063,20 @@ class FuchsiaBuildContext(object):
     def ninja_edge_weights_csv(self) -> pathlib.Path:
         return self.build_dir / "ninja_edge_weights.csv"
 
-    def get_rbe_reproxy_configs(self) -> Iterable[pathlib.Path]:
+    def get_reproxy_configs(self) -> Iterable[pathlib.Path]:
         """Yields the paths to the RBE reproxy configuration files."""
         for cfg in self._rbe_config_data:
-            yield self.build_dir / cfg["path"]
+            path_val = cfg.get("path")
+            if isinstance(path_val, str):
+                yield self.build_dir / path_val
+
+    def get_rsproxy_configs(self) -> Iterable[pathlib.Path]:
+        """Yields the paths to the ResultStore/rsproxy configuration files."""
+        yield self.source_dir / "build/resultstore/fuchsia-resultstore.cfg"
+        yield self.source_dir / "build/resultstore/fuchsia-resultstore-gcertauth.cfg"
 
     @functools.cached_property
-    def _rbe_config_data(self) -> Iterable[dict[str, Any]]:
+    def _rbe_config_data(self) -> Iterable[JSONObject]:
         """Read and parse RBE config data."""
         data = read_json(self.rbe_config_json)
         if isinstance(data, list):
@@ -791,23 +1084,29 @@ class FuchsiaBuildContext(object):
         return []
 
     @functools.cached_property
-    def _rbe_settings(self) -> dict[str, Any]:
+    def _rbe_settings(self) -> rbe_settings.RbeSettings:
         """Automatically detect RBE usage from a GN-generated JSON file."""
-        return read_json(self.rbe_settings_file)
+        try:
+            return rbe_settings.load(self.build_dir)
+        except Exception as e:
+            raise BuildConfigurationError(
+                f"RBE settings could not be loaded from {self.build_dir}: {e}. "
+                "Make sure you have run 'fx set'."
+            )
 
     @property
     def rbe_enabled(self) -> bool:
         if self.config.rbe is not None:
             return self.config.rbe
 
-        return self._rbe_settings.get("final", {}).get("needs_reproxy", False)
+        return self._rbe_settings.needs_reproxy
 
     @property
     def needs_auth(self) -> bool:
         if self.config.resultstore != "none":
             return True
 
-        return self._rbe_settings.get("final", {}).get("needs_auth", False)
+        return self._rbe_settings.needs_auth
 
     @functools.cached_property
     def resolved_auth_mode(self) -> str:
@@ -827,10 +1126,17 @@ class FuchsiaBuildContext(object):
 
     @property
     def concurrency(self) -> int:
-        """The -j value to use, the minimum over all limiting factors."""
+        """The -j value to use. Returns the Fint job_count override if present,
+        otherwise the minimum over all limiting factors."""
+        # If a Fint job_count is specified in the context, treat it as a pure override
+        fint_jobs = self.fint_job_count
+        if fint_jobs is not None and fint_jobs > 0:
+            return fint_jobs
+
         factors = [rbe_cpu_concurrency(self.rbe_enabled)]
         if self.config.max_concurrency > 0:
             factors.append(self.config.max_concurrency)
+
         return min(factors)
 
     @functools.cached_property
@@ -947,11 +1253,17 @@ class BuildInvocation(object):
         if rbe_metadata:
             metadata["rbe"] = rbe_metadata
 
+        resultstore_metadata = _collect_resultstore_metadata(log_dir)
+        if resultstore_metadata:
+            metadata["resultstore"] = resultstore_metadata
+
+        bazel_metadata = _collect_bazel_metadata(log_dir)
+        if bazel_metadata:
+            metadata["bazel"] = bazel_metadata
+
         try:
             mkdir(output_path.parent)
-            with open(output_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-                f.write("\n")
+            output_path.write_text(json.dumps(metadata, indent=2) + "\n")
         except Exception as e:
             msg(f"Failed to write metadata JSON: {e}", file=sys.stderr)
 
@@ -973,13 +1285,19 @@ class BuildInvocation(object):
         The invocation id is recorded in the new log directory
         in a file named "invocation_id".
         """
-        logs_root = self.context.out_dir / "_build_logs"
-        build_dir_name = self.context.build_dir.name
-        log_dir_base = logs_root / build_dir_name
-        mkdir(log_dir_base)
+        if self.context.config.log_dir:
+            log_dir = self.context.config.log_dir.resolve()
+        else:
+            logs_root = self.context.out_dir / "_build_logs"
+            build_dir_name = self.context.build_dir.name
+            log_dir_base = logs_root / build_dir_name
+            mkdir(log_dir_base)
 
-        # Use consistent UUID and timestamp
-        log_dir = log_dir_base / f"build.{self.timestamp}.{self.build_uuid[:8]}"
+            # Use consistent UUID and timestamp
+            log_dir = (
+                log_dir_base / f"build.{self.timestamp}.{self.build_uuid[:8]}"
+            )
+
         mkdir(log_dir)
 
         # Record the invocation Id
@@ -1022,7 +1340,7 @@ class BuildInvocation(object):
 
         if context.rbe_enabled:
             yield "--rbe"
-            for cfg_path in context.get_rbe_reproxy_configs():
+            for cfg_path in context.get_reproxy_configs():
                 yield "--reproxy-cfg"
                 yield str(cfg_path)
 
@@ -1177,6 +1495,7 @@ class BuildInvocation(object):
                         ninja_log_dir / "ninja_action_metrics.json",
                         ninja_log_dir / "ninja_dirty_sources.log",
                         context.ninja_edge_weights_csv,
+                        context.ninja_build_trace_path,
                     ]
                 )
 
@@ -1221,6 +1540,8 @@ class BuildInvocation(object):
         action_metrics = ninja_log_dir / "ninja_action_metrics.json"
         # Record structured action failures
         error_logging_output = self.ninja_errors_path
+        # Record Ninja's raw chrome build trace file
+        chrome_trace_output = self.context.ninja_build_trace_path
 
         ninja_bin = build_command[0]
         remaining_args = build_command[1:]
@@ -1232,6 +1553,8 @@ class BuildInvocation(object):
             str(action_metrics),
             "--error_logging_output",
             str(error_logging_output),
+            "--chrome_trace",
+            str(chrome_trace_output),
         ] + list(remaining_args)
 
 
@@ -1531,6 +1854,14 @@ def _main_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=pathlib.Path, required=True)
     parser.add_argument("--out-dir", type=pathlib.Path)
+    parser.add_argument(
+        "--log-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Specify the directory to write all build logs and diagnostics. "
+        "If not specified, defaults to a timestamped and UUID-tagged subdirectory "
+        "under the build logs root.",
+    )
 
     # Custom handling for boolean flags to support --flag=true/false
     parser.add_argument("--rbe", type=str_to_bool, nargs="?", const=True)
@@ -1569,7 +1900,7 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         "--max-concurrency",
         type=int,
         default=0,
-        help="Upper bound on the automatically chosen -j value, or 0 for no bound. Ignored when -j is passed explicitly.",
+        help="Upper bound on the automatically chosen -j value, or 0 for no bound. Ignored when -j is passed explicitly or when the Fint context specifies job_count.",
     )
 
     parser.add_argument("--verbose", action="store_true")

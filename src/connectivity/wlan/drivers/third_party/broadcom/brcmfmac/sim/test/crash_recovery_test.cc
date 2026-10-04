@@ -13,6 +13,7 @@
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/sim.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/test/sim_test.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/test/device_inspect_test_utils.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/wlan_interface.h"
 
 using ::wlan::common::MacAddr;
 
@@ -39,7 +40,7 @@ class CrashRecoveryTest : public SimTest {
   // counted firmware recovery in driver's metrics.
   void GetInspectCount(uint64_t* out_count, std::string property_name);
 
-  void SetRecoveryHook(fit::function<void()> hook) {
+  void SetRecoveryHook(fit::function<zx_status_t()> hook) {
     WithSimDevice([hook = std::move(hook)](SimDevice* device) mutable {
       device->GetSim()->sim_fw->SetRecoveryHook(std::move(hook));
     });
@@ -296,6 +297,7 @@ TEST_F(CrashRecoveryTest, ResetRejectedIfCrashRecoveryInProgress) {
     // default driver dispatcher.
     recovery_in_progress.Signal();
     finish_recovery.Wait();
+    return ZX_OK;
   });
 
   // Ensure recovery is in progress
@@ -340,6 +342,36 @@ TEST_F(CrashRecoveryTest, ResetAfterCrashRecovery) {
   // Now perform reset and verify success
   auto res = client_->Reset();
   ASSERT_TRUE(res.is_ok());
+}
+
+TEST_F(CrashRecoveryTest, RecoveryFailureDetachesCleanly) {
+  InitWithInterface();
+
+  // Simulate bus recovery failing (e.g., SDIO timeout during brcmf_bus_started).
+  SetRecoveryHook([]() { return ZX_ERR_TIMED_OUT; });
+
+  ScheduleCrashNoWait(zx::msec(10));
+  env_->Run(kTestDuration);
+  WaitForRecoveryComplete();
+
+  uint64_t count;
+  GetInspectCount(&count, "fw_recovery_triggered");
+  EXPECT_EQ(1U, count);
+  GetInspectCount(&count, "fw_recovered");
+  EXPECT_EQ(0U, count);
+
+  // Verify that calling NetworkPort callbacks (MacSetMode, MacGetAddress) and Fullmac methods
+  // on the interface after recovery failure does not crash
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    wlan::drivers::components::NetworkPort::Callbacks* port_callbacks =
+        device->GetClientInterface();
+    ASSERT_NOT_NULL(port_callbacks);
+    port_callbacks->MacSetMode(fuchsia_hardware_network::wire::MacFilterMode::kMulticastPromiscuous,
+                               {});
+    fuchsia_net::MacAddress mac;
+    port_callbacks->MacGetAddress(&mac);
+  });
+  client_ifc_.Query();
 }
 
 }  // namespace wlan::brcmfmac

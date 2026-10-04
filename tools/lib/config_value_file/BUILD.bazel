@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "config_value_file",
+    srcs = [
+        "src/field.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    test_deps = [
+        "//src/sys/lib/fidl_fuchsia_component_config_ext",
+    ],
+    visibility = [
+        "//src/lib/assembly/structured_config:__pkg__",
+        "//src/security/lib/scrutiny/frontend:__pkg__",
+        "//src/sys/lib/component_debug:__pkg__",
+        "//tools/configc:__pkg__",
+        "//tools/lib/cml:__pkg__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

@@ -150,7 +150,6 @@ func (r *RunCommand) setupFFX(ctx context.Context, invokeMode ffxutil.FFXInvokeM
 	extraConfigs := ffxutil.ConfigSettings{
 		Level: "global",
 		Settings: map[string]any{
-			"daemon.autostart":       false,
 			"discovery.mdns.enabled": false,
 		},
 	}

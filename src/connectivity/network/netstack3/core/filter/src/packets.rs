@@ -424,6 +424,9 @@ where
 
 /// A concrete type around a dynamic reference to a
 /// [`DynamicTransportSerializer`].
+///
+/// This serializer is incompatible with GSO; it must not be used to construct
+/// oversized segments.
 pub struct DynTransportSerializer<'a, I: FilterIpExt>(&'a mut dyn DynamicTransportSerializer<I>);
 
 impl<'a, I: FilterIpExt> DynTransportSerializer<'a, I> {

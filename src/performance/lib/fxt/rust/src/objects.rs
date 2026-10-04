@@ -256,9 +256,11 @@ mod tests {
         assert_parses_to_record!(
             FxtBuilder::new(header)
                 .atom(2048u64.to_le_bytes())
-                .atom(FxtBuilder::new(first_arg_header).atom(first_arg_value.to_le_bytes()).build())
-                .atom(FxtBuilder::new(second_arg_header).atom(second_arg_value).build())
-                .atom(FxtBuilder::new(third_arg_header).atom(third_arg_name).build())
+                .atom_words(
+                    FxtBuilder::new(first_arg_header).atom(first_arg_value.to_le_bytes()).build()
+                )
+                .atom_words(FxtBuilder::new(second_arg_header).atom(second_arg_value).build())
+                .atom_words(FxtBuilder::new(third_arg_header).atom(third_arg_name).build())
                 .build(),
             RawTraceRecord::UserspaceObj(RawUserspaceObjRecord {
                 process: ProcessRef::Index(NonZeroU8::new(12).unwrap()),
@@ -329,9 +331,11 @@ mod tests {
         assert_parses_to_record!(
             FxtBuilder::new(header)
                 .atom(koid.to_le_bytes())
-                .atom(FxtBuilder::new(first_arg_header).atom(1007.893f64.to_le_bytes()).build())
-                .atom(FxtBuilder::new(second_arg_header).atom(second_arg_value).build())
-                .atom(FxtBuilder::new(third_arg_header).atom(third_arg_name).build())
+                .atom_words(
+                    FxtBuilder::new(first_arg_header).atom(1007.893f64.to_le_bytes()).build()
+                )
+                .atom_words(FxtBuilder::new(second_arg_header).atom(second_arg_value).build())
+                .atom_words(FxtBuilder::new(third_arg_header).atom(third_arg_name).build())
                 .build(),
             RawTraceRecord::KernelObj(RawKernelObjRecord {
                 koid,

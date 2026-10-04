@@ -545,12 +545,17 @@ async fn query_iface(
 async fn query_device_capability(
     ifaces: &IfaceMap,
     id: u16,
-) -> Result<fidl_common::ApfPacketFilterSupport, zx::Status> {
+) -> Result<fidl_svc::DeviceMonitorQueryIfaceCapabilitiesResponse, zx::Status> {
     info!("query_device_capability(id = {})", id);
     let iface = ifaces.get(&id).ok_or(zx::Status::NOT_FOUND)?;
     let info =
         iface.generic_sme.query_iface_capabilities().await.map_err(|_| zx::Status::INTERNAL)?;
-    info.map_err(zx::Status::err_from_raw)
+    info.map(|resp| fidl_svc::DeviceMonitorQueryIfaceCapabilitiesResponse {
+        apf_support: resp.apf_support,
+        rssi_monitor_support: resp.rssi_monitor_support,
+        ..Default::default()
+    })
+    .map_err(zx::Status::err_from_raw)
 }
 
 async fn destroy_iface(
@@ -3526,16 +3531,29 @@ mod tests {
             max_filter_length: Some(1024),
             ..Default::default()
         };
+        let rssi_support =
+            fidl_common::RssiMonitorSupport { supported: Some(true), ..Default::default() };
         assert_matches!(
             exec.run_until_stalled(&mut generic_sme_stream.next()),
             Poll::Ready(Some(Ok(fidl_sme::GenericSmeRequest::QueryIfaceCapabilities { responder, .. }))) => {
-                responder.send(Ok(&apf_support)).expect("Failed to send query response");
+                responder.send(Ok(&fidl_sme::GenericSmeQueryIfaceCapabilitiesResponse {
+                    apf_support: Some(apf_support.clone()),
+                    rssi_monitor_support: Some(rssi_support.clone()),
+                    ..Default::default()
+                })).expect("Failed to send query response");
             }
         );
         assert_matches!(exec.run_until_stalled(&mut service_fut), Poll::Pending);
 
         let resp = assert_matches!(exec.run_until_stalled(&mut query_fut), Poll::Ready(Ok(Ok(resp))) => resp);
-        assert_eq!(resp, apf_support);
+        assert_eq!(
+            resp,
+            fidl_svc::DeviceMonitorQueryIfaceCapabilitiesResponse {
+                apf_support: Some(apf_support),
+                rssi_monitor_support: Some(rssi_support),
+                ..Default::default()
+            }
+        );
     }
     #[test_case(Ok(()), false; "New PHY - Generic SME with OK epitaph shuts down cleanly")]
     #[test_case(Err(zx::Status::INTERNAL), true; "New PHY - Generic SME with error epitaph initiates iface removal")]

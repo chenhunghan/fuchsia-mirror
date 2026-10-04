@@ -97,8 +97,8 @@ subcommand name.
 ```
 
 This is the structure that holds context your tool needs. This includes things
-like the argument structure defined above, any proxies to the daemon or a
-device you might need, or potentially other things that you can define yourself.
+like the argument structure defined above, any proxies to a device you might
+need, or potentially other things that you can define yourself.
 
 There must be an element in this struct that references the argument type
 described above, and it should have the `#[command]` attribute on it so that

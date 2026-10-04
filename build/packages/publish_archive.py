@@ -18,7 +18,7 @@ sys.path.insert(
 import depfile as depfile_module
 
 
-def zip_dir(dir, zip_file):
+def zip_dir(dir: str, zip_file: zipfile.ZipFile) -> None:
     for root, _dirs, files in os.walk(dir):
         for file in files:
             path = os.path.join(root, file)
@@ -28,7 +28,7 @@ def zip_dir(dir, zip_file):
 # rmtree manually removes all subdirectories and files instead of using
 # shutil.rmtree, to avoid registering spurious reads on stale
 # subdirectories. See https://fxbug.dev/42153728.
-def rmtree(dir):
+def rmtree(dir: str) -> None:
     if not os.path.exists(dir):
         return
     for root, dirs, files in os.walk(dir, topdown=False):
@@ -42,7 +42,7 @@ def rmtree(dir):
                 os.rmdir(full_path)
 
 
-def prepare_dirs(repo_dir):
+def prepare_dirs(repo_dir: str) -> dict[str, str]:
     path = os.path.join(repo_dir, "repository")
     os.makedirs(path)
 
@@ -53,7 +53,7 @@ def prepare_dirs(repo_dir):
 # - `keys/{snapshot|targets|timestamp}.json` containing private metadata keys;
 # - `repository/{{version-num}}.root.json` containing versioned root metadata;
 # - `repository/root.json` containing default root metadata.
-def prepare_publish(args, dirs):
+def prepare_publish(args: argparse.Namespace, dirs: dict[str, str]) -> None:
     for root_metadata_path in args.root_metadata:
         shutil.copy(root_metadata_path, dirs["repository"])
     shutil.copy(
@@ -62,7 +62,9 @@ def prepare_publish(args, dirs):
     )
 
 
-def package_tool_publish(args, dirs, depfile):
+def package_tool_publish(
+    args: argparse.Namespace, dirs: dict[str, str], depfile: str
+) -> None:
     cmd_args = [
         args.package_tool,
         "repository",
@@ -85,7 +87,7 @@ def package_tool_publish(args, dirs, depfile):
     subprocess.run(cmd_args, check=True)
 
 
-def main(args):
+def main(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(
         dir=os.path.dirname(args.output)
     ) as gendir:

@@ -984,5 +984,13 @@ const INTEGER uint16 = X;
   ASSERT_COMPILER_DIAGNOSTICS(library);
 }
 
+TEST(ConstsTests, BadValueForNonZeroConstant) {
+  TestLibrary library;
+  library.AddFile("bad/fi-0226.test.fidl");
+  library.ExpectFail(ErrConstantMayNotBeZero, "FOO", "uint8");
+  library.ExpectFail(ErrConstantMayNotBeZero, "BAR", "int32");
+  ASSERT_COMPILER_DIAGNOSTICS(library);
+}
+
 }  // namespace
 }  // namespace fidlc

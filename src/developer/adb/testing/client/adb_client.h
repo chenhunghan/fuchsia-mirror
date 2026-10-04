@@ -37,10 +37,9 @@ class AdbClientImpl : public fidl::Server<fuchsia_testing_adb::Client>,
 
  private:
   zx_status_t DiscoverAndConnect();
-  zx_status_t ProcessDevice(fidl::SyncClient<fuchsia_hardware_usb_device::Device>& device,
-                            std::string_view instance);
-  zx_status_t FindAdbInterface(std::string_view instance, const uint8_t* data, size_t len);
-  zx_status_t ConnectEndpoints(std::string_view instance);
+  zx_status_t ProcessDevice(fidl::SyncClient<fuchsia_hardware_usb_device::Device>& device);
+  zx_status_t FindAdbInterface(const uint8_t* data, size_t len);
+  zx_status_t ConnectEndpoints();
   zx_status_t SendPacket(apacket* p);
   zx_status_t QueueReadRequest();
 

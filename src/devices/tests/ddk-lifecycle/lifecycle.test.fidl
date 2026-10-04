@@ -11,7 +11,7 @@ closed protocol TestDevice {
     /// or completed later by the caller with |CompleteChildInit|.
     strict AddChild(struct {
         init_complete bool;
-        init_status zx.Status;
+        init_status zx.Result;
     }) -> (struct {
         child_id uint64;
     }) error zx.Status;

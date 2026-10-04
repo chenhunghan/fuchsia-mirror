@@ -29,10 +29,8 @@ from bazel_action_utils import (
     update_gn_targets_symlink,
 )
 from workspace_utils import (
-    BazelPackageAndTargetToGnInputsEntriesMap,
-    BazelTargetGnInputsEntriesMap,
     GeneratedWorkspaceFiles,
-    GnTargetsDirectoryManifestEntry,
+    merge_gn_target_manifests,
     record_gn_targets_dir_from_entries,
 )
 
@@ -168,6 +166,37 @@ def compute_sources_by_owner(
         for owner in owners:
             sources_by_owner[owner].extend(sources)
     return sources_by_owner
+
+
+def should_update_stamp(
+    stamp_exists: bool,
+    declared_outputs: T.Sequence[str],
+    updated_outputs: T.AbstractSet[Path],
+    has_extra_targets: bool,
+) -> bool:
+    """Returns whether a delayed action's stamp file must be rewritten.
+
+    The stamp is normally left untouched when none of the action's declared
+    outputs changed, so that Ninja's restat can prune downstream dependents.
+
+    Args:
+        stamp_exists: Whether the stamp file already exists.
+        declared_outputs: The action's Ninja outputs, excluding the stamp.
+        updated_outputs: The outputs that Bazel rewrote in this build.
+        has_extra_targets: Whether the action also builds the targets listed
+            in an `extra_bazel_targets_file`.
+    """
+    if not stamp_exists:
+        return True
+    # Targets from an `extra_bazel_targets_file` (e.g. Bazel test packages)
+    # write outputs that no Ninja edge declares, so their changes are
+    # invisible here. Downstream actions that read those outputs through
+    # depfiles (e.g. `//build/bazel/target_tests:debug_symbols` and the
+    # amber-files publish) only rerun if the stamp changes, so assume they
+    # changed.
+    if has_extra_targets:
+        return True
+    return any(Path(output) in updated_outputs for output in declared_outputs)
 
 
 def main() -> int:
@@ -541,12 +570,11 @@ def main() -> int:
                 with open(action.ninja_depfile, "w") as f:
                     depfile.write_to(f)
 
-                # Only update the stamp file if it does not exist yet or if at
-                # least one of the action's outputs was updated, so that Ninja's
-                # restat can prune downstream dependents when outputs are unchanged.
-                if not stamp_path.exists() or any(
-                    Path(output) in updated_outputs
-                    for output in action.ninja_outputs[1:]
+                if should_update_stamp(
+                    stamp_exists=stamp_path.exists(),
+                    declared_outputs=action.ninja_outputs[1:],
+                    updated_outputs=updated_outputs,
+                    has_extra_targets=bool(extra_targets_file),
                 ):
                     timestamp = datetime.datetime.now().timestamp()
                     stamp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -571,31 +599,6 @@ def main() -> int:
     # Done!  (Don't return the 'rc' from above, that's for the action itself,
     # here we need to return 0 to tell Ninja that the script exited successfully.)
     return 0
-
-
-def merge_gn_target_manifests(
-    manifests: list[Path],
-) -> BazelPackageAndTargetToGnInputsEntriesMap:
-    manifest_entries_package_map = BazelPackageAndTargetToGnInputsEntriesMap()
-    for manifest_path in manifests:
-        with open(manifest_path) as f:
-            for entry_json in json.load(f):
-                entry = GnTargetsDirectoryManifestEntry.from_json_value(
-                    entry_json
-                )
-
-                bazel_package = entry.bazel_package
-                name_map = manifest_entries_package_map.setdefault(
-                    bazel_package, BazelTargetGnInputsEntriesMap()
-                )
-
-                bazel_name = entry.bazel_name
-                found_entry = name_map.setdefault(bazel_name, entry)
-                if found_entry != entry:
-                    raise ValueError(
-                        f"Found duplicate GN target entry for //{bazel_package}:{bazel_name}:  {found_entry.generator_label} vs {entry.generator_label}"
-                    )
-    return manifest_entries_package_map
 
 
 @dataclasses.dataclass

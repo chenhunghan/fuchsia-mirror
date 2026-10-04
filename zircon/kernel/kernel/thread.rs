@@ -53,12 +53,14 @@ unsafe extern "C" {
     fn cpp_thread_preempt_disable();
     fn cpp_thread_preempt_enable();
     fn cpp_thread_preempt();
-    fn cpp_thread_current_sleep_relative(duration: DurationMono) -> zx_status_t;
     fn cpp_thread_current_sleep_etc(
         deadline: *const crate::kernel::deadline::Deadline,
         interruptible: Interruptible,
         now: zx_instant_mono_t,
     ) -> zx_status_t;
+    fn cpp_thread_current_sleep(duration: InstantMono) -> zx_status_t;
+    fn cpp_thread_current_sleep_relative(duration: DurationMono) -> zx_status_t;
+    fn cpp_thread_current_sleep_interruptible(duration: InstantMono) -> zx_status_t;
     fn cpp_thread_current_soft_fault(va: usize, flags: u32) -> zx_status_t;
     fn cpp_thread_get_arch(thread: *mut Thread) -> *mut c_void;
     fn cpp_thread_get_stack_top(thread: *mut Thread) -> usize;
@@ -73,7 +75,13 @@ unsafe extern "C" {
     fn cpp_thread_current_set_restricted_state(raw_rs: *mut RestrictedState);
     fn cpp_thread_current_is_signaled() -> bool;
     fn cpp_thread_current_check_for_restricted_kick() -> bool;
+    fn cpp_thread_current_memory_allocation_state_enable();
+    fn cpp_thread_current_memory_allocation_state_disable();
     fn cpp_thread_current_memory_allocation_state_is_enabled() -> bool;
+    fn cpp_thread_current_signal_policy_exception(
+        policy_exception_code: u32,
+        policy_exception_data: u32,
+    );
 }
 
 pub const THREAD_SIGNAL_KILL: u32 = 1 << 0;
@@ -377,10 +385,18 @@ pub struct AutoExpiringPreemptDisabler {
 }
 
 impl AutoExpiringPreemptDisabler {
+    /// Default timeslice extension duration (150us), matching C++ `AutoExpiringPreemptDisabler::kDefaultSliceExtension`.
+    pub const DEFAULT_TIMESLICE_EXTENSION: DurationMono = DurationMono::from_micros(150);
+
     /// Creates a new guard and attempts to set a timeslice extension for `duration`.
     pub fn new(duration: DurationMono) -> Self {
         let should_clear = preempt_set_timeslice_extension(duration);
         Self { should_clear, _marker: PhantomData }
+    }
+
+    /// Creates a new guard with the default timeslice extension duration.
+    pub fn with_default_timeslice_extension() -> Self {
+        Self::new(Self::DEFAULT_TIMESLICE_EXTENSION)
     }
 }
 
@@ -389,6 +405,26 @@ impl Drop for AutoExpiringPreemptDisabler {
         if self.should_clear {
             preempt_clear_timeslice_extension();
         }
+    }
+}
+
+/// RAII helper to enforce that a block of code does not allocate memory.
+///
+/// See |Thread::Current::memory_allocation_state()|.
+pub struct ScopedMemoryAllocationDisabled;
+
+impl ScopedMemoryAllocationDisabled {
+    pub fn new() -> Self {
+        // SAFETY: Disables memory allocations on the current thread.
+        unsafe { cpp_thread_current_memory_allocation_state_disable() };
+        Self
+    }
+}
+
+impl Drop for ScopedMemoryAllocationDisabled {
+    fn drop(&mut self) {
+        // SAFETY: Re-enables memory allocations on the current thread when the guard drops.
+        unsafe { cpp_thread_current_memory_allocation_state_enable() };
     }
 }
 
@@ -425,14 +461,10 @@ impl From<bool> for Interruptible {
     }
 }
 
-/// Sleeps the current thread for the specified relative duration.
-pub fn sleep_relative(duration: DurationMono) -> Result<(), Status> {
-    // SAFETY: cpp_thread_current_sleep_relative is safe to call at any time in thread context.
-    let status = unsafe { cpp_thread_current_sleep_relative(duration) };
-    Status::ok(status)
-}
-
-/// Sleeps the current thread until the specified deadline with timer slack.
+/// Wait until the deadline has occurred.
+///
+/// If interruptible, may return early with ZX_ERR_INTERNAL_INTR_KILLED if
+/// thread is signaled for kill.
 pub fn sleep_etc(
     deadline: &crate::kernel::deadline::Deadline,
     interruptible: Interruptible,
@@ -440,6 +472,27 @@ pub fn sleep_etc(
 ) -> Result<(), Status> {
     // SAFETY: `deadline` points to a valid `Deadline`.
     let status = unsafe { cpp_thread_current_sleep_etc(deadline as *const _, interruptible, now) };
+    Status::ok(status)
+}
+
+/// Non-interruptible version of sleep_etc.
+pub fn sleep(deadline: InstantMono) -> Result<(), Status> {
+    // SAFETY: FFI function has not requirements.
+    let status = unsafe { cpp_thread_current_sleep(deadline) };
+    Status::ok(status)
+}
+
+/// Sleeps the current thread for the specified relative duration.
+pub fn sleep_relative(duration: DurationMono) -> Result<(), Status> {
+    // SAFETY: cpp_thread_current_sleep_relative is safe to call at any time in thread context.
+    let status = unsafe { cpp_thread_current_sleep_relative(duration) };
+    Status::ok(status)
+}
+
+/// Interruptible version of sleep.
+pub fn sleep_interruptible(deadline: InstantMono) -> Result<(), Status> {
+    // SAFETY: FFI function has not requirements.
+    let status = unsafe { cpp_thread_current_sleep_interruptible(deadline) };
     Status::ok(status)
 }
 
@@ -584,4 +637,12 @@ pub fn current_check_for_restricted_kick() -> bool {
 pub fn current_memory_allocation_state_is_enabled() -> bool {
     // SAFETY: Foreign function wrapper for Thread::Current::memory_allocation_state().IsEnabled().
     unsafe { cpp_thread_current_memory_allocation_state_is_enabled() }
+}
+
+/// Signals a policy exception on the current thread.
+pub fn signal_policy_exception(policy_exception_code: u32, policy_exception_data: u32) {
+    // SAFETY: Foreign function wrapper for Thread::Current::SignalPolicyException.
+    unsafe {
+        cpp_thread_current_signal_policy_exception(policy_exception_code, policy_exception_data)
+    }
 }

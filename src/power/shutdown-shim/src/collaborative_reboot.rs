@@ -209,28 +209,21 @@ struct Cancel {
 #[derive(Debug)]
 struct ScheduledRequests {
     system_update: usize,
-    netstack_migration: usize,
     // Inspect properties to report the counters from above.
     system_update_inspect_prop: fuchsia_inspect::types::UintProperty,
-    netstack_migration_inspect_prop: fuchsia_inspect::types::UintProperty,
 }
 
 impl ScheduledRequests {
     fn new(inspect_node: &fuchsia_inspect::types::Node) -> Self {
         Self {
             system_update: 0,
-            netstack_migration: 0,
             system_update_inspect_prop: inspect_node.create_uint("SystemUpdate", 0),
-            netstack_migration_inspect_prop: inspect_node.create_uint("NetstackMigration", 0),
         }
     }
 
     fn schedule(&mut self, reason: Reason) {
         let (rc, inspect_prop) = match reason {
             Reason::SystemUpdate => (&mut self.system_update, &self.system_update_inspect_prop),
-            Reason::NetstackMigration => {
-                (&mut self.netstack_migration, &self.netstack_migration_inspect_prop)
-            }
         };
         *rc = rc.saturating_add(1);
         inspect_prop.add(1);
@@ -239,27 +232,16 @@ impl ScheduledRequests {
     fn cancel(&mut self, reason: Reason) {
         let (rc, inspect_prop) = match reason {
             Reason::SystemUpdate => (&mut self.system_update, &self.system_update_inspect_prop),
-            Reason::NetstackMigration => {
-                (&mut self.netstack_migration, &self.netstack_migration_inspect_prop)
-            }
         };
         *rc = rc.saturating_sub(1);
         inspect_prop.subtract(1);
     }
 
     fn list_reasons(&self) -> Vec<Reason> {
-        let Self {
-            system_update,
-            netstack_migration,
-            system_update_inspect_prop: _,
-            netstack_migration_inspect_prop: _,
-        } = self;
+        let Self { system_update, system_update_inspect_prop: _ } = self;
         let mut reasons = Vec::new();
         if *system_update != 0 {
             reasons.push(Reason::SystemUpdate);
-        }
-        if *netstack_migration != 0 {
-            reasons.push(Reason::NetstackMigration);
         }
         reasons
     }
@@ -267,13 +249,8 @@ impl ScheduledRequests {
 
 impl std::fmt::Display for ScheduledRequests {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            system_update,
-            netstack_migration,
-            system_update_inspect_prop: _,
-            netstack_migration_inspect_prop: _,
-        } = self;
-        write!(f, "SystemUpdate:{system_update}, NetstackMigration:{netstack_migration}")
+        let Self { system_update, system_update_inspect_prop: _ } = self;
+        write!(f, "SystemUpdate:{system_update}")
     }
 }
 
@@ -319,8 +296,6 @@ mod tests {
 
     #[test_case(vec![] => false; "no_pending_reboot")]
     #[test_case(vec![Reason::SystemUpdate] => true; "system_update")]
-    #[test_case(vec![Reason::NetstackMigration] => true; "netstack_migration")]
-    #[test_case(vec![Reason::SystemUpdate, Reason::NetstackMigration] => true; "different_reasons")]
     #[test_case(vec![Reason::SystemUpdate, Reason::SystemUpdate] => true; "same_reasons")]
     #[fuchsia::test]
     async fn collaborative_reboot(mut reasons: Vec<Reason>) -> bool {
@@ -393,12 +368,6 @@ mod tests {
     #[test_case(vec![
         (Reason::SystemUpdate, Cancel::UserSignal), (Reason::SystemUpdate, Cancel::UserSignal)
         ] => false; "same_reasons_both_canceled")]
-    #[test_case(vec![
-        (Reason::SystemUpdate, Cancel::UserSignal), (Reason::NetstackMigration, Cancel::None)
-        ] => true; "different_reasons_only_one_canceled")]
-    #[test_case(vec![
-        (Reason::SystemUpdate, Cancel::UserSignal), (Reason::NetstackMigration, Cancel::UserSignal)
-        ] => false; "different_reasons_both_canceled")]
     #[fuchsia::test]
     fn cancellation(requests: Vec<(Reason, Cancel)>) -> bool {
         // Note: This test requires partially driving the cancellation worker,
@@ -577,7 +546,6 @@ mod tests {
             "CollaborativeReboot": {
                 "ScheduledRequests": {
                     "SystemUpdate": 0u64,
-                    "NetstackMigration": 0u64,
                 }
             }
         });
@@ -599,29 +567,10 @@ mod tests {
                 "CollaborativeReboot": {
                     "ScheduledRequests": {
                         "SystemUpdate": count,
-                        "NetstackMigration": 0u64,
                     }
                 }
             });
         }
-
-        // Schedule a `NetstackMigration` reboot, and verify the inspect data.
-        futures::select!(
-            result = scheduler.schedule_reboot(Reason::NetstackMigration, None).fuse() => {
-                    result.expect("failed to schedule reboot");
-                },
-            () = schedule_server_fut => {
-                unreachable!("The `Scheduler` protocol worker shouldn't exit");
-            }
-        );
-        assert_data_tree!(inspector, root: {
-            "CollaborativeReboot": {
-                "ScheduledRequests": {
-                    "SystemUpdate": 2u64,
-                    "NetstackMigration": 1u64,
-                }
-            }
-        });
 
         // Cancel the `SystemUpdate` requests, and verify the inspect data.
         std::mem::drop(cancellation_signals);
@@ -631,7 +580,6 @@ mod tests {
             "CollaborativeReboot": {
                 "ScheduledRequests": {
                     "SystemUpdate": 0u64,
-                    "NetstackMigration": 1u64,
                 }
             }
         });

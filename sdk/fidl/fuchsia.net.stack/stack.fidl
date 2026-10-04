@@ -10,30 +10,6 @@ using fuchsia.net.interfaces.admin;
 /// A path to a device node.
 alias DevicePath = string:255;
 
-/// A value indicating that a [`ForwardingEntry`]'s metric is unspecified.
-const UNSPECIFIED_METRIC uint32 = 0;
-
-/// An entry in the forwarding table for the network stack.
-///
-/// Valid if at least one of [`device_id`] and [`next_hop`] is specified.
-type ForwardingEntry = struct {
-    /// The destination subnet this route can be used to send to.
-    subnet fuchsia.net.Subnet;
-
-    /// The opaque identifier of the device to which packets should be forwarded. The zero value is
-    /// interpreted as unspecified. If unspecified, [`next_hop`] must be set, and will be used by
-    /// the server to select an appropriate device.
-    device_id fuchsia.net.InterfaceId;
-
-    /// The IP address of the next hop. Used for link-layer address resolution, if present.
-    next_hop fuchsia.net.IpAddress:optional;
-
-    /// This entry's metric.
-    ///
-    /// [`UNSPECIFIED_METRIC`] is interpreted as unspecified.
-    metric uint32;
-};
-
 type Error = strict enum {
     INTERNAL = 1;
     NOT_SUPPORTED = 2;
@@ -47,21 +23,6 @@ type Error = strict enum {
 
 @discoverable
 closed protocol Stack {
-    /// Add a new entry to the forwarding table.
-    ///
-    /// If the table already contains an entry with the same subnet and
-    /// destination, an already exists error is returned.
-    strict AddForwardingEntry(struct {
-        entry ForwardingEntry;
-    }) -> () error Error;
-
-    /// Removes the forwarding entry. The entry must exactly match an entry in
-    /// the forwarding table, with the exception of the metric value, which is
-    /// ignored.
-    strict DelForwardingEntry(struct {
-        entry ForwardingEntry;
-    }) -> () error Error;
-
     /// Enables or disables the DHCP client on an interface.
     /// TODO(https://fxbug.dev/42162065): Remove this once the DHCP client is moved
     /// out of the netstack.

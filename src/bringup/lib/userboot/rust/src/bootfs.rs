@@ -17,7 +17,10 @@ pub fn get_zbi_container(
     vmar: &zx::Vmar,
 ) -> Result<ZbiContainer<&'static [u8]>, Error> {
     let zbi_size = zbi_vmo.get_size()? as usize;
-    let zbi_addr = vmar.map(0, zbi_vmo, 0, zbi_size, VmarFlags::PERM_READ)?;
+    // Map with MAP_RANGE so page table entries are populated upfront before scanning the ZBI
+    // container and decompressing the BOOTFS payload.
+    let zbi_addr =
+        vmar.map(0, zbi_vmo, 0, zbi_size, VmarFlags::PERM_READ | VmarFlags::MAP_RANGE)?;
     // SAFETY: zbi_addr points to a valid memory mapping in vmar of zbi_size bytes with read
     // permissions.
     let zbi_slice = unsafe {
@@ -56,8 +59,16 @@ pub fn get_bootfs_vmo(
     let bootfs_vmo = if is_compressed {
         let uncompressed_size = bootfs_item.header.extra as usize;
         let vmo = Vmo::create(uncompressed_size as u64)?;
-        let bootfs_addr =
-            vmar.map(0, &vmo, 0, uncompressed_size, VmarFlags::PERM_READ | VmarFlags::PERM_WRITE)?;
+        // Pre-commit pages and map with MAP_RANGE so zstd decompression writes into pre-populated
+        // page tables instead of taking individual page faults on each page of the output VMO.
+        let _ = vmo.op_range(zx::VmoOp::COMMIT, 0, uncompressed_size as u64);
+        let bootfs_addr = vmar.map(
+            0,
+            &vmo,
+            0,
+            uncompressed_size,
+            VmarFlags::PERM_READ | VmarFlags::PERM_WRITE | VmarFlags::MAP_RANGE,
+        )?;
 
         let payload = bootfs_item.payload.as_bytes();
         // SAFETY: bootfs_addr points to a valid writable memory mapping in vmar of

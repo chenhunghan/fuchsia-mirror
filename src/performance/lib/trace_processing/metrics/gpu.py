@@ -5,7 +5,7 @@
 
 import itertools
 import logging
-from typing import Iterable, Iterator, MutableSequence
+from collections.abc import MutableSequence
 
 from reporting import metrics
 from trace_processing import trace_metrics, trace_model, trace_utils
@@ -40,20 +40,15 @@ class GpuMetricsProcessor(trace_metrics.MetricsProcessor):
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:
-        all_events: Iterator[trace_model.Event] = model.all_events()
-        gpu_usage_events: Iterable[
-            trace_model.CounterEvent
-        ] = trace_utils.filter_events(
-            all_events,
-            name=_GPU_USAGE_EVENT_NAME,
-            type=trace_model.CounterEvent,
-        )
-
         gpu_starts: list[float] = []
         gpu_percentages: list[float] = []
 
         # Parse the start time and percentage for each `Event`.
-        for event in gpu_usage_events:
+        for event in trace_utils.filter_events(
+            model.all_events(),
+            name=_GPU_USAGE_EVENT_NAME,
+            type=trace_model.CounterEvent,
+        ):
             gpu_starts.append(event.start.to_epoch_delta().to_nanoseconds())
             gpu_percentages.append(event.args.get("utilization") or 0)
 

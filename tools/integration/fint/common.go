@@ -28,16 +28,6 @@ func thirdPartyPrebuilt(checkoutDir, platform, name string) string {
 	return filepath.Join(checkoutDir, "prebuilt", "third_party", name, platform, name)
 }
 
-// makeAbsolute takes a root directory and a list of relative paths of files
-// within that directory, and returns a list of absolute paths to those files.
-func makeAbsolute(rootDir string, paths []string) []string {
-	var res []string
-	for _, path := range paths {
-		res = append(res, filepath.Join(rootDir, path))
-	}
-	return res
-}
-
 // saveLogs writes the given set of logs to files in the artifact directory,
 // and adds each path to the output artifacts.
 func saveLogs(artifactDir string, artifacts *fintpb.BuildArtifacts, logs map[string]string) error {

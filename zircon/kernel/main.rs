@@ -12,7 +12,9 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::new_without_default)]
+#![feature(atomic_volatile)]
 #![feature(cfg_sanitize)]
+#![cfg_attr(target_arch = "x86_64", feature(sanitize))]
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -169,5 +171,7 @@ pub mod unused_rust;
 use flow_id as _;
 use init as _;
 use relaxed_atomic as _;
+#[cfg(ktest)]
+use rust_libc_tests as _;
 #[cfg(ktest)]
 use trivial_tests as _;

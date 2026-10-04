@@ -5,13 +5,17 @@
 #include "src/camera/drivers/usb_video/descriptors.h"
 
 #include <endian.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <lib/affine/ratio.h>
 #include <lib/ddk/debug.h>
 #include <stdlib.h>
 
 #include <map>
 #include <set>
+#include <string_view>
 #include <vector>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace camera::usb_video {
 
@@ -19,76 +23,106 @@ namespace {
 static constexpr uint32_t MJPEG_BITS_PER_PIXEL = 24;
 static constexpr uint32_t NANOSECS_IN_SEC = 1e9;
 
-UvcPixelFormat guid_to_pixel_format(const uint8_t guid[GUID_LENGTH]) {
+UvcPixelFormat guid_to_pixel_format(const uint8_t guid[fdescriptor::kVideoGuidLength]) {
   struct {
-    uint8_t guid[GUID_LENGTH];
+    const uint8_t* guid;
     UvcPixelFormat pixel_format;
   } GUID_LUT[] = {
-      {USB_VIDEO_GUID_YUY2_VALUE, UvcPixelFormat::YUY2},
-      {USB_VIDEO_GUID_NV12_VALUE, UvcPixelFormat::NV12},
-      {USB_VIDEO_GUID_M420_VALUE, UvcPixelFormat::M420},
-      {USB_VIDEO_GUID_I420_VALUE, UvcPixelFormat::I420},
+      {kUsbVideoGuidYuy2Value, UvcPixelFormat::YUY2},
+      {kUsbVideoGuidNv12Value, UvcPixelFormat::NV12},
+      {kUsbVideoGuidM420Value, UvcPixelFormat::M420},
+      {kUsbVideoGuidI420Value, UvcPixelFormat::I420},
   };
 
   for (const auto& g : GUID_LUT) {
-    if (memcmp(g.guid, guid, GUID_LENGTH) == 0) {
+    if (memcmp(g.guid, guid, fdescriptor::kVideoGuidLength) == 0) {
       return g.pixel_format;
     }
   }
   return UvcPixelFormat::INVALID;
 }
 
-std::map<int, std::string> desc2string = {
-    {0x01, "USB_DT_DEVICE"},
-    {0x02, "USB_DT_CONFIG"},
-    {0x03, "USB_DT_STRING"},
-    {0x04, "USB_DT_INTERFACE"},
-    {0x05, "USB_DT_ENDPOINT"},
-    {0x06, "USB_DT_DEVICE_QUALIFIER"},
-    {0x07, "USB_DT_OTHER_SPEED_CONFIG"},
-    {0x08, "USB_DT_INTERFACE_POWER"},
-    {0x0b, "USB_DT_INTERFACE_ASSOCIATION"},
-    {0x21, "USB_DT_HID"},
-    {0x22, "USB_DT_HIDREPORT"},
-    {0x23, "USB_DT_HIDPHYSICAL"},
-    {0x24, "USB_DT_CS_INTERFACE"},
-    {0x25, "USB_DT_CS_ENDPOINT"},
-    {0x30, "USB_DT_SS_EP_COMPANION"},
-    {0x31, "USB_DT_SS_ISOCH_EP_COMPANION"},
-};
-
 std::string DType2String(uint8_t type) {
-  auto iter = desc2string.find(type);
-  if (iter == desc2string.end()) {
-    return "Invalid Descriptor Type";
+  switch (static_cast<fdescriptor::DescriptorType>(type)) {
+    case fdescriptor::DescriptorType::kDevice:
+      return "USB_DT_DEVICE";
+    case fdescriptor::DescriptorType::kConfiguration:
+      return "USB_DT_CONFIG";
+    case fdescriptor::DescriptorType::kString:
+      return "USB_DT_STRING";
+    case fdescriptor::DescriptorType::kInterface:
+      return "USB_DT_INTERFACE";
+    case fdescriptor::DescriptorType::kEndpoint:
+      return "USB_DT_ENDPOINT";
+    case fdescriptor::DescriptorType::kDeviceQualifier:
+      return "USB_DT_DEVICE_QUALIFIER";
+    case fdescriptor::DescriptorType::kOtherSpeedConfiguration:
+      return "USB_DT_OTHER_SPEED_CONFIG";
+    case fdescriptor::DescriptorType::kInterfacePower:
+      return "USB_DT_INTERFACE_POWER";
+    case fdescriptor::DescriptorType::kInterfaceAssociation:
+      return "USB_DT_INTERFACE_ASSOCIATION";
+    case fdescriptor::DescriptorType::kHid:
+      return "USB_DT_HID";
+    case fdescriptor::DescriptorType::kHidReport:
+      return "USB_DT_REPORT";
+    case fdescriptor::DescriptorType::kHidPhysical:
+      return "USB_DT_PHYSICAL";
+    case fdescriptor::DescriptorType::kCsInterface:
+      return "USB_DT_CS_INTERFACE";
+    case fdescriptor::DescriptorType::kCsEndpoint:
+      return "USB_DT_CS_ENDPOINT";
+    case fdescriptor::DescriptorType::kSsEpCompanion:
+      return "USB_DT_SS_EP_COMPANION";
+    case fdescriptor::DescriptorType::kSsIsochEpCompanion:
+      return "USB_DT_SS_ISOCH_EP_COMPANION";
+    default:
+      return "Invalid Descriptor Type";
   }
-  return iter->second;
 }
 
 const std::set<uint8_t> kFormatSubtypes = {
-    USB_VIDEO_VS_FORMAT_UNCOMPRESSED, USB_VIDEO_VS_FORMAT_MJPEG,
-    USB_VIDEO_VS_FORMAT_MPEG2TS,      USB_VIDEO_VS_FORMAT_DV,
-    USB_VIDEO_VS_FORMAT_FRAME_BASED,  USB_VIDEO_VS_FORMAT_STREAM_BASED,
-    USB_VIDEO_VS_FORMAT_H264,         USB_VIDEO_VS_FORMAT_H264_SIMULCAST,
-    USB_VIDEO_VS_FORMAT_VP8,          USB_VIDEO_VS_FORMAT_VP8_SIMULCAST};
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatUncompressed),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatMjpeg),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatMpeg2Ts),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatDv),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatFrameBased),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatStreamBased),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatH264),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatH264Simulcast),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatVp8),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatVp8Simulcast)};
 
-const std::set<uint8_t> kFrameSubtypes = {USB_VIDEO_VS_FRAME_UNCOMPRESSED, USB_VIDEO_VS_FRAME_MJPEG,
-                                          USB_VIDEO_VS_FRAME_FRAME_BASED, USB_VIDEO_VS_FRAME_H264,
-                                          USB_VIDEO_VS_FRAME_VP8};
+const std::set<uint8_t> kFrameSubtypes = {
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameUncompressed),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameMjpeg),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameFrameBased),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameH264),
+    fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameVp8)};
 
 // Which frame types are allowed for each format.
 // For each format, only one frame type is allowed.
 const std::map<uint8_t, uint8_t> kAllowedFrames = {
-    {USB_VIDEO_VS_FORMAT_UNCOMPRESSED, USB_VIDEO_VS_FRAME_UNCOMPRESSED},
-    {USB_VIDEO_VS_FORMAT_MJPEG, USB_VIDEO_VS_FRAME_MJPEG},
-    {USB_VIDEO_VS_FORMAT_MPEG2TS, USB_VIDEO_VS_FRAME_MJPEG},
-    {USB_VIDEO_VS_FORMAT_DV, USB_VIDEO_VS_FRAME_MJPEG},
-    {USB_VIDEO_VS_FORMAT_FRAME_BASED, USB_VIDEO_VS_FRAME_FRAME_BASED},
-    {USB_VIDEO_VS_FORMAT_STREAM_BASED, USB_VIDEO_VS_FRAME_FRAME_BASED},
-    {USB_VIDEO_VS_FORMAT_H264, USB_VIDEO_VS_FRAME_H264},
-    {USB_VIDEO_VS_FORMAT_H264_SIMULCAST, USB_VIDEO_VS_FRAME_H264},
-    {USB_VIDEO_VS_FORMAT_VP8, USB_VIDEO_VS_FRAME_VP8},
-    {USB_VIDEO_VS_FORMAT_VP8_SIMULCAST, USB_VIDEO_VS_FRAME_VP8}};
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatUncompressed),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameUncompressed)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatMjpeg),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameMjpeg)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatMpeg2Ts),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameMjpeg)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatDv),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameMjpeg)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatFrameBased),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameFrameBased)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatStreamBased),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameFrameBased)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatH264),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameH264)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatH264Simulcast),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameH264)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatVp8),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameVp8)},
+    {fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFormatVp8Simulcast),
+     fidl::ToUnderlying(fdescriptor::VideoVsDescriptorSubtype::kFrameVp8)}};
 
 std::map<UvcPixelFormat, fuchsia::sysmem::PixelFormatType> Uvc2SysmemPixelFormat = {
     {UvcPixelFormat::BGRA32, fuchsia::sysmem::PixelFormatType::BGRA32},
@@ -135,27 +169,34 @@ zx::result<T> GetStruct(usb_desc_iter_t* iter, uint8_t required_type = 0) {
 }
 
 zx::result<usb_interface_descriptor_t> VerifyStdInterface(usb_desc_iter_t* iter) {
-  return GetStruct<usb_interface_descriptor_t>(iter, USB_DT_INTERFACE);
+  return GetStruct<usb_interface_descriptor_t>(
+      iter, fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface));
 }
 
 zx::result<usb_cs_interface_descriptor_t> VerifyCSInterface(usb_desc_iter_t* iter) {
-  return GetStruct<usb_cs_interface_descriptor_t>(iter, USB_DT_CS_INTERFACE);
+  return GetStruct<usb_cs_interface_descriptor_t>(
+      iter, fidl::ToUnderlying(fdescriptor::DescriptorType::kCsInterface));
 }
 
 zx::result<usb_endpoint_info_descriptor_t> VerifyEndpoint(usb_desc_iter_t* iter) {
-  return GetStruct<usb_endpoint_info_descriptor_t>(iter, USB_DT_ENDPOINT);
+  return GetStruct<usb_endpoint_info_descriptor_t>(
+      iter, fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint));
 }
 
 bool IsVideoControlInterface(usb_desc_iter_t* iter) {
   auto header_or = VerifyStdInterface(iter);
-  return header_or.is_ok() && header_or->b_interface_class == USB_CLASS_VIDEO &&
-         header_or->b_interface_sub_class == USB_SUBCLASS_VIDEO_CONTROL;
+  return header_or.is_ok() &&
+         header_or->b_interface_class == fidl::ToUnderlying(fdescriptor::UsbClass::kVideo) &&
+         header_or->b_interface_sub_class ==
+             fidl::ToUnderlying(fdescriptor::VideoSubclass::kControl);
 }
 
 bool IsVideoStreamingInterface(usb_desc_iter_t* iter) {
   auto header_or = VerifyStdInterface(iter);
-  return header_or.is_ok() && header_or->b_interface_class == USB_CLASS_VIDEO &&
-         header_or->b_interface_sub_class == USB_SUBCLASS_VIDEO_STREAMING;
+  return header_or.is_ok() &&
+         header_or->b_interface_class == fidl::ToUnderlying(fdescriptor::UsbClass::kVideo) &&
+         header_or->b_interface_sub_class ==
+             fidl::ToUnderlying(fdescriptor::VideoSubclass::kStreaming);
 }
 
 zx::result<uint32_t> GetClockFrequency(usb_desc_iter_t* iter) {
@@ -163,7 +204,7 @@ zx::result<uint32_t> GetClockFrequency(usb_desc_iter_t* iter) {
   if (cs_descrip_or.is_error()) {
     return cs_descrip_or.take_error();
   }
-  if (cs_descrip_or->b_descriptor_sub_type != USB_VIDEO_VC_HEADER) {
+  if (cs_descrip_or->b_descriptor_sub_type != fdescriptor::VideoVcDescriptorSubtype::kHeader) {
     return zx::error(ZX_ERR_BAD_STATE);
   }
   auto vc_header = reinterpret_cast<usb_video_vc_header_desc*>(
@@ -179,7 +220,7 @@ zx::result<usb_video_vs_input_header_desc_short> GetInputHeader(usb_desc_iter_t*
   if (cs_descrip_or.is_error()) {
     return cs_descrip_or.take_error();
   }
-  if (cs_descrip_or->b_descriptor_sub_type != USB_VIDEO_VS_INPUT_HEADER) {
+  if (cs_descrip_or->b_descriptor_sub_type != fdescriptor::VideoVsDescriptorSubtype::kInputHeader) {
     return zx::error(ZX_ERR_BAD_STATE);
   }
   return GetStruct<usb_video_vs_input_header_desc_short>(iter);
@@ -258,8 +299,8 @@ zx::result<UvcFormat> ParseUvcFormat(const usb_video_format_header* format,
     return zx::error(ZX_ERR_BAD_STATE);
   }
 
-  switch (format->bDescriptorSubType) {
-    case USB_VIDEO_VS_FORMAT_UNCOMPRESSED: {
+  switch (static_cast<fdescriptor::VideoVsDescriptorSubtype>(format->bDescriptorSubType)) {
+    case fdescriptor::VideoVsDescriptorSubtype::kFormatUncompressed: {
       if (format->bLength < sizeof(usb_video_vs_uncompressed_format_desc) ||
           frame->bLength < sizeof(usb_video_vs_frame_desc)) {
         return zx::error(ZX_ERR_BAD_STATE);
@@ -281,7 +322,7 @@ zx::result<UvcFormat> ParseUvcFormat(const usb_video_format_header* format,
                               .stride = frame_desc->dwMaxVideoFrameBufferSize / frame_desc->wHeight,
                               .default_frame_index = format_desc->bDefaultFrameIndex});
     }
-    case USB_VIDEO_VS_FORMAT_MJPEG: {
+    case fdescriptor::VideoVsDescriptorSubtype::kFormatMjpeg: {
       if (format->bLength < sizeof(usb_video_vs_mjpeg_format_desc) ||
           frame->bLength < sizeof(usb_video_vs_frame_desc)) {
         return zx::error(ZX_ERR_BAD_STATE);
@@ -304,7 +345,7 @@ zx::result<UvcFormat> ParseUvcFormat(const usb_video_format_header* format,
                               .default_frame_index = format_desc->bDefaultFrameIndex});
     }
 
-    case USB_VIDEO_VS_FORMAT_FRAME_BASED: {
+    case fdescriptor::VideoVsDescriptorSubtype::kFormatFrameBased: {
       if (format->bLength < sizeof(usb_video_vs_frame_based_format_desc) ||
           frame->bLength < sizeof(usb_video_vs_frame_based_frame_desc)) {
         return zx::error(ZX_ERR_BAD_STATE);
@@ -361,9 +402,10 @@ zx::result<std::vector<UvcFormat>> GetFormat(usb_desc_iter_t* iter) {
   // for a given format and if present, the Color Matching descriptor shall be placed
   // following the Video and Still Image Frame descriptors for that format.
   auto cs_descrip_or = VerifyCSInterface(iter);
-  while (cs_descrip_or.is_ok() &&
-         (cs_descrip_or->b_descriptor_sub_type == USB_VIDEO_VS_STILL_IMAGE_FRAME ||
-          cs_descrip_or->b_descriptor_sub_type == USB_VIDEO_VS_COLORFORMAT)) {
+  while (cs_descrip_or.is_ok() && (cs_descrip_or->b_descriptor_sub_type ==
+                                       fdescriptor::VideoVsDescriptorSubtype::kStillImageFrame ||
+                                   cs_descrip_or->b_descriptor_sub_type ==
+                                       fdescriptor::VideoVsDescriptorSubtype::kColorformat)) {
     usb_desc_iter_advance(iter);
     cs_descrip_or = VerifyCSInterface(iter);
   }
@@ -507,8 +549,7 @@ zx::result<StreamingSetting> LoadStreamingSettings(usb_desc_iter_t* iter) {
       // The streaming settings should all be of the same type,
       // in this case all isochronous (`EndpointType::kIsochronous`).
       if (setting.ep_type != fdescriptor::EndpointType::kIsochronous) {
-        zxlogf(ERROR, "expected isochronous endpoint, got %u",
-               static_cast<uint8_t>(setting.ep_type));
+        zxlogf(ERROR, "expected isochronous endpoint, got %u", fidl::ToUnderlying(setting.ep_type));
         return zx::error(ZX_ERR_BAD_STATE);
       }
     }

@@ -239,11 +239,12 @@ void Bus::ScanBus(BusScanEntry entry, std::list<BusScanEntry>* scan_list) {
       if (is_bridge) {
         fbl::RefPtr<Bridge> bridge;
         uint8_t mbus_id = config->Read(Config::kSecondaryBusId);
+        char addr[ZX_MAX_NAME_LEN];
+        strncpy(addr, config->addr(), sizeof(addr));
         zx_status_t status =
             Bridge::Create(zxdev(), std::move(config.value()), upstream, this, mbus_id, &bridge);
         if (status != ZX_OK) {
-          zxlogf(ERROR, "failed to create Bridge at %s: %s", config->addr(),
-                 zx_status_get_string(status));
+          zxlogf(ERROR, "failed to create Bridge at %s: %s", addr, zx_status_get_string(status));
           continue;
         }
 

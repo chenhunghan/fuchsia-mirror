@@ -345,8 +345,8 @@ pub(in crate::security) fn check_socket_setsockopt_access(
     security_server: &SecurityServer,
     current_task: &CurrentTask,
     socket: &Socket,
-    _level: u32,
-    _optname: u32,
+    level: u32,
+    optname: u32,
 ) -> Result<(), Errno> {
     let Some(socket_node) = socket.fs_node() else {
         track_stub!(
@@ -355,6 +355,7 @@ pub(in crate::security) fn check_socket_setsockopt_access(
         );
         return Ok(());
     };
+    let audit_context = &[current_task.into(), Auditable::SockOptArguments(level, optname)];
     let current_sid = current_task_state(current_task).current_sid;
     has_socket_permission(
         &build_permission_check(current_task, security_server),
@@ -362,7 +363,7 @@ pub(in crate::security) fn check_socket_setsockopt_access(
         current_sid,
         &socket_node,
         CommonSocketPermission::SetOpt,
-        current_task.into(),
+        audit_context.into(),
     )
 }
 

@@ -262,12 +262,14 @@ class AmlogicVideo final : public VideoDecoder::Owner,
 
   DeviceType device_type_ = {};
   zx::resource secure_monitor_;
-  std::optional<CbusRegisterIo> cbus_;
+  std::optional<fdf::MmioBuffer> cbus_reset_;
+  std::optional<fdf::MmioBuffer> cbus_demux_;
+  std::optional<fdf::MmioBuffer> cbus_parser_;
   std::optional<DosRegisterIo> dosbus_;
   std::optional<HiuRegisterIo> hiubus_;
   std::optional<AoRegisterIo> aobus_;
   std::optional<DmcRegisterIo> dmc_;
-  // These are views and must destruct before cbus_:
+  // These are views and must destruct before the buffers:
   std::optional<ResetRegisterIo> reset_;
   std::optional<DemuxRegisterIo> demux_;
   std::optional<ParserRegisterIo> parser_regs_;

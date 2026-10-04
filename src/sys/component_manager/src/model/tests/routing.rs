@@ -3327,8 +3327,7 @@ async fn source_component_stopping_when_routing() {
 
     // Start to request a capability from the component.
     let (client_end, server_end) = zx::Channel::create();
-    let output =
-        root.lock_resolved_state().await.unwrap().sandbox.component_output.capabilities().clone();
+    let output = root.get_component_output_dict().await.unwrap();
     let route_and_open_fut = async {
         // Route the capability.
         let cap = output.get_capability(&RelativePath::new("foo").unwrap()).unwrap();
@@ -3387,8 +3386,7 @@ async fn source_component_stopped_after_routing_before_open() {
     assert!(!root.is_started().await);
 
     // Request a capability from the component.
-    let output =
-        root.lock_resolved_state().await.unwrap().sandbox.component_output.capabilities().clone();
+    let output = root.get_component_output_dict().await.unwrap();
 
     let cap = output.get_capability(&RelativePath::new("foo").unwrap()).unwrap();
     let cap: Arc<Router<Connector>> = cap.try_into().unwrap();
@@ -3452,8 +3450,7 @@ async fn source_component_shutdown_after_routing_before_open() {
     assert!(!root.is_started().await);
 
     // Request a capability from the component.
-    let output =
-        root.lock_resolved_state().await.unwrap().sandbox.component_output.capabilities().clone();
+    let output = root.get_component_output_dict().await.unwrap();
     let cap = output.get_capability(&RelativePath::new("foo").unwrap()).unwrap();
     let cap: Arc<Router<Connector>> = cap.try_into().unwrap();
     let conn = cap

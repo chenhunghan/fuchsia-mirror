@@ -127,15 +127,6 @@ MAGMA_EXPORT magma_status_t magma_connection_get_error(
     magma_connection_t connection);
 
 ///
-/// \brief Creates a context on the given connection.
-/// \param connection An open connection.
-/// \param context_id_out The returned context id.
-///
-MAGMA_EXPORT magma_status_t magma_connection_create_context(
-    magma_connection_t connection,
-    uint32_t* context_id_out);
-
-///
 /// \brief Releases the context associated with the given id.
 /// \param connection An open connection.
 /// \param context_id A valid context id.

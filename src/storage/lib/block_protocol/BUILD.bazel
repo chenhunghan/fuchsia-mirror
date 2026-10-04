@@ -3,10 +3,26 @@
 # found in the LICENSE file.
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "block_protocol",
+    srcs = [
+        "src/fifo.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/devices/block/drivers/ramdisk:__pkg__",
+        "//src/storage/fxfs/platform:__pkg__",
+        "//src/storage/lib:__subpackages__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
 )
 
 cc_library(
@@ -15,7 +31,13 @@ cc_library(
         "block-fifo.h",
         "types.h",
     ],
-    include_prefix = "lib/driver/mock-mmio/cpp",
-    target_compatible_with = ["@platforms//os:fuchsia"],
-    deps = ["@fuchsia_sdk//fidl/fuchsia.storage.block:fuchsia.storage.block_cpp"],
+    visibility = [
+        "//src/devices/block/bin/biotime:__pkg__",
+        "//src/devices/block/drivers/ahci:__pkg__",
+        "//src/devices/lib/block:__pkg__",
+        "//src/storage/lib/block_client/cpp:__pkg__",
+        "//src/storage/lib/vfs/cpp/journal:__pkg__",
+    ],
+    deps = ["//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp"],
+    alwayslink = True,
 )

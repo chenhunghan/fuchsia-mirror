@@ -1,0 +1,26 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.usb.descriptor;
+
+/// USB Mass Storage Class setup request codes.
+type MscRequest = flexible enum : uint8 {
+    GET_MAX_LUN = 0xfe;
+    RESET = 0xff;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB MSC subclass codes.
+type MscSubclass = flexible enum : uint8 {
+    SCSI = 0x06;
+    @unknown
+    UNDEFINED = 0xee;
+};
+
+/// USB MSC protocol codes.
+type MscProtocol = flexible enum : uint8 {
+    BULK_ONLY = 0x50;
+    @unknown
+    UNDEFINED = 0xee;
+};

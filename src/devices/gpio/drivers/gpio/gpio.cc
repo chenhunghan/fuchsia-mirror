@@ -996,14 +996,16 @@ void GpioRootDevice::AddPinDevices(gpio_config::Config config, fdf::StartComplet
   }
 
   for (std::unique_ptr<PinStatesDevice>& child : pin_states_children_) {
-    if (zx::result<> result = child->AddDevice(node_.node_.borrow()); result.is_error()) {
-      logger().log(fdf::ERROR, "Failed to add pin-states device: {}", result);
+    // Apply the default state before adding the node so that drivers bound to it (e.g. through an
+    // optional "pin-states" composite parent) start with their pins already configured.
+    if (zx::result<> result = child->ApplyDefaultState(); result.is_error()) {
+      logger().log(fdf::ERROR, "Failed to apply default state: {}", result);
       completer(result.take_error());
       return;
     }
 
-    if (zx::result<> result = child->ApplyDefaultState(); result.is_error()) {
-      logger().log(fdf::ERROR, "Failed to apply default state: {}", result);
+    if (zx::result<> result = child->AddDevice(node_.node_.borrow()); result.is_error()) {
+      logger().log(fdf::ERROR, "Failed to add pin-states device: {}", result);
       completer(result.take_error());
       return;
     }

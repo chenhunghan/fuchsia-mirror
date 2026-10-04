@@ -32,7 +32,6 @@ all_ffx_libraries = [
   "safe_string",
   "sdk",
   "ssh",
-  "stream_util",
   "symbol-index",
   "symbolize",
   "target",
@@ -56,19 +55,13 @@ all_ffx_libraries = [
   # keep-sorted end
 ]
 
-# The fuchsia-controller library supports end-to-end testing from
-# Linux hosts, and we don't intend to explicitly support end-to-end
-# testing from other operating systems at this time.
-if (is_linux) {
-  all_ffx_libraries += [ "fuchsia-controller" ]
-}
-
 tests_migrated_ffx_libraries = [
   # keep-sorted start
   "arg_parsing",
   "buildid",
   "compat_info",
   "errors",
+  "isolate",
   "logging",
   "metrics",
   "netext",
@@ -79,6 +72,7 @@ tests_migrated_ffx_libraries = [
   "termio",
   "trace",
   "traceable_error",
+  "usb_fastboot_discovery",
   "version",
 
   # keep-sorted end

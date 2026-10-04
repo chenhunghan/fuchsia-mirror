@@ -90,7 +90,7 @@ impl<'a> RawArg<'a> {
         }
     }
 
-    pub(crate) fn serialize(&self) -> Result<Vec<u8>, SerializeError> {
+    pub(crate) fn serialize(&self) -> Result<Vec<u64>, SerializeError> {
         let arg_name_ref = match self.name {
             StringRef::Index(id) => fxt_layout::StringRefHeader::indexed(id.into()).bits(),
             StringRef::Inline(name) => {

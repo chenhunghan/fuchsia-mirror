@@ -125,7 +125,7 @@ zx::result<OwnedChildNode> DriverBase2::AddOwnedChild(std::string_view node_name
 
 zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> DriverBase2::AddChild(
     std::string_view node_name,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
+    cpp20::span<const fuchsia_driver_framework::NodeProperty2> properties,
     cpp20::span<const fuchsia_driver_framework::Offer> offers) {
   return fdf::AddChild(node(), logger(), node_name, properties, offers);
 }
@@ -133,20 +133,6 @@ zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> DriverBase
 zx::result<OwnedChildNode> DriverBase2::AddOwnedChild(
     std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args) {
   return fdf::AddOwnedChild(node(), logger(), node_name, devfs_args);
-}
-
-zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> DriverBase2::AddChild(
-    std::string_view node_name, fuchsia_driver_framework::DevfsAddArgs& devfs_args,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty> properties,
-    cpp20::span<const fuchsia_driver_framework::Offer> offers) {
-  return fdf::AddChild(node(), logger(), node_name, devfs_args, properties, offers);
-}
-
-zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> DriverBase2::AddChild(
-    std::string_view node_name,
-    cpp20::span<const fuchsia_driver_framework::NodeProperty2> properties,
-    cpp20::span<const fuchsia_driver_framework::Offer> offers) {
-  return fdf::AddChild(node(), logger(), node_name, properties, offers);
 }
 
 zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> DriverBase2::AddChild(

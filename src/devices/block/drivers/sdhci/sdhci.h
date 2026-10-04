@@ -300,6 +300,9 @@ class Sdhci : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_s
   // Set to true if the device has inline crypto support.
   bool supports_inline_crypto_ = false;
 
+  // Set to true if the controller supports 64-bit system addresses for ADMA2.
+  bool supports_64_bit_adma2_ = false;
+
   // Keep one SdmmcVmoStore for each possible client ID (IDs are in [0,
   // fuchsia_hardware_sdmmc::wire::kSdmmcMaxClientId]).
   std::array<SdmmcVmoStore, fuchsia_hardware_sdmmc::wire::kSdmmcMaxClientId + 1>

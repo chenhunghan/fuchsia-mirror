@@ -4,7 +4,8 @@
 path chargers on Fuchsia.
 
 It connects to `fuchsia.hardware.power.battery.Service` (Fuel Gauge data plane),
-`fuchsia.hardware.power.charger.Service` (charger enable control, via its `Controller` member),
+`fuchsia.hardware.power.charger.Service` (charger telemetry),
+`fuchsia.hardware.power.charger.DebugService` (charger operating mode control),
 and `fuchsia.power.battery` services.
 
 ## Specifying Paths & Multiple Devices
@@ -13,7 +14,7 @@ By default, `batteryutil` automatically discovers available battery and charger 
 under `/svc/`. If multiple instances are present:
 - `get` queries and reports telemetry for all discovered instances.
 - `watch` multiplexes real-time streaming updates across all discovered instances.
-- `enable` selects an available charger instance, prompting or warning if multiple are present.
+- `mode` selects an available charger instance, prompting or warning if multiple are present.
 
 To target a specific battery or charger instance directly, pass the `-p` / `--path` option before
 the command:
@@ -25,8 +26,8 @@ $ batteryutil -p /svc/fuchsia.hardware.power.battery.Service/default get
 # Watch a specific fuel gauge instance
 $ batteryutil -p /svc/fuchsia.hardware.power.battery.Service/default watch
 
-# Enable or disable a specific charger instance
-$ batteryutil -p /svc/fuchsia.hardware.power.charger.Service/default enable 1
+# Set operating mode on a specific charger instance
+$ batteryutil -p /svc/fuchsia.hardware.power.charger.DebugService/default mode charging
 ```
 
 ## Commands
@@ -59,7 +60,7 @@ Stream state transitions and telemetry changes via hanging-get without polling.
 
 ```console
 $ batteryutil watch
-Watching battery events on all instances (press Ctrl+C to exit)...
+Watching battery and charger events on all instances (press Ctrl+C to exit)...
 
 === Battery Telemetry Update (/svc/fuchsia.hardware.power.battery.Service/default) ===
 Present: true
@@ -86,26 +87,31 @@ Cycle Count: 2
 Time Remaining: 20m 05s (1205.2s)
 ```
 
-### 3. Charger Enable/Disable (`enable`)
-Enable or disable battery charging:
+### 3. Charger Operating Mode & Power Source Control (`mode`)
+Set the charger operating mode via `fuchsia.hardware.power.charger.DebugService` (falling back to
+Sorrel `SPMI 0x2954` + legacy `fuchsia.power.battery.ChargerService`). Supported modes:
+- `charging` / `usb`: `OperatingMode::Charging` (USB powers system + charges battery)
+- `passthrough`: `OperatingMode::Passthrough` (USB powers system, charging inhibited)
+- `discharging` / `battery`: `OperatingMode::Discharging` (active discharging from battery)
+- `otg`: `OperatingMode::Otg` (reverse boost)
+- `auto`: clears all `DebugService` overrides (`Debug.ClearOverrides`)
+
+Modes set through `DebugService` are sticky overrides: they stay in effect after `batteryutil`
+exits and take precedence over the production policy client connected to `Controller` until they
+are cleared with `batteryutil mode auto`.
 
 ```console
-$ batteryutil enable 1
-Successfully enabled charging via fuchsia.hardware.power.charger.Controller (/svc/fuchsia.hardware.power.charger.Service/default/controller)
+$ batteryutil mode charging
+Successfully set charger operating mode to Charging via fuchsia.hardware.power.charger.Debug (/svc/fuchsia.hardware.power.charger.DebugService/default/debug)
 
-$ batteryutil enable 0
-Successfully disabled charging via fuchsia.hardware.power.charger.Controller (/svc/fuchsia.hardware.power.charger.Service/default/controller)
+$ batteryutil mode passthrough
+Successfully set charger operating mode to Passthrough via fuchsia.hardware.power.charger.Debug (/svc/fuchsia.hardware.power.charger.DebugService/default/debug)
+
+$ batteryutil mode discharging
+Successfully set charger operating mode to Discharging via fuchsia.hardware.power.charger.Debug (/svc/fuchsia.hardware.power.charger.DebugService/default/debug)
+
+$ batteryutil mode auto
+Successfully cleared charger overrides via fuchsia.hardware.power.charger.Debug (/svc/fuchsia.hardware.power.charger.DebugService/default/debug)
 ```
 
-### 4. Low-Level Power Source Override (`power`) — *Sorrel Only*
-Low-level Qualcomm SPMI debug register override (`0x2954`) for manual bench testing on **Sorrel**
-boards only:
-
-```console
-$ batteryutil power battery
-Successfully set power source to battery via SPMI (wrote 0x01 to 0x2954)
-
-$ batteryutil power usb
-Successfully set power source to usb via SPMI (wrote 0x00 to 0x2954)
-```
 

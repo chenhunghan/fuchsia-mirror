@@ -400,11 +400,7 @@ pub trait MemoryAccessorExt: MemoryAccessor {
         if len > N {
             Ok(SmallVec::<[T; N]>::from_vec(self.read_objects_to_vec(user, len)?))
         } else {
-            // TODO(https://github.com/rust-lang/rust/issues/96097) use MaybeUninit::uninit_array
-            // SAFETY: We are converting from an uninitialized array to an array of uninitialized
-            // elements which is the same. See
-            // https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#initializing-an-array-element-by-element.
-            let mut buffer: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
+            let mut buffer: [MaybeUninit<T>; N] = [const { MaybeUninit::uninit() }; N];
 
             self.read_objects(user, &mut buffer[..len])?;
 

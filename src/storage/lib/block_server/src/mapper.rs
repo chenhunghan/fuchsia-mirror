@@ -155,7 +155,11 @@ impl DataBuffer for DirectPageRequest {
 }
 
 impl PageRequest for DirectPageRequest {
-    fn prepare(&mut self, read_range: Range<u64>) -> Result<(), ChunkedArchiveError> {
+    fn prepare(
+        &mut self,
+        read_range: Range<u64>,
+        _read_alignment: usize,
+    ) -> Result<(), ChunkedArchiveError> {
         assert_eq!(self.vaddr, 0, "prepare must only be called once");
         self.read_range = read_range;
         let len = (self.read_range.end - self.read_range.start) as usize;
@@ -442,7 +446,7 @@ mod tests {
         let vmo = direct_pager.create_vmo(key, 8192, fblock::CreateVmoOptions::empty()).unwrap();
 
         let mut request = direct_pager.get_page_request(key, 0..8192);
-        request.prepare(0..8192).expect("prepare");
+        request.prepare(0..8192, 128 * 1024).expect("prepare");
 
         let page1 = vec![0xAAu8; 4096];
         request.mut_ptr_slice().subslice_mut(0..4096).copy_from_slice(&page1);
@@ -480,7 +484,7 @@ mod tests {
         assert_eq!(packet.key(), key);
 
         let mut request = direct_pager.get_page_request(key, 0..8192);
-        request.prepare(0..8192).expect("prepare");
+        request.prepare(0..8192, 128 * 1024).expect("prepare");
         drop(request);
 
         assert_eq!(reader_thread.join().unwrap(), Err(zx::Status::IO));
@@ -515,7 +519,7 @@ mod tests {
         assert_eq!(packet.key(), key);
 
         let mut request = direct_pager.get_page_request(key, 0..8192);
-        request.prepare(0..8192).expect("prepare");
+        request.prepare(0..8192, 128 * 1024).expect("prepare");
         drop(request);
 
         let buf = reader_thread.join().unwrap();

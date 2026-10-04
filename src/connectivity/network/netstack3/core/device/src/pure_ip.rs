@@ -235,7 +235,7 @@ where
                     RecvIpFrameMeta::<_, _, Ipv4>::new(
                         device_id,
                         None,
-                        DeviceIpLayerMetadata::default(),
+                        DeviceIpLayerMetadata::new_for_rx_packet(),
                         parsing_context,
                         gso_info,
                     ),
@@ -251,7 +251,7 @@ where
                     RecvIpFrameMeta::<_, _, Ipv6>::new(
                         device_id,
                         None,
-                        DeviceIpLayerMetadata::default(),
+                        DeviceIpLayerMetadata::new_for_rx_packet(),
                         parsing_context,
                         gso_info,
                     ),
@@ -262,7 +262,7 @@ where
     }
 }
 
-impl<CC, BC> SendableFrameMeta<CC, BC> for DeviceSocketMetadata<PureIpDevice, CC::DeviceId>
+impl<CC, BC> SendableFrameMeta<CC, BC> for DeviceSocketMetadata<PureIpDevice, CC, BC>
 where
     CC: TransmitQueueHandler<PureIpDevice, BC, Meta = PureIpDeviceTxQueueFrameMetadata<BC>>
         + ResourceCounterContext<CC::DeviceId, DeviceCounters>,
@@ -278,10 +278,9 @@ where
         S: NetworkSerializer,
         S::Buffer: BufferMut,
     {
-        let Self { device_id, metadata: PureIpHeaderParams { ip_version } } = self;
-        // TODO(https://fxbug.dev/391946195): Apply send buffer enforcement from
-        // device sockets instead of using default.
-        let tx_meta: BC::TxMetadata = Default::default();
+        let Self { device_id, metadata: PureIpHeaderParams { ip_version }, ip_layer_metadata } =
+            self;
+        let tx_meta = ip_layer_metadata.into_tx_metadata();
         net_types::for_any_ip_version!(
             ip_version,
             I,

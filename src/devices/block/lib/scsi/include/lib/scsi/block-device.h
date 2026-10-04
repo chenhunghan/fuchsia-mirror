@@ -42,7 +42,8 @@ struct DeviceOptions {
 // |BlockDevice| represents a single SCSI direct access block device.
 // |BlockDevice| bridges between the Zircon block protocol and SCSI commands/responses.
 class BlockDevice : public block_server::DriverInterface,
-                    public fidl::Server<fuchsia_driver_token::NodeToken> {
+                    public fidl::Server<fuchsia_driver_token::NodeToken>,
+                    public fidl::WireServer<fuchsia_hardware_inlineencryption::Device> {
  public:
   // Public so that we can use make_unique.
   // Clients should use BlockDevice::Bind().
@@ -90,6 +91,11 @@ class BlockDevice : public block_server::DriverInterface,
 
   // fuchsia_driver_token::NodeToken implementation
   void Get(GetCompleter::Sync& completer) override;
+
+  // fuchsia_hardware_inlineencryption::Device implementation
+  void ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync& completer) override;
+  void DeriveRawSecret(DeriveRawSecretRequestView request,
+                       DeriveRawSecretCompleter::Sync& completer) override;
 
   uint8_t target() const { return target_; }
   uint16_t lun() const { return lun_; }
@@ -144,6 +150,8 @@ class BlockDevice : public block_server::DriverInterface,
   fidl::WireSyncClient<fuchsia_driver_framework::NodeController> node_controller_;
 
   std::optional<block_server::BlockServer> block_server_;
+
+  fidl::ServerBindingGroup<fuchsia_hardware_inlineencryption::Device> inline_encryption_bindings_;
 
   compat::SyncInitializedDeviceServer compat_server_;
 };

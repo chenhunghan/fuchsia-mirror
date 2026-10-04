@@ -357,6 +357,26 @@ TEST_F(ProcTaskDirTest, PidDirCorrectIno) {
   ASSERT_EQ(pre_stat.st_ino, post_stat.st_ino) << "Inode number incorrectly seen to change";
 }
 
+TEST_F(ProcTaskDirTest, PidDirNotAccessibleAfterExitWithOpenChildFd) {
+  test_helper::Rendezvous child_exit = test_helper::MakeRendezvous();
+
+  test_helper::ForkHelper helper;
+  pid_t child_pid = helper.RunInForkedProcess(
+      [holder = std::move(child_exit.holder)]() mutable { holder.hold(); });
+
+  std::string child_dir = fxl::StringPrintf("/proc/%d", child_pid);
+  std::string child_status = child_dir + "/status";
+  fbl::unique_fd status_fd(SAFE_SYSCALL(open(child_status.c_str(), O_RDONLY)));
+
+  // Allow the child to exit and reap it while keeping status_fd open.
+  child_exit.poker.poke();
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  struct stat st;
+  EXPECT_THAT(stat(child_dir.c_str(), &st), SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(stat(child_status.c_str(), &st), SyscallFailsWithErrno(ENOENT));
+}
+
 TEST_F(ProcTaskDirTest, SelfAuxvIsNotEmpty) {
   std::string contents;
   ASSERT_TRUE(files::ReadFileToString("/proc/self/auxv", &contents));

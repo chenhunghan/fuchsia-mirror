@@ -67,37 +67,12 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll, Waker};
-use zx_status::Status;
+use zx::Status;
 
 /// Invalid handle value
 const INVALID_HANDLE: u32 = 0;
 
-/// The type of an object.
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone)]
-pub struct ObjectType(zx_types::zx_obj_type_t);
-
-macro_rules! define_object_type_constant {
-    ($x:tt, $docname:expr, $name:ident, $zx_name:ident, $availability:ident) => {
-        #[doc = $docname]
-        pub const $name: ObjectType = ObjectType(zx_types::$zx_name);
-    };
-}
-
-impl ObjectType {
-    /// No object.
-    pub const NONE: ObjectType = ObjectType(0);
-    invoke_for_handle_types!(define_object_type_constant);
-
-    /// Creates an `ObjectType` from the underlying zircon type.
-    pub const fn from_raw(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    /// Converts `ObjectType` into the underlying zircon type.
-    pub const fn into_raw(self) -> u32 {
-        self.0
-    }
-}
+pub use zx::ObjectType;
 
 /// A borrowed reference to an underlying handle
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -151,13 +126,13 @@ impl<'a> HandleRef<'a> {
     /// Signal an object
     pub fn signal(&self, clear_mask: Signals, set_mask: Signals) -> Result<(), Status> {
         if self.is_invalid() {
-            return Err(zx_status::Status::BAD_HANDLE);
+            return Err(zx::Status::BAD_HANDLE);
         }
 
         clear_mask.validate_user_signals()?;
         set_mask.validate_user_signals()?;
 
-        let rights = get_hdl_rights(self.raw_handle()).ok_or(zx_status::Status::BAD_HANDLE)?;
+        let rights = get_hdl_rights(self.raw_handle()).ok_or(zx::Status::BAD_HANDLE)?;
 
         if !rights.contains(Rights::SIGNAL) {
             Err(Status::ACCESS_DENIED)
@@ -177,7 +152,7 @@ impl<'a> HandleRef<'a> {
     /// Return basic information about the handle.
     pub fn basic_info(&self) -> Result<HandleBasicInfo, Status> {
         if self.is_invalid() {
-            return Err(zx_status::Status::BAD_HANDLE);
+            return Err(zx::Status::BAD_HANDLE);
         }
         let koids = with_handle(self.raw_handle(), |mut h, side| {
             let h = h.as_hdl_data();
@@ -197,7 +172,7 @@ impl<'a> HandleRef<'a> {
     /// Returns the koid (kernel object ID) for this handle.
     pub fn koid(&self) -> Result<Koid, Status> {
         if self.is_invalid() {
-            return Err(zx_status::Status::BAD_HANDLE);
+            return Err(zx::Status::BAD_HANDLE);
         }
         let koid = with_handle(self.raw_handle(), |mut h, side| {
             let h = h.as_hdl_data();
@@ -250,7 +225,7 @@ pub trait AsHandleRef {
     }
 
     /// Returns the koid (kernel object ID) for this handle.
-    fn koid(&self) -> Result<Koid, zx_status::Status> {
+    fn koid(&self) -> Result<Koid, zx::Status> {
         self.as_handle_ref().koid()
     }
 }
@@ -268,13 +243,13 @@ pub trait Peered: AsHandleRef {
     /// syscall.
     fn signal_peer(&self, clear_mask: Signals, set_mask: Signals) -> Result<(), Status> {
         if self.as_handle_ref().is_invalid() {
-            return Err(zx_status::Status::BAD_HANDLE);
+            return Err(zx::Status::BAD_HANDLE);
         }
 
         clear_mask.validate_user_signals()?;
         set_mask.validate_user_signals()?;
 
-        let rights = get_hdl_rights(self.raw_handle()).ok_or(zx_status::Status::BAD_HANDLE)?;
+        let rights = get_hdl_rights(self.raw_handle()).ok_or(zx::Status::BAD_HANDLE)?;
 
         if !rights.contains(Rights::SIGNAL_PEER) {
             Err(Status::ACCESS_DENIED)
@@ -436,22 +411,22 @@ impl Handle {
     /// the original handle. Wraps the
     /// [zx_handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace.md)
     /// syscall.
-    pub fn replace_handle(self, target_rights: Rights) -> Result<Handle, zx_status::Status> {
+    pub fn replace_handle(self, target_rights: Rights) -> Result<Handle, zx::Status> {
         if target_rights == Rights::SAME_RIGHTS {
             return Ok(self);
         }
         if self.is_invalid() {
-            return Err(zx_status::Status::BAD_HANDLE);
+            return Err(zx::Status::BAD_HANDLE);
         }
 
         let mut table = HANDLE_TABLE.lock();
         let std::collections::hash_map::Entry::Occupied(entry) = table.entry(self.raw_handle())
         else {
-            return Err(zx_status::Status::BAD_HANDLE);
+            return Err(zx::Status::BAD_HANDLE);
         };
 
         if !entry.get().rights.contains(target_rights) {
-            return Err(zx_status::Status::INVALID_ARGS);
+            return Err(zx::Status::INVALID_ARGS);
         }
 
         let new_handle = alloc_handle();
@@ -485,7 +460,7 @@ impl From<Handle> for Channel {
 }
 impl From<Channel> for Handle {
     fn from(mut hdl: Channel) -> Handle {
-        let out = unsafe { Handle::from_raw(hdl.0) };
+        let out = Handle(hdl.0);
         hdl.0 = INVALID_HANDLE;
         out
     }
@@ -593,7 +568,7 @@ impl Channel {
     }
 
     /// Read a message from a channel.
-    pub fn read(&self, buf: &mut MessageBuf) -> Result<(), zx_status::Status> {
+    pub fn read(&self, buf: &mut MessageBuf) -> Result<(), zx::Status> {
         let (bytes, handles) = buf.split_mut();
         self.read_split(bytes, handles)
     }
@@ -603,10 +578,10 @@ impl Channel {
         &self,
         bytes: &mut Vec<u8>,
         handles: &mut Vec<Handle>,
-    ) -> Result<(), zx_status::Status> {
+    ) -> Result<(), zx::Status> {
         match self.poll_read(&mut Context::from_waker(Waker::noop()), bytes, handles) {
             Poll::Ready(r) => r,
-            Poll::Pending => Err(zx_status::Status::SHOULD_WAIT),
+            Poll::Pending => Err(zx::Status::SHOULD_WAIT),
         }
     }
 
@@ -616,7 +591,7 @@ impl Channel {
         cx: &mut Context<'_>,
         bytes: &mut Vec<u8>,
         handles: &mut Vec<Handle>,
-    ) -> Poll<Result<(), zx_status::Status>> {
+    ) -> Poll<Result<(), zx::Status>> {
         with_handle(self.0, |h, side| {
             if let HdlRef::Channel(obj) = h {
                 if let Some(mut msg) = obj.q.side_mut(side.opposite()).pop_front() {
@@ -630,7 +605,7 @@ impl Channel {
                 } else if obj.is_open() {
                     obj.wakers.side_mut(side).pending_readable(cx)
                 } else {
-                    Poll::Ready(Err(zx_status::Status::PEER_CLOSED))
+                    Poll::Ready(Err(zx::Status::PEER_CLOSED))
                 }
             } else {
                 unreachable!();
@@ -656,10 +631,10 @@ impl Channel {
         &self,
         buf: &mut [u8],
         handles: &mut [MaybeUninit<Handle>],
-    ) -> Result<(Result<(), zx_status::Status>, usize, usize), (usize, usize)> {
+    ) -> Result<(Result<(), zx::Status>, usize, usize), (usize, usize)> {
         match self.poll_read_raw(&mut Context::from_waker(Waker::noop()), buf, handles) {
             Poll::Ready(r) => r,
-            Poll::Pending => Ok((Err(zx_status::Status::SHOULD_WAIT), 0, 0)),
+            Poll::Pending => Ok((Err(zx::Status::SHOULD_WAIT), 0, 0)),
         }
     }
 
@@ -670,7 +645,7 @@ impl Channel {
         cx: &mut Context<'_>,
         buf: &mut [u8],
         handles: &mut [MaybeUninit<Handle>],
-    ) -> Poll<Result<(Result<(), zx_status::Status>, usize, usize), (usize, usize)>> {
+    ) -> Poll<Result<(Result<(), zx::Status>, usize, usize), (usize, usize)>> {
         with_handle(self.0, |h, side| {
             let HdlRef::Channel(obj) = h else { unreachable!() };
             let read_side = obj.q.side_mut(side.opposite());
@@ -698,13 +673,13 @@ impl Channel {
             } else if obj.is_open() {
                 obj.wakers.side_mut(side).pending_readable(cx)
             } else {
-                Poll::Ready(Ok((Err(zx_status::Status::PEER_CLOSED), 0, 0)))
+                Poll::Ready(Ok((Err(zx::Status::PEER_CLOSED), 0, 0)))
             }
         })
     }
 
     /// Read a message from a channel.
-    pub fn read_etc(&self, buf: &mut MessageBufEtc) -> Result<(), zx_status::Status> {
+    pub fn read_etc(&self, buf: &mut MessageBufEtc) -> Result<(), zx::Status> {
         let (bytes, handles) = buf.split_mut();
         self.read_etc_split(bytes, handles)
     }
@@ -714,10 +689,10 @@ impl Channel {
         &self,
         bytes: &mut Vec<u8>,
         handles: &mut Vec<HandleInfo>,
-    ) -> Result<(), zx_status::Status> {
+    ) -> Result<(), zx::Status> {
         match self.poll_read_etc(&mut Context::from_waker(Waker::noop()), bytes, handles) {
             Poll::Ready(r) => r,
-            Poll::Pending => Err(zx_status::Status::SHOULD_WAIT),
+            Poll::Pending => Err(zx::Status::SHOULD_WAIT),
         }
     }
 
@@ -727,7 +702,7 @@ impl Channel {
         cx: &mut Context<'_>,
         bytes: &mut Vec<u8>,
         handle_infos: &mut Vec<HandleInfo>,
-    ) -> Poll<Result<(), zx_status::Status>> {
+    ) -> Poll<Result<(), zx::Status>> {
         let mut handles = Vec::new();
         ready!(self.poll_read(cx, bytes, &mut handles))?;
         handle_infos.clear();
@@ -741,7 +716,7 @@ impl Channel {
     }
 
     /// Write a message to a channel.
-    pub fn write(&self, bytes: &[u8], handles: &mut [Handle]) -> Result<(), zx_status::Status> {
+    pub fn write(&self, bytes: &[u8], handles: &mut [Handle]) -> Result<(), zx::Status> {
         let bytes_vec = bytes.to_vec();
         let mut handles_vec = Vec::with_capacity(handles.len());
         for handle in handles {
@@ -750,7 +725,7 @@ impl Channel {
         with_handle(self.0, |h, side| {
             if let HdlRef::Channel(obj) = h {
                 if !obj.is_open() {
-                    return Err(zx_status::Status::PEER_CLOSED);
+                    return Err(zx::Status::PEER_CLOSED);
                 }
                 check_write_shutdown()?;
                 obj.q
@@ -770,18 +745,18 @@ impl Channel {
         &self,
         bytes: &[u8],
         handles: &mut [HandleDisposition<'a>],
-    ) -> Result<(), zx_status::Status> {
+    ) -> Result<(), zx::Status> {
         let bytes_vec = bytes.to_vec();
         let mut handles_vec = Vec::with_capacity(handles.len());
         for hd in handles {
             let op: HandleOp<'a> =
                 std::mem::replace(&mut hd.handle_op, HandleOp::Move(Handle::invalid()));
             if let HandleOp::Move(handle) = op {
-                let ty = get_hdl_type(handle.raw_handle()).ok_or(zx_status::Status::BAD_HANDLE)?;
+                let ty = get_hdl_type(handle.raw_handle()).ok_or(zx::Status::BAD_HANDLE)?;
                 if ty.object_type() != handle.object_type()
                     && handle.object_type() != ObjectType::NONE
                 {
-                    return Err(zx_status::Status::INVALID_ARGS);
+                    return Err(zx::Status::INVALID_ARGS);
                 }
                 handles_vec.push(handle.replace_handle(hd.rights)?);
             } else {
@@ -794,7 +769,7 @@ impl Channel {
                     // Move the handles outside this closure before dropping them.  If any are
                     // channels in the same shard as this channel, dropping them will attempt to
                     // re-acquire the lock held by with_handle.
-                    return Err((handles_vec, zx_status::Status::PEER_CLOSED));
+                    return Err((handles_vec, zx::Status::PEER_CLOSED));
                 }
                 if let Err(e) = check_write_shutdown() {
                     return Err((handles_vec, e));
@@ -845,7 +820,7 @@ impl From<Handle> for Socket {
 }
 impl From<Socket> for Handle {
     fn from(mut hdl: Socket) -> Handle {
-        let out = unsafe { Handle::from_raw(hdl.0) };
+        let out = Handle(hdl.0);
         hdl.0 = INVALID_HANDLE;
         out
     }
@@ -899,7 +874,7 @@ impl Socket {
 
     /// Create a streaming socket.
     pub fn create_stream() -> (Socket, Socket) {
-        let rights = Rights::SOCKET_DEFAULT;
+        let rights = Rights::BASIC | Rights::IO | Rights::SIGNAL | Rights::SIGNAL_PEER;
         let (left, right, obj) = new_handle_pair(HdlType::StreamSocket, rights);
 
         let mut obj = obj.lock();
@@ -920,7 +895,7 @@ impl Socket {
 
     /// Create a datagram socket.
     pub fn create_datagram() -> (Socket, Socket) {
-        let rights = Rights::SOCKET_DEFAULT;
+        let rights = Rights::BASIC | Rights::IO | Rights::SIGNAL | Rights::SIGNAL_PEER;
         let (left, right, obj) = new_handle_pair(HdlType::DatagramSocket, rights);
 
         let mut obj = obj.lock();
@@ -941,12 +916,12 @@ impl Socket {
 
     /// Write the given bytes into the socket.
     /// Return value (on success) is number of bytes actually written.
-    pub fn write(&self, bytes: &[u8]) -> Result<usize, zx_status::Status> {
+    pub fn write(&self, bytes: &[u8]) -> Result<usize, zx::Status> {
         with_handle(self.0, |h, side| {
             match h {
                 HdlRef::StreamSocket(obj) => {
                     if !obj.is_open() {
-                        return Err(zx_status::Status::PEER_CLOSED);
+                        return Err(zx::Status::PEER_CLOSED);
                     }
                     check_write_shutdown()?;
                     obj.q.side_mut(side).extend(bytes);
@@ -955,7 +930,7 @@ impl Socket {
                 }
                 HdlRef::DatagramSocket(obj) => {
                     if !obj.is_open() {
-                        return Err(zx_status::Status::PEER_CLOSED);
+                        return Err(zx::Status::PEER_CLOSED);
                     }
                     check_write_shutdown()?;
                     obj.q.side_mut(side).push_back(bytes.to_vec());
@@ -969,7 +944,7 @@ impl Socket {
     }
 
     /// Return how many bytes are buffered in the socket
-    pub fn outstanding_read_bytes(&self) -> Result<usize, zx_status::Status> {
+    pub fn outstanding_read_bytes(&self) -> Result<usize, zx::Status> {
         let (len, open) = with_handle(self.0, |h, side| match h {
             HdlRef::StreamSocket(obj) => (obj.q.side(side.opposite()).len(), obj.is_open()),
             HdlRef::DatagramSocket(obj) => (
@@ -982,7 +957,7 @@ impl Socket {
             return Ok(len);
         }
         if !open {
-            return Err(zx_status::Status::PEER_CLOSED);
+            return Err(zx::Status::PEER_CLOSED);
         }
         Ok(0)
     }
@@ -992,14 +967,14 @@ impl Socket {
         &self,
         bytes: &mut [u8],
         ctx: &mut Context<'_>,
-    ) -> Poll<Result<usize, zx_status::Status>> {
+    ) -> Poll<Result<usize, zx::Status>> {
         with_handle(self.0, |h, side| match h {
             HdlRef::StreamSocket(obj) => {
                 if bytes.is_empty() {
                     if obj.is_open() {
                         return Poll::Ready(Ok(0));
                     } else {
-                        return Poll::Ready(Err(zx_status::Status::PEER_CLOSED));
+                        return Poll::Ready(Err(zx::Status::PEER_CLOSED));
                     }
                 }
                 let read = obj.q.side_mut(side.opposite());
@@ -1008,7 +983,7 @@ impl Socket {
                     if obj.is_open() {
                         return obj.wakers.side_mut(side).pending_readable(ctx);
                     } else {
-                        return Poll::Ready(Err(zx_status::Status::PEER_CLOSED));
+                        return Poll::Ready(Err(zx::Status::PEER_CLOSED));
                     }
                 }
                 for (i, b) in read.drain(..copy_bytes).enumerate() {
@@ -1029,7 +1004,7 @@ impl Socket {
                     }
                     Poll::Ready(Ok(n))
                 } else if !obj.is_open() {
-                    Poll::Ready(Err(zx_status::Status::PEER_CLOSED))
+                    Poll::Ready(Err(zx::Status::PEER_CLOSED))
                 } else {
                     obj.wakers.side_mut(side).pending_readable(ctx)
                 }
@@ -1040,10 +1015,10 @@ impl Socket {
 
     /// Read bytes from the socket.
     /// Return value (on success) is number of bytes actually read.
-    pub fn read(&self, bytes: &mut [u8]) -> Result<usize, zx_status::Status> {
+    pub fn read(&self, bytes: &mut [u8]) -> Result<usize, zx::Status> {
         match self.poll_read(bytes, &mut Context::from_waker(Waker::noop())) {
             Poll::Ready(r) => r,
-            Poll::Pending => Err(zx_status::Status::SHOULD_WAIT),
+            Poll::Pending => Err(zx::Status::SHOULD_WAIT),
         }
     }
 
@@ -1053,7 +1028,7 @@ impl Socket {
     }
 
     /// Get info about the socket.
-    pub fn info(&self) -> Result<SocketInfo, zx_status::Status> {
+    pub fn info(&self) -> Result<SocketInfo, zx::Status> {
         with_handle(self.0, |h, side| match h {
             HdlRef::StreamSocket(obj) => {
                 let read = obj.q.side_mut(side.opposite());
@@ -1111,7 +1086,7 @@ impl From<Handle> for EventPair {
 }
 impl From<EventPair> for Handle {
     fn from(mut hdl: EventPair) -> Handle {
-        let out = unsafe { Handle::from_raw(hdl.0) };
+        let out = Handle(hdl.0);
         hdl.0 = INVALID_HANDLE;
         out
     }
@@ -1159,7 +1134,11 @@ impl EventPair {
 
     /// Create an event pair.
     pub fn try_create() -> Result<(EventPair, EventPair), Status> {
-        let rights = Rights::EVENTPAIR_DEFAULT;
+        let rights = Rights::TRANSFER
+            | Rights::DUPLICATE
+            | Rights::IO
+            | Rights::SIGNAL
+            | Rights::SIGNAL_PEER;
         let (left, right, _) = new_handle_pair(HdlType::EventPair, rights);
         Ok((EventPair(left), EventPair(right)))
     }
@@ -1188,7 +1167,7 @@ impl From<Handle> for Event {
 }
 impl From<Event> for Handle {
     fn from(mut hdl: Event) -> Handle {
-        let out = unsafe { Handle::from_raw(hdl.0) };
+        let out = Handle(hdl.0);
         hdl.0 = INVALID_HANDLE;
         out
     }
@@ -1229,7 +1208,7 @@ impl Event {
 
     /// Create an event.
     pub fn create() -> Event {
-        Event(new_handle(HdlType::Event, Rights::EVENT_DEFAULT).0)
+        Event(new_handle(HdlType::Event, Rights::BASIC | Rights::SIGNAL).0)
     }
 
     /// Return a reference to the handle.
@@ -1606,93 +1585,10 @@ mod inner_signals {
             if Signals::USER_SIGNALS.contains(*self) { Ok(()) } else { Err(Status::INVALID_ARGS) }
         }
     }
-
-    bitflags! {
-        /// Rights associated with a handle.
-        ///
-        /// See [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights) for more information.
-        #[repr(C)]
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct Rights: u32 {
-            /// No rights.
-            const NONE           = 0;
-            /// Duplicate right.
-            const DUPLICATE      = 1 << 0;
-            /// Transfer right.
-            const TRANSFER       = 1 << 1;
-            /// Read right.
-            const READ           = 1 << 2;
-            /// Write right.
-            const WRITE          = 1 << 3;
-            /// Execute right.
-            const EXECUTE = 1 << 4;
-            /// Map right.
-            const MAP = 1 << 5;
-            /// Get Property right.
-            const GET_PROPERTY = 1 << 6;
-            /// Set Property right.
-            const SET_PROPERTY = 1 << 7;
-            /// Enumerate right.
-            const ENUMERATE = 1 << 8;
-            /// Destroy right.
-            const DESTROY = 1 << 9;
-            /// Set Policy right.
-            const SET_POLICY = 1 << 10;
-            /// Get Policy right.
-            const GET_POLICY = 1 << 11;
-            /// Signal right.
-            const SIGNAL = 1 << 12;
-            /// Signal Peer right.
-            const SIGNAL_PEER = 1 << 13;
-            /// Wait right.
-            const WAIT = 1 << 14;
-            /// Inspect right.
-            const INSPECT = 1 << 15;
-            /// Manage Job right.
-            const MANAGE_JOB = 1 << 16;
-            /// Manage Process right.
-            const MANAGE_PROCESS = 1 << 17;
-            /// Manage Thread right.
-            const MANAGE_THREAD = 1 << 18;
-            /// Apply Profile right.
-            const APPLY_PROFILE = 1 << 19;
-            /// Manage Socket right.
-            const MANAGE_SOCKET = 1 << 20;
-            /// Same rights.
-            const SAME_RIGHTS = 1 << 31;
-            /// A basic set of rights for most things.
-            const BASIC = Rights::TRANSFER.bits() |
-                                Rights::DUPLICATE.bits() |
-                                Rights::WAIT.bits() |
-                                Rights::INSPECT.bits();
-            /// IO related rights
-            const IO = Rights::WRITE.bits() |
-                    Rights::READ.bits();
-            /// Rights of a new socket.
-            const SOCKET_DEFAULT = Rights::BASIC.bits() |
-                                    Rights::IO.bits() |
-                                    Rights::SIGNAL.bits() |
-                                    Rights::SIGNAL_PEER.bits();
-            /// Rights of a new channel.
-            const CHANNEL_DEFAULT = (Rights::BASIC.bits() & !Rights::DUPLICATE.bits()) |
-                                    Rights::IO.bits() |
-                                    Rights::SIGNAL.bits() |
-                                    Rights::SIGNAL_PEER.bits();
-            /// Rights of a new event pair.
-            const EVENTPAIR_DEFAULT =
-                                    Rights::TRANSFER.bits() |
-                                    Rights::DUPLICATE.bits() |
-                                    Rights::IO.bits() |
-                                    Rights::SIGNAL.bits() |
-                                    Rights::SIGNAL_PEER.bits();
-            /// Rights of a new event.
-            const EVENT_DEFAULT = Rights::BASIC.bits() |
-                                Rights::SIGNAL.bits();
-        }
-    }
 }
 
-pub use inner_signals::{Rights, Signals};
+pub use inner_signals::Signals;
+pub use zx::Rights;
 
 /// Handle operation.
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -1787,7 +1683,7 @@ impl HandleInfo {
         HandleInfo::new(
             // SAFETY: caller is responsible for preventing double-closure of the handle.
             unsafe { Handle::from_raw(raw.handle) },
-            ObjectType(raw.ty),
+            ObjectType::from_raw(raw.ty),
             Rights::from_bits_retain(raw.rights),
         )
     }
@@ -2276,8 +2172,8 @@ pub async fn shut_down_handles() {
     }
 }
 
-fn check_write_shutdown() -> Result<(), zx_status::Status> {
-    if SHUTTING_DOWN.load(Ordering::Acquire) { Err(zx_status::Status::SHOULD_WAIT) } else { Ok(()) }
+fn check_write_shutdown() -> Result<(), zx::Status> {
+    if SHUTTING_DOWN.load(Ordering::Acquire) { Err(zx::Status::SHOULD_WAIT) } else { Ok(()) }
 }
 
 fn get_hdl_type(handle: u32) -> Option<HdlType> {
@@ -2556,7 +2452,12 @@ mod test {
     #[test]
     fn socket_dup_requires_right() {
         let (_a, b) = Socket::create_stream();
-        let c = b.duplicate_handle(Rights::SOCKET_DEFAULT & !Rights::DUPLICATE).unwrap();
+        let c = b
+            .duplicate_handle(
+                (Rights::BASIC | Rights::IO | Rights::SIGNAL | Rights::SIGNAL_PEER)
+                    & !Rights::DUPLICATE,
+            )
+            .unwrap();
         assert!(matches!(c.duplicate_handle(Rights::SAME_RIGHTS), Err(Status::ACCESS_DENIED)));
     }
 
@@ -2678,7 +2579,7 @@ mod test {
 
     #[test]
     fn handle_basic_info_invalid() {
-        assert_eq!(Handle::invalid().basic_info().unwrap_err(), zx_status::Status::BAD_HANDLE);
+        assert_eq!(Handle::invalid().basic_info().unwrap_err(), zx::Status::BAD_HANDLE);
 
         // Note non-zero but invalid handles can't be tested because of a
         // panic when the handle isn't found in with_handle().
@@ -2710,13 +2611,13 @@ mod test {
     fn handle_replace_invalid() {
         assert_eq!(
             Handle::invalid().replace_handle(Rights::TRANSFER).unwrap_err(),
-            zx_status::Status::BAD_HANDLE
+            zx::Status::BAD_HANDLE
         );
 
         let closed_handle = unsafe { mimic_closed_handle() };
         assert_eq!(
             ManuallyDrop::into_inner(closed_handle).replace_handle(Rights::TRANSFER).unwrap_err(),
-            zx_status::Status::BAD_HANDLE
+            zx::Status::BAD_HANDLE
         );
     }
 
@@ -2727,7 +2628,7 @@ mod test {
         assert_eq!(orig_basic_info.rights, Rights::CHANNEL_DEFAULT);
         assert_eq!(
             c1.into_handle().replace_handle(Rights::DUPLICATE).unwrap_err(),
-            zx_status::Status::INVALID_ARGS
+            zx::Status::INVALID_ARGS
         );
     }
 
@@ -2809,18 +2710,24 @@ mod test {
     #[test]
     fn user_signal_no_rights() {
         let (c1, _) = EventPair::create();
-        let c1 =
-            c1.into_handle().replace_handle(Rights::EVENTPAIR_DEFAULT & !Rights::SIGNAL).unwrap();
+        let rights = Rights::TRANSFER
+            | Rights::DUPLICATE
+            | Rights::IO
+            | Rights::SIGNAL
+            | Rights::SIGNAL_PEER;
+        let c1 = c1.into_handle().replace_handle(rights & !Rights::SIGNAL).unwrap();
         assert_eq!(c1.signal(Signals::empty(), Signals::USER_1), Err(Status::ACCESS_DENIED));
     }
 
     #[test]
     fn user_signal_peer_no_rights() {
         let (c1, _) = EventPair::create();
-        let c1 = c1
-            .into_handle()
-            .replace_handle(Rights::EVENTPAIR_DEFAULT & !Rights::SIGNAL_PEER)
-            .unwrap();
+        let rights = Rights::TRANSFER
+            | Rights::DUPLICATE
+            | Rights::IO
+            | Rights::SIGNAL
+            | Rights::SIGNAL_PEER;
+        let c1 = c1.into_handle().replace_handle(rights & !Rights::SIGNAL_PEER).unwrap();
         let c1 = EventPair::from(c1);
         assert_eq!(c1.signal_peer(Signals::empty(), Signals::USER_1), Err(Status::ACCESS_DENIED));
     }
@@ -2891,7 +2798,7 @@ mod test {
     #[test]
     fn event_replace_rights() {
         let e = Event::create();
-        assert_eq!(e.basic_info().unwrap().rights, Rights::EVENT_DEFAULT);
+        assert_eq!(e.basic_info().unwrap().rights, Rights::BASIC | Rights::SIGNAL);
         let e = e.into_handle().replace_handle(Rights::TRANSFER).unwrap();
         assert_eq!(e.basic_info().unwrap().rights, Rights::TRANSFER);
     }

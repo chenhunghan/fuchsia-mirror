@@ -8,6 +8,6 @@
 
 #include "linux-boot-config.h"
 
-ktl::optional<linux_boot_config::LinuxBootConfig> GetLinuxBootConfig() {
+linux_boot_config::LinuxBootConfig GetLinuxBootConfig() {
   return gDevicetreeBoot.linux_boot_config;
 }

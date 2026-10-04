@@ -2,4 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-package(default_applicable_licenses = ["//:license"])
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load(":cargo_toml_gen.bzl", "cargo_toml_gen")
+
+package(
+    default_applicable_licenses = ["//:license"],
+)
+
+py_binary(
+    name = "generate_cargo",
+    srcs = [
+        "generate_cargo.py",
+    ],
+    main = "generate_cargo.py",
+)
+
+cargo_toml_gen(
+    name = "cargo_toml_gen",
+    api_level_cfg_flags = "@gn_targets//build/rust:api_level_cfg_flags",
+    cargo_toml = "//third_party/rust_crates:Cargo.toml",
+    project_json = "@gn_targets//tools/gn_desc:gn_project_json",
+)

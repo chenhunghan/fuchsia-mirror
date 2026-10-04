@@ -45,6 +45,10 @@ zx_status_t RemoteBlockDevice::BlockAttachVmo(const zx::vmo& vmo, storage::Vmoid
   return ZX_OK;
 }
 
+zx::result<uint8_t> RemoteBlockDevice::RegisterKey(zx::eventpair key_token) {
+  return fifo_client_.RegisterKey(std::move(key_token));
+}
+
 zx_status_t RemoteBlockDevice::VolumeGetInfo(
     fuchsia_storage_block::wire::VolumeManagerInfo* out_manager_info,
     fuchsia_storage_block::wire::VolumeInfo* out_volume_info) const {

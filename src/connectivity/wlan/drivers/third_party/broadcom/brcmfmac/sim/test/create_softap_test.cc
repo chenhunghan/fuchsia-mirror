@@ -703,4 +703,13 @@ TEST_F(CreateSoftAPTest, DeauthMultiClients) {
   env_->Run(kSimulatedClockDuration);
 }
 
+TEST_F(CreateSoftAPTest, DeleteInterfaceBeforeStartComplete) {
+  StartSoftAP();
+
+  // Delete the interface before the environment sends up the SoftAP events from sim firmware.
+  // This simulates the edge condition where the interface is deleted before start is complete.
+  DeleteInterface();
+  env_->Run(kSimulatedClockDuration);
+}
+
 }  // namespace wlan::brcmfmac

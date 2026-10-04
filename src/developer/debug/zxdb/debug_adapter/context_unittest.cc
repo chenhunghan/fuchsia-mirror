@@ -18,7 +18,7 @@ namespace {
 
 // Create our own fake RemoteAPI to get the id of created breakpoints, which is needed for
 // `ContextTest.StoppedEventProcessLevelBreakpoint`.
-class FakeRemoteAPI : public RemoteAPI {
+class FakeRemoteAPI : public MockRemoteAPI {
  public:
   std::vector<uint32_t>& added_breakpoint_ids() { return added_breakpoint_ids_; }
 
@@ -26,7 +26,7 @@ class FakeRemoteAPI : public RemoteAPI {
       const debug_ipc::AddOrChangeBreakpointRequest& request,
       fit::callback<void(const Err&, debug_ipc::AddOrChangeBreakpointReply)> cb) override {
     added_breakpoint_ids_.push_back(request.breakpoint.id);
-    RemoteAPI::AddOrChangeBreakpoint(request, std::move(cb));
+    MockRemoteAPI::AddOrChangeBreakpoint(request, std::move(cb));
   }
 
  private:
@@ -64,6 +64,7 @@ TEST_F(ContextTest, InitializeRequest) {
   auto got = response.get();
   EXPECT_EQ(got.error, false);
   EXPECT_EQ(bool(got.response.supportsFunctionBreakpoints), true);
+  EXPECT_EQ(bool(got.response.supportsDataBreakpoints), true);
   EXPECT_EQ(bool(got.response.supportsConditionalBreakpoints), true);
   EXPECT_EQ(bool(got.response.supportsConfigurationDoneRequest), true);
 }

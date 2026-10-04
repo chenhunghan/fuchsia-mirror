@@ -13,6 +13,9 @@ library zx;
 
 // zx_status_t and errors.h.
 alias Status = int32;
+// NOTE(https://fxbug.dev/565438974): zx.Result will replace non-error uses of
+// zx.Status as part of implementing RFC-0286.
+alias Result = int32;
 
 // These aliases all represent points in or quantities of time.
 // See the block comments on the declaration of the associated C types in

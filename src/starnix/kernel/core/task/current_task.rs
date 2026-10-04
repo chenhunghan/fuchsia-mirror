@@ -232,17 +232,27 @@ impl CurrentTask {
         //
         // Specifically, the following resources require explicit release:
         //
-        // 1. `running_state`: Transitively releases `fs` and `proc_pid_directory_cache`
+        // 1. `running_state`: Transitively releases `proc_pid_directory_cache`
         // 2. `files`: Drops `FileHandle` to close open file descriptors
         // 3. `mm`: Drops `FsNodeHandle` to remove memory-mapped filesystem nodes and drops
         //    `FileWriteGuard` for executable mappings
         // 4. `fs`: Drops `MountClientMarker` to allow unmounting and drops `FsNodeHandle` to remove
         //    namespace filesystem nodes
         // 5. `proc_pid_directory_cache`: Drops `FsNodeHandle` to remove /proc/<pid> nodes
+        //
+        // `files`, `mm` and `fs` are released explicitly here rather than by dropping
+        // `running_state`. Other threads may transiently hold a strong reference to
+        // `TaskRunningState` (e.g. `Task::interrupt()`), and if such a thread ends up dropping the
+        // last reference, it runs the destructors of everything still owned by the
+        // `TaskRunningState`, possibly while holding locks. Dropping `fs` in particular may tear
+        // down an entire mount namespace, which acquires `DirEntry` locks, so it must happen here
+        // on the exiting thread, where no locks are held. `proc_pid_directory_cache` only holds an
+        // `FsNodeHandle`, whose release is already deferred to the delayed releaser.
 
         if let Some(running_state) = self.running_state.take() {
             *running_state.files.lock() = None;
             running_state.mm.update(None);
+            running_state.fs.update(None);
         }
 
         *self.files.borrow_mut() = None;
@@ -294,8 +304,15 @@ impl CurrentTask {
         self.files.borrow().as_ref().expect("CurrentTask must have FdTable").clone()
     }
 
+    /// Returns the [`FsContext`] for the [`Task`].
+    ///
+    /// # Panics
+    ///
+    /// Calling `fs()` on a [`CurrentTask`] for which the [`Task`] has no file system context
+    /// (i.e. exited tasks) panics. However, such tasks should not have a `CurrentTask`.
+    #[track_caller]
     pub fn fs(&self) -> Arc<FsContext> {
-        self.running_state().fs()
+        self.running_state().fs().expect("CurrentTask must have FsContext")
     }
 
     pub fn has_shared_fs(&self) -> bool {
@@ -387,6 +404,22 @@ impl CurrentTask {
     /// Change the current and real creds of the task. This is invalid to call while temporary
     /// credentials are present.
     pub fn set_creds(&self, creds: Credentials) {
+        // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+        //
+        //   The parent-death signal setting is also cleared upon changes
+        //   to any of the following thread credentials: effective user ID,
+        //   effective group ID, filesystem user ID, or filesystem group ID.
+        let prev = self.current_creds();
+        let clear_parent_death_signal = creds.euid != prev.euid
+            || creds.egid != prev.egid
+            || creds.fsuid != prev.fsuid
+            || creds.fsgid != prev.fsgid;
+        std::mem::drop(prev);
+
+        if clear_parent_death_signal {
+            self.thread_group().write().set_parent_death_signal(None);
+        }
+
         let creds = Arc::new(creds);
         self.write_creds().update(self, creds);
     }
@@ -1135,6 +1168,16 @@ impl CurrentTask {
         self.running_state().unshare_files(self);
         self.files().exec();
 
+        // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+        //
+        //   It is also (since Linux 2.4.36 / 2.6.23) cleared when
+        //   executing a set-user-ID or set-group-ID binary, or a binary that
+        //   has associated capabilities (see capabilities(7)); otherwise, this
+        //   value is preserved across execve(2).
+        if resolved_program.secure_exec {
+            self.thread_group().write().set_parent_death_signal(None);
+        }
+
         {
             let mut state = self.write();
 
@@ -1152,14 +1195,6 @@ impl CurrentTask {
 
             state.set_sigaltstack(None);
             state.robust_list_head = RobustListHeadPtr::null(self);
-            // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
-            //
-            //   If a set-user-ID or set-group-ID
-            //   program is being executed, then the parent death signal set by
-            //   prctl(2) PR_SET_PDEATHSIG flag is cleared.
-            //
-            // TODO(https://fxbug.dev/356684424): Implement the behavior above once we support
-            // the PR_SET_PDEATHSIG flag.
         }
 
         security::bprm_committing_creds(self, &resolved_program)?;
@@ -1186,15 +1221,13 @@ impl CurrentTask {
         {
             let mut thread_group_state = self.thread_group().write();
             thread_group_state.exit_signal = Some(SIGCHLD);
-            for (_, weak_child) in &mut thread_group_state.children {
-                if let Some(child) = weak_child.upgrade() {
-                    // This allow_subclass is safe because locking parent then child strictly
-                    // follows the top-down traversal of the thread group tree, which cannot form
-                    // cycles.
-                    let _token = starnix_sync::allow_subclass();
-                    let mut child_state = child.write();
-                    child_state.exit_signal = Some(SIGCHLD);
-                }
+            for child in thread_group_state.children() {
+                // This allow_subclass is safe because locking parent then child strictly
+                // follows the top-down traversal of the thread group tree, which cannot form
+                // cycles.
+                let _token = starnix_sync::allow_subclass();
+                let mut child_state = child.write();
+                child_state.exit_signal = Some(SIGCHLD);
             }
         }
 
@@ -1597,18 +1630,19 @@ impl CurrentTask {
             let original_parent;
 
             // Make sure to drop these locks ASAP to avoid inversion
-            let thread_group_state = {
+            let (thread_group_state, creator_task) = {
                 let thread_group_state = self.thread_group().write();
                 if clone_parent {
                     // With the CLONE_PARENT flag, the parent of the new task is our parent
                     // instead of ourselves.
                     weak_original_parent =
                         thread_group_state.parent.clone().ok_or_else(|| errno!(EINVAL))?;
+                    let creator_task = weak_original_parent.creator_task().cloned();
                     std::mem::drop(thread_group_state);
                     original_parent = weak_original_parent.upgrade();
-                    original_parent.write()
+                    (original_parent.write(), creator_task)
                 } else {
-                    thread_group_state
+                    (thread_group_state, Some(self.weak_task()))
                 }
             };
 
@@ -1664,6 +1698,10 @@ impl CurrentTask {
                         command.clone(),
                     )?
                 };
+
+                if let Some(parent) = &mut task_info.thread_group.write().parent {
+                    parent.set_creator_task(creator_task);
+                }
 
                 cgroup2_pid_table.inherit_cgroup(self.thread_group(), &task_info.thread_group);
 
@@ -2193,8 +2231,9 @@ fn split_path(path: &FsStr) -> LookupVec<&FsStr> {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::spawn_kernel_and_run;
+    use crate::testing::{create_task, spawn_kernel_and_run};
     use starnix_uapi::auth::Credentials;
+    use std::sync::Arc;
 
     // This test will run `override_creds` and check it doesn't crash. This ensures that the
     // delegation to `override_creds_async` is correct.
@@ -2202,6 +2241,26 @@ mod tests {
     async fn test_override_creds_can_delegate_to_async_version() {
         spawn_kernel_and_run(async move |current_task| {
             assert_eq!(current_task.override_creds(Credentials::root(), || 0), 0);
+        })
+        .await;
+    }
+
+    // Another thread may hold a transient strong reference to the `TaskRunningState` of a task
+    // while it exits (e.g. `Task::interrupt()`). The `FsContext` must still be released by
+    // `exit()` itself rather than by whoever drops the last `TaskRunningState` reference, since
+    // dropping it can tear down a whole mount namespace and acquire `DirEntry` locks.
+    #[::fuchsia::test]
+    async fn test_exit_releases_fs_while_running_state_is_referenced() {
+        spawn_kernel_and_run(async move |current_task| {
+            let task = create_task(current_task.kernel(), "task");
+            let running_state = task.task.running_state().expect("task should be running");
+            let fs = Arc::downgrade(&task.fs());
+
+            // Releasing the `AutoReleasableTask` calls `CurrentTask::exit()`.
+            std::mem::drop(task);
+
+            assert!(running_state.fs().is_err());
+            assert!(fs.upgrade().is_none(), "FsContext should be dropped by exit()");
         })
         .await;
     }

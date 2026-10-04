@@ -45,7 +45,7 @@ class ClockDispatcher final : public Dispatcher {
   ~ClockDispatcher() final;
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_CLOCK; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
-  bool is_waitable() const final { return true; }
+  bool is_waitable() const final { return ZX_DEFAULT_CLOCK_RIGHTS & ZX_RIGHT_WAIT; }
 
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final {
     return rust_clock_dispatcher_get_name(*this, out_name);

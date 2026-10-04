@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub struct RegulatoryManager<I: IfaceManagerApi + ?Sized> {
     regulatory_service: RegulatoryRegionWatcherProxy,
     iface_manager: Arc<Mutex<I>>,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 }
 
 mod country_code {
@@ -49,8 +50,9 @@ impl<I: IfaceManagerApi + ?Sized> RegulatoryManager<I> {
     pub fn new(
         regulatory_service: RegulatoryRegionWatcherProxy,
         iface_manager: Arc<Mutex<I>>,
+        power_manager: Arc<dyn wlan_power_manager::PowerManager>,
     ) -> Self {
-        RegulatoryManager { regulatory_service, iface_manager }
+        RegulatoryManager { regulatory_service, iface_manager, power_manager }
     }
 
     pub async fn run(&self, policy_notifier: oneshot::Sender<()>) -> Result<(), Error> {
@@ -84,6 +86,9 @@ impl<I: IfaceManagerApi + ?Sized> RegulatoryManager<I> {
                 }
                 Ok(country_code) => country_code,
             };
+
+            let _wake_lease =
+                self.power_manager.take_wake_lease("wlancfg-regulatory-set-country-code").await;
 
             // Apply the new country code.
             let mut iface_manager = self.iface_manager.lock().await;
@@ -129,6 +134,7 @@ mod tests {
         regulatory_region_requests: RegulatoryRegionWatcherRequestStream,
         regulatory_sender: oneshot::Sender<()>,
         regulatory_receiver: oneshot::Receiver<()>,
+        power_manager: Arc<wlan_power_manager_testing::TestPowerManager>,
         // Fields are dropped in declaration order. Always drop executor last because we hold other
         // zircon objects tied to the executor in this struct, and those can't outlive the executor.
         //
@@ -149,8 +155,12 @@ mod tests {
             let (regulatory_region_proxy, regulatory_region_server_channel) =
                 create_proxy::<RegulatoryRegionWatcherMarker>();
             let iface_manager = Arc::new(Mutex::new(iface_manager));
-            let regulatory_manager =
-                RegulatoryManager::new(regulatory_region_proxy, iface_manager.clone());
+            let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
+            let regulatory_manager = RegulatoryManager::new(
+                regulatory_region_proxy,
+                iface_manager.clone(),
+                power_manager.clone(),
+            );
             let regulatory_region_requests = regulatory_region_server_channel.into_stream();
 
             let (regulatory_sender, regulatory_receiver) = oneshot::channel();
@@ -161,6 +171,7 @@ mod tests {
                 regulatory_region_requests,
                 regulatory_sender,
                 regulatory_receiver,
+                power_manager,
             }
         }
     }
@@ -494,5 +505,25 @@ mod tests {
                 .await
                 .expect("internal error: failed to receive fake response from test case")
         }
+    }
+
+    #[fuchsia::test]
+    fn test_regulatory_wake_lease() {
+        let mut context = TestContext::new(make_default_stub_iface_manager());
+        let regulatory_fut = context.regulatory_manager.run(context.regulatory_sender);
+        let mut regulatory_fut = pin!(regulatory_fut);
+        assert!(context.executor.run_until_stalled(&mut regulatory_fut).is_pending());
+
+        let region_request_fut = &mut context.regulatory_region_requests.next();
+        let region_responder = assert_matches!(
+            context.executor.run_until_stalled(region_request_fut),
+            Poll::Ready(Some(Ok(RegulatoryRegionWatcherRequest::GetRegionUpdate{responder}))) => responder
+        );
+        region_responder.send(Some("US")).expect("failed to send response");
+        assert_matches!(context.executor.run_until_stalled(&mut regulatory_fut), Poll::Pending);
+
+        // Verify that the wake lease was taken.
+        let calls = context.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-regulatory-set-country-code".to_string()));
     }
 }

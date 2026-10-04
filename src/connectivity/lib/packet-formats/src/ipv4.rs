@@ -1033,6 +1033,11 @@ impl Ipv4PacketBuilder {
         self.dscp_and_ecn = dscp_and_ecn;
     }
 
+    /// Returns the ID field.
+    pub fn read_id(&self) -> u16 {
+        self.id
+    }
+
     /// Set the ID field.
     pub fn id(&mut self, id: u16) {
         self.id = id

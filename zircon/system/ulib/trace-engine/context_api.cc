@@ -550,18 +550,19 @@ bool RegisterString(trace_context_t* context, const char* string_literal, bool c
     if (out_ref_optional) {
       if (unlikely(!(entry->flags & StringEntry::kAllocIndexAttempted))) {
         entry->flags |= StringEntry::kAllocIndexAttempted;
-        size_t string_len = strlen(string_literal);
+        const auto* bytes_ptr = reinterpret_cast<const unsigned char*>(string_literal);
         bool rqst_durable = true;
         // If allocating an index succeeds but writing the record
         // fails, toss the index and return an inline reference. The
         // index is lost anyway, but the result won't be half-complete.
         // The subsequent write of the inlined reference will likely
         // also fail, but that's ok.
-        if (likely(
-                context->AllocStringIndex(&entry->index) &&
-                WriteStringRecord(context, rqst_durable, entry->index,
-                                  std::span{reinterpret_cast<const unsigned char*>(string_literal),
-                                            string_len}))) {
+        if (likely(context->LookupOrAllocStringIndex(
+                bytes_ptr, &entry->index,
+                [context, rqst_durable, string_literal, bytes_ptr](trace_string_index_t index) {
+                  return WriteStringRecord(context, rqst_durable, index,
+                                           std::span{bytes_ptr, strlen(string_literal)});
+                }))) {
           entry->flags |= StringEntry::kAllocIndexSucceeded;
         }
       }
@@ -574,15 +575,24 @@ bool RegisterString(trace_context_t* context, const char* string_literal, bool c
     return true;
   }
 
-  // Slow path.
-  // TODO(https://fxbug.dev/42105900): Since we can't use the thread-local cache here, cache
-  // this registered string on the trace context structure, guarded by a mutex.
-  // Make sure to assign it a string index if possible instead of inlining.
+  // Slow path when the thread-local cache is full or out of date.
   if (check_category && !CheckCategory(context, string_literal)) {
     return false;  // category disabled
   }
   if (out_ref_optional) {
-    *out_ref_optional = trace_make_inline_c_string_ref(string_literal);
+    trace_string_index_t index;
+    const auto* bytes_ptr = reinterpret_cast<const unsigned char*>(string_literal);
+    bool rqst_durable = true;
+    if (likely(context->LookupOrAllocStringIndex(
+            bytes_ptr, &index,
+            [context, rqst_durable, string_literal, bytes_ptr](trace_string_index_t idx) {
+              return WriteStringRecord(context, rqst_durable, idx,
+                                       std::span{bytes_ptr, strlen(string_literal)});
+            }))) {
+      *out_ref_optional = trace_make_indexed_string_ref(index);
+    } else {
+      *out_ref_optional = trace_make_inline_c_string_ref(string_literal);
+    }
   }
   return true;
 }
@@ -632,8 +642,11 @@ bool RegisterByteString(trace_context_t* context, std::span<const unsigned char>
         // also fail, but that's ok.
         //
         // NOTE: WriteStringRecord doesn't expect a null terminator
-        if (likely(context->AllocStringIndex(&entry->index) &&
-                   WriteStringRecord(context, rqst_durable, entry->index, bytes))) {
+        if (likely(context->LookupOrAllocStringIndex(
+                bytes.data(), &entry->index,
+                [context, rqst_durable, bytes](trace_string_index_t index) {
+                  return WriteStringRecord(context, rqst_durable, index, bytes);
+                }))) {
           entry->flags |= StringEntry::kAllocIndexSucceeded;
         }
       }
@@ -647,10 +660,7 @@ bool RegisterByteString(trace_context_t* context, std::span<const unsigned char>
     return true;
   }
 
-  // Slow path.
-  // TODO(https://fxbug.dev/42105900): Since we can't use the thread-local cache here, cache
-  // this registered string on the trace context structure, guarded by a mutex.
-  // Make sure to assign it a string index if possible instead of inlining.
+  // Slow path when the thread-local cache is full or out of date.
   if (check_category &&
       !CheckCategory(
           context,
@@ -658,8 +668,17 @@ bool RegisterByteString(trace_context_t* context, std::span<const unsigned char>
     return false;  // category disabled
   }
   if (out_ref_optional) {
-    *out_ref_optional =
-        trace_make_inline_string_ref(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    trace_string_index_t index;
+    bool rqst_durable = true;
+    if (likely(context->LookupOrAllocStringIndex(
+            bytes.data(), &index, [context, rqst_durable, bytes](trace_string_index_t idx) {
+              return WriteStringRecord(context, rqst_durable, idx, bytes);
+            }))) {
+      *out_ref_optional = trace_make_indexed_string_ref(index);
+    } else {
+      *out_ref_optional =
+          trace_make_inline_string_ref(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
   }
   return true;
 }

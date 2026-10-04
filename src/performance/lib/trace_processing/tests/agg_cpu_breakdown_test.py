@@ -5,7 +5,6 @@
 """Unit tests for agg_cpu_breakdown.py."""
 
 import unittest
-from typing import List
 
 import trace_processing.trace_model as trace_model
 import trace_processing.trace_time as trace_time
@@ -17,7 +16,7 @@ class AggCpuBreakdownTest(unittest.TestCase):
 
     def construct_trace_model(self) -> trace_model.Model:
         model = trace_model.Model((), {})
-        threads: List[trace_model.Thread] = []
+        threads: list[trace_model.Thread] = []
         for i in range(1, 5):
             threads.append(trace_model.Thread(i, "thread-%d" % i))
         model.processes = [
@@ -31,7 +30,7 @@ class AggCpuBreakdownTest(unittest.TestCase):
 
         # CPU 0.
         # Total time: 0 to 9100000000 = 9100 ms.
-        records_0: List[trace_model.SchedulingRecord] = [
+        records_0: list[trace_model.SchedulingRecord] = [
             # "thread-0" is active from 0 - 1800 ms, 1800 total duration.
             trace_model.ContextSwitch(
                 trace_time.TimePoint(0),
@@ -86,7 +85,7 @@ class AggCpuBreakdownTest(unittest.TestCase):
 
         # CPU 2.
         # Total time: 0 to 8000000000 = 8000 ms.
-        records_2: List[trace_model.SchedulingRecord] = [
+        records_2: list[trace_model.SchedulingRecord] = [
             # "thread-1" is active from 0 - 1500 ms, 1500 total duration.
             trace_model.ContextSwitch(
                 trace_time.TimePoint(0),
@@ -141,7 +140,7 @@ class AggCpuBreakdownTest(unittest.TestCase):
 
         # CPU 3.
         # Total time: 3000000000 to 6000000000 = 3000 ms.
-        records_3: List[trace_model.SchedulingRecord] = [
+        records_3: list[trace_model.SchedulingRecord] = [
             # "thread-3" (incoming) is idle; don't log it in breakdown,
             # but do log it in the total CPU duration for CPU 3.
             trace_model.ContextSwitch(
@@ -189,7 +188,7 @@ class AggCpuBreakdownTest(unittest.TestCase):
 
         # CPU 5.
         # Total time: 500000000 to 6000000000 = 5500
-        records_5: List[trace_model.SchedulingRecord] = []
+        records_5: list[trace_model.SchedulingRecord] = []
         # Add 5 Waking and ContextSwitch events for "thread-1" where the incoming_tid
         # is 1 and the outgoing_tid (70) is not mapped to a Thread in our Process.
         for i in range(1, 7):

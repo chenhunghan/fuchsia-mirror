@@ -46,7 +46,7 @@ closed protocol Drawing {
     strict DrawArray(struct {
         points array<Point, 4>;
     }) -> (struct {
-        rv zx.Status;
+        rv zx.Result;
     });
     strict Describe(struct {
         one string:64;

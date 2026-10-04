@@ -6,6 +6,7 @@
 
 //! Fault-tolerant memory copying between user and kernel spaces for RISC-V 64.
 
+use super::vm::is_user_accessible_range;
 use crate::arch_rs::{FaultInfo, UserCopyCaptureFaultsError};
 use zx_status::Status;
 
@@ -40,27 +41,6 @@ fn current_thread_data_fault_resume_ptr() -> *mut u64 {
         let arch = super::thread::thread_arch(thread.cast());
         core::ptr::addr_of_mut!((*arch).data_fault_resume)
     }
-}
-
-/// Canonical address mask for RISC-V 64 Sv39 virtual addresses; a set bit above
-/// bit 37 means the address is outside the user half of the address space.
-///
-/// [riscv/priv/v1.12]: Section 4.4.1 (Sv39: Page-Based 39-bit Virtual-Memory System)
-const RISCV64_CANONICAL_ADDRESS_MASK: usize = !((1usize << 38) - 1);
-
-/// Check if a virtual address is in the user-accessible address space.
-#[inline(always)]
-pub fn is_user_accessible(va: usize) -> bool {
-    (va & RISCV64_CANONICAL_ADDRESS_MASK) == 0
-}
-
-/// Check that the continuous range of addresses in `[va, va + len)` are all user-accessible.
-fn is_user_accessible_range(va: usize, len: usize) -> bool {
-    let Some(end) = va.checked_add(len) else {
-        return false;
-    };
-
-    is_user_accessible(va) && (len == 0 || is_user_accessible(end - 1))
 }
 
 /// Copy memory from user space (`src`) to kernel space (`dst`).
@@ -232,7 +212,7 @@ pub unsafe extern "C" fn rust_arch_copy_to_user_capture_faults(
 /// Unit tests for user memory range accessibility checks.
 #[unittest::suite(name = "riscv64_user_copy")]
 mod tests {
-    use super::{is_user_accessible, is_user_accessible_range};
+    use super::super::vm::{is_user_accessible, is_user_accessible_range};
     use unittest::{assert_false, assert_true};
 
     /// Test address range validation for user memory accesses.

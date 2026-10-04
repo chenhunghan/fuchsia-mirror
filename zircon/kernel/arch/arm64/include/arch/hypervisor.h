@@ -9,6 +9,7 @@
 
 #include <lib/id_allocator.h>
 #include <zircon/syscalls/hypervisor.h>
+#include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
 #include <arch/arm64/hypervisor/el2_state.h>

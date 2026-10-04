@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+pub mod internal;
 mod user_iovec;
 mod user_ptr;
 mod user_string_view;

@@ -17,7 +17,7 @@ source_set("stdbind") {
 rustc_library("stdbind-rs") {
   name = "stdbind"
   edition = "2024"
-  with_unit_tests = true
+  with_unit_tests = "host"
 
   sources = [
     "src/lib.rs",

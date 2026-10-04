@@ -293,3 +293,47 @@ class SummarizeTest(unittest.TestCase):
             f.close()
             with open(f.name, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), '["foo",\n"bar",\n"qux"]\n')
+
+    def test_summarize_results_with_no_summarize_metrics(self) -> None:
+        """Test that metrics in no_summarize_metrics keep their raw values."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file1 = os.path.join(tmpdir, "file1.fuchsiaperf.json")
+            with open(file1, "w") as f:
+                json.dump(
+                    [
+                        {
+                            "label": "summarized_metric",
+                            "test_suite": "fuchsia.my.benchmark",
+                            "unit": "ms",
+                            "values": [100, 2, 4, 6],
+                        },
+                        {
+                            "label": "raw_metric",
+                            "test_suite": "fuchsia.my.benchmark",
+                            "unit": "W",
+                            "values": [1.5, 2.5, 3.5],
+                        },
+                    ],
+                    f,
+                )
+            results = summarize.summarize_perf_files(
+                [file1],
+                no_summarize_metrics={"fuchsia.my.benchmark: raw_metric"},
+            )
+        self.assertEqual(
+            results,
+            [
+                {
+                    "label": "summarized_metric",
+                    "test_suite": "fuchsia.my.benchmark",
+                    "unit": "ms",
+                    "values": [4],
+                },
+                {
+                    "label": "raw_metric",
+                    "test_suite": "fuchsia.my.benchmark",
+                    "unit": "W",
+                    "values": [1.5, 2.5, 3.5],
+                },
+            ],
+        )

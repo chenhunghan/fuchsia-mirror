@@ -6,9 +6,12 @@
 
 use super::handle::KernelHandle;
 use super::vm_address_region_dispatcher_ffi::{
-    cpp_vmar_dispatcher_allocate, cpp_vmar_dispatcher_map, cpp_vmar_dispatcher_set_memory_priority,
+    cpp_vmar_dispatcher_allocate, cpp_vmar_dispatcher_create, cpp_vmar_dispatcher_map,
+    cpp_vmar_dispatcher_set_memory_priority,
 };
+use crate::vm::vm_address_region::VmAddressRegion;
 use crate::vm::vm_object::VmObject;
+use fbl::RefPtr;
 use zx_status::Status;
 use zx_types::zx_rights_t;
 
@@ -25,6 +28,26 @@ crate::object::dispatcher::impl_dispatcher_facade!(
 );
 
 impl VmAddressRegionDispatcher {
+    /// Creates a new `VmAddressRegionDispatcher` wrapping `vmar`.
+    pub fn create(
+        vmar: RefPtr<VmAddressRegion>,
+        base_arch_mmu_flags: u32,
+    ) -> Result<(KernelHandle<VmAddressRegionDispatcher>, zx_rights_t), Status> {
+        // SAFETY: `RefPtr::into_raw(vmar)` transfers ownership of one reference to C++
+        // (`fbl::ImportFromRawPtr`), and `cpp_vmar_dispatcher_create` initializes `handle_out`
+        // and `rights_out` on success.
+        unsafe {
+            KernelHandle::create_with_rights(|handle_out, rights_out| {
+                cpp_vmar_dispatcher_create(
+                    RefPtr::into_raw(vmar).cast_mut(),
+                    base_arch_mmu_flags,
+                    handle_out,
+                    rights_out,
+                )
+            })
+        }
+    }
+
     /// Sets memory priority for this VMAR dispatcher.
     pub fn set_memory_priority(&self, priority: MemoryPriority) -> Result<(), Status> {
         // SAFETY: `self` is a valid `VmAddressRegionDispatcher` reference.

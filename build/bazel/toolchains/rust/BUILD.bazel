@@ -3,3 +3,39 @@
 # found in the LICENSE file.
 
 package(default_applicable_licenses = ["//:license"])
+
+# Rust runtime libraries and debug symbols needed by Fuchsia binaries built
+# with -Cprefer-dynamic. These mirror the equivalents in
+# //build/bazel/toolchains/clang, with one important difference: they are plain
+# filegroups rather than fuchsia_package_resource_group/fuchsia_debug_symbols
+# targets.
+#
+# The package resource and debug symbol collectors traverse every attribute of
+# every target they reach, so a target here that advertised
+# FuchsiaPackageResourcesInfo or FuchsiaDebugSymbolInfo would be picked up by
+# every package, including C++ ones that have no Rust code and no need for
+# libstd. Exposing only files keeps that decision in fx_packaged_binary, which
+# can tell whether the binary it wraps is actually a Rust target.
+
+filegroup(
+    name = "libstd_dist",
+    srcs = select({
+        "@platforms//cpu:aarch64": ["@fuchsia_prebuilt_rust//:libstd_dist_arm64"],
+        "@platforms//cpu:riscv64": ["@fuchsia_prebuilt_rust//:libstd_dist_riscv64"],
+        "@platforms//cpu:x86_64": ["@fuchsia_prebuilt_rust//:libstd_dist_x64"],
+    }),
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "libstd_debug_build_id",
+    srcs = ["@fuchsia_prebuilt_rust//:lib/debug/.build-id"],
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "debug_symbols_source_search_root",
+    srcs = ["@fuchsia_prebuilt_rust//:BUILD.bazel"],
+    visibility = ["//:__subpackages__"],
+)

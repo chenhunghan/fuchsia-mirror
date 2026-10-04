@@ -16,7 +16,7 @@ use core::sync::atomic::{self, AtomicU16};
 use derivative::Derivative;
 use explicit::ResultExt as _;
 use lock_order::lock::{OrderedLockAccess, OrderedLockRef};
-use log::{debug, trace};
+use log::{debug, error, trace};
 use net_types::ip::{
     GenericOverIp, Ip, IpVersion, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr, Ipv6SourceAddr, Mtu, Subnet,
 };
@@ -40,8 +40,8 @@ use netstack3_filter::{
     self as filter, ConnectionDirection, ConntrackConnection, FilterBindingsContext,
     FilterBindingsTypes, FilterHandler as _, FilterIpContext, FilterIpExt, FilterIpMetadata,
     FilterIpPacket, FilterPacketMetadata, FilterTimerId, ForwardedPacket, IpPacket, MarkAction,
-    MaybeTransportPacket as _, RejectType, SocketInfo, TransportPacketSerializer, Tuple,
-    WeakConnectionError, WeakConntrackConnection,
+    MaybeTransportPacket as _, ProofOfEgressCheck, RejectType, SocketInfo,
+    TransportPacketSerializer, Tuple, WeakConnectionError, WeakConntrackConnection,
 };
 use netstack3_hashmap::HashMap;
 use packet::{
@@ -69,6 +69,9 @@ use crate::internal::fragmentation::{FragmentableIpSerializer, FragmentationIpEx
 use crate::internal::gmp::GmpQueryHandler;
 use crate::internal::gmp::igmp::IgmpCounters;
 use crate::internal::gmp::mld::MldCounters;
+use crate::internal::gso::{
+    GsoError, GsoIpExt, MaybeSegmentableIpSerializer, MaybeSegmentableTransportSerializer,
+};
 use crate::internal::icmp::counters::IcmpCountersIpExt;
 use crate::internal::icmp::{
     IcmpBindingsTypes, IcmpError, IcmpErrorHandler, IcmpHandlerIpExt, Icmpv4Error, Icmpv4State,
@@ -136,8 +139,6 @@ pub const IPV6_DEFAULT_SUBNET: Subnet<Ipv6Addr> =
 /// Note: This metadata may be regenerated when packet handling requires
 /// performing multiple actions (e.g. sending the packet out multiple interfaces
 /// as part of multicast forwarding).
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
 pub struct IpLayerPacketMetadata<
     I: packet_formats::ip::IpExt,
     A,
@@ -185,7 +186,7 @@ struct IpLayerPacketMetadataDropCheck {
 /// Metadata that is produced and consumed by the IP layer for each packet, but
 /// which also traverses the device layer.
 #[derive(Derivative)]
-#[derivative(Debug(bound = ""), Default(bound = ""))]
+#[derivative(Debug(bound = ""))]
 pub struct DeviceIpLayerMetadata<BT: TxMetadataBindingsTypes> {
     /// Weak reference to this packet's connection tracking entry, if the packet is
     /// tracked.
@@ -209,12 +210,56 @@ pub struct DeviceIpLayerMetadata<BT: TxMetadataBindingsTypes> {
     marks: Marks,
 }
 
+/// The result of splitting metadata for a packet sent as multiple frames via
+/// [`DeviceIpLayerMetadata::split_for_multiple_frames`].
+pub(crate) struct SplitDeviceIpLayerMetadata<BT: TxMetadataBindingsTypes> {
+    pub(crate) primary: DeviceIpLayerMetadata<BT>,
+    pub(crate) secondary: DeviceIpLayerMetadata<BT>,
+}
+
 impl<BT: TxMetadataBindingsTypes> DeviceIpLayerMetadata<BT> {
+    /// Creates a new instance with the specified `tx_metadata` and `marks`.
+    pub fn from_tx_metadata_and_marks(tx_metadata: BT::TxMetadata, marks: Marks) -> Self {
+        Self { conntrack_entry: None, tx_metadata, marks }
+    }
+
     /// Discards the remaining IP layer information and returns only the tx
     /// metadata used for buffer ownership.
     pub fn into_tx_metadata(self) -> BT::TxMetadata {
         self.tx_metadata
     }
+
+    /// Creates a new instance for a received packet.
+    pub fn new_for_rx_packet() -> Self {
+        Self { conntrack_entry: None, tx_metadata: Default::default(), marks: Default::default() }
+    }
+
+    /// Creates an empty [`DeviceIpLayerMetadata`].
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn empty() -> Self {
+        Self { conntrack_entry: None, tx_metadata: Default::default(), marks: Default::default() }
+    }
+
+    /// Splits metadata for a packet that is sent as multiple frames (e.g. due
+    /// to IP fragmentation or GSO segmentation) into
+    /// [`SplitDeviceIpLayerMetadata`].
+    ///
+    /// The `primary` instance retains unique resources (`tx_metadata`), while
+    /// the `secondary` instance receives a copy of shareable metadata
+    /// (`conntrack_entry` and `marks`) with default unique resources.
+    pub(crate) fn split_for_multiple_frames(self) -> SplitDeviceIpLayerMetadata<BT> {
+        let secondary = Self {
+            conntrack_entry: self.conntrack_entry.clone(),
+            // TODO(https://fxbug.dev/391953082): We should penalize sockets via
+            // the tx metadata when a packet is sent as multiple frames instead
+            // of just attaching the ownership to one of them. For now, only the
+            // `primary` instance retains the tx metadata.
+            tx_metadata: Default::default(),
+            marks: self.marks,
+        };
+        SplitDeviceIpLayerMetadata { primary: self, secondary }
+    }
+
     /// Creates new IP layer metadata with the marks.
     #[cfg(any(test, feature = "testutils"))]
     pub fn with_marks(marks: Marks) -> Self {
@@ -319,6 +364,12 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
             #[cfg(debug_assertions)]
             drop_check: Default::default(),
         }
+    }
+
+    /// Creates a new empty [`IpLayerPacketMetadata`].
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn new_empty() -> Self {
+        Self::new_local_tx(Default::default(), Default::default(), None)
     }
 
     pub(crate) fn into_parts(
@@ -825,6 +876,7 @@ pub trait IpLayerIpExt:
     + IcmpHandlerIpExt
     + FilterIpExt
     + FragmentationIpExt
+    + GsoIpExt
     + IpDeviceIpExt
     + IpCountersIpExt
     + IcmpCountersIpExt
@@ -1719,7 +1771,7 @@ where
         packet_metadata: IpLayerPacketMetadata<I, CC::WeakAddressId, BC>,
     ) -> Result<(), IpSendFrameError<S>>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut,
     {
         send_ip_packet_from_device(self, bindings_ctx, meta.into(), body, packet_metadata)
@@ -3247,7 +3299,9 @@ where
     I: IpLayerIpExt,
     BC: FilterBindingsContext<CC::DeviceId> + TxMetadataBindingsTypes + MarksBindingsContext,
     CC: IpLayerEgressContext<I, BC> + IpDeviceMtuContext<I> + IpDeviceAddressIdContext<I>,
-    S: FragmentableIpSerializer<I, Buffer: BufferMut> + FilterIpPacket<I>,
+    S: FragmentableIpSerializer<I, Buffer: BufferMut>
+        + MaybeSegmentableIpSerializer<I>
+        + FilterIpPacket<I>,
 {
     let (verdict, proof) = core_ctx.filter_handler().egress_hook(
         bindings_ctx,
@@ -3266,10 +3320,7 @@ where
     // If the packet is leaving through the loopback device, attempt to extract a
     // weak reference to the packet's conntrack entry to plumb that through the
     // device layer so it can be reused on ingress to the IP layer.
-    // TODO(https://fxbug.dev/452980285): Split a frame carrying GSO metadata
-    // back into `gso_size` segments here. A coalesced frame is larger than the
-    // MTU by construction, so until then it is sent (and fragmented) whole.
-    let (conntrack_connection_and_direction, tx_metadata, marks, _socket_cookie, _gso_info) =
+    let (conntrack_connection_and_direction, tx_metadata, marks, _socket_cookie, gso_info) =
         packet_metadata.into_parts();
     let conntrack_entry = if device.is_loopback() {
         conntrack_connection_and_direction
@@ -3303,6 +3354,165 @@ where
     // Use the minimum MTU between the target device and the requested mtu.
     let mtu = limit_mtu.min(core_ctx.get_mtu(device));
 
+    let Some(gso_info) = gso_info else {
+        // Transport-layer segmentation isn't required. Check if we need to
+        // fragment and then send.
+        return send_ip_frame_possibly_fragmented(
+            core_ctx,
+            bindings_ctx,
+            device,
+            destination,
+            body,
+            device_ip_layer_metadata,
+            mtu,
+            proof,
+        );
+    };
+
+    match send_ip_frame_segmented(
+        core_ctx,
+        bindings_ctx,
+        device,
+        destination.clone(),
+        &body,
+        gso_info,
+        device_ip_layer_metadata,
+        mtu,
+        proof,
+    ) {
+        Ok(()) => Ok(()),
+        Err(SendIpFrameSegmentedError::NotSegmentable(error, device_ip_layer_metadata, proof)) => {
+            // GRO and GSO should always produce packets that can be
+            // resegmented. If that's not the case, we want to know about it. In
+            // production, however, we'll attempt to send with fragmentation for
+            // robustness' sake.
+            debug_assert!(
+                false,
+                "GRO or GSO produced a packet that can't be resegmented: {error:?}"
+            );
+            error!("GRO or GSO produced a packet that can't be resegmented: {error:?}");
+            send_ip_frame_possibly_fragmented(
+                core_ctx,
+                bindings_ctx,
+                device,
+                destination,
+                body,
+                device_ip_layer_metadata,
+                mtu,
+                proof,
+            )
+        }
+        Err(SendIpFrameSegmentedError::Send(error)) => {
+            Err(IpSendFrameError { serializer: body, error })
+        }
+    }
+}
+
+/// The error type for [`send_ip_frame_segmented`].
+enum SendIpFrameSegmentedError<BT: TxMetadataBindingsTypes> {
+    /// The packet can't be segmented in software.
+    ///
+    /// Nothing was sent, so the caller's metadata and egress proof are handed
+    /// back untouched.
+    NotSegmentable(GsoError, DeviceIpLayerMetadata<BT>, ProofOfEgressCheck),
+    /// A segment couldn't be sent.
+    Send(IpSendFrameErrorReason),
+}
+
+/// Splits `body` into `gso_info`-sized segments and sends each one out of
+/// `device`, fragmenting any segment that doesn't fit in `mtu`.
+///
+/// Takes `body` by reference: segments borrow from the packet's builders and
+/// payload, and keeping the borrow inside this function is what allows the
+/// caller to hand `body` back to *its* caller on error.
+fn send_ip_frame_segmented<I, CC, BC, S>(
+    core_ctx: &mut CC,
+    bindings_ctx: &mut BC,
+    device: &CC::DeviceId,
+    destination: IpPacketDestination<I, &CC::DeviceId>,
+    body: &S,
+    gso_info: GsoInfo,
+    device_ip_layer_metadata: DeviceIpLayerMetadata<BC>,
+    mtu: Mtu,
+    proof: ProofOfEgressCheck,
+) -> Result<(), SendIpFrameSegmentedError<BC>>
+where
+    I: IpLayerIpExt,
+    BC: FilterBindingsContext<CC::DeviceId> + TxMetadataBindingsTypes + MarksBindingsContext,
+    CC: IpLayerEgressContext<I, BC>,
+    S: FragmentableIpSerializer<I, Buffer: BufferMut> + MaybeSegmentableIpSerializer<I>,
+{
+    core_ctx.increment_both(device, |c| &c.gso.for_source(S::SOURCE).segmentation_required);
+
+    let segmenter = match body.try_segmenter(gso_info) {
+        Ok(segmenter) => segmenter,
+        Err(error) => {
+            core_ctx.increment_both(device, |c| c.gso.for_source(S::SOURCE).error_counter(&error));
+            return Err(SendIpFrameSegmentedError::NotSegmentable(
+                error,
+                device_ip_layer_metadata,
+                proof,
+            ));
+        }
+    };
+
+    let mut device_ip_layer_metadata = device_ip_layer_metadata;
+    let mut proof = proof;
+
+    for (segment, has_more) in segmenter {
+        let (segment_metadata, segment_proof, remaining) = if has_more {
+            let SplitDeviceIpLayerMetadata { primary, secondary } =
+                device_ip_layer_metadata.split_for_multiple_frames();
+            (secondary, proof.clone_for_multiple_frames(), Some((primary, proof)))
+        } else {
+            (device_ip_layer_metadata, proof, None)
+        };
+
+        send_ip_frame_possibly_fragmented(
+            core_ctx,
+            bindings_ctx,
+            device,
+            destination.clone(),
+            segment,
+            segment_metadata,
+            mtu,
+            segment_proof,
+        )
+        .map_err(|IpSendFrameError { serializer: _, error }| {
+            SendIpFrameSegmentedError::Send(error)
+        })?;
+
+        core_ctx.increment_both(device, |c| &c.gso.for_source(S::SOURCE).segments);
+
+        match remaining {
+            Some((m, p)) => {
+                device_ip_layer_metadata = m;
+                proof = p;
+            }
+            None => break,
+        }
+    }
+
+    Ok(())
+}
+
+/// Sends `body` out of `device`, fragmenting it if it doesn't fit in `mtu`.
+fn send_ip_frame_possibly_fragmented<I, CC, BC, S>(
+    core_ctx: &mut CC,
+    bindings_ctx: &mut BC,
+    device: &CC::DeviceId,
+    destination: IpPacketDestination<I, &CC::DeviceId>,
+    body: S,
+    device_ip_layer_metadata: DeviceIpLayerMetadata<BC>,
+    mtu: Mtu,
+    proof: ProofOfEgressCheck,
+) -> Result<(), IpSendFrameError<S>>
+where
+    I: IpLayerIpExt,
+    BC: FilterBindingsContext<CC::DeviceId> + TxMetadataBindingsTypes + MarksBindingsContext,
+    CC: IpLayerEgressContext<I, BC>,
+    S: FragmentableIpSerializer<I, Buffer: BufferMut>,
+{
     let body = body.with_size_limit(mtu.into());
 
     let fits_mtu = match body.serialize_new_buf(
@@ -3330,51 +3540,48 @@ where
     // it out.
     core_ctx.increment_both(device, |c| &c.fragmentation.fragmentation_required);
 
-    // Taken on the last frame.
-    let mut device_ip_layer_metadata = Some(device_ip_layer_metadata);
     let body = body.into_inner();
     let result = match IpFragmenter::new(bindings_ctx, &body, mtu) {
-        Ok(mut fragmenter) => loop {
-            let (fragment, has_more) = match fragmenter.next() {
-                None => break Ok(()),
-                Some(f) => f,
-            };
+        Ok(mut fragmenter) => {
+            let mut device_ip_layer_metadata = device_ip_layer_metadata;
+            loop {
+                let Some((fragment, has_more)) = fragmenter.next() else {
+                    break Ok(());
+                };
 
-            // TODO(https://fxbug.dev/391953082): We should penalize sockets
-            // via the tx metadata when we incur IP fragmentation instead of
-            // just attaching the ownership to the last fragment. For now, we
-            // attach the tx metadata to the last frame only.
-            let device_ip_layer_metadata = if has_more {
-                // Unwrap here because only the last frame can take it.
-                let device_ip_layer_metadata = device_ip_layer_metadata.as_ref().unwrap();
-                DeviceIpLayerMetadata {
-                    conntrack_entry: device_ip_layer_metadata.conntrack_entry.clone(),
-                    tx_metadata: Default::default(),
-                    marks: device_ip_layer_metadata.marks,
-                }
-            } else {
-                // Unwrap here because the last frame can only happen once.
-                device_ip_layer_metadata.take().unwrap()
-            };
+                let (fragment_metadata, remaining_metadata) = if has_more {
+                    let SplitDeviceIpLayerMetadata { primary, secondary } =
+                        device_ip_layer_metadata.split_for_multiple_frames();
+                    (secondary, Some(primary))
+                } else {
+                    (device_ip_layer_metadata, None)
+                };
 
-            match core_ctx.send_ip_frame(
-                bindings_ctx,
-                device,
-                destination.clone(),
-                device_ip_layer_metadata,
-                fragment,
-                proof.clone_for_fragmentation(),
-            ) {
-                Ok(()) => {
-                    core_ctx.increment_both(device, |c| &c.fragmentation.fragments);
+                match core_ctx.send_ip_frame(
+                    bindings_ctx,
+                    device,
+                    destination.clone(),
+                    fragment_metadata,
+                    fragment,
+                    proof.clone_for_multiple_frames(),
+                ) {
+                    Ok(()) => {
+                        core_ctx.increment_both(device, |c| &c.fragmentation.fragments);
+                    }
+                    Err(ErrorAndSerializer { serializer: _, error }) => {
+                        core_ctx.increment_both(device, |c| {
+                            &c.fragmentation.error_fragmented_serializer
+                        });
+                        break Err(error);
+                    }
                 }
-                Err(ErrorAndSerializer { serializer: _, error }) => {
-                    core_ctx
-                        .increment_both(device, |c| &c.fragmentation.error_fragmented_serializer);
-                    break Err(error);
+
+                match remaining_metadata {
+                    Some(m) => device_ip_layer_metadata = m,
+                    None => break Ok(()),
                 }
             }
-        },
+        }
         Err(e) => {
             core_ctx.increment_both(device, |c| &c.fragmentation.error_counter(&e));
             Err(SendFrameErrorReason::SizeConstraintsViolation)
@@ -3764,21 +3971,22 @@ pub fn receive_ipv4_packet<
     );
     match action {
         ReceivePacketAction::MulticastForward { targets, address_status, dst_ip } => {
-            // TOOD(https://fxbug.dev/364242513): Support connection tracking of
-            // the multiplexed flows created by multicast forwarding. Here, we
-            // use the existing metadata for the first action taken, and then
-            // a default instance for each subsequent action. The first action
-            // will populate the conntrack table with an entry, which will then
-            // be used by all subsequent forwards.
-            let mut packet_metadata = Some(packet_metadata);
+            // Multicast forwarding replicates a single flow across multiple
+            // targets. We split the metadata so that marks and socket info are
+            // preserved for all targets and local delivery. The first target
+            // takes the unconfirmed conntrack entry to populate the table,
+            // which subsequent forwards share.
             for MulticastRouteTarget { output_interface, min_ttl } in targets.as_ref() {
                 clone_packet_for_mcast_forwarding! {
                     let (copy_of_data, copy_of_buffer, copy_of_packet) = packet
                 };
+                let SplitMulticastPacketMetadata { primary: this_packet_metadata, secondary } =
+                    packet_metadata.split_for_multicast();
+                packet_metadata = secondary;
                 determine_ip_packet_forwarding_action::<Ipv4, _, _>(
                     core_ctx,
                     copy_of_packet,
-                    packet_metadata.take().unwrap_or_default(),
+                    this_packet_metadata,
                     Some(*min_ttl),
                     device,
                     &output_interface,
@@ -3808,10 +4016,12 @@ pub fn receive_ipv4_packet<
                     device,
                     frame_dst,
                     packet,
-                    packet_metadata.take().unwrap_or_default(),
+                    packet_metadata,
                     receive_meta,
                 )
                 .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
+            } else {
+                packet_metadata.acknowledge_drop();
             }
         }
         ReceivePacketAction::Deliver { address_status, internal_forwarding } => {
@@ -4243,21 +4453,22 @@ pub fn receive_ipv6_packet<
         max_fragment_len,
     ) {
         ReceivePacketAction::MulticastForward { targets, address_status, dst_ip } => {
-            // TOOD(https://fxbug.dev/364242513): Support connection tracking of
-            // the multiplexed flows created by multicast forwarding. Here, we
-            // use the existing metadata for the first action taken, and then
-            // a default instance for each subsequent action. The first action
-            // will populate the conntrack table with an entry, which will then
-            // be used by all subsequent forwards.
-            let mut packet_metadata = Some(packet_metadata);
+            // Multicast forwarding replicates a single flow across multiple
+            // targets. We split the metadata so that marks and socket info are
+            // preserved for all targets and local delivery. The first target
+            // takes the unconfirmed conntrack entry to populate the table,
+            // which subsequent forwards share.
             for MulticastRouteTarget { output_interface, min_ttl } in targets.as_ref() {
                 clone_packet_for_mcast_forwarding! {
                     let (copy_of_data, copy_of_buffer, copy_of_packet) = packet
                 };
+                let SplitMulticastPacketMetadata { primary: this_packet_metadata, secondary } =
+                    packet_metadata.split_for_multicast();
+                packet_metadata = secondary;
                 determine_ip_packet_forwarding_action::<Ipv6, _, _>(
                     core_ctx,
                     copy_of_packet,
-                    packet_metadata.take().unwrap_or_default(),
+                    this_packet_metadata,
                     Some(*min_ttl),
                     device,
                     &output_interface,
@@ -4288,10 +4499,12 @@ pub fn receive_ipv6_packet<
                     device,
                     frame_dst,
                     packet,
-                    packet_metadata.take().unwrap_or_default(),
+                    packet_metadata,
                     receive_meta,
                 )
                 .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
+            } else {
+                packet_metadata.acknowledge_drop();
             }
         }
         ReceivePacketAction::Deliver { address_status: _, internal_forwarding } => {
@@ -4603,6 +4816,7 @@ where
                 Some(address_status),
                 dst_ip,
                 frame_dst,
+                *marks,
                 max_fragment_len,
             )
         }
@@ -4679,6 +4893,7 @@ where
                 Some(address_status),
                 dst_ip,
                 frame_dst,
+                *marks,
                 max_fragment_len,
             )
         }
@@ -4751,6 +4966,7 @@ fn receive_ip_multicast_packet_action<
     address_status: Option<I::AddressStatus>,
     dst_ip: SpecifiedAddr<I::Addr>,
     frame_dst: Option<LocalFrameDestination>,
+    marks: Marks,
     max_fragment_len: Option<usize>,
 ) -> ReceivePacketAction<I, CC::DeviceId> {
     let targets = multicast_forwarding::lookup_multicast_route_or_stash_packet(
@@ -4760,6 +4976,7 @@ fn receive_ip_multicast_packet_action<
         device,
         frame_dst,
         max_fragment_len,
+        marks,
     );
     match (targets, address_status) {
         (Some(targets), address_status) => {
@@ -4818,6 +5035,7 @@ fn receive_ip_packet_action_common<
             None,
             dst_ip,
             frame_dst,
+            *marks,
             max_fragment_len,
         );
     }
@@ -5045,7 +5263,7 @@ impl<I: IpExt, D> From<SendIpPacketMeta<I, D, SpecifiedAddr<I::Addr>>>
 ///
 /// NOTE: Due to filtering rules, it is possible that the device provided in
 /// `meta` will not be the device that final IP packet is actually sent from.
-pub trait IpLayerHandler<I: IpExt + FragmentationIpExt + FilterIpExt, BC>:
+pub trait IpLayerHandler<I: IpExt + FragmentationIpExt + GsoIpExt + FilterIpExt, BC>:
     DeviceIdContext<AnyDevice>
 {
     /// Encapsulate and send the provided transport packet and from the device
@@ -5057,7 +5275,7 @@ pub trait IpLayerHandler<I: IpExt + FragmentationIpExt + FilterIpExt, BC>:
         body: S,
     ) -> Result<(), IpSendFrameError<S>>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut;
 
     /// Send an IP packet that doesn't require the encapsulation and other
@@ -5074,14 +5292,16 @@ pub trait IpLayerHandler<I: IpExt + FragmentationIpExt + FilterIpExt, BC>:
         body: S,
     ) -> Result<(), IpSendFrameError<S>>
     where
-        S: FragmentableIpSerializer<I, Buffer: BufferMut> + FilterIpPacket<I>;
+        S: FragmentableIpSerializer<I, Buffer: BufferMut>
+            + MaybeSegmentableIpSerializer<I>
+            + FilterIpPacket<I>;
 }
 
-impl<
+impl<I, BC, CC> IpLayerHandler<I, BC> for CC
+where
     I: IpLayerIpExt,
     BC: IpLayerBindingsContext<I, <CC as DeviceIdContext<AnyDevice>>::DeviceId>,
     CC: IpLayerEgressContext<I, BC> + IpDeviceEgressStateContext<I> + IpDeviceMtuContext<I>,
-> IpLayerHandler<I, BC> for CC
 {
     fn send_ip_packet_from_device<S>(
         &mut self,
@@ -5090,10 +5310,16 @@ impl<
         body: S,
     ) -> Result<(), IpSendFrameError<S>>
     where
-        S: TransportPacketSerializer<I>,
+        S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
         S::Buffer: BufferMut,
     {
-        send_ip_packet_from_device(self, bindings_ctx, meta, body, IpLayerPacketMetadata::default())
+        send_ip_packet_from_device(
+            self,
+            bindings_ctx,
+            meta,
+            body,
+            IpLayerPacketMetadata::new_local_tx(Default::default(), Default::default(), None),
+        )
     }
 
     fn send_ip_frame<S>(
@@ -5104,7 +5330,9 @@ impl<
         body: S,
     ) -> Result<(), IpSendFrameError<S>>
     where
-        S: FragmentableIpSerializer<I, Buffer: BufferMut> + FilterIpPacket<I>,
+        S: FragmentableIpSerializer<I, Buffer: BufferMut>
+            + MaybeSegmentableIpSerializer<I>
+            + FilterIpPacket<I>,
     {
         send_ip_frame(
             self,
@@ -5112,7 +5340,7 @@ impl<
             device,
             destination,
             body,
-            IpLayerPacketMetadata::default(),
+            IpLayerPacketMetadata::new_local_tx(Default::default(), Default::default(), None),
             Mtu::no_limit(),
         )
     }
@@ -5139,7 +5367,7 @@ where
     I: IpLayerIpExt,
     BC: FilterBindingsContext<CC::DeviceId> + TxMetadataBindingsTypes + MarksBindingsContext,
     CC: IpLayerEgressContext<I, BC> + IpDeviceEgressStateContext<I> + IpDeviceMtuContext<I>,
-    S: TransportPacketSerializer<I>,
+    S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
     S::Buffer: BufferMut,
 {
     let SendIpPacketMeta { device, src_ip, dst_ip, destination, proto, ttl, mtu, dscp_and_ecn } =

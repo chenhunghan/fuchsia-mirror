@@ -158,14 +158,15 @@ class FlatlandManagerTest : public LoggingEventLoop, public ::testing::Test {
           return presentation_infos;
         }));
 
-    ON_CALL(*mock_flatland_presenter_, RemoveSession(_, _))
-        .WillByDefault(::testing::Invoke(
-            [&](scheduling::SessionId session_id, std::optional<zx::event> release_fence) {
-              async::PostTask(this->dispatcher(), [&, session_id]() {
-                std::lock_guard lock(removed_session_thread_checker_);
-                removed_sessions_.insert(session_id);
-              });
-            }));
+    ON_CALL(*mock_flatland_presenter_, RemoveSession(_, _, _))
+        .WillByDefault(::testing::Invoke([&](scheduling::SessionId session_id,
+                                             std::vector<zx::event> release_fences,
+                                             std::vector<zx::counter> release_counters) {
+          async::PostTask(this->dispatcher(), [&, session_id]() {
+            std::lock_guard lock(removed_session_thread_checker_);
+            removed_sessions_.insert(session_id);
+          });
+        }));
 
     const display::WireDisplayId kDisplayId = {.value = 1};
     constexpr uint32_t kDisplayWidth = 640;
@@ -199,7 +200,7 @@ class FlatlandManagerTest : public LoggingEventLoop, public ::testing::Test {
     if (manager_) {
       const size_t initial_session_count = manager_->GetSessionCount();
       FX_LOGS(INFO) << "initial_session_count=" << initial_session_count;
-      EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _))
+      EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _, _))
           .Times(AtLeast(initial_session_count));
       RunLoopUntil([this, initial_session_count] {
         std::lock_guard lock(removed_session_thread_checker_);
@@ -374,7 +375,7 @@ TEST_F(FlatlandManagerTest, CreateViewportedFlatlands) {
     EXPECT_EQ(manager_->GetSessionCount(), 2ul);
     RunLoopUntil([this] { return !link_system_->GetResolvedTopologyLinks().empty(); });
 
-    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _));
+    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _, _));
   }
 
   RunLoopUntil([this] { return link_system_->GetResolvedTopologyLinks().empty(); });
@@ -391,7 +392,7 @@ TEST_F(FlatlandManagerTest, ClientDiesBeforeManager) {
     EXPECT_TRUE(flatland.is_bound());
 
     // |flatland| falls out of scope, killing the session.
-    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _));
+    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _, _));
 
     // FlatlandManager::RemoveFlatlandInstance() will be posted on main thread and may not be run
     // yet.
@@ -424,7 +425,7 @@ TEST_F(FlatlandManagerTest, ManagerDiesBeforeClients) {
   EXPECT_EQ(manager_->GetSessionCount(), 1ul);
 
   // Explicitly kill the server.
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _));
+  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _, _));
   manager_.reset();
 
   EXPECT_EQ(uber_struct_system_->GetSessionCount(), 0ul);
@@ -655,7 +656,7 @@ TEST_F(FlatlandManagerTest, PresentWithoutTokensClosesSession) {
   EXPECT_TRUE(flatland.is_bound());
 
   // Present one more time and ensure the session is closed.
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _));
+  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _, _));
   PRESENT(flatland, id, false);
 
   // The instance will eventually be unbound, but it takes a pair of thread hops to complete since
@@ -683,7 +684,7 @@ TEST_F(FlatlandManagerTest, ErrorClosesSession) {
   EXPECT_TRUE(flatland.is_bound());
 
   // Queue a bad SetRootTransform call ensure the session is closed.
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _));
+  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id, _, _));
   fuchsia_ui_composition::FlatlandSetRootTransformRequest root_request;
   root_request.transform_id(fuchsia_ui_composition::TransformId(2));
   EXPECT_TRUE(flatland->SetRootTransform(std::move(root_request)).is_ok());
@@ -868,7 +869,7 @@ TEST_F(FlatlandManagerTest, OnFramePresentedEvent) {
   // this test could flake.
   PRESENT(flatland1, id1, true);
   PRESENT(flatland2, id2, true);
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id1, _));
+  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(id1, _, _));
   flatland1.reset();
   FX_LOGS(INFO) << "Waiting for removal of session " << id1;
   RunLoopUntil([this, id1] {

@@ -23,6 +23,21 @@ class StatusProtocol_TestBase : public ::test::zxtypes::StatusProtocol {
     NotImplemented_("handle_unknown_method");
   }
 };
+
+class ResultProtocol_TestBase : public ::test::zxtypes::ResultProtocol {
+ public:
+  virtual ~ResultProtocol_TestBase() {}
+  virtual void NotImplemented_(const std::string& name) = 0;
+  void A(int32_t arg, ACallback callback) override {
+    NotImplemented_("A");
+  }
+  void B(int32_t arg, BCallback callback) override {
+    NotImplemented_("B");
+  }
+  void handle_unknown_method(uint64_t ordinal, bool method_has_response) override {
+    NotImplemented_("handle_unknown_method");
+  }
+};
 }  // namespace testing
 }  // namespace zxtypes
 }  // namespace test

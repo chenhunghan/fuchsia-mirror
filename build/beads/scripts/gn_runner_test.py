@@ -9,7 +9,7 @@ import gn_runner
 
 
 class TestGnRunner(unittest.TestCase):
-    def test_run_and_extract_output(self):
+    def test_run_and_extract_output(self) -> None:
         build_dir = Path("/tmp/build")
         mock_output = "some output"
         runner = gn_runner.MockGnRunner(build_dir, mock_output)
@@ -23,7 +23,7 @@ class TestGnRunner(unittest.TestCase):
             ["gn", "desc", "/tmp/build", "//:default"],
         )
 
-    def test_build_dir(self):
+    def test_build_dir(self) -> None:
         build_dir = Path("/tmp/build")
         runner = gn_runner.MockGnRunner(build_dir, "")
         self.assertEqual(runner.build_dir, build_dir)

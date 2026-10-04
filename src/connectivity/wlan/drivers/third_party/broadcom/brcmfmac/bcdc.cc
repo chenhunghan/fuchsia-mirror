@@ -398,6 +398,7 @@ fail:
 }
 
 void brcmf_proto_bcdc_detach(struct brcmf_pub* drvr) {
+  std::scoped_lock proto_lock(drvr->proto_block);
   if (drvr->proto == nullptr) {
     return;
   }

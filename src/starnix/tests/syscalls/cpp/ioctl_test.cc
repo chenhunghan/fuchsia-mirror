@@ -547,10 +547,10 @@ TEST_F(IoctlTest, EVIOCGNAME_Success) {
     input_device_names.push_back(dev_name);
   }
 
-  // TODO(b/564945259): Re-add "starnix_mouse_fc1a_0003_v1" once mouse device is registered
+  // TODO(b/564945259): Re-add "starnix_mouse" once mouse device is registered
   // dynamically.
-  EXPECT_THAT(input_device_names, testing::UnorderedElementsAre("starnix_touch_fc1a_0002_v0",
-                                                                "starnix_buttons_fc1a_0001_v1"));
+  EXPECT_THAT(input_device_names,
+              testing::UnorderedElementsAre("starnix_touch", "starnix_buttons"));
 }
 
 // If the buffer for copying the device name is too small, copy only how much

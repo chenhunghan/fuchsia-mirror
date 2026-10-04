@@ -2,7 +2,8 @@
 
 Reviewed on: 2021-10-01
 
-`session_manager` is the component that runs and manages [session components](glossary.session-component).
+`session_manager` is the component that runs and manages
+[session components](/docs/glossary/README.md#session-component).
 
 ## Building
 
@@ -117,5 +118,3 @@ details in other files within `src/`.
 
 Unit tests are co-located with the code, while integration tests are in
 [`//src/session/tests`](/src/session/tests).
-
-[glossary.session-component]: /docs/glossary.md#session-component

@@ -24,10 +24,9 @@ use fidl_fuchsia_net_ext::{self as fnet_ext, IntoExt as _, TryIntoExt as _};
 use flex_fuchsia_net as fnet;
 use flex_fuchsia_net_routes as fnet_routes;
 use flex_fuchsia_net_routes_admin as fnet_routes_admin;
-use flex_fuchsia_net_stack as fnet_stack;
 use futures::{Future, Stream, TryStreamExt as _};
 use net_types::ip::{GenericOverIp, Ip, Ipv4, Ipv6, Ipv6Addr, Subnet};
-use net_types::{SpecifiedAddr, UnicastAddress, Witness as _};
+use net_types::{SpecifiedAddr, UnicastAddress};
 use thiserror::Error;
 
 /// Conversion errors from `fnet_routes` FIDL types to the generic equivalents
@@ -524,44 +523,6 @@ impl TryFrom<Route<Ipv6>> for fnet_routes::RouteV6 {
             },
             action: action.try_into()?,
             properties: properties.into(),
-        })
-    }
-}
-
-impl<I: Ip> TryFrom<Route<I>> for fnet_stack::ForwardingEntry {
-    type Error = NetTypeConversionError;
-    fn try_from(
-        Route {
-            destination,
-            action,
-            properties:
-                RouteProperties { specified_properties: SpecifiedRouteProperties { metric } },
-        }: Route<I>,
-    ) -> Result<Self, Self::Error> {
-        let RouteTarget { outbound_interface, next_hop } = match action {
-            RouteAction::Unknown => {
-                return Err(NetTypeConversionError::UnknownUnionVariant(match I::VERSION {
-                    net_types::ip::IpVersion::V4 => ROUTE_ACTION_V4_UNKNOWN_VARIANT_TAG,
-                    net_types::ip::IpVersion::V6 => ROUTE_ACTION_V6_UNKNOWN_VARIANT_TAG,
-                }));
-            }
-            RouteAction::Forward(target) => target,
-        };
-
-        let next_hop = I::map_ip_in(
-            next_hop,
-            |next_hop| next_hop.map(|addr| fnet::IpAddress::Ipv4(addr.get().into_ext())),
-            |next_hop| next_hop.map(|addr| fnet::IpAddress::Ipv6(addr.get().into_ext())),
-        );
-
-        Ok(fnet_stack::ForwardingEntry {
-            subnet: destination.into_ext(),
-            device_id: outbound_interface,
-            next_hop: next_hop.map(Box::new),
-            metric: match metric {
-                fnet_routes::SpecifiedMetric::ExplicitMetric(metric) => metric,
-                fnet_routes::SpecifiedMetric::InheritedFromInterface(fnet_routes::Empty) => 0,
-            },
         })
     }
 }

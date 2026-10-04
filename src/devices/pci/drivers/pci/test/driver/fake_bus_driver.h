@@ -15,6 +15,10 @@ namespace pci {
 
 class FakeBusDriver;
 using FakeBusDriverType = ddk::Device<FakeBusDriver>;
+
+// Fake bus driver loaded in DriverTestRealm by pci-driver-test.
+// Configures a fake Quadro device and serves fuchsia.hardware.pci.Service
+// for driver_tests.rs.
 class FakeBusDriver : public FakeBusDriverType {
  public:
   static zx_status_t Create(zx_device_t* parent, const char* name, uint8_t start_bus,

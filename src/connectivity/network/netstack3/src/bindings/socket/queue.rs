@@ -11,7 +11,7 @@ use log::trace;
 use netstack3_core::types::BufferSizeSettings;
 use thiserror::Error;
 
-use crate::bindings::util::DataNotifier;
+use crate::bindings::waker::DataNotifier;
 
 #[derive(Copy, Clone, Debug, Error, Eq, PartialEq)]
 #[error("application buffers are full")]
@@ -170,6 +170,17 @@ struct AvailableMessageQueue<M> {
 
 pub(crate) trait BodyLen {
     fn body_len(&self) -> usize;
+
+    /// The number of bytes charged against the queue's capacity for this
+    /// message.
+    ///
+    /// In addition to the body, this accounts for the in-memory size of the
+    /// message itself so that messages with empty (or tiny) bodies cannot be
+    /// queued without bound. This is akin to Linux accounting for an skb's
+    /// `truesize` rather than just its payload length.
+    fn queued_size(&self) -> usize {
+        core::mem::size_of_val(self).saturating_add(self.body_len())
+    }
 }
 
 impl<M> AvailableMessageQueue<M> {
@@ -190,7 +201,7 @@ impl<M> AvailableMessageQueue<M> {
 
         // Respect the configured limit except if this would be the only message
         // in the buffer. This is compatible with Linux behavior.
-        let len = message.body_len();
+        let len = message.queued_size();
         if *available_messages_size + len > max_available_messages_size.get()
             && !available_messages.is_empty()
         {
@@ -210,7 +221,7 @@ impl<M> AvailableMessageQueue<M> {
             self;
 
         available_messages.pop_front().map(|msg| {
-            *available_messages_size -= msg.body_len();
+            *available_messages_size -= msg.queued_size();
             msg
         })
     }
@@ -260,5 +271,65 @@ mod tests {
 
         assert_eq!(mq.take_pending_error(), Some(PendingDatagramSocketError::HostUnreachable));
         assert_eq!(mq.listener.error_signaled, false);
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct TestMessage(Vec<u8>);
+
+    impl BodyLen for TestMessage {
+        fn body_len(&self) -> usize {
+            let Self(body) = self;
+            body.len()
+        }
+    }
+
+    const TEST_MESSAGE_OVERHEAD: usize = core::mem::size_of::<TestMessage>();
+
+    #[test]
+    fn queued_size_includes_overhead() {
+        assert_eq!(TestMessage(Vec::new()).queued_size(), TEST_MESSAGE_OVERHEAD);
+        assert_eq!(TestMessage(vec![0; 10]).queued_size(), TEST_MESSAGE_OVERHEAD + 10);
+    }
+
+    #[test]
+    fn empty_messages_are_bounded() {
+        const MAX_MESSAGES: usize = 16;
+        let mut queue = AvailableMessageQueue::new(
+            NonZeroUsize::new(MAX_MESSAGES * TEST_MESSAGE_OVERHEAD).unwrap(),
+        );
+        for _ in 0..MAX_MESSAGES {
+            assert_eq!(queue.push(TestMessage(Vec::new())), Ok(()));
+        }
+        assert_eq!(queue.push(TestMessage(Vec::new())), Err(NoSpace));
+        assert_eq!(queue.available_messages.len(), MAX_MESSAGES);
+        assert_eq!(queue.available_messages_size, MAX_MESSAGES * TEST_MESSAGE_OVERHEAD);
+
+        // Popping a message frees up space for exactly one more.
+        assert_eq!(queue.pop(), Some(TestMessage(Vec::new())));
+        assert_eq!(queue.push(TestMessage(Vec::new())), Ok(()));
+        assert_eq!(queue.push(TestMessage(Vec::new())), Err(NoSpace));
+
+        while let Some(_) = queue.pop() {}
+        assert_eq!(queue.available_messages_size, 0);
+    }
+
+    #[test]
+    fn body_and_overhead_count_toward_limit() {
+        const BODY_LEN: usize = 100;
+        let mut queue = AvailableMessageQueue::new(
+            NonZeroUsize::new(2 * (BODY_LEN + TEST_MESSAGE_OVERHEAD)).unwrap(),
+        );
+        assert_eq!(queue.push(TestMessage(vec![0; BODY_LEN])), Ok(()));
+        assert_eq!(queue.push(TestMessage(vec![0; BODY_LEN])), Ok(()));
+        assert_eq!(queue.push(TestMessage(Vec::new())), Err(NoSpace));
+    }
+
+    #[test]
+    fn oversized_message_accepted_when_empty() {
+        let mut queue = AvailableMessageQueue::new(NonZeroUsize::new(1).unwrap());
+        assert_eq!(queue.push(TestMessage(vec![0; 100])), Ok(()));
+        assert_eq!(queue.push(TestMessage(Vec::new())), Err(NoSpace));
+        assert_eq!(queue.pop(), Some(TestMessage(vec![0; 100])));
+        assert_eq!(queue.available_messages_size, 0);
     }
 }

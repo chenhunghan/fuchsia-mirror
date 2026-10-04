@@ -7,10 +7,13 @@
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/loop.h>
+#include <lib/driver/mmio/cpp/mmio-view.h>
+#include <lib/driver/mmio/testing/cpp/test-helper.h>
 #include <lib/driver/testing/cpp/scoped_global_logger.h>
 #include <lib/fake-bti/bti.h>
-#include <lib/mmio-ptr/fake.h>
 #include <lib/zircon-internal/align.h>
+
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -32,15 +35,6 @@ void Configure2MbGtt(ddk::Pci& pci) {
   EXPECT_OK(status);
 }
 
-fdf::MmioBuffer MakeMmioBuffer(uint8_t* buffer, size_t size) {
-  return fdf::MmioBuffer({
-      .vaddr = FakeMmioPtr(buffer),
-      .offset = 0,
-      .size = size,
-      .vmo = ZX_HANDLE_INVALID,
-  });
-}
-
 class GttTest : public testing::Test {
  public:
   GttTest() : loop_(&kAsyncLoopConfigNeverAttachToThread) {}
@@ -58,22 +52,24 @@ class GttTest : public testing::Test {
 };
 
 TEST_F(GttTest, InitWithZeroSizeGtt) {
-  uint8_t buffer = 0;
-  fdf::MmioBuffer mmio = MakeMmioBuffer(&buffer, 0);
+  fdf::MmioBuffer mmio = fdf_testing::CreateMmioBuffer(kTableSize, ZX_CACHE_POLICY_CACHED);
+  // The view stays valid after the move because |gtt| keeps the mapping.
+  fdf::MmioView table = mmio.View(0);
 
   Gtt gtt;
   EXPECT_STATUS(ZX_ERR_INTERNAL, gtt.Init(pci_, std::move(mmio), 0));
 
   // No MMIO writes should have occurred.
-  EXPECT_EQ(0, buffer);
+  for (size_t i = 0; i < kTableSize / sizeof(uint64_t); i++) {
+    ASSERT_EQ(0u, table.Read64(i * sizeof(uint64_t)));
+  }
 }
 
 TEST_F(GttTest, InitGtt) {
   Configure2MbGtt(pci_);
 
-  auto buffer = std::make_unique<uint8_t[]>(kTableSize);
-  memset(buffer.get(), 0, kTableSize);
-  fdf::MmioBuffer mmio = MakeMmioBuffer(buffer.get(), kTableSize);
+  fdf::MmioBuffer mmio = fdf_testing::CreateMmioBuffer(kTableSize, ZX_CACHE_POLICY_CACHED);
+  fdf::MmioView table = mmio.View(0);
 
   Gtt gtt;
   EXPECT_OK(gtt.Init(pci_, std::move(mmio), 0));
@@ -81,9 +77,8 @@ TEST_F(GttTest, InitGtt) {
   // The table should contain 2MB / sizeof(uint64_t) 64-bit entries that map to the fake scratch
   // buffer. The "+ 1" marks bit 0 as 1 which denotes that's the page is present.
   uint64_t kBusPhysicalAddr = FAKE_BTI_PHYS_ADDR | 1;
-  for (unsigned i = 0; i < kTableSize / sizeof(uint64_t); i++) {
-    uint64_t addr = reinterpret_cast<uint64_t*>(buffer.get())[i];
-    ASSERT_EQ(kBusPhysicalAddr, addr);
+  for (size_t i = 0; i < kTableSize / sizeof(uint64_t); i++) {
+    ASSERT_EQ(kBusPhysicalAddr, table.Read64(i * sizeof(uint64_t)));
   }
 
   // Allocated GTT regions should start from base 0.
@@ -101,24 +96,24 @@ TEST_F(GttTest, InitGttWithFramebufferOffset) {
   constexpr size_t kFbOffset = 1024;
   constexpr uint8_t kJunk = 0xFF;
   const size_t kFbPages = ZX_ROUNDUP(kFbOffset, kPageSize) / kPageSize;
-  auto buffer = std::make_unique<uint8_t[]>(kTableSize);
-  memset(buffer.get(), kJunk, kTableSize);
-  fdf::MmioBuffer mmio = MakeMmioBuffer(buffer.get(), kTableSize);
+  fdf::MmioBuffer mmio = fdf_testing::CreateMmioBuffer(kTableSize, ZX_CACHE_POLICY_CACHED);
+  const std::vector<uint8_t> junk(kTableSize, kJunk);
+  mmio.WriteBuffer(0, junk.data(), junk.size());
+  fdf::MmioView table = mmio.View(0);
 
   Gtt gtt;
   EXPECT_OK(gtt.Init(pci_, std::move(mmio), kFbOffset));
 
   // The first page-aligned region of addresses should remain unmodified.
   for (size_t i = 0; i < kFbPages; i++) {
-    ASSERT_EQ(kJunk, buffer[i]);
+    ASSERT_EQ(kJunk, table.Read8(i));
   }
 
   // The table should contain 2MB / sizeof(uint64_t) 64-bit entries that map to the fake scratch
   // buffer. The "+ 1" marks bit 0 as 1 which denotes that's the page is present.
   uint64_t kBusPhysicalAddr = FAKE_BTI_PHYS_ADDR | 1;
   for (size_t i = kFbPages; i < kTableSize / sizeof(uint64_t); i++) {
-    uint64_t addr = reinterpret_cast<uint64_t*>(buffer.get())[i];
-    ASSERT_EQ(kBusPhysicalAddr, addr);
+    ASSERT_EQ(kBusPhysicalAddr, table.Read64(i * sizeof(uint64_t)));
   }
 
   // The first allocated GTT regions should exclude the framebuffer pages.
@@ -131,8 +126,8 @@ TEST_F(GttTest, InitGttWithFramebufferOffset) {
 
 TEST_F(GttTest, SetupForMexec) {
   Configure2MbGtt(pci_);
-  auto buffer = std::make_unique<uint8_t[]>(kTableSize);
-  fdf::MmioBuffer mmio = MakeMmioBuffer(buffer.get(), kTableSize);
+  fdf::MmioBuffer mmio = fdf_testing::CreateMmioBuffer(kTableSize, ZX_CACHE_POLICY_CACHED);
+  fdf::MmioView table = mmio.View(0);
 
   Gtt gtt;
   EXPECT_OK(gtt.Init(pci_, std::move(mmio), 0));
@@ -142,16 +137,14 @@ TEST_F(GttTest, SetupForMexec) {
   const uint32_t kFbPages = ZX_ROUNDUP(1024, kPageSize) / kPageSize;
   gtt.SetupForMexec(kStolenFbMemory, kFbPages);
 
-  for (unsigned i = 0; i < kFbPages; i++) {
-    uint64_t addr = reinterpret_cast<uint64_t*>(buffer.get())[i];
-    ASSERT_EQ(kStolenFbMemory | 0x01, addr);
+  for (size_t i = 0; i < kFbPages; i++) {
+    ASSERT_EQ(kStolenFbMemory | 0x01, table.Read64(i * sizeof(uint64_t)));
   }
 
   // The mapping for the remaining pages should remain untouched.
   uint64_t kBusPhysicalAddr = FAKE_BTI_PHYS_ADDR + 1;
-  for (unsigned i = kFbPages; i < kTableSize / sizeof(uint64_t); i++) {
-    uint64_t addr = reinterpret_cast<uint64_t*>(buffer.get())[i];
-    ASSERT_EQ(kBusPhysicalAddr, addr);
+  for (size_t i = kFbPages; i < kTableSize / sizeof(uint64_t); i++) {
+    ASSERT_EQ(kBusPhysicalAddr, table.Read64(i * sizeof(uint64_t)));
   }
 }
 

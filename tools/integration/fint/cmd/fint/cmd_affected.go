@@ -34,7 +34,7 @@ flags:
 
 func (a *AffectedCommand) Execute(ctx context.Context, _ *flag.FlagSet, _ ...any) subcommands.ExitStatus {
 	return a.execute(ctx, func(ctx context.Context) error {
-		staticSpec, contextSpec, err := a.loadSpecs()
+		_, contextSpec, err := a.loadSpecs()
 		if err != nil {
 			return err
 		}
@@ -45,7 +45,7 @@ func (a *AffectedCommand) Execute(ctx context.Context, _ *flag.FlagSet, _ ...any
 		if err != nil {
 			return err
 		}
-		artifacts, affectedErr := fint.Affected(ctx, staticSpec, contextSpec)
+		artifacts, affectedErr := fint.Affected(ctx, contextSpec)
 		proto.Merge(artifacts, existingArtifacts)
 
 		if contextSpec.ArtifactDir != "" {

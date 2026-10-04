@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use futures::stream::FusedStream;
 use futures::Future;
 use futures::Stream;
-use num::Num;
+use num_traits::Num;
 use parking_lot::Mutex;
 use std::num::ParseIntError;
 use std::sync::Arc;

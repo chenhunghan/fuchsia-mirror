@@ -55,6 +55,8 @@ pub enum BoardFeature {
     PmmCheckerAuto,
     /// Power management and frequency scaling support.
     Power,
+    /// Power framework support for WLAN driver.
+    PowerFrameworkEnabledForWlanDriver,
     /// Pulse Width Modulation controller support.
     Pwm,
     /// Radar sensor support.
@@ -135,6 +137,9 @@ impl AsRef<str> for BoardFeature {
             Self::PmmChecker => "fuchsia::pmm_checker",
             Self::PmmCheckerAuto => "fuchsia::pmm_checker_auto",
             Self::Power => "fuchsia::power",
+            Self::PowerFrameworkEnabledForWlanDriver => {
+                "fuchsia::power_framework_enabled_for_wlan_driver"
+            }
             Self::Pwm => "fuchsia::pwm",
             Self::Radar => "fuchsia::radar",
             Self::RealTimeClock => "fuchsia::real_time_clock",

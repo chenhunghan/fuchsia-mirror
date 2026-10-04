@@ -27,7 +27,6 @@
 #include "sdk/lib/driver/outgoing/cpp/outgoing_directory.h"
 
 namespace ftdi_serial {
-namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 constexpr uint16_t kFtdiTypeR = 0x0600;
 constexpr uint16_t kFtdiTypeBm = 0x0400;
@@ -191,6 +190,7 @@ class FtdiDevice : public DeviceType,
 
   uint16_t ftditype_ = 0;
   uint32_t baudrate_ = 0;
+  uint16_t port_index_ = 1;
 
   size_t read_offset_ = 0;
 

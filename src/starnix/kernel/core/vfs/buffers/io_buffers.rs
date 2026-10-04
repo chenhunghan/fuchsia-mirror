@@ -757,13 +757,10 @@ impl OutputBuffer for VecOutputBuffer {
             return error!(EINVAL);
         }
 
-        self.capacity -= length;
         let current_len = self.buffer.len();
-        // SAFETY: We checked that length <= self.available(), and we updated self.capacity.
-        // self.available() is self.capacity - self.buffer.len().
-        // So length <= self.capacity - self.buffer.len()
-        // self.buffer.len() + length <= self.capacity.
-        // The buffer has at least self.capacity capacity (see VecOutputBuffer::new).
+        // SAFETY: The caller initialized the next `length` bytes, and the check above ensures
+        // `current_len + length <= self.capacity`. The buffer has at least `self.capacity` bytes
+        // of allocated capacity (see VecOutputBuffer::new).
         unsafe { self.buffer.set_len(current_len + length) };
         Ok(())
     }
@@ -1081,6 +1078,18 @@ mod tests {
         assert!(output_buffer.write_all(b"foo").is_err());
         let data: Vec<u8> = output_buffer.into();
         assert_eq!(data, b"helloworld".to_vec());
+    }
+
+    #[::fuchsia::test]
+    fn test_vec_output_buffer_advance_preserves_capacity() {
+        let mut output_buffer = VecOutputBuffer::new(10);
+        output_buffer.buffer.spare_capacity_mut()[0].write(b'a');
+        // SAFETY: The first byte of the spare capacity was initialized above.
+        unsafe { output_buffer.advance(1).expect("advance") };
+        assert_eq!(output_buffer.bytes_written(), 1);
+        assert_eq!(output_buffer.available(), 9);
+        assert_eq!(output_buffer.write_all(b"bcdefghij").expect("write"), 9);
+        assert_eq!(output_buffer.data(), b"abcdefghij");
     }
 
     #[::fuchsia::test]

@@ -31,7 +31,7 @@ use crate::packets::{
     FilterIpExt, FilterIpPacket, IcmpErrorMut, IpPacket, MaybeIcmpErrorMut as _,
     MaybeTransportPacketMut as _, TransportPacketMut as _,
 };
-use crate::state::{FakePacketMetadata, Hook};
+use crate::state::{FilterPacketMetadata, Hook};
 
 /// The NAT configuration for a given conntrack connection.
 ///
@@ -581,7 +581,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes> Connection<I, NatConfig<I, A>, BT> {
 /// This function configures NAT, if it has not yet been configured for the
 /// connection, and performs NAT on the provided packet based on the hook and
 /// the connection's NAT configuration.
-pub(crate) fn perform_nat<N, I, P, CC, BC>(
+pub(crate) fn perform_nat<N, I, P, M, CC, BC>(
     core_ctx: &mut CC,
     bindings_ctx: &mut BC,
     nat_installed: bool,
@@ -591,11 +591,13 @@ pub(crate) fn perform_nat<N, I, P, CC, BC>(
     hook: &Hook<I, BC, ()>,
     packet: &mut P,
     interfaces: Interfaces<'_, CC::DeviceId>,
+    metadata: &mut M,
 ) -> Verdict<DropPacket>
 where
     N: NatHook<I>,
     I: FilterIpExt,
     P: FilterIpPacket<I>,
+    M: FilterPacketMetadata,
     CC: NatContext<I, BC>,
     BC: FilterBindingsContext<CC::DeviceId>,
 {
@@ -633,7 +635,7 @@ where
                 (Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::No)), false)
             }
             (Connection::Exclusive(conn), ConnectionDirection::Original) => {
-                let verdict = configure_nat::<N, _, _, _, _>(
+                let verdict = configure_nat::<N, _, _, _, _, _>(
                     core_ctx,
                     bindings_ctx,
                     table,
@@ -641,6 +643,7 @@ where
                     hook,
                     packet,
                     interfaces.clone(),
+                    metadata,
                 );
                 // Configure source port remapping for a connection by default even if its first
                 // packet does not match any NAT rules, in order to ensure that source ports for
@@ -731,7 +734,7 @@ where
 /// matches the provided packet, configures NAT based on the rule's action. Note
 /// that because NAT routines can contain a superset of the rules filter
 /// routines can, it's possible for this packet to hit a non-NAT action.
-fn configure_nat<N, I, P, CC, BC>(
+fn configure_nat<N, I, P, M, CC, BC>(
     core_ctx: &mut CC,
     bindings_ctx: &mut BC,
     table: &Table<I, NatConfig<I, CC::WeakAddressId>, BC>,
@@ -739,18 +742,19 @@ fn configure_nat<N, I, P, CC, BC>(
     hook: &Hook<I, BC, ()>,
     packet: &P,
     interfaces: Interfaces<'_, CC::DeviceId>,
+    metadata: &mut M,
 ) -> Verdict<DropPacket, NatConfigurationResult<I, CC::WeakAddressId, BC>>
 where
     N: NatHook<I>,
     I: FilterIpExt,
     P: FilterIpPacket<I>,
+    M: FilterPacketMetadata,
     CC: NatContext<I, BC>,
     BC: FilterBindingsContext<CC::DeviceId>,
 {
     let Hook { routines } = hook;
     for routine in routines {
-        let result =
-            super::check_routine(&routine, packet, interfaces, &mut FakePacketMetadata::default());
+        let result = super::check_routine(&routine, packet, interfaces, metadata);
         match N::evaluate_result(core_ctx, bindings_ctx, table, conn, packet, &interfaces, result) {
             ControlFlow::Break(result) => return result,
             ControlFlow::Continue(()) => {}
@@ -1251,13 +1255,17 @@ mod tests {
     use ip_test_macro::ip_test;
     use net_types::ip::{AddrSubnet, Ipv4};
     use netstack3_base::testutil::FakeMatcherDeviceId;
-    use netstack3_base::{IntoCoreTimerCtx, NetworkSerializationContext, TimerContext};
+    use netstack3_base::{
+        IntoCoreTimerCtx, Mark, MarkDomain, MarkMatcher, MarkMatchers, Marks,
+        NetworkSerializationContext, TimerContext,
+    };
     use packet::{EmptyBuf, NestablePacketBuilder as _, NestableSerializer as _, Serializer};
     use packet_formats::ip::{IpPacketBuilder, IpProto};
     use packet_formats::udp::UdpPacketBuilder;
     use test_case::{test_case, test_matrix};
 
     use super::*;
+    use crate::MarkAction;
     use crate::conntrack::Tuple;
     use crate::context::testutil::{
         FakeBindingsCtx, FakeNatCtx, FakePrimaryAddressId, FakeWeakAddressId,
@@ -1267,6 +1275,7 @@ mod tests {
         ArbitraryValue, FakeIpPacket, FakeUdpPacket, IcmpErrorMessage, Icmpv4DestUnreachableError,
         Icmpv6DestUnreachableError,
     };
+    use crate::state::testutil::FakePacketMetadata;
     use crate::state::{Action, Routine, Rule};
     use crate::testutil::TestIpExt;
 
@@ -1329,7 +1338,7 @@ mod tests {
         let mut conn = ConnectionExclusive::from_packet(&bindings_ctx, &packet);
 
         assert_eq!(
-            configure_nat::<LocalEgressHook, _, _, _, _>(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1337,6 +1346,7 @@ mod tests {
                 &Hook::default(),
                 &packet,
                 Interfaces { ingress: None, egress: None },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::No))
         );
@@ -1356,7 +1366,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            configure_nat::<LocalEgressHook, _, _, _, _>(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1364,6 +1374,7 @@ mod tests {
                 &hook,
                 &packet,
                 Interfaces { ingress: None, egress: None },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::No))
         );
@@ -1387,7 +1398,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            configure_nat::<LocalEgressHook, _, _, _, _>(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1395,6 +1406,7 @@ mod tests {
                 &Hook { routines: vec![routine.clone()] },
                 &packet,
                 Interfaces { ingress: None, egress: None },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::No))
         );
@@ -1413,7 +1425,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            configure_nat::<LocalEgressHook, _, _, _, _>(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1421,6 +1433,7 @@ mod tests {
                 &hook,
                 &packet,
                 Interfaces { ingress: None, egress: None },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Stop(DropPacket)
         );
@@ -1452,7 +1465,7 @@ mod tests {
         };
 
         assert_eq!(
-            configure_nat::<LocalEgressHook, _, _, _, _>(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1460,6 +1473,7 @@ mod tests {
                 &hook,
                 &packet,
                 Interfaces { ingress: None, egress: None },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Stop(DropPacket)
         );
@@ -1491,7 +1505,7 @@ mod tests {
         };
 
         assert_eq!(
-            configure_nat::<LocalEgressHook, _, _, _, _>(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1499,6 +1513,7 @@ mod tests {
                 &hook,
                 &packet,
                 Interfaces { ingress: None, egress: None },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::Yes(None)))
         );
@@ -1532,7 +1547,7 @@ mod tests {
         };
 
         assert_matches!(
-            configure_nat::<EgressHook, _, _, _, _>(
+            configure_nat::<EgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1543,6 +1558,7 @@ mod tests {
                     ingress: None,
                     egress: Some(&FakeMatcherDeviceId::ethernet_interface())
                 },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::Yes(Some(_))))
         );
@@ -1566,7 +1582,7 @@ mod tests {
         };
 
         assert_eq!(
-            configure_nat::<IngressHook, _, _, _, _>(
+            configure_nat::<IngressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1577,6 +1593,7 @@ mod tests {
                     ingress: Some(&FakeMatcherDeviceId::ethernet_interface()),
                     egress: None
                 },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Stop(DropPacket)
         );
@@ -1600,7 +1617,7 @@ mod tests {
         };
 
         assert_eq!(
-            configure_nat::<EgressHook, _, _, _, _>(
+            configure_nat::<EgressHook, _, _, _, _, _>(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 &conntrack,
@@ -1611,9 +1628,77 @@ mod tests {
                     ingress: None,
                     egress: Some(&FakeMatcherDeviceId::ethernet_interface())
                 },
+                &mut FakePacketMetadata::default(),
             ),
             Verdict::Stop(DropPacket)
         );
+    }
+
+    #[test]
+    fn configure_nat_observes_and_updates_packet_metadata() {
+        let mut bindings_ctx = FakeBindingsCtx::<Ipv4>::new();
+        let conntrack = Table::new::<IntoCoreTimerCtx>(&mut bindings_ctx);
+        let mut core_ctx = FakeNatCtx::default();
+        let packet = FakeIpPacket::<_, FakeUdpPacket>::arbitrary_value();
+        let mut conn = ConnectionExclusive::from_packet(&bindings_ctx, &packet);
+
+        let hook = Hook {
+            routines: vec![Routine {
+                rules: vec![
+                    // If Mark1 is 100, set Mark2 to 200.
+                    Rule::new(
+                        PacketMatcher {
+                            mark_matcher: Some(MarkMatchers::new([(
+                                MarkDomain::Mark1,
+                                MarkMatcher::Marked {
+                                    mask: !0,
+                                    start: 100,
+                                    end: 100,
+                                    invert: false,
+                                },
+                            )])),
+                            ..Default::default()
+                        },
+                        Action::Mark {
+                            domain: MarkDomain::Mark2,
+                            action: MarkAction::SetMark { mark: 200, clearing_mask: 0 },
+                        },
+                    ),
+                    // If Mark2 is 200, redirect.
+                    Rule::new(
+                        PacketMatcher {
+                            mark_matcher: Some(MarkMatchers::new([(
+                                MarkDomain::Mark2,
+                                MarkMatcher::Marked {
+                                    mask: !0,
+                                    start: 200,
+                                    end: 200,
+                                    invert: false,
+                                },
+                            )])),
+                            ..Default::default()
+                        },
+                        Action::Redirect { dst_port: None },
+                    ),
+                ],
+            }],
+        };
+
+        let mut metadata = FakePacketMetadata::new(Marks::new([(MarkDomain::Mark1, 100)]));
+        assert_eq!(
+            configure_nat::<LocalEgressHook, _, _, _, _, _>(
+                &mut core_ctx,
+                &mut bindings_ctx,
+                &conntrack,
+                &mut conn,
+                &hook,
+                &packet,
+                Interfaces { ingress: None, egress: None },
+                &mut metadata,
+            ),
+            Verdict::Proceed(NatConfigurationResult::Result(ShouldNat::Yes(None)))
+        );
+        assert_eq!(*metadata.marks().get(MarkDomain::Mark2), Mark(Some(200)));
     }
 
     trait NatHookExt<I: FilterIpExt>: NatHook<I> {
@@ -1670,7 +1755,7 @@ mod tests {
         // Even with a Redirect NAT rule in LOCAL_EGRESS, and a Masquerade NAT rule in
         // EGRESS, DNAT and SNAT should both be disabled for the connection because it
         // is self-connected.
-        let verdict = perform_nat::<LocalEgressHook, _, _, _, _>(
+        let verdict = perform_nat::<LocalEgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1689,10 +1774,11 @@ mod tests {
             <LocalEgressHook as NatHookExt<I>>::interfaces(
                 &FakeMatcherDeviceId::ethernet_interface(),
             ),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1709,6 +1795,7 @@ mod tests {
             },
             &mut packet,
             <EgressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -1729,7 +1816,7 @@ mod tests {
             .expect("packet should be trackable");
 
         // Skip NAT so the connection is finalized without DNAT configured for it.
-        let verdict = perform_nat::<LocalEgressHook, _, _, _, _>(
+        let verdict = perform_nat::<LocalEgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             false, /* nat_installed */
@@ -1741,13 +1828,14 @@ mod tests {
             <LocalEgressHook as NatHookExt<I>>::interfaces(
                 &FakeMatcherDeviceId::ethernet_interface(),
             ),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         assert_eq!(conn.external_data().destination.get(), None);
         assert_eq!(conn.external_data().source.get(), None);
 
         // Skip NAT so the connection is finalized without SNAT configured for it.
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             false, /* nat_installed */
@@ -1757,6 +1845,7 @@ mod tests {
             &Hook::default(),
             &mut packet,
             <EgressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         assert_eq!(conn.external_data().destination.get(), None);
@@ -1774,7 +1863,7 @@ mod tests {
             .get_connection_for_packet_and_update(&bindings_ctx, reply.conntrack_packet().unwrap())
             .expect("packet should be valid")
             .expect("packet should be trackable");
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1784,13 +1873,14 @@ mod tests {
             &Hook::default(),
             &mut reply,
             <IngressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         assert_eq!(conn.external_data().destination.get(), None);
         assert_eq!(conn.external_data().source.get(), Some(&ShouldNat::No));
 
         // And finally, on LOCAL_INGRESS, DNAT should also be configured as `DoNotNat`.
-        let verdict = perform_nat::<LocalIngressHook, _, _, _, _>(
+        let verdict = perform_nat::<LocalIngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1800,6 +1890,7 @@ mod tests {
             &Hook::default(),
             &mut reply,
             <IngressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         assert_eq!(conn.external_data().destination.get(), Some(&ShouldNat::No));
@@ -1857,7 +1948,7 @@ mod tests {
                 )],
             }],
         };
-        let verdict = perform_nat::<Original, _, _, _, _>(
+        let verdict = perform_nat::<Original, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1867,6 +1958,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             Original::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -1912,7 +2004,7 @@ mod tests {
                 rules: vec![Rule::new(PacketMatcher::default(), Action::Drop)],
             }],
         };
-        let verdict = perform_nat::<Reply, _, _, _, _>(
+        let verdict = perform_nat::<Reply, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1922,6 +2014,7 @@ mod tests {
             &nat_routines,
             &mut reply_packet,
             Reply::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         assert_eq!(reply_packet, pre_nat_packet.reply());
@@ -1955,7 +2048,7 @@ mod tests {
                 )],
             }],
         };
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -1965,6 +2058,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             Interfaces { ingress: None, egress: Some(&FakeMatcherDeviceId::ethernet_interface()) },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2004,7 +2098,7 @@ mod tests {
                 rules: vec![Rule::new(PacketMatcher::default(), Action::Drop)],
             }],
         };
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2014,6 +2108,7 @@ mod tests {
             &nat_routines,
             &mut reply_packet,
             Interfaces { ingress: Some(&FakeMatcherDeviceId::ethernet_interface()), egress: None },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         assert_eq!(reply_packet, pre_nat_packet.reply());
@@ -2110,7 +2205,7 @@ mod tests {
         let nat_routines = Hook {
             routines: vec![Routine { rules: vec![Rule::new(PacketMatcher::default(), action)] }],
         };
-        let verdict = perform_nat::<N, _, _, _, _>(
+        let verdict = perform_nat::<N, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2120,6 +2215,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             N::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2141,7 +2237,7 @@ mod tests {
         // the same flow should check the validity of the cached address, see that it's
         // invalid, and be dropped.
         core_ctx.device_addrs.clear();
-        let verdict = perform_nat::<N, _, _, _, _>(
+        let verdict = perform_nat::<N, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2151,6 +2247,7 @@ mod tests {
             &nat_routines,
             &mut FakeIpPacket::<_, FakeUdpPacket>::arbitrary_value(),
             N::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Stop(DropPacket));
         let (nat, _nat_type) = conn.relevant_config(N::NAT_TYPE, ConnectionDirection::Original);
@@ -2167,7 +2264,7 @@ mod tests {
             ),
             None
         );
-        let verdict = perform_nat::<N, _, _, _, _>(
+        let verdict = perform_nat::<N, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2177,6 +2274,7 @@ mod tests {
             &nat_routines,
             &mut FakeIpPacket::<_, FakeUdpPacket>::arbitrary_value(),
             N::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
         let (nat, _nat_type) = conn.relevant_config(N::NAT_TYPE, ConnectionDirection::Original);
@@ -2493,7 +2591,7 @@ mod tests {
                 )],
             }],
         };
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2503,6 +2601,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             <IngressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2567,7 +2666,7 @@ mod tests {
             IE::proto(),
         ));
 
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2577,6 +2676,7 @@ mod tests {
             &nat_routines,
             &mut error_packet,
             <EgressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2653,7 +2753,7 @@ mod tests {
                 )],
             }],
         };
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2663,6 +2763,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             <IngressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2724,7 +2825,7 @@ mod tests {
             ));
         let reply_packet_pre_nat = reply_packet.clone();
 
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2734,6 +2835,7 @@ mod tests {
             &nat_routines,
             &mut reply_packet,
             <EgressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2776,7 +2878,7 @@ mod tests {
             IE::proto(),
         ));
 
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2786,6 +2888,7 @@ mod tests {
             &nat_routines,
             &mut error_packet,
             <IngressHook as NatHookExt<I>>::interfaces(&FakeMatcherDeviceId::ethernet_interface()),
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2887,7 +2990,7 @@ mod tests {
                 )],
             }],
         };
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2897,6 +3000,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             Interfaces { ingress: None, egress: Some(&FakeMatcherDeviceId::ethernet_interface()) },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -2949,7 +3053,7 @@ mod tests {
         )
         .wrap_in(I::PacketBuilder::new(error_src_addr, I::NETSTACK, u8::MAX, IE::proto()));
 
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -2959,6 +3063,7 @@ mod tests {
             &nat_routines,
             &mut error_packet,
             Interfaces { ingress: Some(&FakeMatcherDeviceId::ethernet_interface()), egress: None },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -3032,7 +3137,7 @@ mod tests {
                 )],
             }],
         };
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -3042,6 +3147,7 @@ mod tests {
             &nat_routines,
             &mut packet,
             Interfaces { ingress: None, egress: Some(&FakeMatcherDeviceId::ethernet_interface()) },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -3093,7 +3199,7 @@ mod tests {
             ));
         let reply_packet_pre_nat = reply_packet.clone();
 
-        let verdict = perform_nat::<IngressHook, _, _, _, _>(
+        let verdict = perform_nat::<IngressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -3103,6 +3209,7 @@ mod tests {
             &nat_routines,
             &mut reply_packet,
             Interfaces { ingress: Some(&FakeMatcherDeviceId::ethernet_interface()), egress: None },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 
@@ -3143,7 +3250,7 @@ mod tests {
             IE::proto(),
         ));
 
-        let verdict = perform_nat::<EgressHook, _, _, _, _>(
+        let verdict = perform_nat::<EgressHook, _, _, _, _, _>(
             &mut core_ctx,
             &mut bindings_ctx,
             NAT_ENABLED_FOR_TESTS,
@@ -3153,6 +3260,7 @@ mod tests {
             &nat_routines,
             &mut error_packet,
             Interfaces { ingress: None, egress: Some(&FakeMatcherDeviceId::ethernet_interface()) },
+            &mut FakePacketMetadata::default(),
         );
         assert_eq!(verdict, Verdict::Proceed(Accept));
 

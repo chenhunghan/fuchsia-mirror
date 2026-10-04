@@ -14,6 +14,25 @@ from trace_processing.metrics import cpu
 class CpuBreakdownTest(unittest.TestCase):
     """CPU breakdown tests."""
 
+    def assertBreakdownAlmostEqual(
+        self,
+        first: cpu.Breakdown,
+        second: cpu.Breakdown,
+        places: int,
+    ) -> None:
+        self.assertEqual(len(first), len(second))
+        for first_element, second_element in zip(first, second, strict=True):
+            self.assertEqual(first_element.keys(), second_element.keys())
+            for key in first_element:
+                if key in {"percent", "normalized_percent"}:
+                    self.assertAlmostEqual(
+                        cast(float, first_element[key]),
+                        cast(float, second_element[key]),
+                        places=places,
+                    )
+                else:
+                    self.assertEqual(first_element[key], second_element[key])
+
     def construct_trace_model(self) -> trace_model.Model:
         threads = [trace_model.Thread(i, f"thread-{i}") for i in range(1, 5)]
         processes = [
@@ -201,7 +220,7 @@ class CpuBreakdownTest(unittest.TestCase):
             trace_model.CounterEvent.consume_dict(
                 {
                     "cat": "kernel:power",
-                    "name": "Processing Rate:2",
+                    "name": "Rate:2",
                     "id": "2",
                     "pid": 0,
                     "tid": 0,
@@ -312,19 +331,11 @@ class CpuBreakdownTest(unittest.TestCase):
 
         self.assertEqual(len(breakdown), 5)
 
-        # Make it easier to compare breakdown results.
-        for b in breakdown:
-            b["percent"] = round(cast(float, b["percent"]), 3)
-            if "normalized_percent" in b:
-                b["normalized_percent"] = round(
-                    cast(float, b["normalized_percent"]), 3
-                )
-
         # Each process: thread has the correct numbers for each CPU.
         # Sorted by descending cpu and descending percent.
         # Note that neither thread-3 nor thread-4 are logged because
         # they are idle or there is no duration.
-        self.assertEqual(
+        self.assertBreakdownAlmostEqual(
             breakdown,
             [
                 {
@@ -398,6 +409,7 @@ class CpuBreakdownTest(unittest.TestCase):
                     },
                 },
             ],
+            places=3,
         )
 
     def test_group_by_process_name(self) -> None:
@@ -409,17 +421,9 @@ class CpuBreakdownTest(unittest.TestCase):
         consolidated_breakdown = cpu.group_by_process_name(breakdown)
         self.assertEqual(len(consolidated_breakdown), 4)
 
-        # Make it easier to compare breakdown results.
-        for b in consolidated_breakdown:
-            b["percent"] = round(cast(float, b["percent"]), 3)
-            if "normalized_percent" in b:
-                b["normalized_percent"] = round(
-                    cast(float, b["normalized_percent"]), 3
-                )
-
         # Each process has been consolidated.
         # Sorted by descending cpu and descending percent.
-        self.assertEqual(
+        self.assertBreakdownAlmostEqual(
             consolidated_breakdown,
             [
                 {
@@ -469,6 +473,7 @@ class CpuBreakdownTest(unittest.TestCase):
                     },
                 },
             ],
+            places=3,
         )
 
     def test_process_metrics_with_skips(self) -> None:

@@ -9,13 +9,19 @@ import json
 from pathlib import Path
 from sys import stderr
 
-from fuchsia.tools.licenses.common_types import *
-from fuchsia.tools.licenses.spdx_types import *
+from fuchsia.tools.licenses.common_types import DictReader
+from fuchsia.tools.licenses.spdx_types import (
+    SpdxDocument,
+    SpdxDocumentBuilder,
+    SpdxExtractedLicensingInfo,
+    SpdxLicenseExpression,
+    SpdxPackage,
+)
 
 _VERBOSE = False
 
 
-def _log(*kwargs):
+def _log(*kwargs: object) -> None:
     if _VERBOSE:
         print(*kwargs, file=stderr)
 
@@ -69,8 +75,8 @@ def _create_doc_from_licenses_used_json(
         copyright_notice: str = dict_reader.get("copyright_notice")
         license_text_file_path: str = dict_reader.get("license_text")
 
-        license_id: str = None
-        nested_doc: SpdxDocument = None
+        license_id: str | None = None
+        nested_doc: SpdxDocument | None = None
 
         if license_text_file_path.endswith(".spdx.json"):
             _log(f"Adding {license_text_file_path} spdx as a nested document!")
@@ -115,7 +121,7 @@ def _create_doc_from_licenses_used_json(
     return doc_builder.build()
 
 
-def main():
+def main() -> None:
     """Parses arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(

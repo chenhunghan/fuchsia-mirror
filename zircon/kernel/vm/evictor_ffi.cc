@@ -12,7 +12,9 @@
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 extern "C" {
 
-FFI_ALWAYS_INLINE void cpp_evictor_destroy(Evictor* evictor) { ktl::destroy_at(evictor); }
+FFI_ALWAYS_INLINE void cpp_evictor_disable_eviction(Evictor* evictor) {
+  evictor->DisableEviction();
+}
 FFI_ALWAYS_INLINE void cpp_evictor_init(ffi::Uninitialized<Evictor>* evictor) {
   evictor->Initialize();
 }

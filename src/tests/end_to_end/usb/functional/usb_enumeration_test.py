@@ -6,6 +6,7 @@ import logging
 
 import fuchsia_base_test
 from mobly import asserts, test_runner
+from usb_lib.link_speed import assert_link_speed
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -86,6 +87,12 @@ class UsbEnumerationTest(fuchsia_base_test.FuchsiaBaseTest):
             "usb_state_history",
             output,
             "Expected to find usb_state_history in usb-cli output",
+        )
+
+    def test_usb_link_speed(self) -> None:
+        """Verifies the peripheral link negotiated `expected_usb_link_speed`."""
+        assert_link_speed(
+            self.dut, expected=self.user_params.get("expected_usb_link_speed")
         )
 
     def _verify_driver_loaded(self, required_api: str, name: str) -> None:

@@ -91,9 +91,11 @@ class FlatlandBenchmark(fuchsia_base_test.FuchsiaBaseTest):
         )
 
         metrics.TestCaseResult.write_fuchsiaperf_json(
-            results=itertools.chain(
-                app_render_processor.process_metrics(model),
-                cpu_processor.process_metrics(model),
+            results=tuple(
+                itertools.chain(
+                    app_render_processor.process_metrics(model),
+                    cpu_processor.process_metrics(model),
+                )
             ),
             test_suite=f"{TEST_NAME}",
             output_path=fuchsiaperf_json_path,

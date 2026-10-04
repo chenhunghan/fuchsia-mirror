@@ -10,7 +10,6 @@ use crate::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use crate::vfs::{
     CacheMode, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsStr,
 };
-use ebpf_api::BPF_PROG_TYPE_FUSE;
 use starnix_logging::bug_ref;
 use starnix_types::vfs::default_statfs;
 use starnix_uapi::errors::Errno;
@@ -47,18 +46,6 @@ impl SysFs {
             dir.subdir("cgroup", dir_mode, empty_dir);
             dir.subdir("fuse", dir_mode, |dir| {
                 dir.subdir("connections", dir_mode, empty_dir);
-                dir.subdir("features", dir_mode, |dir| {
-                    dir.entry(
-                        "fuse_bpf",
-                        BytesFile::new_node(b"supported\n".to_vec()),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-                dir.entry(
-                    "bpf_prog_type_fuse",
-                    BytesFile::new_node(format!("{}\n", BPF_PROG_TYPE_FUSE).into_bytes()),
-                    mode!(IFREG, 0o444),
-                );
             });
             dir.subdir("pstore", dir_mode, empty_dir);
         });

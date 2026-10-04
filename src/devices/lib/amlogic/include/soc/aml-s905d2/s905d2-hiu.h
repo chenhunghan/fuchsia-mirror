@@ -6,9 +6,12 @@
 #define SRC_DEVICES_LIB_AMLOGIC_INCLUDE_SOC_AML_S905D2_S905D2_HIU_H_
 
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
+#include <lib/driver/mmio/cpp/mmio-view.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <zircon/assert.h>
+
+#include <optional>
 
 #include <soc/aml-meson/aml-pll.h>
 
@@ -38,10 +41,10 @@ __BEGIN_CDECLS
 zx_status_t s905d2_hiu_init(zx_handle_t mmio_resource, fdf::MmioBuffer* device);
 
 /*
-    Initializes the fdf::MmioBuffer struct assuming the register block is already
+    Initializes the fdf::MmioView assuming the register block is already
     mapped
 */
-zx_status_t s905d2_hiu_init_etc(fdf::MmioBuffer* device, fdf::MmioView hiubase);
+zx_status_t s905d2_hiu_init_etc(std::optional<fdf::MmioView>* device, const fdf::MmioView& hiubase);
 
 /*
     Initializes the selected pll. This resetting the pll and writing initial

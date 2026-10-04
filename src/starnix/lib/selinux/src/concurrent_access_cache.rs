@@ -156,7 +156,7 @@ impl
 pub(super) struct XpermsAccessCacheStorage;
 
 impl XpermsAccessCacheStorage {
-    const PERMISSION_ID_MASK: u8 = 0b0011_1111;
+    const PERMISSION_ID_MASK: u8 = 0b0001_1111;
     const XPERMS_KIND_BIT_INDEX: usize = 5;
     const PERMISSIVE_BIT_INDEX: usize = 6;
     const HAS_TODO_BIT_INDEX: usize = 7;
@@ -321,7 +321,7 @@ impl
         _out_of_line_u64s: &[AtomicU64; 0],
     ) -> Self::Value {
         let u32_val = inline_u32s[0].load(Ordering::Relaxed);
-        SecurityId(std::num::NonZeroU32::new(u32_val).unwrap())
+        SecurityId(std::num::NonZeroU32::new(u32_val).unwrap_or(std::num::NonZeroU32::MIN))
     }
 
     #[inline(always)]

@@ -10,14 +10,14 @@
 
 use proc_macro::TokenStream;
 use quote::{quote, quote_spanned};
-use syn::{parse_macro_input, Error, Lit, Visibility};
+use syn::{Error, Lit, Visibility, parse_macro_input};
 
 fn validate_item_fn(sig: &syn::Signature, vis: &syn::Visibility) -> Result<(), syn::Error> {
     // Disallow const, unsafe or abi linkage, generics etc
     if let Some(c) = &sig.constness {
         return Err(Error::new(c.span, "test-harness tests may not be 'const'"));
     }
-    if let Some(u) = &sig.unsafety {
+    if let syn::Safety::Unsafe(u) = &sig.safety {
         return Err(Error::new(u.span, "test-harness tests may not be 'unsafe'"));
     }
     if let Some(abi) = &sig.abi {
@@ -50,7 +50,10 @@ fn validate_item_fn(sig: &syn::Signature, vis: &syn::Visibility) -> Result<(), s
         Visibility::Restricted(restricted_vis) => Some(restricted_vis.pub_token.span),
         Visibility::Inherited => None,
     } {
-        return Err(Error::new(token_span, "test-harness tests cannot be called elsewhere, so they must have inherited (i.e. non-pub) visibility"));
+        return Err(Error::new(
+            token_span,
+            "test-harness tests cannot be called elsewhere, so they must have inherited (i.e. non-pub) visibility",
+        ));
     }
     Ok(())
 }
@@ -92,7 +95,7 @@ pub fn run_singlethreaded_test(args: TokenStream, item: TokenStream) -> TokenStr
     };
 
     let item = parse_macro_input!(item as syn::ItemFn);
-    let syn::ItemFn { attrs, sig, vis, block } = item;
+    let syn::ItemFn { attrs, sig, vis, block, modifiers: _ } = item;
 
     if let Err(e) = validate_item_fn(&sig, &vis) {
         return e.to_compile_error().into();

@@ -9,14 +9,13 @@
 
 #include <lib/fit/function.h>
 #include <lib/fit/result.h>
-#include <lib/stdcompat/bit.h>
 #include <stdio.h>
-#include <string.h>
 
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -50,8 +49,8 @@ struct Trailer {
     Trailer trailer = {};
     memcpy(this, bytes.data(), sizeof(trailer));
     if constexpr (std::endian::native == std::endian::big) {
-      this->size = cpp23::byteswap(trailer.size);
-      this->checksum = cpp23::byteswap(trailer.checksum);
+      this->size = std::byteswap(trailer.size);
+      this->checksum = std::byteswap(trailer.checksum);
     }
   }
 
@@ -60,8 +59,8 @@ struct Trailer {
     ZX_ASSERT(bytes.size() >= sizeof(Trailer));
     Trailer trailer = *this;
     if constexpr (std::endian::native == std::endian::big) {
-      trailer.size = cpp23::byteswap(trailer.size);
-      trailer.checksum = cpp23::byteswap(trailer.checksum);
+      trailer.size = std::byteswap(trailer.size);
+      trailer.checksum = std::byteswap(trailer.checksum);
     }
     memcpy(bytes.data(), &trailer, sizeof(trailer));
   }
@@ -222,7 +221,7 @@ concept Visitor = requires(T visitor, const Key& key, const Value& value) {
 // adding from the previous checksum, and the `\0` padding bytes can be safely overwritten,
 // since they dont contribute to the checksum.
 constexpr uint32_t Checksum(std::span<const std::byte> bytes) {
-  auto as_nums = std::span(std::bit_cast<const uint8_t*>(bytes.data()), bytes.size_bytes());
+  auto as_nums = std::span(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size_bytes());
   uint32_t accumulated = std::accumulate(as_nums.begin(), as_nums.end(), 0);
   return accumulated;
 }
@@ -247,6 +246,17 @@ class LinuxBootConfig {
 
   // Number of bytes of the embedded file with the padding bytes.
   constexpr size_t size_bytes() const { return contents_.size(); }
+
+  constexpr bool empty() const { return contents_.empty(); }
+
+  constexpr explicit operator bool() const { return !empty(); }
+
+  // Look like a std::optional<This> for now.
+  constexpr auto* operator->(this auto&& self) { return &self; }
+  constexpr decltype(auto) operator*(this auto&& self) {
+    return std::forward<decltype(self)>(self);
+  }
+
   constexpr std::string_view contents() const { return contents_; }
 
   template <Visitor V>

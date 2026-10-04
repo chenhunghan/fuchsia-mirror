@@ -23,6 +23,7 @@
 #include <lib/zx/result.h>
 #include <threads.h>
 
+#include <atomic>
 #include <memory>
 #include <queue>
 #include <utility>
@@ -30,6 +31,8 @@
 #include "src/devices/usb/drivers/dwc2/dwc2_config.h"
 #include "src/devices/usb/drivers/dwc2/usb_dwc_regs.h"
 #include "src/devices/usb/lib/usb-endpoint/include/usb-endpoint/sdk/usb-endpoint-server.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace dwc2 {
 
@@ -243,7 +246,7 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
   // DMA buffer for endpoint zero requests
   std::unique_ptr<dma_buffer::ContiguousBuffer> ep0_buffer_;
   // Current endpoint zero request
-  fuchsia_hardware_usb_descriptor::wire::UsbSetup cur_setup_ = {};
+  fdescriptor::wire::UsbSetup cur_setup_ = {};
   Ep0State ep0_state_ = Ep0State::DISCONNECTED;
 
   fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDciInterface> dci_intf_;
@@ -257,7 +260,7 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
   zx::interrupt irq_;
 
   fuchsia_hardware_usb_dwc2::Metadata metadata_;
-  bool connected_ = false;
+  std::atomic<bool> connected_ = false;
   bool configured_ = false;
   // The length of the last IN-data sent to the host.
   uint32_t last_transmission_len_;

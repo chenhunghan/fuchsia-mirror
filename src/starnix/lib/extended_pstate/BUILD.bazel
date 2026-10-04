@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_binary", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "aarch64_assembly",
+    srcs = ["src/aarch64_asm.S"],
+    implementation_deps = ["//src/starnix/lib/asm_utils"],
+    # bazel2gn does not yet support @platforms//cpu:* in target_compatible_with.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//cpu:arm64"],
+)
+
+fx_cc_library(
+    name = "x64_assembly",
+    srcs = ["src/x86_64_asm.S"],
+    implementation_deps = ["//src/starnix/lib/asm_utils"],
+    # bazel2gn does not yet support @platforms//cpu:* in target_compatible_with.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+)
+
+fx_cc_library(
+    name = "riscv64_assembly",
+    srcs = ["src/riscv64_asm.S"],
+    implementation_deps = ["//src/starnix/lib/asm_utils"],
+    # bazel2gn does not yet support @platforms//cpu:* in target_compatible_with.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//cpu:riscv64"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"] + select({
+        "@platforms//cpu:x86_64": ["src/x86_64.rs"],
+        "@platforms//cpu:arm64": ["src/aarch64.rs"],
+        "@platforms//cpu:riscv64": ["src/riscv64.rs"],
+    }),
+    crate_name = "extended_pstate",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = ["//src/lib/fuchsia"],
+    visibility = ["//src/starnix/kernel:__subpackages__"],
+    with_unit_tests = True,
+    deps = ["//third_party/rust_crates/vendor:static_assertions"] + select({
+        "@platforms//cpu:x86_64": [":x64_assembly"],
+        "@platforms//cpu:arm64": [":aarch64_assembly"],
+        "@platforms//cpu:riscv64": [":riscv64_assembly"],
+    }),
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/benchmark.rs"],
+    crate_name = "extended_pstate_bench",
+    crate_root = "src/benchmark.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/config:starnix_clippy_lints",
+    with_unit_tests = True,
+    deps = [
+        ":lib",
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:criterion",
+    ],
+)

@@ -9,6 +9,7 @@ use crate::common::{MEMBER_BATTERY, MEMBER_DEVICE, MicroUnit, append_member_suff
 use anyhow::{Context, Result, anyhow};
 use fidl::endpoints::ServiceMarker;
 use fidl_fuchsia_hardware_power_battery as fbattery;
+use fidl_fuchsia_hardware_power_charger as fcharger;
 use fidl_fuchsia_power_battery as fpowerbattery;
 use fuchsia_component::client::connect_to_protocol_at_path;
 use futures::StreamExt;
@@ -256,7 +257,27 @@ impl fmt::Display for DisplayLegacyStatus<'_> {
 }
 
 pub async fn get_battery_info(path: Option<&str>) -> Result<()> {
+    // Protocol selection for an explicit `--path`:
+    // 1. A path naming a known service picks its protocol directly: the charger `DebugService` is
+    //    rejected as control-only, the charger `Service` (or a `charger` member) uses the modern
+    //    `Charger` protocol, `InfoService` uses the legacy `BatteryInfoProvider`, and the battery
+    //    `Service` uses the modern `Battery` protocol.
+    // 2. Any other path (e.g. a bare instance directory) is probed newest-first: modern `Battery`
+    //    (the primary telemetry `get` reports), then modern `Charger` for charger-only instances,
+    //    and the deprecated legacy protocol last, kept only for boards that have not migrated.
+    // Names are matched before probing because a connection is not validated until its first
+    // call, so every probe costs a round trip.
     if let Some(p) = path {
+        if p.contains(fcharger::DebugServiceMarker::SERVICE_NAME) {
+            anyhow::bail!(
+                "DebugService path '{p}' is control-only; pass a {} or {} path for telemetry",
+                fbattery::ServiceMarker::SERVICE_NAME,
+                fcharger::ServiceMarker::SERVICE_NAME
+            );
+        }
+        if p.contains(fcharger::ServiceMarker::SERVICE_NAME) || p.ends_with("/charger") {
+            return crate::charger::get_modern_charger_info_at(p).await;
+        }
         if p.contains(fpowerbattery::InfoServiceMarker::SERVICE_NAME) {
             return get_legacy_battery_info_at(p).await;
         }
@@ -266,54 +287,66 @@ pub async fn get_battery_info(path: Option<&str>) -> Result<()> {
         if let Ok(()) = get_modern_battery_info_at(p).await {
             return Ok(());
         }
+        if let Ok(()) = crate::charger::get_modern_charger_info_at(p).await {
+            return Ok(());
+        }
         return get_legacy_battery_info_at(p).await;
     }
 
-    let modern_instances = crate::common::discover_instances(fbattery::ServiceMarker::SERVICE_NAME);
-    if !modern_instances.is_empty() {
-        let multi = modern_instances.len() > 1;
-        let mut succeeded = false;
-        for inst in &modern_instances {
-            if multi {
-                println!("=== Battery Telemetry ({inst}) ===");
-            }
-            match get_modern_battery_info_at(inst).await {
-                Ok(()) => succeeded = true,
-                Err(e) => eprintln!("Error querying {inst}: {:#}", e),
-            }
-            if multi {
-                println!();
-            }
-        }
-        if succeeded {
-            return Ok(());
-        }
+    let modern_battery = crate::common::discover_instances(fbattery::ServiceMarker::SERVICE_NAME);
+    let legacy_battery = if modern_battery.is_empty() {
+        crate::common::discover_instances(fpowerbattery::InfoServiceMarker::SERVICE_NAME)
+    } else {
+        Vec::new()
+    };
+    let modern_charger = crate::common::discover_instances(fcharger::ServiceMarker::SERVICE_NAME);
+
+    let total_instances = modern_battery.len() + legacy_battery.len() + modern_charger.len();
+    if total_instances == 0 {
+        anyhow::bail!("No battery or charger service instances found under /svc");
     }
 
-    let legacy_instances =
-        crate::common::discover_instances(fpowerbattery::InfoServiceMarker::SERVICE_NAME);
-    if !legacy_instances.is_empty() {
-        let multi = legacy_instances.len() > 1;
-        let mut succeeded = false;
-        for inst in &legacy_instances {
-            if multi {
-                println!("=== Legacy Battery Telemetry ({inst}) ===");
-            }
-            match get_legacy_battery_info_at(inst).await {
-                Ok(()) => succeeded = true,
-                Err(e) => eprintln!("Error querying {inst}: {:#}", e),
-            }
-            if multi {
-                println!();
-            }
-        }
-        if !succeeded {
-            anyhow::bail!("Failed to query any legacy battery instances");
-        }
-        return Ok(());
+    let show_headers = total_instances > 1;
+    let mut succeeded = false;
+
+    for inst in &modern_battery {
+        let query = get_modern_battery_info_at(inst);
+        succeeded |= report_instance("Battery Telemetry", inst, show_headers, query).await;
     }
 
-    anyhow::bail!("No battery service instances found under /svc")
+    for inst in &legacy_battery {
+        let query = get_legacy_battery_info_at(inst);
+        succeeded |= report_instance("Legacy Battery Telemetry", inst, show_headers, query).await;
+    }
+
+    for inst in &modern_charger {
+        let query = crate::charger::get_modern_charger_info_at(inst);
+        succeeded |= report_instance("Charger Telemetry", inst, show_headers, query).await;
+    }
+
+    if !succeeded {
+        anyhow::bail!("Failed to query any battery or charger instances");
+    }
+    Ok(())
+}
+
+/// Runs `query` for one service instance, framing its output with a `title` header when
+/// `show_header` is set. Returns whether the query succeeded; a failure is reported on stderr so
+/// that the remaining instances are still queried.
+async fn report_instance(
+    title: &str,
+    inst: &str,
+    show_header: bool,
+    query: impl Future<Output = Result<()>>,
+) -> bool {
+    if show_header {
+        println!("=== {title} ({inst}) ===");
+    }
+    let succeeded = query.await.inspect_err(|e| eprintln!("Error querying {inst}: {e:#}")).is_ok();
+    if show_header {
+        println!();
+    }
+    succeeded
 }
 
 async fn get_modern_battery_info_at(path: &str) -> Result<()> {
@@ -356,7 +389,7 @@ pub fn battery_watch_stream(
         let proxy = proxy_opt?;
         match proxy.watch(None).await {
             Ok(Ok((status, _wake_lease))) => Some((Ok(status), Some(proxy))),
-            Ok(Err(e)) => Some((Err(anyhow!("Battery Watch domain error: {:?}", e)), Some(proxy))),
+            Ok(Err(e)) => Some((Err(anyhow!("Battery Watch domain error: {:?}", e)), None)),
             Err(e) => Some((Err(anyhow!("Battery Watch FIDL error: {:#}", e)), None)),
         }
     }))
@@ -364,41 +397,84 @@ pub fn battery_watch_stream(
 
 pub async fn watch_battery(path: Option<&str>) -> Result<()> {
     if let Some(p) = path {
+        if p.contains(fcharger::DebugServiceMarker::SERVICE_NAME) {
+            anyhow::bail!(
+                "DebugService path '{p}' is control-only; pass a {} or {} path for telemetry",
+                fbattery::ServiceMarker::SERVICE_NAME,
+                fcharger::ServiceMarker::SERVICE_NAME
+            );
+        }
+        if p.contains(fcharger::ServiceMarker::SERVICE_NAME) || p.ends_with("/charger") {
+            return crate::charger::watch_charger_at(p).await;
+        }
         return watch_battery_at(p).await;
     }
 
-    let modern_instances = crate::common::discover_instances(fbattery::ServiceMarker::SERVICE_NAME);
-    if !modern_instances.is_empty() {
-        let mut streams = Vec::new();
-        for inst in modern_instances {
-            let target_path = append_member_suffix(&inst, MEMBER_BATTERY);
-            let target_path_str = target_path.to_str().context("invalid UTF-8 path")?;
-            let proxy = connect_to_protocol_at_path::<fbattery::BatteryMarker>(target_path_str)
-                .with_context(|| format!("Failed to connect to Battery at {target_path_str}"))?;
-            let stream = battery_watch_stream(proxy).map(move |res| (inst.clone(), res));
-            streams.push(stream);
-        }
+    let modern_battery = crate::common::discover_instances(fbattery::ServiceMarker::SERVICE_NAME);
+    let modern_charger = crate::common::discover_instances(fcharger::ServiceMarker::SERVICE_NAME);
 
-        println!("Watching battery events on all instances (press Ctrl+C to exit)...\n");
-        let mut combined = futures::stream::select_all(streams);
-        while let Some((inst, item)) = combined.next().await {
-            match item {
-                Ok(status) => {
-                    println!("=== Battery Telemetry Update ({inst}) ===");
-                    print!("{}", DisplayBatteryStatus(&status));
-                    println!();
-                }
-                Err(e) => {
-                    eprintln!("Warning ({inst}): received watch error: {:#}", e);
-                }
-            }
-        }
-        return Ok(());
+    if modern_battery.is_empty() && modern_charger.is_empty() {
+        anyhow::bail!(
+            "No modern fuchsia.hardware.power.battery or charger instances found under /svc"
+        );
     }
 
-    anyhow::bail!(
-        "No modern fuchsia.hardware.power.battery instances found under /svc (streaming is unsupported on legacy callback providers)"
-    )
+    let mut streams: Vec<BoxStream<'static, (&'static str, String, Result<String>)>> = Vec::new();
+
+    for inst in modern_battery {
+        let target_path = append_member_suffix(&inst, MEMBER_BATTERY);
+        let target_path_str = target_path.to_str().context("invalid UTF-8 path")?;
+        let proxy = connect_to_protocol_at_path::<fbattery::BatteryMarker>(target_path_str)
+            .with_context(|| format!("Failed to connect to Battery at {target_path_str}"))?;
+        let stream = battery_watch_stream(proxy)
+            .map(move |res| {
+                ("Battery", inst.clone(), res.map(|s| DisplayBatteryStatus(&s).to_string()))
+            })
+            .boxed();
+        streams.push(stream);
+    }
+
+    for inst in modern_charger {
+        let target_path = append_member_suffix(&inst, crate::common::MEMBER_CHARGER);
+        let target_path_str = target_path.to_str().context("invalid UTF-8 path")?;
+        let proxy = connect_to_protocol_at_path::<fcharger::ChargerMarker>(target_path_str)
+            .with_context(|| format!("Failed to connect to Charger at {target_path_str}"))?;
+        let stream = crate::charger::charger_watch_stream(proxy)
+            .map(move |res| {
+                (
+                    "Charger",
+                    inst.clone(),
+                    res.map(|s| crate::charger::DisplayChargerStatus(&s).to_string()),
+                )
+            })
+            .boxed();
+        streams.push(stream);
+    }
+
+    println!("Watching battery and charger events on all instances (press Ctrl+C to exit)...\n");
+    let mut combined = futures::stream::select_all(streams);
+    let mut received_any = false;
+    let mut last_err = None;
+    while let Some((kind, inst, item)) = combined.next().await {
+        match item {
+            Ok(formatted) => {
+                received_any = true;
+                println!("=== {kind} Telemetry Update ({inst}) ===");
+                print!("{formatted}");
+                println!();
+            }
+            Err(e) => {
+                eprintln!("Warning ({inst}): received {kind} watch error: {:#}", e);
+                last_err = Some(e);
+            }
+        }
+    }
+    if !received_any {
+        return Err(
+            last_err.unwrap_or_else(|| anyhow!("All battery and charger watch streams closed"))
+        );
+    }
+    Ok(())
 }
 
 async fn watch_battery_at(path: &str) -> Result<()> {
@@ -410,17 +486,24 @@ async fn watch_battery_at(path: &str) -> Result<()> {
     println!("Watching battery events on {} (press Ctrl+C to exit)...\n", target_path_str);
 
     let mut stream = battery_watch_stream(proxy);
+    let mut received_any = false;
+    let mut last_err = None;
     while let Some(item) = stream.next().await {
         match item {
             Ok(status) => {
+                received_any = true;
                 println!("=== Battery Telemetry Update ===");
                 print!("{}", DisplayBatteryStatus(&status));
                 println!();
             }
             Err(e) => {
                 eprintln!("Warning: received watch error: {:#}", e);
+                last_err = Some(e);
             }
         }
+    }
+    if !received_any {
+        return Err(last_err.unwrap_or_else(|| anyhow!("Battery watch stream closed immediately")));
     }
     Ok(())
 }
@@ -503,5 +586,11 @@ mod tests {
         let expected = "Supported Triggers: present, level_percent, charge_status, cycle_count";
         assert!(output.contains(expected));
         assert!(output.contains("Supported Wake Triggers: None"));
+    }
+
+    #[fuchsia::test]
+    async fn test_report_instance_returns_query_outcome() {
+        assert!(report_instance("Telemetry", "ok", true, async { Ok(()) }).await);
+        assert!(!report_instance("Telemetry", "err", true, async { Err(anyhow!("boom")) }).await);
     }
 }

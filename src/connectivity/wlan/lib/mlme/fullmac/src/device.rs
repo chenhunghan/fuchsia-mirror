@@ -26,6 +26,9 @@ pub trait DeviceOps {
     fn query_apf_packet_filter_support(
         &self,
     ) -> anyhow::Result<Result<fidl_common::ApfPacketFilterSupport, i32>>;
+    fn query_rssi_monitor_support(
+        &self,
+    ) -> anyhow::Result<Result<fidl_common::RssiMonitorSupport, i32>>;
     fn start_scan(&self, req: fidl_fullmac::WlanFullmacImplStartScanRequest) -> anyhow::Result<()>;
     fn connect(&self, req: fidl_fullmac::WlanFullmacImplConnectRequest) -> anyhow::Result<()>;
     fn reconnect(&self, req: fidl_fullmac::WlanFullmacImplReconnectRequest) -> anyhow::Result<()>;
@@ -86,6 +89,11 @@ pub trait DeviceOps {
     fn get_scheduled_scan_enabled(
         &self,
     ) -> anyhow::Result<Result<fidl_fullmac::WlanFullmacImplGetScheduledScanEnabledResponse, i32>>;
+    fn start_rssi_monitor(
+        &self,
+        req: fidl_fullmac::WlanFullmacImplStartRssiMonitorRequest,
+    ) -> anyhow::Result<Result<(), i32>>;
+    fn stop_rssi_monitor(&self) -> anyhow::Result<Result<(), i32>>;
 }
 
 pub struct FullmacDevice {
@@ -184,6 +192,23 @@ impl DeviceOps for FullmacDevice {
                     .resp
                     .ok_or_else(|| {
                         format_err!("Driver returned empty QueryApfPacketFilterSupport response")
+                    })
+                    .map(Ok),
+                Err(e) => Ok(Err(e)),
+            })
+    }
+
+    fn query_rssi_monitor_support(
+        &self,
+    ) -> anyhow::Result<Result<fidl_common::RssiMonitorSupport, i32>> {
+        self.fullmac_impl_sync_proxy
+            .query_rssi_monitor_support(zx::MonotonicInstant::INFINITE)
+            .context("FIDL error on QueryRssiMonitorSupport")
+            .and_then(|support| match support {
+                Ok(response) => response
+                    .resp
+                    .ok_or_else(|| {
+                        format_err!("Driver returned empty QueryRssiMonitorSupport response")
                     })
                     .map(Ok),
                 Err(e) => Ok(Err(e)),
@@ -381,6 +406,21 @@ impl DeviceOps for FullmacDevice {
             .get_scheduled_scan_enabled(zx::MonotonicInstant::INFINITE)
             .context("FIDL error on GetScheduledScanEnabled")
     }
+
+    fn start_rssi_monitor(
+        &self,
+        req: fidl_fullmac::WlanFullmacImplStartRssiMonitorRequest,
+    ) -> anyhow::Result<Result<(), i32>> {
+        self.fullmac_impl_sync_proxy
+            .start_rssi_monitor(&req, zx::MonotonicInstant::INFINITE)
+            .context("FIDL error on StartRssiMonitor")
+    }
+
+    fn stop_rssi_monitor(&self) -> anyhow::Result<Result<(), i32>> {
+        self.fullmac_impl_sync_proxy
+            .stop_rssi_monitor(zx::MonotonicInstant::INFINITE)
+            .context("FIDL error on StopRssiMonitor")
+    }
 }
 
 #[cfg(test)]
@@ -439,6 +479,7 @@ pub mod test_utils {
         },
         QueryTelemetrySupport,
         QueryApfPacketFilterSupport,
+        QueryRssiMonitorSupport,
         GetIfaceStats,
         GetIfaceHistogramStats,
         GetSignalReport,
@@ -463,6 +504,10 @@ pub mod test_utils {
             req: fidl_fullmac::WlanFullmacImplSetApfPacketFilterEnabledRequest,
         },
         GetApfPacketFilterEnabled,
+        StartRssiMonitor {
+            req: fidl_fullmac::WlanFullmacImplStartRssiMonitorRequest,
+        },
+        StopRssiMonitor,
     }
 
     pub struct FakeFullmacDeviceMocks {
@@ -479,6 +524,7 @@ pub mod test_utils {
         pub query_telemetry_support_mock: Option<Result<fidl_stats::TelemetrySupport, i32>>,
         pub query_apf_packet_filter_support_mock:
             Option<Result<fidl_common::ApfPacketFilterSupport, i32>>,
+        pub query_rssi_monitor_support_mock: Option<Result<fidl_common::RssiMonitorSupport, i32>>,
 
         pub set_keys_resp_mock: Option<fidl_fullmac::WlanFullmacSetKeysResp>,
         pub get_iface_stats_mock: Option<fidl_mlme::GetIfaceStatsResponse>,
@@ -492,6 +538,8 @@ pub mod test_utils {
             Option<Result<fidl_fullmac::WlanFullmacImplGetApfPacketFilterEnabledResponse, i32>>,
         pub get_scheduled_scan_enabled_mock:
             Option<Result<fidl_fullmac::WlanFullmacImplGetScheduledScanEnabledResponse, i32>>,
+        pub start_rssi_monitor_mock: Option<Result<(), i32>>,
+        pub stop_rssi_monitor_mock: Option<Result<(), i32>>,
         pub fullmac_ifc_client_end: Option<ClientEnd<fidl_fullmac::WlanFullmacImplIfcMarker>>,
     }
 
@@ -566,6 +614,10 @@ pub mod test_utils {
                             ..Default::default()
                         },
                     )),
+                    query_rssi_monitor_support_mock: Some(Ok(fidl_common::RssiMonitorSupport {
+                        supported: Some(false),
+                        ..Default::default()
+                    })),
                     get_signal_report_mock: Some(Ok(fidl_stats::SignalReport {
                         ..Default::default()
                     })),
@@ -592,6 +644,8 @@ pub mod test_utils {
                             ..Default::default()
                         },
                     )),
+                    start_rssi_monitor_mock: Some(Ok(())),
+                    stop_rssi_monitor_mock: Some(Ok(())),
                 })),
             };
 
@@ -646,6 +700,15 @@ pub mod test_utils {
             self.driver_call_sender.send(DriverCall::QueryApfPacketFilterSupport);
             self.mocks.lock().query_apf_packet_filter_support_mock.clone().ok_or_else(|| {
                 format_err!("query_apf_packet_filter_support_mock is None in FakeFullmacDevice")
+            })
+        }
+
+        fn query_rssi_monitor_support(
+            &self,
+        ) -> anyhow::Result<Result<fidl_common::RssiMonitorSupport, i32>> {
+            self.driver_call_sender.send(DriverCall::QueryRssiMonitorSupport);
+            self.mocks.lock().query_rssi_monitor_support_mock.clone().ok_or_else(|| {
+                format_err!("query_rssi_monitor_support_mock is None in FakeFullmacDevice")
             })
         }
 
@@ -841,6 +904,27 @@ pub mod test_utils {
         ) -> anyhow::Result<Result<(), i32>> {
             self.driver_call_sender.send(DriverCall::StopScheduledScan { req });
             Ok(Ok(()))
+        }
+
+        fn start_rssi_monitor(
+            &self,
+            req: fidl_fullmac::WlanFullmacImplStartRssiMonitorRequest,
+        ) -> anyhow::Result<Result<(), i32>> {
+            self.driver_call_sender.send(DriverCall::StartRssiMonitor { req });
+            self.mocks
+                .lock()
+                .start_rssi_monitor_mock
+                .clone()
+                .ok_or_else(|| format_err!("start_rssi_monitor_mock is None in FakeFullmacDevice"))
+        }
+
+        fn stop_rssi_monitor(&self) -> anyhow::Result<Result<(), i32>> {
+            self.driver_call_sender.send(DriverCall::StopRssiMonitor);
+            self.mocks
+                .lock()
+                .stop_rssi_monitor_mock
+                .clone()
+                .ok_or_else(|| format_err!("stop_rssi_monitor_mock is None in FakeFullmacDevice"))
         }
     }
 }

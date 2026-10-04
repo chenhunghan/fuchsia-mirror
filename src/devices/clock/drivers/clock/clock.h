@@ -28,7 +28,7 @@ class ClockDevice : public fidl::WireServer<fuchsia_hardware_clock::Clock> {
         name_(name) {}
 
   zx_status_t Init(const std::shared_ptr<fdf::Namespace>& incoming,
-                   const std::shared_ptr<fdf::OutgoingDirectory>& outgoing,
+                   const std::shared_ptr<fdf::OutgoingDirectory>& outgoing, std::string child_name,
                    std::optional<int32_t> node_id,
                    const fidl::ClientEnd<fuchsia_driver_framework::Node>& parent,
                    bool report_initial_conditions);

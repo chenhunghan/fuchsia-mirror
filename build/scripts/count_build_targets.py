@@ -78,7 +78,7 @@ def count_targets(
     # Keywords to ignore (e.g. GN built-in functions that are not targets).
     ignored_keywords = GN_IGNORED_KEYWORDS[system] | exclude_targets
 
-    counts = {}
+    counts: dict[str, int] = {}
     for file_path in fuchsia_root.rglob(build_file):
         relative_path = file_path.relative_to(fuchsia_root)
         parts = relative_path.parts
@@ -103,7 +103,7 @@ def main() -> int:
     parser.add_argument(
         "--fuchsia-dir",
         type=Path,
-        default=Path(os.environ.get("FUCHSIA_DIR")),
+        default=os.environ.get("FUCHSIA_DIR"),
         help="Path to Fuchsia root directory",
     )
     parser.add_argument(
@@ -134,6 +134,8 @@ def main() -> int:
         help="Target types to exclude (can be specified multiple times)",
     )
     args = parser.parse_args()
+    if args.fuchsia_dir is None:
+        parser.error("--fuchsia-dir or FUCHSIA_DIR must be set")
 
     target_counts = count_targets(
         args.fuchsia_dir, set(args.skip), set(args.exclude), args.system

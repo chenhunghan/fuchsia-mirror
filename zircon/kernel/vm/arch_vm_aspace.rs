@@ -5,21 +5,24 @@
 // https://opensource.org/licenses/MIT
 
 use crate::kernel::types::PAddr;
+use arch_vm_aspace_bindings as bindings;
+use bindings::zx_status_t;
 use core::marker::{PhantomData, PhantomPinned};
+use core::ptr;
 use zr::ToMutPtr;
 use zx_status::Status;
 
 // TODO(https://fxbug.dev/529507187): Use bitflags! or equivalent once available.
 pub type ArchMmuFlags = u8;
 
-#[allow(clippy::identity_op)]
+#[expect(clippy::identity_op)]
 pub const ARCH_MMU_FLAG_CACHED: ArchMmuFlags = 0 << 0;
 pub const ARCH_MMU_FLAG_UNCACHED: ArchMmuFlags = 1 << 0;
-#[allow(clippy::identity_op)]
+#[expect(clippy::identity_op)]
 pub const ARCH_MMU_FLAG_UNCACHED_DEVICE: ArchMmuFlags = 2 << 0;
-#[allow(clippy::identity_op)]
+#[expect(clippy::identity_op)]
 pub const ARCH_MMU_FLAG_WRITE_COMBINING: ArchMmuFlags = 3 << 0;
-#[allow(clippy::identity_op)]
+#[expect(clippy::identity_op)]
 pub const ARCH_MMU_FLAG_CACHE_MASK: ArchMmuFlags = 3 << 0;
 pub const ARCH_MMU_FLAG_PERM_USER: ArchMmuFlags = 1 << 2;
 pub const ARCH_MMU_FLAG_PERM_READ: ArchMmuFlags = 1 << 3;
@@ -30,11 +33,35 @@ pub const ARCH_MMU_FLAG_PERM_RWX_MASK: ArchMmuFlags =
 pub const ARCH_MMU_FLAG_NS: ArchMmuFlags = 1 << 6;
 pub const ARCH_MMU_FLAG_INVALID: ArchMmuFlags = 1 << 7;
 
+zr::static_assert!(ARCH_MMU_FLAG_CACHED == bindings::ARCH_MMU_FLAG_CACHED as ArchMmuFlags);
+zr::static_assert!(ARCH_MMU_FLAG_UNCACHED == bindings::ARCH_MMU_FLAG_UNCACHED as ArchMmuFlags);
+zr::static_assert!(
+    ARCH_MMU_FLAG_UNCACHED_DEVICE == bindings::ARCH_MMU_FLAG_UNCACHED_DEVICE as ArchMmuFlags
+);
+zr::static_assert!(
+    ARCH_MMU_FLAG_WRITE_COMBINING == bindings::ARCH_MMU_FLAG_WRITE_COMBINING as ArchMmuFlags
+);
+zr::static_assert!(ARCH_MMU_FLAG_CACHE_MASK == bindings::ARCH_MMU_FLAG_CACHE_MASK as ArchMmuFlags);
+zr::static_assert!(ARCH_MMU_FLAG_PERM_USER == bindings::ARCH_MMU_FLAG_PERM_USER as ArchMmuFlags);
+zr::static_assert!(ARCH_MMU_FLAG_PERM_READ == bindings::ARCH_MMU_FLAG_PERM_READ as ArchMmuFlags);
+zr::static_assert!(ARCH_MMU_FLAG_PERM_WRITE == bindings::ARCH_MMU_FLAG_PERM_WRITE as ArchMmuFlags);
+zr::static_assert!(
+    ARCH_MMU_FLAG_PERM_EXECUTE == bindings::ARCH_MMU_FLAG_PERM_EXECUTE as ArchMmuFlags
+);
+zr::static_assert!(
+    ARCH_MMU_FLAG_PERM_RWX_MASK == bindings::ARCH_MMU_FLAG_PERM_RWX_MASK as ArchMmuFlags
+);
+zr::static_assert!(ARCH_MMU_FLAG_NS == bindings::ARCH_MMU_FLAG_NS as ArchMmuFlags);
+zr::static_assert!(ARCH_MMU_FLAG_INVALID == bindings::ARCH_MMU_FLAG_INVALID as ArchMmuFlags);
+
 // TODO(https://fxbug.dev/529507187): Use bitflags! or equivalent once available.
 pub type ArchAspaceFlags = u8;
 
 pub const ARCH_ASPACE_FLAG_KERNEL: ArchAspaceFlags = 1 << 0;
 pub const ARCH_ASPACE_FLAG_GUEST: ArchAspaceFlags = 1 << 1;
+
+zr::static_assert!(ARCH_ASPACE_FLAG_KERNEL == bindings::ARCH_ASPACE_FLAG_KERNEL as ArchAspaceFlags);
+zr::static_assert!(ARCH_ASPACE_FLAG_GUEST == bindings::ARCH_ASPACE_FLAG_GUEST as ArchAspaceFlags);
 
 // TODO(https://fxbug.dev/529507187): Use bitflags! or equivalent once available.
 // Options for unmapping the given virtual address range.
@@ -47,6 +74,19 @@ pub const ARCH_UNMAP_OPTION_NONE: ArchUnmapOptions = 0;
 pub const ARCH_UNMAP_OPTION_ENLARGE: ArchUnmapOptions = 1 << 0;
 // Requests that the accessed bit be harvested, and the page queues updated.
 pub const ARCH_UNMAP_OPTION_HARVEST: ArchUnmapOptions = 1 << 1;
+
+zr::static_assert!(
+    ARCH_UNMAP_OPTION_NONE
+        == bindings::ArchVmAspaceInterface_ArchUnmapOptions_None as ArchUnmapOptions
+);
+zr::static_assert!(
+    ARCH_UNMAP_OPTION_ENLARGE
+        == bindings::ArchVmAspaceInterface_ArchUnmapOptions_Enlarge as ArchUnmapOptions
+);
+zr::static_assert!(
+    ARCH_UNMAP_OPTION_HARVEST
+        == bindings::ArchVmAspaceInterface_ArchUnmapOptions_Harvest as ArchUnmapOptions
+);
 
 /// Returns true if the MMU flags specify an uncached memory type.
 #[inline]
@@ -62,6 +102,18 @@ pub enum ExistingEntryAction {
     Upgrade = 2,
 }
 
+zr::static_assert!(
+    ExistingEntryAction::Skip as u8 == bindings::ArchVmAspaceInterface_ExistingEntryAction::Skip.0
+);
+zr::static_assert!(
+    ExistingEntryAction::Error as u8
+        == bindings::ArchVmAspaceInterface_ExistingEntryAction::Error.0
+);
+zr::static_assert!(
+    ExistingEntryAction::Upgrade as u8
+        == bindings::ArchVmAspaceInterface_ExistingEntryAction::Upgrade.0
+);
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NonTerminalAction {
@@ -72,6 +124,14 @@ pub enum NonTerminalAction {
     Retain = 1,
 }
 
+zr::static_assert!(
+    NonTerminalAction::FreeUnaccessed as u8
+        == bindings::ArchVmAspaceInterface_NonTerminalAction::FreeUnaccessed.0
+);
+zr::static_assert!(
+    NonTerminalAction::Retain as u8 == bindings::ArchVmAspaceInterface_NonTerminalAction::Retain.0
+);
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalAction {
@@ -81,76 +141,13 @@ pub enum TerminalAction {
     UpdateAge = 1,
 }
 
-unsafe extern "C" {
-    fn cpp_arch_vm_aspace_init(aspace: *mut ArchVmAspace) -> i32;
-    fn cpp_arch_vm_aspace_init_shared(aspace: *mut ArchVmAspace) -> i32;
-    fn cpp_arch_vm_aspace_init_restricted(aspace: *mut ArchVmAspace) -> i32;
-    fn cpp_arch_vm_aspace_init_unified(
-        aspace: *mut ArchVmAspace,
-        shared: *mut ArchVmAspace,
-        restricted: *mut ArchVmAspace,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_disable_updates(aspace: *mut ArchVmAspace);
-    fn cpp_arch_vm_aspace_destroy(aspace: *mut ArchVmAspace) -> i32;
-    fn cpp_arch_vm_aspace_map_contiguous(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        paddr: PAddr,
-        count: usize,
-        mmu_flags: ArchMmuFlags,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_map(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        phys: *mut PAddr,
-        count: usize,
-        mmu_flags: ArchMmuFlags,
-        existing_action: ExistingEntryAction,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_unmap(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        count: usize,
-        enlarge: ArchUnmapOptions,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_unmap_only_enlarge_on_oom(aspace: *mut ArchVmAspace) -> bool;
-    fn cpp_arch_vm_aspace_protect(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        count: usize,
-        mmu_flags: ArchMmuFlags,
-        enlarge: ArchUnmapOptions,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_query(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        paddr: *mut PAddr,
-        mmu_flags: *mut ArchMmuFlags,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_pick_spot(
-        aspace: *mut ArchVmAspace,
-        base: usize,
-        end: usize,
-        align: usize,
-        size: usize,
-        mmu_flags: ArchMmuFlags,
-    ) -> usize;
-    fn cpp_arch_vm_aspace_harvest_accessed(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        count: usize,
-        non_terminal_action: NonTerminalAction,
-        terminal_action: TerminalAction,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_mark_accessed(
-        aspace: *mut ArchVmAspace,
-        vaddr: usize,
-        count: usize,
-    ) -> i32;
-    fn cpp_arch_vm_aspace_accessed_since_last_check(aspace: *mut ArchVmAspace, clear: bool)
-    -> bool;
-    fn cpp_arch_vm_aspace_arch_table_phys(aspace: *mut ArchVmAspace) -> PAddr;
-}
+zr::static_assert!(
+    TerminalAction::UpdateAgeAndHarvest as u8
+        == bindings::ArchVmAspaceInterface_TerminalAction::UpdateAgeAndHarvest.0
+);
+zr::static_assert!(
+    TerminalAction::UpdateAge as u8 == bindings::ArchVmAspaceInterface_TerminalAction::UpdateAge.0
+);
 
 #[repr(C)]
 pub struct ArchVmAspace {
@@ -169,20 +166,32 @@ impl ArchVmAspace {
     /// supported, the shared and restricted address spaces should be created with `init_shared`
     /// and `init_restricted`.
     pub fn init(&self) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_arch_vm_aspace_init(self.to_mut_ptr()) })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t = unsafe { bindings::cpp_arch_vm_aspace_init(self.as_ffi_ptr()) };
+        Status::ok(status)
+    }
+
+    fn as_ffi_ptr(&self) -> *mut bindings::ArchVmAspace {
+        ptr::from_ref(self).cast_mut().cast()
     }
 
     /// This is used to create a shared address space, whose contents can be
     /// accessed from multiple unified address spaces. These address spaces have a statically
     /// initialized top level page.
     pub fn init_shared(&self) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_arch_vm_aspace_init_shared(self.to_mut_ptr()) })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t =
+            unsafe { bindings::cpp_arch_vm_aspace_init_shared(self.as_ffi_ptr()) };
+        Status::ok(status)
     }
 
     /// This is used to create a restricted address space, whose contents can be
     /// accessed from a single unified address space.
     pub fn init_restricted(&self) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_arch_vm_aspace_init_restricted(self.to_mut_ptr()) })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t =
+            unsafe { bindings::cpp_arch_vm_aspace_init_restricted(self.as_ffi_ptr()) };
+        Status::ok(status)
     }
 
     /// `init_unified`: This is used to create a unified address space. This type of address space
@@ -195,13 +204,15 @@ impl ArchVmAspace {
         shared: &ArchVmAspace,
         restricted: &ArchVmAspace,
     ) -> Result<(), Status> {
-        Status::ok(unsafe {
-            cpp_arch_vm_aspace_init_unified(
-                self.to_mut_ptr(),
-                shared.to_mut_ptr(),
-                restricted.to_mut_ptr(),
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t = unsafe {
+            bindings::cpp_arch_vm_aspace_init_unified(
+                self.as_ffi_ptr(),
+                shared.to_mut_ptr().cast(),
+                restricted.to_mut_ptr().cast(),
             )
-        })
+        };
+        Status::ok(status)
     }
 
     /// This method puts the instance into read-only mode and asserts that it contains no mappings.
@@ -214,7 +225,8 @@ impl ArchVmAspace {
     /// The purpose of this method is to help enforce lifecycle and state transitions of VmAspace
     /// and ArchVmAspaceInterface.
     pub fn disable_updates(&self) {
-        unsafe { cpp_arch_vm_aspace_disable_updates(self.to_mut_ptr()) }
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        unsafe { bindings::cpp_arch_vm_aspace_disable_updates(self.as_ffi_ptr()) }
     }
 
     /// Destroy expects the aspace to be fully unmapped, as any mapped regions indicate incomplete
@@ -225,7 +237,10 @@ impl ArchVmAspace {
     /// failed. Once destroy has been called it is a user error to call any of the other methods on
     /// the aspace, unless specifically stated otherwise, and doing so may cause a panic.
     pub fn destroy(&self) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_arch_vm_aspace_destroy(self.to_mut_ptr()) })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t =
+            unsafe { bindings::cpp_arch_vm_aspace_destroy(self.as_ffi_ptr()) };
+        Status::ok(status)
     }
 
     /// Map a physically contiguous region into the virtual address space. This is allowed to use
@@ -241,9 +256,17 @@ impl ArchVmAspace {
         count: usize,
         mmu_flags: ArchMmuFlags,
     ) -> Result<(), Status> {
-        Status::ok(unsafe {
-            cpp_arch_vm_aspace_map_contiguous(self.to_mut_ptr(), vaddr, paddr, count, mmu_flags)
-        })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t = unsafe {
+            bindings::cpp_arch_vm_aspace_map_contiguous(
+                self.as_ffi_ptr(),
+                vaddr,
+                paddr.0,
+                count,
+                mmu_flags,
+            )
+        };
+        Status::ok(status)
     }
 
     // Map the given array of pages into the virtual address space starting at
@@ -272,16 +295,20 @@ impl ArchVmAspace {
         mmu_flags: ArchMmuFlags,
         existing_action: ExistingEntryAction,
     ) -> Result<(), Status> {
-        Status::ok(unsafe {
-            cpp_arch_vm_aspace_map(
-                self.to_mut_ptr(),
+        let existing_action: bindings::ArchVmAspaceInterface_ExistingEntryAction =
+            bindings::ArchVmAspaceInterface_ExistingEntryAction(existing_action as _);
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace` and `phys` points to `count` entries.
+        let status: zx_status_t = unsafe {
+            bindings::cpp_arch_vm_aspace_map(
+                self.as_ffi_ptr(),
                 vaddr,
-                phys,
+                phys.cast(),
                 count,
                 mmu_flags,
                 existing_action,
             )
-        })
+        };
+        Status::ok(status)
     }
 
     /// Unmaps the given virtual address range.
@@ -295,14 +322,18 @@ impl ArchVmAspace {
         count: usize,
         enlarge: ArchUnmapOptions,
     ) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_arch_vm_aspace_unmap(self.to_mut_ptr(), vaddr, count, enlarge) })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t =
+            unsafe { bindings::cpp_arch_vm_aspace_unmap(self.as_ffi_ptr(), vaddr, count, enlarge) };
+        Status::ok(status)
     }
 
     /// Returns whether or not an unmap might need to enlarge an operation for reasons other than
     /// being out of memory. If this returns true, then unmapping a partial large page will fail
     /// always require an enlarged operation.
     pub fn unmap_only_enlarge_on_oom(&self) -> bool {
-        unsafe { cpp_arch_vm_aspace_unmap_only_enlarge_on_oom(self.to_mut_ptr()) }
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        unsafe { bindings::cpp_arch_vm_aspace_unmap_only_enlarge_on_oom(self.as_ffi_ptr()) }
     }
 
     /// Change the page protections on the given virtual address range
@@ -325,24 +356,28 @@ impl ArchVmAspace {
         mmu_flags: ArchMmuFlags,
         enlarge: ArchUnmapOptions,
     ) -> Result<(), Status> {
-        Status::ok(unsafe {
-            cpp_arch_vm_aspace_protect(self.to_mut_ptr(), vaddr, count, mmu_flags, enlarge)
-        })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t = unsafe {
+            bindings::cpp_arch_vm_aspace_protect(
+                self.as_ffi_ptr(),
+                vaddr,
+                count,
+                mmu_flags,
+                enlarge,
+            )
+        };
+        Status::ok(status)
     }
 
     /// Queries the translation for `vaddr`.
     pub fn query(&self, vaddr: usize) -> Result<(PAddr, ArchMmuFlags), Status> {
-        let mut paddr = PAddr(0);
+        let mut paddr: usize = 0;
         let mut mmu_flags: ArchMmuFlags = 0;
-        Status::ok(unsafe {
-            cpp_arch_vm_aspace_query(
-                self.to_mut_ptr(),
-                vaddr,
-                &mut paddr as *mut PAddr,
-                &mut mmu_flags as *mut ArchMmuFlags,
-            )
-        })
-        .map(|_| (paddr, mmu_flags))
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`, and `paddr` and `mmu_flags` are valid out-pointers.
+        let status: zx_status_t = unsafe {
+            bindings::cpp_arch_vm_aspace_query(self.as_ffi_ptr(), vaddr, &mut paddr, &mut mmu_flags)
+        };
+        Status::ok(status).map(|_| (PAddr(paddr), mmu_flags))
     }
 
     /// Picks a spot in the virtual address space.
@@ -354,8 +389,16 @@ impl ArchVmAspace {
         size: usize,
         mmu_flags: ArchMmuFlags,
     ) -> usize {
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
         unsafe {
-            cpp_arch_vm_aspace_pick_spot(self.to_mut_ptr(), base, end, align, size, mmu_flags)
+            bindings::cpp_arch_vm_aspace_pick_spot(
+                self.as_ffi_ptr(),
+                base,
+                end,
+                align,
+                size,
+                mmu_flags,
+            )
         }
     }
 
@@ -371,20 +414,29 @@ impl ArchVmAspace {
         non_terminal_action: NonTerminalAction,
         terminal_action: TerminalAction,
     ) -> Result<(), Status> {
-        Status::ok(unsafe {
-            cpp_arch_vm_aspace_harvest_accessed(
-                self.to_mut_ptr(),
+        let non_terminal_action: bindings::ArchVmAspaceInterface_NonTerminalAction =
+            bindings::ArchVmAspaceInterface_NonTerminalAction(non_terminal_action as u8);
+        let terminal_action: bindings::ArchVmAspaceInterface_TerminalAction =
+            bindings::ArchVmAspaceInterface_TerminalAction(terminal_action as u8);
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t = unsafe {
+            bindings::cpp_arch_vm_aspace_harvest_accessed(
+                self.as_ffi_ptr(),
                 vaddr,
                 count,
                 non_terminal_action,
                 terminal_action,
             )
-        })
+        };
+        Status::ok(status)
     }
 
     /// Marks any pages in the given virtual address range as being accessed.
     pub fn mark_accessed(&self, vaddr: usize, count: usize) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_arch_vm_aspace_mark_accessed(self.to_mut_ptr(), vaddr, count) })
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let status: zx_status_t =
+            unsafe { bindings::cpp_arch_vm_aspace_mark_accessed(self.as_ffi_ptr(), vaddr, count) };
+        Status::ok(status)
     }
 
     /// Returns whether or not this aspace might have additional accessed information since the last
@@ -403,7 +455,8 @@ impl ArchVmAspace {
     /// Not clearing makes this function const and not modify any state. If `clear` is true then
     /// this method is only thread-compatible and must be externally synchronized.
     pub fn accessed_since_last_check(&self, clear: bool) -> bool {
-        unsafe { cpp_arch_vm_aspace_accessed_since_last_check(self.to_mut_ptr(), clear) }
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        unsafe { bindings::cpp_arch_vm_aspace_accessed_since_last_check(self.as_ffi_ptr(), clear) }
     }
 
     /// Physical address of the backing data structure used for translation.
@@ -411,6 +464,9 @@ impl ArchVmAspace {
     /// This should be treated as an opaque value outside of
     /// architecture-specific components.
     pub fn arch_table_phys(&self) -> PAddr {
-        unsafe { cpp_arch_vm_aspace_arch_table_phys(self.to_mut_ptr()) }
+        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        let phys: bindings::paddr_t =
+            unsafe { bindings::cpp_arch_vm_aspace_arch_table_phys(self.as_ffi_ptr()) };
+        PAddr(phys)
     }
 }

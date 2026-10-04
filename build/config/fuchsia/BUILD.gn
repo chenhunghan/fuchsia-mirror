@@ -172,6 +172,7 @@ config("shared_library_config") {
   ldflags = cflags
 }
 
+# LINT.IfChange(fdio_config)
 config("fdio_config") {
   # This config is only a marker that is used to signal that a given executable
   # should link with fdio. With fdio now getting built in this very build, there
@@ -179,6 +180,8 @@ config("fdio_config") {
   # See the override of the `executable` template in
   # //build/config/BUILDCONFIG.gni where that build edge is added.
 }
+
+# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:fdio_config)
 
 config("executable_config") {
 }
@@ -228,14 +231,18 @@ config("dynamic_cpp_standard_library") {
   rustflags = [ "-Clink-args=--push-state -Bdynamic -lc++ --pop-state" ]
 }
 
+# LINT.IfChange(dynamic_rust_standard_library)
 config("dynamic_rust_standard_library") {
   rustflags = [ "-Cprefer-dynamic" ]
 }
+
+# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:dynamic_rust_standard_library)
 
 config("static_rust_standard_library") {
   rustflags = [ "-Cprefer-dynamic=no" ]
 }
 
+# LINT.IfChange(large_rust_stack)
 # Configure a larger (2MB) stack size for Rust binaries.
 #
 # Currently, threads created by Rust's libstd have a hardcoded default stack
@@ -245,6 +252,8 @@ config("static_rust_standard_library") {
 config("large_rust_stack") {
   rustflags = [ "-Clink-args=-zstack-size=0x200000" ]
 }
+
+# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:large_rust_stack)
 
 # Enable additional integer-math sanitizers
 config("integer-paranoia") {

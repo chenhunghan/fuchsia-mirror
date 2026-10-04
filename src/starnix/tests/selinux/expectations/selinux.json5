@@ -12,14 +12,6 @@
         {
             type: "expect_failure",
             matchers: [
-                // TODO: https://fxbug.dev/398654361
-                "binder/001",
-                "binder/004",
-                "binder/008",
-
-                // TODO: https://fxbug.dev/398652723
-                "capable_file/008",
-
                 // TODO: https://fxbug.dev/398662840
                 "cgroupfs_label/001",
                 "cgroupfs_label/002",
@@ -51,7 +43,7 @@
                 "filesystem/069",
                 "filesystem/079",
 
-                // TODO: https://fxbug.dev/398696732
+                // See https://fxbug.dev/398696732: Starnix doesn't support the new mount API.
                 "fs_filesystem/003",
                 "fs_filesystem/004",
                 "fs_filesystem/005",
@@ -189,13 +181,12 @@
                 "mmap/020",
                 "mmap/026",
                 "mmap/028",
-                "mmap/030",
                 "mmap/032",
                 "mmap/034",
                 "mmap/036",
                 "mmap/038",
 
-                // TODO: https://fxbug.dev/319480589 - Starnix does not support dynamic kernel module loading.
+                // See https://fxbug.dev/319480589: Starnix does not support dynamic kernel module loading.
                 "module_load/*",
 
                 // TODO: https://fxbug.dev/398663319
@@ -268,10 +259,6 @@
                 "userfaultfd/007",
                 "userfaultfd/008",
                 "userfaultfd/009",
-
-                // TODO: https://fxbug.dev/398711590
-                "watchkey/001",
-                "watchkey/002",
             ],
         },
         {

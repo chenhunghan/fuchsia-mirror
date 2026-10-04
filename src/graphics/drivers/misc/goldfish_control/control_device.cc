@@ -20,6 +20,7 @@
 
 #include <memory>
 
+#include <bind/fuchsia/cpp/bind.h>
 #include <ddktl/fidl.h>
 #include <fbl/auto_lock.h>
 
@@ -380,8 +381,13 @@ zx_status_t Control::Bind() {
       fuchsia_hardware_goldfish_pipe::Service::Name,
   };
 
+  zx_device_str_prop_t props[] = {
+      ddk::MakeStrProperty(bind_fuchsia::SERVICE, fuchsia_hardware_goldfish::ControlService::Name),
+  };
+
   status = DdkAdd(ddk::DeviceAddArgs("goldfish-control")
                       .set_fidl_service_offers(kOffersArray)
+                      .set_str_props(props)
                       .set_outgoing_dir(directory_client.TakeChannel())
                       .set_proto_id(ZX_PROTOCOL_GOLDFISH_CONTROL));
   if (status != ZX_OK) {

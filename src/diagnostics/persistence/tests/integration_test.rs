@@ -8,6 +8,7 @@ use diagnostics_hierarchy::SelectResult;
 use fidl::endpoints::Proxy;
 use fidl_fuchsia_diagnostics as fdiagnostics;
 use fidl_fuchsia_diagnostics_persistence as fdiagnostics_persistence;
+use fidl_fuchsia_hardware_power_statecontrol as fpower;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_logger as flogger;
 use fidl_fuchsia_power_battery as fbattery;
@@ -51,6 +52,7 @@ async fn make_realm(
     interval: i64,
     mock_battery_tx: Option<mpsc::Sender<fbattery::BatteryInfoWatcherProxy>>,
     mock_update_tx: Option<mpsc::Sender<fupdate::NotifierProxy>>,
+    mock_shutdown_tx: Option<mpsc::Sender<fpower::ShutdownWatcherProxy>>,
 ) -> Result<TestRealm, Error> {
     let skip_update_check = mock_update_tx.is_none();
     let builder = RealmBuilder::new().await?;
@@ -167,6 +169,15 @@ async fn make_realm(
             value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Uint64(10)),
         }))
         .await?;
+    let enable_shutdown_snapshot = mock_shutdown_tx.is_some();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.diagnostics.persist.EnableShutdownSnapshot".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(
+                enable_shutdown_snapshot,
+            )),
+        }))
+        .await?;
     builder
         .add_route(
             Route::new()
@@ -181,6 +192,9 @@ async fn make_realm(
                 ))
                 .capability(Capability::configuration(
                     "fuchsia.diagnostics.persist.LowBatteryThresholdPercent",
+                ))
+                .capability(Capability::configuration(
+                    "fuchsia.diagnostics.persist.EnableShutdownSnapshot",
                 ))
                 .from(Ref::self_())
                 .to(&persistence),
@@ -277,6 +291,54 @@ async fn make_realm(
                 Route::new()
                     .capability(Capability::protocol::<fupdate::ListenerMarker>())
                     .from(&update_listener)
+                    .to(&persistence),
+            )
+            .await?;
+    }
+
+    if let Some(tx) = mock_shutdown_tx {
+        let shutdown_watcher_register = builder
+            .add_local_child(
+                "shutdown-watcher-register",
+                move |handles| {
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        let mut fs = fuchsia_component::server::ServiceFs::new();
+                        fs.dir("svc").add_fidl_service(
+                            |stream: fpower::ShutdownWatcherRegisterRequestStream| stream,
+                        );
+                        fs.serve_connection(handles.outgoing_dir)?;
+                        fs.for_each_concurrent(None, move |mut stream| {
+                            let mut tx = tx.clone();
+                            async move {
+                                while let Ok(Some(req)) = stream.try_next().await {
+                                    match req {
+                                        fpower::ShutdownWatcherRegisterRequest::RegisterWatcher {
+                                            watcher,
+                                            responder,
+                                        } => {
+                                            let proxy = watcher.into_proxy();
+                                            let _ = tx.send(proxy).await;
+                                            let _ = responder.send();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        })
+                        .await;
+                        Ok(())
+                    })
+                },
+                ChildOptions::new().eager(),
+            )
+            .await?;
+
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::protocol::<fpower::ShutdownWatcherRegisterMarker>())
+                    .from(&shutdown_watcher_register)
                     .to(&persistence),
             )
             .await?;
@@ -491,7 +553,7 @@ async fn read_snapshot_token(instance: &RealmInstance) -> Result<u64, Error> {
 #[fuchsia::test]
 async fn test_persistence_rotation() -> Result<(), Error> {
     const INTERVAL: i64 = 1;
-    let realm = make_realm(INTERVAL, None, None).await?;
+    let realm = make_realm(INTERVAL, None, None, None).await?;
 
     // Boot 1 Check: Connect to PreviousBootDataProvider, verify data.inspect is None
     let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
@@ -530,7 +592,7 @@ async fn test_persistence_rotation() -> Result<(), Error> {
 async fn test_low_battery_trigger() -> Result<(), Error> {
     const INTERVAL: i64 = 300;
     let (tx, mut rx) = mpsc::channel(1);
-    let realm = make_realm(INTERVAL, Some(tx), None).await?;
+    let realm = make_realm(INTERVAL, Some(tx), None, None).await?;
 
     // Boot 1 Check: Connect to PreviousBootDataProvider, verify data.inspect is None
     let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
@@ -574,10 +636,55 @@ async fn test_low_battery_trigger() -> Result<(), Error> {
 }
 
 #[fuchsia::test]
+async fn test_shutdown_watcher_trigger() -> Result<(), Error> {
+    const INTERVAL: i64 = 300;
+    let (tx, mut rx) = mpsc::channel(1);
+    let realm = make_realm(INTERVAL, None, None, Some(tx)).await?;
+
+    // Boot 1 Check: Connect to PreviousBootDataProvider, verify data.inspect is None
+    let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
+        realm.instance.root.connect_to_protocol_at_exposed_dir()?;
+    let data = provider.watch_previous_boot_data(&Default::default()).await?;
+    assert!(data.inspect.is_none(), "Expected no previous boot data on initial boot");
+
+    // Set distinctive shutdown token
+    const SHUTDOWN_TOKEN: u64 = 0xDEAD_BEEF_CAFE;
+    realm.current_token.store(SHUTDOWN_TOKEN, Ordering::SeqCst);
+
+    // Wait for persistence to connect to mock ShutdownWatcherRegister and send watcher proxy
+    let watcher_proxy =
+        rx.next().await.ok_or_else(|| anyhow::anyhow!("Failed to receive ShutdownWatcherProxy"))?;
+
+    // Emit a shutdown event
+    let shutdown_options = fpower::ShutdownOptions {
+        reasons: Some(vec![fpower::ShutdownReason::HighTemperature]),
+        action: Some(fpower::ShutdownAction::Poweroff),
+        ..Default::default()
+    };
+    watcher_proxy.on_shutdown(&shutdown_options).await?;
+
+    // Wait until Persistence captures SHUTDOWN_TOKEN on disk
+    wait_for_active_token(&realm.temp_dir, SHUTDOWN_TOKEN).await?;
+
+    let lifecycle: fsys2::LifecycleControllerProxy =
+        realm.instance.root.connect_to_protocol_at_exposed_dir()?;
+
+    // Restart persistence to rotate active snapshot to previous_boot
+    restart_persistence(&lifecycle).await?;
+
+    // Verify inspect snapshot generated by shutdown watcher trigger is present with SHUTDOWN_TOKEN
+    let token = read_snapshot_token(&realm.instance).await?;
+    assert_eq!(token, SHUTDOWN_TOKEN, "Expected shutdown snapshot to contain token");
+
+    realm.destroy().await?;
+    Ok(())
+}
+
+#[fuchsia::test]
 async fn test_update_check_gating() -> Result<(), Error> {
     const INTERVAL: i64 = 5;
     let (tx, mut rx) = mpsc::channel(1);
-    let realm = make_realm(INTERVAL, None, Some(tx)).await?;
+    let realm = make_realm(INTERVAL, None, Some(tx), None).await?;
 
     let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
         realm.instance.root.connect_to_protocol_at_exposed_dir()?;

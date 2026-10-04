@@ -106,7 +106,8 @@ mod tests {
             })
             .detach();
 
-            let crypt = Arc::new(RemoteCrypt::new(crypt_client));
+            let crypt =
+                Arc::new(RemoteCrypt::new_with_device(crypt_client, self.filesystem.device()));
             let root_volume =
                 root_volume(self.filesystem.clone()).await.expect("root_volume failed");
             let vol = root_volume
@@ -146,7 +147,8 @@ mod tests {
             })
             .detach();
 
-            let crypt = Arc::new(RemoteCrypt::new(crypt_client));
+            let crypt =
+                Arc::new(RemoteCrypt::new_with_device(crypt_client, self.filesystem.device()));
             let root_volume =
                 root_volume(self.filesystem.clone()).await.expect("root_volume failed");
             root_volume
@@ -222,7 +224,11 @@ mod tests {
         dir.update_attributes(
             transaction,
             Some(&fio::MutableNodeAttributes {
-                wrapping_key_id: Some(key_identifier),
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier,
+                    flags: fio::FscryptPolicyFlags::PAD_16
+                        | fio::FscryptPolicyFlags::IV_INO_LBLK_32,
+                }),
                 ..Default::default()
             }),
             0,
@@ -322,7 +328,11 @@ mod tests {
         dir.update_attributes(
             transaction,
             Some(&fio::MutableNodeAttributes {
-                wrapping_key_id: Some(key_identifier),
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier,
+                    flags: fio::FscryptPolicyFlags::PAD_16
+                        | fio::FscryptPolicyFlags::IV_INO_LBLK_32,
+                }),
                 ..Default::default()
             }),
             0,
@@ -455,7 +465,11 @@ mod tests {
             dir.update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(key_identifier),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier,
+                        flags: fio::FscryptPolicyFlags::PAD_16
+                            | fio::FscryptPolicyFlags::IV_INO_LBLK_32,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -501,10 +515,13 @@ mod tests {
                 .expect("open_object failed"),
             );
             let attributes = file
-                .get_attributes(fio::NodeAttributesQuery::WRAPPING_KEY_ID)
+                .get_attributes(fio::NodeAttributesQuery::ENCRYPTION_POLICY)
                 .await
                 .expect("get_attributes failed");
-            assert_eq!(attributes.mutable_attributes.wrapping_key_id, Some(key_identifier));
+            assert_eq!(
+                attributes.mutable_attributes.encryption_policy.map(|p| p.key_identifier),
+                Some(key_identifier)
+            );
         }
         fixture.close().await;
     }
@@ -554,7 +571,11 @@ mod tests {
         dir.update_attributes(
             transaction,
             Some(&fio::MutableNodeAttributes {
-                wrapping_key_id: Some(key_identifier),
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier,
+                    flags: fio::FscryptPolicyFlags::PAD_16
+                        | fio::FscryptPolicyFlags::IV_INO_LBLK_32,
+                }),
                 ..Default::default()
             }),
             0,
@@ -640,7 +661,7 @@ mod tests {
                 .expect("CryptService failed");
         })
         .detach();
-        let crypt = Arc::new(RemoteCrypt::new(crypt_client));
+        let crypt = Arc::new(RemoteCrypt::new_with_device(crypt_client, fs.device()));
         let store = root_volume
             .volume(
                 "starnix",

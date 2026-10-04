@@ -20,7 +20,7 @@ closed protocol Device {
     strict GetSecureMemoryPhysicalAddress(resource struct {
         secure_mem zx.Handle:VMO;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         paddr uint64;
     });
 };

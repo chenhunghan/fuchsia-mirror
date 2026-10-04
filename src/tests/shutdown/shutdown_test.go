@@ -28,15 +28,9 @@ func TestShutdown(t *testing.T) {
 	i := distro.NewInstance(ctx, device)
 	i.Start()
 
-	// Make sure the shell is ready to accept commands over serial
-	// and /dev is mounted for use from the console.
-	i.WaitForLogMessages([]string{"console.shell: enabled", "mounted '/dev'"})
-
-	if arch == emulator.X64 {
-		// Ensure the ACPI driver comes up before we attempt a shutdown.
-		i.RunCommand("waitfor verbose class=acpi topo=/dev/sys/platform/pt/acpi/_SB_/pt && echo ACPI_READY")
-		i.WaitForLogMessage("ACPI_READY")
-	}
+	// Make sure the shell is ready to accept commands over serial,
+	// /dev is mounted for use from the console, and driver enumeration completes.
+	i.WaitForLogMessages([]string{"console.shell: enabled", "mounted '/dev'", "Bootup completed."})
 
 	// Trigger a shutdown.
 	i.RunCommand("power shutdown")

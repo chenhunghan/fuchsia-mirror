@@ -220,6 +220,23 @@ TEST(IdReplacerTests, RedactsIfPrefixWouldBeBeforeBuffer) {
   EXPECT_EQ(replacer(cache, content), kExpectedContent);
 }
 
+TEST(IdReplacerTests, SkipsEmptyCaptureWithIgnorePrefixes) {
+  RedactionIdCache cache(inspect::UintProperty{});
+
+  std::string content = R"(skip:abcd abcd elf:abcd)";
+  static constexpr std::string_view kExpectedContent = R"(skip:abcd <REDACTED-HEX: 1> elf:abcd)";
+  const std::vector<std::string> kHexIgnorePrefixes({"elf:"});
+
+  // The first alternative has no capturing group, so its matches produce an empty capture and
+  // must be skipped without reading memory at the (null) capture position.
+  Replacer replacer =
+      ReplaceWithIdFormatString(R"(\bskip:[0-9a-f]{4}\b|(\b[0-9a-f]{4}\b))", "<REDACTED-HEX: %d>",
+                                /*ignore_prefixes=*/kHexIgnorePrefixes);
+
+  ASSERT_NE(replacer, nullptr);
+  EXPECT_EQ(replacer(cache, content), kExpectedContent);
+}
+
 struct IpTestParam {
   std::string test_name;
   std::string text;

@@ -606,7 +606,7 @@ closed protocol BufferCollection {
     ///
     /// `buffer_collection_info` has the VMO handles and other related info.
     strict WaitForBuffersAllocated() -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         buffer_collection_info BufferCollectionInfo_2;
     });
 
@@ -614,7 +614,7 @@ closed protocol BufferCollection {
     /// buffer collection has been allocated or failed, or `ZX_ERR_UNAVAILABLE`
     /// if WaitForBuffersAllocated would block.
     strict CheckBuffersAllocated() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     @available(deprecated=8, removed=9)
@@ -629,7 +629,7 @@ closed protocol BufferCollection {
     strict WaitForSingleBufferAllocated(struct {
         buffer_index uint64;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         buffer_info SingleBufferInfo;
     });
     @available(deprecated=8, removed=9)
@@ -642,7 +642,7 @@ closed protocol BufferCollection {
     });
     @available(deprecated=9, removed=23)
     strict GetAuxBuffers() -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         buffer_collection_info_aux_buffers BufferCollectionInfo_2;
     });
 

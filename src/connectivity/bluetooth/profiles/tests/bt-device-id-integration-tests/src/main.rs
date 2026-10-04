@@ -5,7 +5,7 @@
 use fidl_fuchsia_bluetooth_bredr as bredr;
 use fidl_fuchsia_bluetooth_deviceid::*;
 use fuchsia_bluetooth::types::PeerId;
-use fuchsia_component_test::{Capability, RealmInstance};
+use fuchsia_component_test::{Capability, RealmInstance, Ref, Route};
 use futures::future::Either;
 use futures::{Future, FutureExt, StreamExt};
 use log::info;
@@ -43,6 +43,38 @@ async fn setup_test_topology() -> (RealmInstance, BtProfileComponent, PiconetMem
         )
         .await
         .expect("failed to add DI profile");
+
+    test_harness
+        .builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.VendorId".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Uint16(1000)),
+        }))
+        .await
+        .expect("failed to add VendorId config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.VendorId"))
+                .from(Ref::self_())
+                .to(Ref::child(DEVICE_ID_MONIKER)),
+        )
+        .await
+        .expect("failed to route VendorId config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.ProductId"))
+                .capability(Capability::configuration("fuchsia.bluetooth.Version"))
+                .capability(Capability::configuration("fuchsia.bluetooth.Primary"))
+                .capability(Capability::configuration("fuchsia.bluetooth.ServiceDescription"))
+                .from(Ref::void())
+                .to(Ref::child(DEVICE_ID_MONIKER)),
+        )
+        .await
+        .expect("failed to route optional config capabilities from void");
 
     let test_topology = test_harness.build().await.unwrap();
 

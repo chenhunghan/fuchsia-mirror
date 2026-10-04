@@ -1864,6 +1864,16 @@ _built_in_target_types_without_public_wrapper -= [
 #
 # For now, they are never wrapped by the action tracer.
 #
+# Common arguments passed to the in-tree Python interpreter when executing
+# build actions:
+# -S: Speed up startup by not looking for Python site packages.
+# -W error::SyntaxWarning: Treat invalid escape sequences and syntax warnings as errors.
+common_python_args = [
+  "-S",
+  "-W",
+  "error::SyntaxWarning",
+]
+
 foreach(_target_type,
         [
           "action",
@@ -1895,10 +1905,8 @@ foreach(_target_type,
 
       _ext = get_path_info(script, "extension")
       if (_ext == "py" || _ext == "pyz") {
-        _new_args = [
-                      "-S",
-                      rebase_path(script, root_build_dir),
-                    ] + args
+        _new_args =
+            common_python_args + [ rebase_path(script, root_build_dir) ] + args
         if (!defined(inputs)) {
           inputs = []
         }
@@ -2237,11 +2245,8 @@ foreach(_target_type,
 
         # Prepend _args with Python interpreter args.
         _new_python_args =
-            [
-              # Speed up startup by not looking for site packages.
-              "-S",
-              rebase_path(invoker.script, root_build_dir),
-            ] + _args
+            common_python_args +
+            [ rebase_path(invoker.script, root_build_dir) ] + _args
         _args = []
         _args = _new_python_args
       } else {
@@ -2269,20 +2274,19 @@ foreach(_target_type,
           python_exe_src,
           "//build/tracer/output_cacher.py",
         ]
-        _new_repro_check_args = [
-          # Speed up startup by not looking for Python site packages.
-          "-S",
-          rebase_path("//build/tracer/output_cacher.py", root_build_dir),
-          "--check-repeatability",
+        _new_repro_check_args =
+            common_python_args + [
+              rebase_path("//build/tracer/output_cacher.py", root_build_dir),
+              "--check-repeatability",
 
-          # "--disable", This will execute only the original command
-          # (pass-through).
-          "--label",
-          get_label_info(":$target_name", "label_with_toolchain"),
-          "--temp-suffix=",  # don't use suffix
-          "--temp-dir",
-          ".tmp-repro",
-        ]
+              # "--disable", This will execute only the original command
+              # (pass-through).
+              "--label",
+              get_label_info(":$target_name", "label_with_toolchain"),
+              "--temp-suffix=",  # don't use suffix
+              "--temp-dir",
+              ".tmp-repro",
+            ]
         if (defined(outputs)) {
           _new_repro_check_args +=
               [ "--outputs" ] + rebase_path(outputs, root_build_dir)
@@ -2374,13 +2378,12 @@ foreach(_target_type,
             _hermetic_inputs_file,
           ]
           depfile = "${target_out_dir}/${target_name}.depfile"
-          args = [
-            "-S",
-            rebase_path(_wrapper_script, root_build_dir),
-            "--hermetic-inputs-file",
-            rebase_path(_hermetic_inputs_file, root_build_dir),
-            "--outputs",
-          ]
+          args = common_python_args + [
+                   rebase_path(_wrapper_script, root_build_dir),
+                   "--hermetic-inputs-file",
+                   rebase_path(_hermetic_inputs_file, root_build_dir),
+                   "--outputs",
+                 ]
           args += rebase_path(outputs, root_build_dir)
           args += [
             "--depfile",
@@ -2404,18 +2407,15 @@ foreach(_target_type,
           "//build/tracer/action_tracer.py",
         ]
 
-        args = [
-          # Speed up startup by not looking for Python site packages.
-          "-S",
-
-          # This wraps actions with a filesystem activity tracer.
-          rebase_path("//build/tracer/action_tracer.py", root_build_dir),
-          "--fsatrace-path",
-          rebase_path("//prebuilt/fsatrace/fsatrace", root_build_dir),
-          "--label",
-          get_label_info(":$target_name", "label_with_toolchain"),
-          "--trace-output",
-        ]
+        args = common_python_args + [
+                 # This wraps actions with a filesystem activity tracer.
+                 rebase_path("//build/tracer/action_tracer.py", root_build_dir),
+                 "--fsatrace-path",
+                 rebase_path("//prebuilt/fsatrace/fsatrace", root_build_dir),
+                 "--label",
+                 get_label_info(":$target_name", "label_with_toolchain"),
+                 "--trace-output",
+               ]
         if (_target_type == "action") {
           gen_path = rebase_path("${target_gen_dir}/${target_name}_trace.txt",
                                  root_build_dir)
@@ -2508,8 +2508,7 @@ foreach(_target_type,
             scripts_safe_to_not_check + [ invoker.script ] - [ invoker.script ]
         if (!script_safe_to_not_check) {
           _args = []
-          _args = [
-                    "-S",
+          _args = common_python_args + [
                     rebase_path("//build/rbe/output_leak_scanner.py",
                                 root_build_dir),
                     "--label",

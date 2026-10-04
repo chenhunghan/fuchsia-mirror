@@ -24,19 +24,6 @@ group("dynamic_dictionaries") {
   ]
 }
 
-# The allowlist of components that can customize timing of request delivery in
-# CML.
-group("delivery_type") {
-  visibility = [
-    "//src/connectivity/policy/http-client/*",
-    "//src/devices/bin/driver-index:*",
-    "//src/diagnostics/persistence/*",
-    "//src/sys/component_manager/tests/*",
-    "//src/sys/pkg/bin/null-update-checker/*",
-    "//src/sys/pkg/bin/system-update-committer/*",
-  ]
-}
-
 # The allowlist of components that can use the "allow_long_names" feature in
 # CML.
 group("allow_long_names") {

@@ -10,10 +10,8 @@ using fuchsia.power.broker;
 using fuchsia.url;
 using zx;
 
-@available(removed=28)
 const BINDING_RESULT_MAX uint8 = 10;
 
-@available(added=28)
 const BINDING_RESULT_MAX_2 uint32 = 256;
 
 const HASH_LENGTH uint8 = 64;
@@ -88,7 +86,6 @@ open protocol Manager {
 
 
     /// Returns a list of all driver hosts that are known to the system.
-    @available(added=27)
     flexible GetDriverHostInfo(resource struct {
         iterator server_end:DriverHostInfoIterator;
     });
@@ -125,7 +122,6 @@ open protocol Manager {
 
     /// Attempts to bind all unbound nodes in the topology.
     /// Returns new successful binds.
-    @available(removed=28)
     flexible BindAllUnboundNodes() -> (struct {
         /// List of new bindings that happened as a result of this.
         binding_result vector<NodeBindingInfo>:BINDING_RESULT_MAX;
@@ -133,7 +129,6 @@ open protocol Manager {
 
     /// Attempts to bind all unbound nodes in the topology.
     /// Returns new successful binds.
-    @available(added=28)
     flexible BindAllUnboundNodes2() -> (struct {
         /// List of new bindings that happened as a result of this.
         binding_result vector<NodeBindingInfo>:BINDING_RESULT_MAX_2;
@@ -151,7 +146,6 @@ open protocol Manager {
     }) -> () error zx.Status;
 
     /// Waits for bootup to complete.
-    @available(added=21)
     strict WaitForBootup() -> ();
 
     /// Restarts the driver components bound to the nodes identified in |node_ids|,
@@ -208,7 +202,6 @@ open protocol Manager {
     /// disabled, and any active nodes created from this spec are removed and re-bound.
     ///
     /// Returns the number of affected composite nodes.
-    @available(added=27)
     strict RebindCompositesWithDriver(struct {
         driver_url fuchsia.url.Url;
     }) -> (struct {

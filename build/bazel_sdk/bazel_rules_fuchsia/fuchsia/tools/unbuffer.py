@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 
-def main(command: list[str]) -> int:
+def main(command: list[str]) -> int | None:
     # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
     # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE inheritance
     # which can confuse child Python processes.
@@ -46,7 +46,7 @@ def main(command: list[str]) -> int:
 
             return proc.wait()
     except KeyboardInterrupt:
-        pass
+        return None
 
 
 if __name__ == "__main__":

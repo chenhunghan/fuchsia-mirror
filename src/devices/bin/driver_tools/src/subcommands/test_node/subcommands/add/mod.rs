@@ -6,16 +6,17 @@ pub mod args;
 
 use anyhow::{Result, anyhow};
 use args::AddTestNodeCommand;
-use {flex_fuchsia_driver_development as fdd, flex_fuchsia_driver_framework as fdf};
+use flex_fuchsia_driver_development as fdd;
+use flex_fuchsia_driver_framework as fdf;
 
-fn string_to_property(prop: &str) -> Result<fdf::NodeProperty> {
+fn string_to_property(prop: &str) -> Result<fdf::NodeProperty2> {
     let split: Vec<&str> = prop.split("=").collect();
     if split.len() != 2 {
         return Err(anyhow!("Bad Property '{}', properties need one '=' character", prop));
     }
 
-    Ok(fdf::NodeProperty {
-        key: fdf::NodePropertyKey::StringValue(split[0].to_string()),
+    Ok(fdf::NodeProperty2 {
+        key: split[0].to_string(),
         value: fdf::NodePropertyValue::StringValue(split[1].to_string()),
     })
 }

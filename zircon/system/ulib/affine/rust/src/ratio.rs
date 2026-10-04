@@ -322,6 +322,8 @@ impl core::ops::Mul for Ratio {
     }
 }
 
+// Division of fractions is multiplication by the reciprocal.
+#[allow(clippy::suspicious_arithmetic_impl)]
 impl core::ops::Div for Ratio {
     type Output = Self;
     fn div(self, rhs: Self) -> Self::Output {
@@ -343,6 +345,8 @@ impl core::ops::Mul<Ratio> for i64 {
     }
 }
 
+// Division of fractions is multiplication by the reciprocal.
+#[allow(clippy::suspicious_arithmetic_impl)]
 impl core::ops::Div<Ratio> for i64 {
     type Output = i64;
     fn div(self, rhs: Ratio) -> Self::Output {

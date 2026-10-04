@@ -138,6 +138,7 @@ _REBOOT_OFFLINE_TIMEOUT_SEC: int = 60
 class FuchsiaDevice(
     device_knobs.DeviceKnobs,
     affordances_capable.RebootCapableDevice,
+    affordances_capable.SuspendResumeCapableDevice,
     affordances_capable.FuchsiaDeviceLogger,
     affordances_capable.FuchsiaDeviceClose,
     affordances_capable.InspectCapableDevice,
@@ -202,9 +203,8 @@ class FuchsiaDevice(
         self._device_info: custom_types.DeviceInfo = device_info
 
         # Track if the device was created with a statically provided IP (infra).
-        self._is_static_ip: bool = device_info.ip_port is not None and (
-            environ.get("BOTANIST_CONFIG") is not None
-            or environ.get("SWARMING_TASK_ID") is not None
+        self._is_static_ip: bool = (
+            device_info.ip_port is not None and common.is_infra(environ)
         )
 
         self._ffx_config_data: FfxConfigData = ffx_config_data
@@ -711,6 +711,7 @@ class FuchsiaDevice(
             reboot_affordance=self,
             fuchsia_device_close=self,
             location=self.location,
+            suspend_resume_affordance=self,
         )
 
     @properties.Affordance
@@ -726,6 +727,7 @@ class FuchsiaDevice(
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
             fuchsia_device_close=self,
+            suspend_resume_affordance=self,
         )
 
     @properties.Affordance
@@ -741,6 +743,7 @@ class FuchsiaDevice(
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
             fuchsia_device_close=self,
+            suspend_resume_affordance=self,
         )
 
     @properties.Affordance
@@ -806,6 +809,7 @@ class FuchsiaDevice(
             ffx=self.ffx,
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
+            suspend_resume_affordance=self,
         )
 
     @properties.Affordance
@@ -820,6 +824,7 @@ class FuchsiaDevice(
             ffx=self.ffx,
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
+            suspend_resume_affordance=self,
         )
 
     @properties.Affordance

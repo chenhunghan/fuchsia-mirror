@@ -346,22 +346,22 @@ fn process_formatted_string(mut formatted: &str) -> Option<EncodedSize<'_>> {
     let mut unit = SizeUnit::Bytes;
     let mut scale = 1u64;
 
-    if let Some(last_char) = formatted.chars().next_back() {
-        if !last_char.is_ascii_digit() {
-            unit = SizeUnit::try_from(last_char).ok()?;
-            formatted = &formatted[..formatted.len() - last_char.len_utf8()];
+    if let Some(last_char) = formatted.chars().next_back()
+        && !last_char.is_ascii_digit()
+    {
+        unit = SizeUnit::try_from(last_char).ok()?;
+        formatted = &formatted[..formatted.len() - last_char.len_utf8()];
 
-            // Look for the unit.
-            match unit {
-                SizeUnit::Bytes => scale = 1,
-                SizeUnit::KiB => scale = 1 << 10,
-                SizeUnit::MiB => scale = 1 << 20,
-                SizeUnit::GiB => scale = 1 << 30,
-                SizeUnit::TiB => scale = 1 << 40,
-                SizeUnit::PiB => scale = 1 << 50,
-                SizeUnit::EiB => scale = 1 << 60,
-                _ => return None,
-            }
+        // Look for the unit.
+        match unit {
+            SizeUnit::Bytes => scale = 1,
+            SizeUnit::KiB => scale = 1 << 10,
+            SizeUnit::MiB => scale = 1 << 20,
+            SizeUnit::GiB => scale = 1 << 30,
+            SizeUnit::TiB => scale = 1 << 40,
+            SizeUnit::PiB => scale = 1 << 50,
+            SizeUnit::EiB => scale = 1 << 60,
+            _ => return None,
         }
     }
 

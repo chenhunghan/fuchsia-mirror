@@ -122,8 +122,9 @@ impl fmt::Display for WireTypeTemplate<'_> {
             TypeKind::Primitive { subtype } => {
                 if matches!(subtype, PrimSubtype::Int32)
                     && self.from_alias.is_some_and(|from_alias| {
+                        let decl_name = from_alias.name.decl_name().non_canonical();
                         from_alias.name.library() == "zx"
-                            && from_alias.name.decl_name().non_canonical() == "Status"
+                            && (decl_name == "Status" || decl_name == "Result")
                     })
                 {
                     write!(f, "::fidl_next::wire::fuchsia::StatusResult")?;

@@ -24,7 +24,7 @@ closed protocol ProfileProvider {
         priority uint32;
         name string:64;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         profile zx.Handle:<PROFILE, optional>;
     });
 
@@ -35,7 +35,7 @@ closed protocol ProfileProvider {
         period uint64;
         name string:64;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         profile zx.Handle:<PROFILE, optional>;
     });
 
@@ -43,7 +43,7 @@ closed protocol ProfileProvider {
     strict GetCpuAffinityProfile(struct {
         cpu_mask CpuSet;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         profile zx.Handle:<PROFILE, optional>;
     });
 
@@ -54,6 +54,6 @@ closed protocol ProfileProvider {
         handle zx.Handle;
         role string:2048;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

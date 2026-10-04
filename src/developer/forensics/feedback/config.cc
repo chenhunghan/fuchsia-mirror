@@ -150,6 +150,10 @@ std::optional<SnapshotExclusionConfig> ParseSnapshotExclusionConfig(
 constexpr char kFeedbackConfigSchema[] = R"({
   "type": "object",
   "properties": {
+    "persisted_logs_total_size_kib": {
+      "type": "integer",
+      "minimum": 1
+    },
     "report_persistence_max_cache_size_kib": {
       "type": "integer",
       "minimum": 1
@@ -200,6 +204,7 @@ constexpr char kFeedbackConfigSchema[] = R"({
     }
   },
   "required": [
+    "persisted_logs_total_size_kib",
     "report_persistence_max_cache_size_kib",
     "report_persistence_max_tmp_size_kib",
     "snapshot_persistence_max_cache_size_mib",
@@ -218,6 +223,9 @@ constexpr char kFeedbackConfigSchema[] = R"({
 
 std::optional<FeedbackConfig> ParseFeedbackConfig(const rapidjson::Document& json) {
   FeedbackConfig config;
+
+  const uint64_t persisted_logs_total_size_kib = json[kPersistedLogsTotalSizeKey].GetUint64();
+  config.persisted_logs_total_size = StorageSize::Kilobytes(persisted_logs_total_size_kib);
 
   const uint64_t max_report_cache_size_kib = json[kReportPersistenceMaxCacheSizeKey].GetUint64();
   config.report_persistence_max_cache_size = StorageSize::Kilobytes(max_report_cache_size_kib);
@@ -327,6 +335,8 @@ void ExposeConfig(inspect::Node& inspect_root, const FeedbackConfig& feedback_co
         node.RecordBool(kSupportsUserInitiatedPoweroffsKey,
                         feedback_config.supports_user_initiated_poweroffs);
 
+        node.RecordUint(kPersistedLogsTotalSizeKey,
+                        feedback_config.persisted_logs_total_size.ToKilobytes());
         node.RecordString(kSnapshotPersistenceMaxTmpSizeKey, snapshot_persistence_tmp_size);
         node.RecordString(kSnapshotPersistenceMaxCacheSizeKey, snapshot_persistence_cache_size);
       });

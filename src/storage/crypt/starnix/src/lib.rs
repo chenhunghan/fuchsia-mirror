@@ -32,10 +32,37 @@ const AES256_KEY_SIZE: usize = 32;
 /// An fscrypt wrapping key id.
 pub type EncryptionKeyId = [u8; FSCRYPT_KEY_IDENTIFIER_SIZE as usize];
 
+/// Policy mode derived from `fscrypt_policy_v2` flags on `FS_IOC_SET_ENCRYPTION_POLICY`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FscryptMode {
+    /// Default v2 policy (`flags` has neither `IV_INO_LBLK_64` nor `IV_INO_LBLK_32`):
+    /// uses per-file wrapped keys (`WrappedKey::Fxfs` / `FxfsCipher`) for files.
+    #[default]
+    Standard,
+    /// `FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64`: shared hardware keyslot with 64-bit
+    /// `(ino << 32) | lblk_num` DUNs and `HKDF_CONTEXT_IV_INO_LBLK_64_KEY` (4).
+    InoLblk64,
+    /// `FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32`: shared hardware keyslot with 32-bit
+    /// `(SipHash(ino) + lblk_num) as u32` DUNs and `HKDF_CONTEXT_IV_INO_LBLK_32_KEY` (6).
+    InoLblk32,
+}
+
+impl FscryptMode {
+    pub fn from_flags(flags: fidl_fuchsia_io::FscryptPolicyFlags) -> Self {
+        if flags.contains(fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_64) {
+            Self::InoLblk64
+        } else if flags.contains(fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32) {
+            Self::InoLblk32
+        } else {
+            Self::Standard
+        }
+    }
+}
+
 struct KeyInfo {
     users: Vec<u32>,
     key: Box<[u8]>,
-    slot: Option<u8>,
+    key_token: Option<zx::EventPair>,
 }
 
 struct CryptServiceInner {
@@ -61,7 +88,7 @@ impl CryptService {
         let data_wrapping_key_id = derive_lblk32_wrapping_key_id(raw_data_key);
 
         fn to_key_info(key: &[u8]) -> KeyInfo {
-            KeyInfo { users: Vec::new(), key: key.into(), slot: None }
+            KeyInfo { users: Vec::new(), key: key.into(), key_token: None }
         }
 
         Self {
@@ -92,7 +119,7 @@ impl CryptService {
 
     /// Adds the specified wrapping key for user `uid`.
     pub fn add_wrapping_key(&self, raw_key: &[u8], uid: u32) -> Result<EncryptionKeyId, Errno> {
-        let (key, slot) = if let Some(proxy) = self.inline_crypto_proxy.as_ref() {
+        let (key, key_token) = if let Some(proxy) = self.inline_crypto_proxy.as_ref() {
             let key = Box::from(
                 proxy
                     .derive_raw_secret(raw_key, zx::MonotonicInstant::INFINITE)
@@ -106,7 +133,7 @@ impl CryptService {
                         from_status_like_fdio!(status)
                     })?,
             );
-            let slot = proxy
+            let key_token = proxy
                 .program_key(raw_key, DATA_UNIT_SIZE, zx::MonotonicInstant::INFINITE)
                 .map_err(|error| {
                     log::error!(error:?; "program_key FIDL error");
@@ -117,7 +144,7 @@ impl CryptService {
                     log::error!(status:?; "program_key failed");
                     from_status_like_fdio!(status)
                 })?;
-            (key, Some(slot))
+            (key, Some(key_token))
         } else {
             (Box::from(raw_key), None)
         };
@@ -132,7 +159,7 @@ impl CryptService {
                 Ok(key_identifier)
             }
             Entry::Vacant(vacant) => {
-                vacant.insert(KeyInfo { users: vec![uid], key, slot });
+                vacant.insert(KeyInfo { users: vec![uid], key, key_token });
                 Ok(key_identifier)
             }
         }
@@ -156,8 +183,8 @@ impl CryptService {
                     owner,
                     wrapping_key_id,
                     object_type,
+                    flags,
                     responder,
-                    ..
                 }) => {
                     responder
                         .send(
@@ -165,8 +192,11 @@ impl CryptService {
                                 owner,
                                 EncryptionKeyId::from(wrapping_key_id),
                                 object_type,
+                                flags,
                             ) {
-                                Ok((ref wrapped, ref key)) => Ok((wrapped, key)),
+                                Ok((ref wrapped, ref key, key_token)) => {
+                                    Ok((wrapped, key, key_token))
+                                }
                                 Err(e) => Err(e.into_raw()),
                             },
                         )
@@ -177,7 +207,7 @@ impl CryptService {
                 Ok(CryptRequest::UnwrapKey { owner, wrapped_key, responder }) => {
                     responder
                         .send(match self.unwrap_key(owner, wrapped_key) {
-                            Ok(ref unwrapped) => Ok(unwrapped),
+                            Ok((ref unwrapped, key_token)) => Ok((unwrapped, key_token)),
                             Err(e) => Err(e.into_raw()),
                         })
                         .unwrap_or_else(
@@ -224,9 +254,21 @@ impl CryptService {
         self.uuid.set(uuid).unwrap();
     }
 
-    fn derive_directory_key(&self, key: &[u8], nonce: &[u8]) -> Result<Vec<u8>, zx::Status> {
-        Ok(fscrypt::to_directory_keys(key, self.uuid.get().ok_or(zx::Status::BAD_STATE)?, nonce)
-            .to_unwrapped_key())
+    fn derive_directory_key(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        mode: FscryptMode,
+    ) -> Result<Vec<u8>, zx::Status> {
+        let uuid = self.uuid.get().ok_or(zx::Status::BAD_STATE)?;
+        Ok(match mode {
+            FscryptMode::InoLblk64 => {
+                fscrypt::to_directory_keys_lblk64(key, uuid, nonce).to_unwrapped_key()
+            }
+            FscryptMode::InoLblk32 | FscryptMode::Standard => {
+                fscrypt::to_directory_keys(key, uuid, nonce).to_unwrapped_key()
+            }
+        })
     }
 
     fn create_key(&self, owner: u64, purpose: KeyPurpose) -> CryptCreateKeyResult {
@@ -267,33 +309,58 @@ impl CryptService {
         owner: u64,
         wrapping_key_id: EncryptionKeyId,
         object_type: ObjectType,
-    ) -> Result<(WrappedKey, Vec<u8>), zx::Status> {
+        flags: fidl_fuchsia_io::FscryptPolicyFlags,
+    ) -> Result<(WrappedKey, Vec<u8>, Option<zx::EventPair>), zx::Status> {
         let mut inner = self.inner.lock();
         let key_info = inner.keys.get_mut(&wrapping_key_id).ok_or(zx::Status::UNAVAILABLE)?;
+        let mode = FscryptMode::from_flags(flags);
         match object_type {
             ObjectType::Directory | ObjectType::Symlink => {
                 let mut nonce = [0; 16];
                 zx::cprng_draw(&mut nonce);
-                let unwrapped_key = self.derive_directory_key(&key_info.key, &nonce)?;
-                Ok((
-                    WrappedKey::FscryptInoLblk32Dir(FscryptKeyIdentifierAndNonce {
-                        key_identifier: wrapping_key_id,
-                        nonce,
-                    }),
-                    unwrapped_key,
-                ))
+                let unwrapped_key = self.derive_directory_key(&key_info.key, &nonce, mode)?;
+                let wrapped_key = match mode {
+                    FscryptMode::InoLblk64 => {
+                        WrappedKey::FscryptInoLblk64Dir(FscryptKeyIdentifierAndNonce {
+                            key_identifier: wrapping_key_id,
+                            nonce,
+                        })
+                    }
+                    FscryptMode::InoLblk32 | FscryptMode::Standard => {
+                        WrappedKey::FscryptInoLblk32Dir(FscryptKeyIdentifierAndNonce {
+                            key_identifier: wrapping_key_id,
+                            nonce,
+                        })
+                    }
+                };
+                Ok((wrapped_key, unwrapped_key, None))
             }
             ObjectType::File => {
-                if let Some(slot) = key_info.slot {
-                    let unwrapped_key = derive_file_key(slot, &key_info.key);
-                    Ok((
-                        WrappedKey::FscryptInoLblk32File(FscryptKeyIdentifier {
-                            key_identifier: wrapping_key_id,
-                        }),
-                        unwrapped_key,
-                    ))
+                // Only use shared-key inline encryption when an `IV_INO_LBLK_*` policy mode is
+                // active AND a hardware keyslot is programmed. Default (`FscryptMode::Standard`)
+                // policies use per-file wrapped keys (`WrappedKey::Fxfs`), avoiding cross-file
+                // key+DUN reuse.
+                if let (Some(key_token), FscryptMode::InoLblk32 | FscryptMode::InoLblk64) =
+                    (&key_info.key_token, mode)
+                {
+                    let dup_token = key_token.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+                    let unwrapped_key = derive_file_key(&key_info.key, mode);
+                    let wrapped_key = match mode {
+                        FscryptMode::InoLblk64 => {
+                            WrappedKey::FscryptInoLblk64File(FscryptKeyIdentifier {
+                                key_identifier: wrapping_key_id,
+                            })
+                        }
+                        FscryptMode::InoLblk32 => {
+                            WrappedKey::FscryptInoLblk32File(FscryptKeyIdentifier {
+                                key_identifier: wrapping_key_id,
+                            })
+                        }
+                        FscryptMode::Standard => unreachable!(),
+                    };
+                    Ok((wrapped_key, unwrapped_key, Some(dup_token)))
                 } else {
-                    // Use a software backed key.
+                    // Use a per-file wrapped key (`FxfsCipher`).
                     let cipher = get_fxfs_cipher(&key_info.key);
                     let nonce = zero_extended_nonce(owner);
 
@@ -311,6 +378,7 @@ impl CryptService {
                             wrapped_key: wrapped.try_into().expect("wrapped key wrong size"),
                         }),
                         key.into(),
+                        None,
                     ))
                 }
             }
@@ -318,30 +386,47 @@ impl CryptService {
         }
     }
 
-    fn unwrap_key(&self, owner: u64, key: WrappedKey) -> Result<Vec<u8>, zx::Status> {
+    fn unwrap_key(
+        &self,
+        owner: u64,
+        key: WrappedKey,
+    ) -> Result<(Vec<u8>, Option<zx::EventPair>), zx::Status> {
         let mut inner = self.inner.lock();
         match key {
             WrappedKey::Fxfs(FxfsKey { wrapping_key_id, wrapped_key }) => {
                 let wrapping_key_id = EncryptionKeyId::from(wrapping_key_id);
                 let key_info = inner.keys.get(&wrapping_key_id).ok_or(zx::Status::UNAVAILABLE)?;
-
                 let cipher = get_fxfs_cipher(&key_info.key);
                 let nonce = zero_extended_nonce(owner);
 
-                Ok(cipher
-                    .decrypt(&nonce, &wrapped_key[..])
-                    .map_err(|_| zx::Status::IO_DATA_INTEGRITY)?)
+                Ok((
+                    cipher
+                        .decrypt(&nonce, &wrapped_key[..])
+                        .map_err(|_| zx::Status::IO_DATA_INTEGRITY)?,
+                    None,
+                ))
             }
             WrappedKey::FscryptInoLblk32File(FscryptKeyIdentifier { key_identifier }) => {
                 let wrapping_key_id = EncryptionKeyId::from(key_identifier);
                 let key_info =
                     inner.keys.get_mut(&wrapping_key_id).ok_or(zx::Status::UNAVAILABLE)?;
-                let Some(slot) = key_info.slot else {
+                let Some(key_token) = &key_info.key_token else {
                     // The caller is trying to use a hardware wrapped key, but we
                     // don't have access to the wrapping hardware.
                     return Err(zx::Status::UNAVAILABLE);
                 };
-                Ok(derive_file_key(slot, &key_info.key))
+                let dup_token = key_token.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+                Ok((derive_file_key(&key_info.key, FscryptMode::InoLblk32), Some(dup_token)))
+            }
+            WrappedKey::FscryptInoLblk64File(FscryptKeyIdentifier { key_identifier }) => {
+                let wrapping_key_id = EncryptionKeyId::from(key_identifier);
+                let key_info =
+                    inner.keys.get_mut(&wrapping_key_id).ok_or(zx::Status::UNAVAILABLE)?;
+                let Some(key_token) = &key_info.key_token else {
+                    return Err(zx::Status::UNAVAILABLE);
+                };
+                let dup_token = key_token.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+                Ok((derive_file_key(&key_info.key, FscryptMode::InoLblk64), Some(dup_token)))
             }
             WrappedKey::FscryptInoLblk32Dir(FscryptKeyIdentifierAndNonce {
                 key_identifier,
@@ -350,7 +435,22 @@ impl CryptService {
                 let wrapping_key_id = EncryptionKeyId::from(key_identifier);
                 let key_info = inner.keys.get(&wrapping_key_id).ok_or(zx::Status::UNAVAILABLE)?;
 
-                self.derive_directory_key(&key_info.key, &nonce)
+                Ok((
+                    self.derive_directory_key(&key_info.key, &nonce, FscryptMode::InoLblk32)?,
+                    None,
+                ))
+            }
+            WrappedKey::FscryptInoLblk64Dir(FscryptKeyIdentifierAndNonce {
+                key_identifier,
+                nonce,
+            }) => {
+                let wrapping_key_id = EncryptionKeyId::from(key_identifier);
+                let key_info = inner.keys.get(&wrapping_key_id).ok_or(zx::Status::UNAVAILABLE)?;
+
+                Ok((
+                    self.derive_directory_key(&key_info.key, &nonce, FscryptMode::InoLblk64)?,
+                    None,
+                ))
             }
             _ => Err(zx::Status::NOT_SUPPORTED),
         }
@@ -363,12 +463,14 @@ fn zero_extended_nonce(val: u64) -> Nonce {
     nonce
 }
 
-fn derive_file_key(slot: u8, key: &[u8]) -> Vec<u8> {
-    let mut unwrapped_key = Vec::with_capacity(17);
-    unwrapped_key.push(slot);
-    let ino_hash_key: [u8; 16] = fscrypt_hkdf(key, &[], HKDF_CONTEXT_INODE_HASH_KEY);
-    unwrapped_key.extend_from_slice(&ino_hash_key);
-    unwrapped_key
+fn derive_file_key(key: &[u8], mode: FscryptMode) -> Vec<u8> {
+    match mode {
+        FscryptMode::InoLblk32 | FscryptMode::Standard => {
+            let ino_hash_key: [u8; 16] = fscrypt_hkdf(key, &[], HKDF_CONTEXT_INODE_HASH_KEY);
+            ino_hash_key.to_vec()
+        }
+        FscryptMode::InoLblk64 => Vec::new(),
+    }
 }
 
 fn get_fxfs_cipher(raw_key: &[u8]) -> Aes256GcmSiv {
@@ -436,7 +538,12 @@ mod tests {
         // create_key_with_id should still succeed.
         service.forget_wrapping_key(wrapping_key_id, 1).expect("forget wrapping key failed");
         service
-            .create_key_with_id(0, wrapping_key_id, ObjectType::File)
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::empty(),
+            )
             .expect("create key with id failed");
 
         // User 1 cannot forget the same key a second time.
@@ -454,6 +561,7 @@ mod tests {
                     0,
                     EncryptionKeyId::from(u128::to_le_bytes(1)),
                     ObjectType::File,
+                    fidl_fuchsia_io::FscryptPolicyFlags::empty(),
                 )
                 .expect_err(
                     "create_key_with_id should fail if the key hasn't been added by the caller"
@@ -492,8 +600,15 @@ mod tests {
         let wrapping_key_id = service.add_wrapping_key(&[0xdc; 32], 0).unwrap();
         assert_eq!(wrapping_key_id, EXPECTED_WRAPPING_KEY_ID);
 
-        let (_, unwrapped_key) =
-            service.create_key_with_id(0, wrapping_key_id, ObjectType::Directory).unwrap();
+        let (_, unwrapped_key, key_token) = service
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::Directory,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32,
+            )
+            .unwrap();
+        assert!(key_token.is_none());
         let (cts_key, remainder) = unwrapped_key.split_at(EXPECTED_CTS_KEY.len());
         let (ino_hash_key, _dir_hash_key) = remainder.split_at(EXPECTED_INO_HASH_KEY.len());
 
@@ -522,19 +637,23 @@ mod tests {
         let service = CryptService::new(&[0; 32], &[1; 32], Some(insecure_inilne_crypto_proxy));
         let wrapping_key_id = service.add_wrapping_key(&[0xcd; 32], 0).unwrap();
 
-        let (wrapped_key, unwrapped_key) = service
-            .create_key_with_id(0, wrapping_key_id, ObjectType::File)
+        let (wrapped_key, unwrapped_key, key_token) = service
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32,
+            )
             .expect("create_key failed");
         assert_matches!(wrapped_key, WrappedKey::FscryptInoLblk32File(FscryptKeyIdentifier { .. }));
-        let expected_slot = 0;
-        assert_eq!(unwrapped_key[0], expected_slot);
+        let key_token = key_token.expect("expected key_token");
 
         let mut key = [0xcd; 32];
         for b in &mut key {
             *b = *b >> 4 | *b << 4;
         }
         let expected_ino_hash_key: [u8; 16] = fscrypt_hkdf(&key, &[], HKDF_CONTEXT_INODE_HASH_KEY);
-        assert_eq!(unwrapped_key[1..17], expected_ino_hash_key);
+        assert_eq!(unwrapped_key[..16], expected_ino_hash_key);
         // Validate encrypted reads/writes with the key we just programmed.
         let device = BlockDevice::new(
             RemoteBlockClient::new(block_server.clone().connect::<BlockProxy>())
@@ -544,6 +663,8 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let expected_slot = device.register_key(key_token).await.expect("register_key failed");
 
         let plaintext: &[u8] = b"This is aligned sensitive data!!";
         let mut buf = device.allocate_buffer(4096).await;
@@ -570,14 +691,32 @@ mod tests {
         assert_ne!(&read_buf.to_vec()[..plaintext.len()], plaintext);
 
         // Reading using a different key than the one used for writing should also return garbage.
-        // Cheat: we know the insecure inline encryption provider adds this to the next available
-        // slot which is `expected_slot + 1`
-        let _wrapping_key_id = service.add_wrapping_key(&[0xab; 32], 0).unwrap();
+        let wrapping_key_id_2 = service.add_wrapping_key(&[0xab; 32], 0).unwrap();
+        let (_, _, key_token_2) = service
+            .create_key_with_id(
+                0,
+                wrapping_key_id_2,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32,
+            )
+            .unwrap();
+        // Before registering key_token_2 with the session, using expected_slot + 1 must fail.
         device
             .read_with_opts(
                 0,
                 read_buf.as_mut(),
                 ReadOptions { inline_crypto: InlineCryptoOptions::enabled(expected_slot + 1, 0) },
+            )
+            .await
+            .expect_err("Read passed unexpectedly with unregistered key slot");
+
+        let slot_2 =
+            device.register_key(key_token_2.unwrap()).await.expect("register_key 2 failed");
+        device
+            .read_with_opts(
+                0,
+                read_buf.as_mut(),
+                ReadOptions { inline_crypto: InlineCryptoOptions::enabled(slot_2, 0) },
             )
             .await
             .expect("Read failed");
@@ -623,8 +762,13 @@ mod tests {
         service.set_uuid(TEST_UUID);
         let wrapping_key_id =
             service.add_wrapping_key(&[0xcd; 32], 0).expect("add wrapping key failed");
-        let (wrapped_key, expected_unwrapped_key) = service
-            .create_key_with_id(0, wrapping_key_id, ObjectType::Directory)
+        let (wrapped_key, expected_unwrapped_key, _) = service
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::Directory,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32,
+            )
             .expect("create_key failed");
         assert_matches!(
             wrapped_key,
@@ -633,7 +777,7 @@ mod tests {
                 ..
             }) if key_identifier == wrapping_key_id
         );
-        let unwrapped_key = service.unwrap_key(0, wrapped_key).expect("create_key failed");
+        let (unwrapped_key, _) = service.unwrap_key(0, wrapped_key).expect("create_key failed");
         assert_eq!(unwrapped_key, expected_unwrapped_key);
     }
 
@@ -643,7 +787,7 @@ mod tests {
 
         let (wrapping_key_id, wrapped_key, unwrapped_key) =
             service.create_key(0, KeyPurpose::Data).expect("create_key failed");
-        let unwrap_result = service
+        let (unwrap_result, _) = service
             .unwrap_key(
                 0,
                 WrappedKey::Fxfs(FxfsKey {
@@ -657,7 +801,7 @@ mod tests {
         // Do it twice to make sure the service can use the same key repeatedly.
         let (wrapping_key_id, wrapped_key, unwrapped_key) =
             service.create_key(1, KeyPurpose::Data).expect("create_key failed");
-        let unwrap_result = service
+        let (unwrap_result, _) = service
             .unwrap_key(
                 1,
                 WrappedKey::Fxfs(FxfsKey {
@@ -676,13 +820,18 @@ mod tests {
         let wrapping_key_id =
             service.add_wrapping_key(&[2; 32], 0).expect("add wrapping key failed");
 
-        let (wrapped_key, unwrapped_key) = service
-            .create_key_with_id(0, wrapping_key_id, ObjectType::File)
+        let (wrapped_key, unwrapped_key, _) = service
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::empty(),
+            )
             .expect("create_key_with_id failed");
         // TODO(https://fxbug.dev/436902004): Switch to lkb32 wrapped key type.
         match wrapped_key {
             WrappedKey::Fxfs(fxfs_key) => {
-                let unwrap_result = service
+                let (unwrap_result, _) = service
                     .unwrap_key(
                         0,
                         WrappedKey::Fxfs(FxfsKey {
@@ -697,13 +846,18 @@ mod tests {
         }
 
         // Do it twice to make sure the service can use the same key repeatedly.
-        let (wrapped_key, unwrapped_key) = service
-            .create_key_with_id(1, wrapping_key_id, ObjectType::File)
+        let (wrapped_key, unwrapped_key, _) = service
+            .create_key_with_id(
+                1,
+                wrapping_key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::empty(),
+            )
             .expect("create_key_with_id failed");
         // TODO(https://fxbug.dev/436902004): Switch to lkb32 wrapped key type.
         match wrapped_key {
             WrappedKey::Fxfs(fxfs_key) => {
-                let unwrap_result = service
+                let (unwrap_result, _) = service
                     .unwrap_key(
                         1,
                         WrappedKey::Fxfs(FxfsKey {
@@ -725,14 +879,19 @@ mod tests {
         let wrapping_key_id =
             service.add_wrapping_key(&[2; 32], 0).expect("add wrapping key failed");
 
-        let (wrapped_key, unwrapped_key) = service
-            .create_key_with_id(0, wrapping_key_id, ObjectType::File)
+        let (wrapped_key, unwrapped_key, _) = service
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::empty(),
+            )
             .expect("create_key_with_id failed");
 
         // TODO(https://fxbug.dev/436902004): Switch to lkb32 wrapped key type.
         match wrapped_key {
             WrappedKey::Fxfs(fxfs_key) => {
-                let unwrap_result = service
+                let (unwrap_result, _) = service
                     .unwrap_key(
                         0,
                         WrappedKey::Fxfs(FxfsKey {
@@ -749,7 +908,12 @@ mod tests {
         service.forget_wrapping_key(wrapping_key_id, 0).unwrap();
 
         service
-            .create_key_with_id(0, wrapping_key_id, ObjectType::File)
+            .create_key_with_id(
+                0,
+                wrapping_key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::empty(),
+            )
             .expect_err("create_key_with_id should fail if the wrapping key does not exist");
     }
 
@@ -807,7 +971,8 @@ mod tests {
                         }
                         DeviceRequest::ProgramKey { wrapped_key, responder, .. } => {
                             if wrapped_key == expected_key {
-                                responder.send(Ok(0)).unwrap();
+                                let (_server_ep, client_ep) = zx::EventPair::create();
+                                responder.send(Ok(client_ep)).unwrap();
                             } else {
                                 responder.send(Err(zx::Status::INVALID_ARGS.into_raw())).unwrap();
                             }
@@ -818,6 +983,82 @@ mod tests {
         });
 
         let service = CryptService::new(&[0; 32], &[1; 32], Some(client));
-        service.add_wrapping_key(&raw_key_bytes, 0).expect("add_wrapping_key failed");
+        service.set_uuid([0x55; 16]);
+        let key_id = service.add_wrapping_key(&raw_key_bytes, 0).expect("add_wrapping_key failed");
+
+        // 1. IV_INO_LBLK_32 returns 16-byte unwrapped key (ino_hash_key) + key_token for files
+        //    and 64-byte unwrapped key for directories.
+        let (wrapped_lblk32, unwrapped_lblk32, token_lblk32) = service
+            .create_key_with_id(
+                0,
+                key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32,
+            )
+            .expect("create_key failed");
+        assert_eq!(unwrapped_lblk32.len(), 16);
+        assert!(token_lblk32.is_some());
+        let (_, unwrapped_dir32, token_dir32) = service
+            .create_key_with_id(
+                0,
+                key_id,
+                ObjectType::Directory,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_32,
+            )
+            .expect("create_key dir failed");
+        assert_eq!(unwrapped_dir32.len(), 64);
+        assert!(token_dir32.is_none());
+
+        // 2. IV_INO_LBLK_64 returns empty unwrapped key + key_token for files and 48-byte unwrapped
+        //    key for directories.
+        assert!(service.contains_key(key_id));
+        let (wrapped_lblk64, unwrapped_lblk64, token_lblk64) = service
+            .create_key_with_id(
+                0,
+                key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_64,
+            )
+            .expect("create_key failed");
+        assert!(unwrapped_lblk64.is_empty());
+        assert!(token_lblk64.is_some());
+        let (wrapped_dir64, unwrapped_dir64, token_dir64) = service
+            .create_key_with_id(
+                0,
+                key_id,
+                ObjectType::Directory,
+                fidl_fuchsia_io::FscryptPolicyFlags::IV_INO_LBLK_64,
+            )
+            .expect("create_key dir failed");
+        assert_eq!(unwrapped_dir64.len(), 48);
+        assert!(token_dir64.is_none());
+
+        // 3. Standard policy (PAD_16 only, no IV_INO_LBLK_*) uses per-file WrappedKey::Fxfs (32B).
+        assert!(service.contains_key(key_id));
+        let (wrapped_std, unwrapped_std, token_std) = service
+            .create_key_with_id(
+                42,
+                key_id,
+                ObjectType::File,
+                fidl_fuchsia_io::FscryptPolicyFlags::PAD_16,
+            )
+            .expect("create_key failed");
+        assert!(matches!(wrapped_std, WrappedKey::Fxfs(_)));
+        assert_eq!(unwrapped_std.len(), 32);
+        assert!(token_std.is_none());
+
+        // 4. Verify all three modes coexist under the same main key and unwrap deterministically.
+        let (unwrapped, token) = service.unwrap_key(0, wrapped_lblk32).expect("unwrap failed");
+        assert_eq!(unwrapped, unwrapped_lblk32);
+        assert!(token.is_some());
+        let (unwrapped, token) = service.unwrap_key(0, wrapped_lblk64).expect("unwrap failed");
+        assert!(unwrapped.is_empty());
+        assert!(token.is_some());
+        let (unwrapped, token) = service.unwrap_key(0, wrapped_dir64).expect("unwrap failed");
+        assert_eq!(unwrapped, unwrapped_dir64);
+        assert!(token.is_none());
+        let (unwrapped, token) = service.unwrap_key(42, wrapped_std).expect("unwrap failed");
+        assert_eq!(unwrapped, unwrapped_std);
+        assert!(token.is_none());
     }
 }

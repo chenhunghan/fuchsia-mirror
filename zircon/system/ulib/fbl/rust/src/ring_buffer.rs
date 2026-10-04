@@ -32,8 +32,8 @@ impl<T, const N: usize> RingBuffer<T, N> {
 
     /// Create a new, empty RingBuffer.
     pub const fn new() -> Self {
-        let _ = Self::ASSERT_N_POSITIVE;
-        let _ = Self::ASSERT_N_FITS_U32;
+        const { Self::ASSERT_N_POSITIVE };
+        const { Self::ASSERT_N_FITS_U32 };
         RingBuffer { data: [const { MaybeUninit::uninit() }; N], head: 0, tail: 0, size: 0 }
     }
 

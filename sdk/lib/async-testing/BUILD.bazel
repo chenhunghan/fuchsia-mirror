@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library_zx(
+    name = "async-testing",
+    srcs = [
+        "dispatcher_stub.cc",
+        "test_loop.cc",
+        "test_loop_dispatcher.cc",
+    ],
+    hdrs = [
+        "include/lib/async-testing/dispatcher_stub.h",
+        "include/lib/async-testing/test_loop.h",
+        "include/lib/async-testing/test_loop_dispatcher.h",
+        "include/lib/async-testing/test_subloop.h",
+    ],
+    api_area = "Kernel",
+    category = "partner",
+    idk_name = "async-testing",
+    implementation_deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/fdio",
+    ],
+    stable = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
+    # visibility is limited to actual Bazel dependents.
+    visibility = [
+        "//src/lib/testing/loop_fixture:__pkg__",
+    ],  # @bazel2gn:raw_overwrite:[ "//*" ]
+    deps = [
+        # <lib/async-testing/dispatcher_stub.h> has
+        # #include <lib/async/dispatcher.h>.
+        "//sdk/lib/async",
+        # <lib/async-testing/dispatcher_stub.h> has #include <lib/zx/time.h>.
+        "//zircon/system/ulib/zx",
+    ],
+)

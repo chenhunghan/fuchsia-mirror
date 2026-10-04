@@ -1134,7 +1134,7 @@ class UsbPeripheralFunctionTest : public ManagedUsbPeripheralTest {
 
     usb_interface_descriptor_t intf_desc = {
         .b_length = sizeof(usb_interface_descriptor_t),
-        .b_descriptor_type = USB_DT_INTERFACE,
+        .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
         .b_interface_number = interface_num,
         .b_alternate_setting = 0,
         .b_num_endpoints = 1,
@@ -1144,7 +1144,7 @@ class UsbPeripheralFunctionTest : public ManagedUsbPeripheralTest {
     };
     usb_endpoint_descriptor_t ep_desc = {
         .b_length = sizeof(usb_endpoint_descriptor_t),
-        .b_descriptor_type = USB_DT_ENDPOINT,
+        .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
         .b_endpoint_address = ep_addr,
         .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
         .w_max_packet_size = 512,

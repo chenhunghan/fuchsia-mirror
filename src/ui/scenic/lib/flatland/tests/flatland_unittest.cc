@@ -18,6 +18,7 @@
 #include <lib/ui/scenic/cpp/buffer_collection_import_export_tokens.h>
 #include <lib/ui/scenic/cpp/view_creation_tokens.h>
 #include <lib/ui/scenic/cpp/view_identity.h>
+#include <lib/zx/counter.h>
 
 #include <cstdint>
 #include <memory>
@@ -185,6 +186,57 @@ class FlatlandDisplayTest : public FlatlandTest {
 
     EXPECT_TRUE(parent_viewport_watcher_status.has_value());
     EXPECT_EQ(parent_viewport_watcher_status.value(), ParentViewportStatus::kConnectedToDisplay);
+  }
+
+  struct CommonTopologyState {
+    flatland::UberStructSnapshot snapshot;
+    GlobalTopologyData topology_data;
+    flatland::GlobalMatrixVector global_matrices;
+    flatland::GlobalTransformClipRegionVector clip_regions;
+  };
+
+  CommonTopologyState ComputeCommonTopologyState(TransformHandle root_transform) {
+    auto snapshot = uber_struct_system_->Snapshot();
+    auto links = link_system_->GetResolvedTopologyLinks();
+    auto topology_data = GlobalTopologyData::ComputeGlobalTopologyData(
+        snapshot.map, links, link_system_->GetInstanceId(), root_transform);
+
+    flatland::GlobalMatrixVector global_matrices;
+    ComputeGlobalMatrices(global_matrices, topology_data.topology_vector,
+                          topology_data.parent_indices, snapshot.map);
+
+    flatland::GlobalTransformClipRegionVector clip_regions;
+    ComputeGlobalTransformClipRegions(clip_regions, topology_data.topology_vector,
+                                      topology_data.parent_indices, global_matrices, snapshot.map);
+
+    return {
+        .snapshot = std::move(snapshot),
+        .topology_data = std::move(topology_data),
+        .global_matrices = std::move(global_matrices),
+        .clip_regions = std::move(clip_regions),
+    };
+  }
+
+  std::vector<flatland::ResolvedLayer> ComputeResolvedLayers(TransformHandle root_transform) {
+    auto [snapshot, topology_data, global_matrices, clip_regions] =
+        ComputeCommonTopologyState(root_transform);
+
+    flatland::GlobalOpacityVector inherited_opacities;
+    ComputeGlobalOpacityValues(inherited_opacities, topology_data.topology_vector,
+                               topology_data.parent_indices, snapshot.map);
+
+    return flatland::ComputeGlobalResolvedLayers(topology_data, snapshot.map, global_matrices,
+                                                 clip_regions, inherited_opacities);
+  }
+
+  std::unique_ptr<view_tree::SubtreeSnapshot> ComputeViewTreeSnapshot(
+      TransformHandle root_transform) {
+    auto [snapshot, topology_data, global_matrices, clip_regions] =
+        ComputeCommonTopologyState(root_transform);
+
+    return GlobalTopologyData::GenerateViewTreeSnapshot(
+        topology_data, snapshot.map, {}, clip_regions, global_matrices,
+        link_system_->GetLinkChildToParentTransformMap().first);
   }
 };
 
@@ -540,6 +592,42 @@ TEST_F(FlatlandTest, SetHitRegionsErrorTest) {
   {
     std::shared_ptr<Flatland> flatland = CreateFlatland();
     fuchsia_math::wire::RectF rect = {0, 0, -1, 0};
+    fuchsia_ui_composition::wire::HitRegion region = {rect, interaction};
+
+    flatland->CreateTransform(kId);
+    flatland->SetRootTransform(kId);
+    flatland->SetHitRegions(kId, {region});
+    Present(flatland, /*expect_success=*/false);
+  }
+
+  // Width/height should not be NaN.
+  {
+    std::shared_ptr<Flatland> flatland = CreateFlatland();
+    fuchsia_math::wire::RectF rect = {0, 0, NAN, 10};
+    fuchsia_ui_composition::wire::HitRegion region = {rect, interaction};
+
+    flatland->CreateTransform(kId);
+    flatland->SetRootTransform(kId);
+    flatland->SetHitRegions(kId, {region});
+    Present(flatland, /*expect_success=*/false);
+  }
+
+  // Origin should not be NaN.
+  {
+    std::shared_ptr<Flatland> flatland = CreateFlatland();
+    fuchsia_math::wire::RectF rect = {NAN, 0, 10, 10};
+    fuchsia_ui_composition::wire::HitRegion region = {rect, interaction};
+
+    flatland->CreateTransform(kId);
+    flatland->SetRootTransform(kId);
+    flatland->SetHitRegions(kId, {region});
+    Present(flatland, /*expect_success=*/false);
+  }
+
+  // Coordinates should not be infinite.
+  {
+    std::shared_ptr<Flatland> flatland = CreateFlatland();
+    fuchsia_math::wire::RectF rect = {0, 0, INFINITY, 10};
     fuchsia_ui_composition::wire::HitRegion region = {rect, interaction};
 
     flatland->CreateTransform(kId);
@@ -5647,6 +5735,130 @@ TEST_F(FlatlandDisplayTest, SimpleSetContent) {
   ConnectChildViewToDisplayThenValidate(display, child, kWidth, kHeight);
 }
 
+// Content that extends past the display's edges is clipped to the display.
+TEST_F(FlatlandDisplayTest, ContentClippedToDisplay) {
+  constexpr uint32_t kWidth = 800;
+  constexpr uint32_t kHeight = 600;
+
+  std::shared_ptr<FlatlandDisplay> display = CreateFlatlandDisplay(kWidth, kHeight);
+
+  std::shared_ptr<Flatland> child = CreateFlatland();
+  ConnectChildViewToDisplayThenValidate(display, child, kWidth, kHeight);
+
+  const TransformId kRootId{1};
+  child->CreateTransform(kRootId);
+  child->SetRootTransform(kRootId);
+
+  // Content extending past the right and bottom edges.
+  const TransformId kTransformId1{2};
+  const ContentId kFilledRectId1{3};
+  child->CreateTransform(kTransformId1);
+  child->SetTranslation(kTransformId1, {700, 500});
+  child->AddChild(kRootId, kTransformId1);
+  child->CreateFilledRect(kFilledRectId1);
+  child->SetSolidFill(kFilledRectId1, {1.f, 0.f, 0.f, 1.f}, {200, 200});
+  child->SetContent(kTransformId1, kFilledRectId1);
+
+  // Content extending past the left and top edges.
+  const TransformId kTransformId2{4};
+  const ContentId kFilledRectId2{5};
+  child->CreateTransform(kTransformId2);
+  child->SetTranslation(kTransformId2, {-100, -100});
+  child->AddChild(kRootId, kTransformId2);
+  child->CreateFilledRect(kFilledRectId2);
+  child->SetSolidFill(kFilledRectId2, {0.f, 1.f, 0.f, 1.f}, {200, 200});
+  child->SetContent(kTransformId2, kFilledRectId2);
+
+  Present(child, true);
+
+  auto resolved_layers = ComputeResolvedLayers(display->root_transform());
+  ASSERT_EQ(resolved_layers.size(), 2u);
+  EXPECT_EQ(resolved_layers[0].geometry.dest, types::RectangleF({700, 500, 100, 100}));
+  EXPECT_EQ(resolved_layers[1].geometry.dest, types::RectangleF({0, 0, 100, 100}));
+}
+
+// At a device pixel ratio above 1, content is still clipped to the display's physical size,
+// although the transform that links the display to its content scales by that ratio.
+TEST_F(FlatlandDisplayTest, ContentClippedToDisplayAtDevicePixelRatio) {
+  constexpr uint32_t kWidth = 800;
+  constexpr uint32_t kHeight = 600;
+
+  std::shared_ptr<FlatlandDisplay> display = CreateFlatlandDisplay(kWidth, kHeight);
+  display->SetDevicePixelRatio({2.f, 2.f});
+
+  std::shared_ptr<Flatland> child = CreateFlatland();
+  ConnectChildViewToDisplayThenValidate(display, child, 400, 300);
+
+  const TransformId kRootId{1};
+  const TransformId kTransformId{2};
+  const ContentId kFilledRectId{3};
+
+  child->CreateTransform(kRootId);
+  child->SetRootTransform(kRootId);
+
+  child->CreateTransform(kTransformId);
+  child->SetTranslation(kTransformId, {300, 200});
+  child->AddChild(kRootId, kTransformId);
+
+  child->CreateFilledRect(kFilledRectId);
+  child->SetSolidFill(kFilledRectId, {1.f, 0.f, 0.f, 1.f}, {200, 200});
+  child->SetContent(kTransformId, kFilledRectId);
+
+  Present(child, true);
+
+  auto resolved_layers = ComputeResolvedLayers(display->root_transform());
+  ASSERT_EQ(resolved_layers.size(), 1u);
+  EXPECT_EQ(resolved_layers[0].geometry.dest, types::RectangleF({600, 400, 200, 200}));
+}
+
+// The root view's bounds are the display's logical size.
+TEST_F(FlatlandDisplayTest, ViewBoundsAreLogicalSize) {
+  constexpr uint32_t kWidth = 800;
+  constexpr uint32_t kHeight = 600;
+
+  std::shared_ptr<FlatlandDisplay> display = CreateFlatlandDisplay(kWidth, kHeight);
+
+  std::shared_ptr<Flatland> child = CreateFlatland();
+  ConnectChildViewToDisplayThenValidate(display, child, kWidth, kHeight);
+
+  auto snapshot = ComputeViewTreeSnapshot(display->root_transform());
+  ASSERT_NE(snapshot, nullptr);
+  auto child_uber_struct = GetUberStruct(child.get());
+  ASSERT_NE(child_uber_struct, nullptr);
+  ASSERT_NE(child_uber_struct->view_ref, nullptr);
+  const zx_koid_t child_koid = child_uber_struct->view_ref->koid();
+
+  EXPECT_EQ(snapshot->root, child_koid);
+  ASSERT_TRUE(snapshot->view_tree.contains(child_koid));
+  EXPECT_EQ(snapshot->view_tree.at(child_koid).bounding_box,
+            (view_tree::BoundingBox{.min = {0, 0}, .max = {kWidth, kHeight}}));
+}
+
+// At a device pixel ratio above 1, the root view's bounds are the logical size the child was
+// given, not the display's physical size.
+TEST_F(FlatlandDisplayTest, ViewBoundsAreLogicalSizeAtDevicePixelRatio) {
+  constexpr uint32_t kWidth = 800;
+  constexpr uint32_t kHeight = 600;
+
+  std::shared_ptr<FlatlandDisplay> display = CreateFlatlandDisplay(kWidth, kHeight);
+  display->SetDevicePixelRatio({2.f, 2.f});
+
+  std::shared_ptr<Flatland> child = CreateFlatland();
+  ConnectChildViewToDisplayThenValidate(display, child, 400, 300);
+
+  auto snapshot = ComputeViewTreeSnapshot(display->root_transform());
+  ASSERT_NE(snapshot, nullptr);
+  auto child_uber_struct = GetUberStruct(child.get());
+  ASSERT_NE(child_uber_struct, nullptr);
+  ASSERT_NE(child_uber_struct->view_ref, nullptr);
+  const zx_koid_t child_koid = child_uber_struct->view_ref->koid();
+
+  EXPECT_EQ(snapshot->root, child_koid);
+  ASSERT_TRUE(snapshot->view_tree.contains(child_koid));
+  EXPECT_EQ(snapshot->view_tree.at(child_koid).bounding_box,
+            (view_tree::BoundingBox{.min = {0, 0}, .max = {400, 300}}));
+}
+
 // TODO(https://fxbug.dev/42156567): other FlatlandDisplayTests that should be written:
 // - version of SimpleSetContent where the child presents before SetDisplayContent() is called.
 
@@ -6146,9 +6358,13 @@ TEST_F(FlatlandTest, PendingReleasesDrainedAtTeardown) {
 
   // Destroy the session. Capture the RemoveSession release fence.
   std::optional<zx::event> teardown_fence;
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(flatland->GetSessionId(), ::testing::_))
-      .WillOnce([&teardown_fence](scheduling::SessionId, std::optional<zx::event> fence) {
-        teardown_fence = std::move(fence);
+  EXPECT_CALL(*mock_flatland_presenter_,
+              RemoveSession(flatland->GetSessionId(), ::testing::_, ::testing::_))
+      .WillOnce([&teardown_fence](scheduling::SessionId, std::vector<zx::event> fences,
+                                  const std::vector<zx::counter>&) {
+        if (!fences.empty()) {
+          teardown_fence = std::move(fences.back());
+        }
       });
 
   EXPECT_CALL(*mock_buffer_collection_importer_, ReleaseBufferImage(global_image_id)).Times(0);
@@ -6205,9 +6421,13 @@ TEST_F(FlatlandTest, NoDoubleReleaseWhenPerPresentFenceSignalsAfterTeardown) {
 
   // 2. Destroy the session; capture the RemoveSession fence.
   std::optional<zx::event> teardown_fence;
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(flatland->GetSessionId(), ::testing::_))
-      .WillOnce([&teardown_fence](scheduling::SessionId, std::optional<zx::event> fence) {
-        teardown_fence = std::move(fence);
+  EXPECT_CALL(*mock_flatland_presenter_,
+              RemoveSession(flatland->GetSessionId(), ::testing::_, ::testing::_))
+      .WillOnce([&teardown_fence](scheduling::SessionId, std::vector<zx::event> fences,
+                                  const std::vector<zx::counter>&) {
+        if (!fences.empty()) {
+          teardown_fence = std::move(fences.back());
+        }
       });
 
   flatland.reset();
@@ -6277,9 +6497,13 @@ TEST_F(FlatlandTest, TeardownGathersRecordsAndAccumulator) {
 
   // 3. Destroy session; capture RemoveSession fence.
   std::optional<zx::event> teardown_fence;
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(flatland->GetSessionId(), ::testing::_))
-      .WillOnce([&teardown_fence](scheduling::SessionId, std::optional<zx::event> fence) {
-        teardown_fence = std::move(fence);
+  EXPECT_CALL(*mock_flatland_presenter_,
+              RemoveSession(flatland->GetSessionId(), ::testing::_, ::testing::_))
+      .WillOnce([&teardown_fence](scheduling::SessionId, std::vector<zx::event> fences,
+                                  const std::vector<zx::counter>&) {
+        if (!fences.empty()) {
+          teardown_fence = std::move(fences.back());
+        }
       });
 
   EXPECT_CALL(*mock_buffer_collection_importer_, ReleaseBufferImage(global_image_id_a)).Times(0);
@@ -6610,9 +6834,13 @@ TEST_F(FlatlandTest, CreateImageImportFailureRollsBackImageObject) {
   EXPECT_CALL(*mock_buffer_collection_importer_, ReleaseBufferImage(failed_image_id)).Times(1);
 
   std::optional<zx::event> teardown_fence;
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(flatland->GetSessionId(), ::testing::_))
-      .WillOnce([&teardown_fence](scheduling::SessionId, std::optional<zx::event> fence) {
-        teardown_fence = std::move(fence);
+  EXPECT_CALL(*mock_flatland_presenter_,
+              RemoveSession(flatland->GetSessionId(), ::testing::_, ::testing::_))
+      .WillOnce([&teardown_fence](scheduling::SessionId, std::vector<zx::event> fences,
+                                  std::vector<zx::counter>) {
+        if (!fences.empty()) {
+          teardown_fence = std::move(fences.back());
+        }
       });
 
   flatland.reset();
@@ -6693,9 +6921,13 @@ TEST_F(FlatlandTest, LateImportFailureLeavesReusedContentIdIntact) {
   // RunLoopUntilIdle(), expect ReleaseBufferImage(first_id) once and
   // ReleaseBufferImage(second_id) once, signal the fence, RunLoopUntilIdle().
   std::optional<zx::event> teardown_fence;
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(flatland->GetSessionId(), ::testing::_))
-      .WillOnce([&teardown_fence](scheduling::SessionId, std::optional<zx::event> fence) {
-        teardown_fence = std::move(fence);
+  EXPECT_CALL(*mock_flatland_presenter_,
+              RemoveSession(flatland->GetSessionId(), ::testing::_, ::testing::_))
+      .WillOnce([&teardown_fence](scheduling::SessionId, std::vector<zx::event> fences,
+                                  const std::vector<zx::counter>&) {
+        if (!fences.empty()) {
+          teardown_fence = std::move(fences.back());
+        }
       });
 
   flatland.reset();
@@ -6869,9 +7101,13 @@ TEST_F(Flatland2Test, TeardownReleasesClientHeldLayerImage) {
   EXPECT_NE(flatland->GetImageObjectForTest(image_id), nullptr);
 
   std::optional<zx::event> teardown_fence;
-  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(flatland->GetSessionId(), ::testing::_))
-      .WillOnce([&teardown_fence](scheduling::SessionId, std::optional<zx::event> fence) {
-        teardown_fence = std::move(fence);
+  EXPECT_CALL(*mock_flatland_presenter_,
+              RemoveSession(flatland->GetSessionId(), ::testing::_, ::testing::_))
+      .WillOnce([&teardown_fence](scheduling::SessionId, std::vector<zx::event> fences,
+                                  const std::vector<zx::counter>&) {
+        if (!fences.empty()) {
+          teardown_fence = std::move(fences.back());
+        }
       });
 
   flatland.reset();
@@ -10013,76 +10249,6 @@ TEST_F(Flatland2Test, SetLayerImageUnknownImageFails) {
   EXPECT_NE(error_log->find("image 999 not found"), std::string::npos);
 }
 
-TEST_F(Flatland2Test, SetLayerImageFencesNotYetImplementedFails) {
-  {
-    // 1. Acquire fence supplied -> rejected with error.
-    std::optional<std::string> error_log;
-    auto flatland = CreateFlatland2(&error_log);
-    auto allocator = CreateAllocator();
-
-    auto ref_pair = BufferCollectionImportExportTokens::New();
-    RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
-
-    EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
-        .WillOnce(ReturnPromise(fpromise::ok()));
-
-    const LayerId kLayer(1);
-    const ImageId kImage(2);
-    flatland->CreateLayer(kLayer);
-
-    fidl::Arena arena;
-    auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
-                     .size(fuchsia_math::wire::SizeU{100, 100})
-                     .Build();
-    flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
-
-    zx::event fence;
-    zx_status_t status = zx::event::create(0, &fence);
-    ASSERT_EQ(status, ZX_OK);
-    fuchsia_ui_composition::wire::WaitFence wait_fence =
-        fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
-
-    flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
-
-    EXPECT_TRUE(error_log.has_value());
-    EXPECT_NE(error_log->find("fences not yet implemented"), std::string::npos);
-  }
-
-  {
-    // 2. Release fence supplied -> rejected with error.
-    std::optional<std::string> error_log;
-    auto flatland = CreateFlatland2(&error_log);
-    auto allocator = CreateAllocator();
-
-    auto ref_pair = BufferCollectionImportExportTokens::New();
-    RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
-
-    EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
-        .WillOnce(ReturnPromise(fpromise::ok()));
-
-    const LayerId kLayer(1);
-    const ImageId kImage(2);
-    flatland->CreateLayer(kLayer);
-
-    fidl::Arena arena;
-    auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
-                     .size(fuchsia_math::wire::SizeU{100, 100})
-                     .Build();
-    flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
-
-    zx::event fence;
-    zx_status_t status = zx::event::create(0, &fence);
-    ASSERT_EQ(status, ZX_OK);
-    fuchsia_ui_composition::wire::SignalFence signal_fence =
-        fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence));
-
-    flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
-
-    EXPECT_TRUE(error_log.has_value());
-    EXPECT_NE(error_log->find("fences not yet implemented"), std::string::npos);
-  }
-}
-
 TEST_F(Flatland2Test, SampleRectExceedingImageBoundsFailsAtPresent) {
   {
     // 1. Opposite corner (origin + extent) extends past 100x100 bounds: (10, 10, 100, 100).
@@ -10394,6 +10560,2180 @@ TEST_F(Flatland2Test, BindingInNonImageModeSucceedsAndSticky) {
   ASSERT_EQ(renderables.size(), 1u);
   ASSERT_TRUE(std::holds_alternative<ResolvedLayer::ImageContent>(renderables[0].content));
   EXPECT_EQ(std::get<ResolvedLayer::ImageContent>(renderables[0].content).image_id, global_id);
+}
+
+// Flatland2Test.PresentBlocksOnAcquireFence
+// Verifies that SetLayerImage with an unsignaled basic event acquire fence blocks
+// UberStruct publication until the fence is signaled.
+TEST_F(Flatland2Test, PresentBlocksOnAcquireFence) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+
+  // Fence is unsignaled, so UberStruct must not be published.
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal the fence.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fence_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.CounterAcquireFence
+// Verifies that SetLayerImage with an unsignaled timestamp (zx::counter) acquire fence
+// blocks UberStruct publication until the counter is signaled with ZX_COUNTER_SIGNALED.
+TEST_F(Flatland2Test, CounterAcquireFence) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::counter counter;
+  ASSERT_EQ(zx::counter::create(0, &counter), ZX_OK);
+  zx::counter counter_copy;
+  ASSERT_EQ(counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_copy), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithTimestamp(std::move(counter));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+
+  // Counter is unsignaled, so UberStruct must not be published.
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal the counter fence.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  counter_copy.signal(0, ZX_COUNTER_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.StompDropsSupersededAcquire
+// Verifies that binding image A (unsignaled fence) then stomping with image B (signaled fence)
+// drops A's fence un-waited and publishes B without blocking.
+TEST_F(Flatland2Test, StompDropsSupersededAcquire) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair1 = BufferCollectionImportExportTokens::New();
+  auto ref_pair2 = BufferCollectionImportExportTokens::New();
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair1.export_token), CreateToken(), true);
+  }
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair2.export_token), CreateToken(), true);
+  }
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImageA(4);
+  const ImageId kImageB(5);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props_a = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageA, ToWire(ref_pair1.DuplicateImportToken()), 0, props_a);
+  auto props_b = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageB, ToWire(ref_pair2.DuplicateImportToken()), 0, props_b);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Fence A is never signaled.
+  zx::event fence_a;
+  ASSERT_EQ(zx::event::create(0, &fence_a), ZX_OK);
+
+  // Fence B is signaled.
+  zx::event fence_b;
+  ASSERT_EQ(zx::event::create(0, &fence_b), ZX_OK);
+  fence_b.signal(0, ZX_EVENT_SIGNALED);
+
+  // Bind A with unsignaled fence.
+  fuchsia_ui_composition::wire::WaitFence wait_fence_a =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence_a));
+  flatland->SetLayerImage(kLayer, kImageA, std::move(wait_fence_a), std::nullopt);
+
+  // Stomp: Bind B with signaled fence on the same layer before Present().
+  fuchsia_ui_composition::wire::WaitFence wait_fence_b =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence_b));
+  flatland->SetLayerImage(kLayer, kImageB, std::move(wait_fence_b), std::nullopt);
+
+  // Present completes without waiting on fence A.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  auto uber_struct = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct, nullptr);
+
+  // Verify that Image B is published.
+  auto global_b = flatland->GetGlobalImageIdForTest(kImageB);
+  auto layer_handle = uber_struct->layer_stacks.begin()->second[0];
+  const auto& layer = uber_struct->layers.find(layer_handle)->second;
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(layer.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(layer.content).image_id, global_b);
+}
+
+// Flatland2Test.MultipleLayersOneWaitSet
+// Verifies that acquire fences from multiple layers gate the same Present.
+TEST_F(Flatland2Test, MultipleLayersOneWaitSet) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair1 = BufferCollectionImportExportTokens::New();
+  auto ref_pair2 = BufferCollectionImportExportTokens::New();
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair1.export_token), CreateToken(), true);
+  }
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair2.export_token), CreateToken(), true);
+  }
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer1(2);
+  const LayerId kLayer2(3);
+  const LayerStackId kStack(4);
+  const ImageId kImage1(5);
+  const ImageId kImage2(6);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer1);
+  flatland->CreateLayer(kLayer2);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer1, kLayer2});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props1 = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                    .size(fuchsia_math::wire::SizeU{100, 100})
+                    .Build();
+  flatland->CreateImage2(kImage1, ToWire(ref_pair1.DuplicateImportToken()), 0, props1);
+  auto props2 = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                    .size(fuchsia_math::wire::SizeU{100, 100})
+                    .Build();
+  flatland->CreateImage2(kImage2, ToWire(ref_pair2.DuplicateImportToken()), 0, props2);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer1, fidl::ToWire(arena, layer_props));
+  flatland->SetLayerProperties(kLayer2, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence1;
+  ASSERT_EQ(zx::event::create(0, &fence1), ZX_OK);
+  zx::event fence1_copy = utils::CopyZxHandle(fence1);
+
+  zx::event fence2;
+  ASSERT_EQ(zx::event::create(0, &fence2), ZX_OK);
+  zx::event fence2_copy = utils::CopyZxHandle(fence2);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence1 =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence1));
+  flatland->SetLayerImage(kLayer1, kImage1, std::move(wait_fence1), std::nullopt);
+  fuchsia_ui_composition::wire::WaitFence wait_fence2 =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence2));
+  flatland->SetLayerImage(kLayer2, kImage2, std::move(wait_fence2), std::nullopt);
+
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+
+  // Both fences unsignaled: blocked.
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal first fence only: still blocked.
+  fence1_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal second fence: unblocked.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fence2_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.ResetLayerDropsPendingAcquire
+// Verifies that calling ResetLayer on a layer with an unsignaled acquire fence
+// drops the pending fence un-waited, leaving Present unblocked.
+TEST_F(Flatland2Test, ResetLayerDropsPendingAcquire) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Fence is never signaled.
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  // Reset the layer before Present().
+  flatland->ResetLayer(kLayer);
+
+  // Present completes unblocked because the pending acquire was dropped.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.UnbindLayerImageDropsPendingAcquire
+// Verifies that calling UnbindLayerImage on a layer with an unsignaled acquire fence
+// drops the pending fence un-waited, leaving Present unblocked.
+TEST_F(Flatland2Test, UnbindLayerImageDropsPendingAcquire) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Bind the image with an unsignaled acquire fence.
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  LayerHandle handle = flatland->GetLayerHandleForTest(kLayer);
+  auto* layer_obj = flatland->GetLayerObjectForTest(handle);
+  ASSERT_NE(layer_obj, nullptr);
+  EXPECT_TRUE(layer_obj->pending_acquire_fence.is_valid());
+
+  // Call UnbindLayerImage on the layer.
+  flatland->UnbindLayerImageForTest(handle);
+
+  EXPECT_FALSE(layer_obj->pending_acquire_fence.is_valid());
+
+  // Present completes unblocked because the pending acquire was dropped with the image unbind.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.ImageImportFailureDropsPendingAcquire
+// Verifies that when an asynchronous image import fails, the promise error handler invokes
+// UnbindLayerImage on any referencing layers, which drops their pending acquire fences.
+TEST_F(Flatland2Test, ImageImportFailureDropsPendingAcquire) {
+  std::optional<std::string> error_log;
+  auto flatland = CreateFlatland2(&error_log);
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  // Return failure on import.
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::error()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Bind the image with an unsignaled acquire fence before import finishes.
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  LayerHandle handle = flatland->GetLayerHandleForTest(kLayer);
+  auto* layer_obj = flatland->GetLayerObjectForTest(handle);
+  ASSERT_NE(layer_obj, nullptr);
+  EXPECT_TRUE(layer_obj->pending_acquire_fence.is_valid());
+
+  // Run the loop so the import promise resolves and fails.
+  // The error handler invokes UnbindLayerImage(layer), which must drop the pending acquire fence.
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(error_log.has_value());
+  EXPECT_NE(error_log->find("Importer could not import image"), std::string::npos);
+  EXPECT_FALSE(layer_obj->pending_acquire_fence.is_valid());
+}
+
+// Flatland2Test.ReleaseLayerDropsPendingAcquire
+// Verifies that calling ReleaseLayer on a layer with an unsignaled acquire fence
+// drops the pending fence un-waited, leaving Present unblocked.
+TEST_F(Flatland2Test, ReleaseLayerDropsPendingAcquire) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const ImageId kImage(3);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Fence is never signaled.
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  // Release the layer before Present().
+  flatland->ReleaseLayer(kLayer);
+
+  // Present completes unblocked because the pending acquire was dropped with the layer.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.StompWithNullFenceDropsPendingAcquire
+// Verifies that stomping an image binding with std::nullopt acquire fence
+// drops the previous unsignaled acquire fence un-waited.
+TEST_F(Flatland2Test, StompWithNullFenceDropsPendingAcquire) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair1 = BufferCollectionImportExportTokens::New();
+  auto ref_pair2 = BufferCollectionImportExportTokens::New();
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair1.export_token), CreateToken(), true);
+  }
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair2.export_token), CreateToken(), true);
+  }
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImageA(4);
+  const ImageId kImageB(5);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props_a = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageA, ToWire(ref_pair1.DuplicateImportToken()), 0, props_a);
+  auto props_b = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageB, ToWire(ref_pair2.DuplicateImportToken()), 0, props_b);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Fence A is never signaled.
+  zx::event fence_a;
+  ASSERT_EQ(zx::event::create(0, &fence_a), ZX_OK);
+
+  // Bind A with unsignaled fence.
+  fuchsia_ui_composition::wire::WaitFence wait_fence_a =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence_a));
+  flatland->SetLayerImage(kLayer, kImageA, std::move(wait_fence_a), std::nullopt);
+
+  // Stomp: Bind B with no fence on the same layer before Present().
+  flatland->SetLayerImage(kLayer, kImageB, std::nullopt, std::nullopt);
+
+  // Present completes without waiting on fence A.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  auto uber_struct = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct, nullptr);
+
+  auto global_b = flatland->GetGlobalImageIdForTest(kImageB);
+  auto layer_handle = uber_struct->layer_stacks.begin()->second[0];
+  const auto& layer = uber_struct->layers.find(layer_handle)->second;
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(layer.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(layer.content).image_id, global_b);
+}
+
+// Flatland2Test.MixedFenceTypesOneWaitSet
+// Verifies that acquire fences of different types (zx::event and zx::counter) across multiple
+// layers gate the same Present until all fences of both types are signaled.
+TEST_F(Flatland2Test, MixedFenceTypesOneWaitSet) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair1 = BufferCollectionImportExportTokens::New();
+  auto ref_pair2 = BufferCollectionImportExportTokens::New();
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair1.export_token), CreateToken(), true);
+  }
+  {
+    RegisterBufferCollection(allocator, std::move(ref_pair2.export_token), CreateToken(), true);
+  }
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer1(2);
+  const LayerId kLayer2(3);
+  const LayerStackId kStack(4);
+  const ImageId kImage1(5);
+  const ImageId kImage2(6);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer1);
+  flatland->CreateLayer(kLayer2);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer1, kLayer2});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props1 = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                    .size(fuchsia_math::wire::SizeU{100, 100})
+                    .Build();
+  flatland->CreateImage2(kImage1, ToWire(ref_pair1.DuplicateImportToken()), 0, props1);
+  auto props2 = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                    .size(fuchsia_math::wire::SizeU{100, 100})
+                    .Build();
+  flatland->CreateImage2(kImage2, ToWire(ref_pair2.DuplicateImportToken()), 0, props2);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer1, fidl::ToWire(arena, layer_props));
+  flatland->SetLayerProperties(kLayer2, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Layer 1: zx::event fence.
+  zx::event event_fence;
+  ASSERT_EQ(zx::event::create(0, &event_fence), ZX_OK);
+  zx::event event_fence_copy = utils::CopyZxHandle(event_fence);
+
+  // Layer 2: zx::counter fence.
+  zx::counter counter_fence;
+  ASSERT_EQ(zx::counter::create(0, &counter_fence), ZX_OK);
+  zx::counter counter_fence_copy;
+  ASSERT_EQ(counter_fence.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_fence_copy), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence1 =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(event_fence));
+  flatland->SetLayerImage(kLayer1, kImage1, std::move(wait_fence1), std::nullopt);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence2 =
+      fuchsia_ui_composition::wire::WaitFence::WithTimestamp(std::move(counter_fence));
+  flatland->SetLayerImage(kLayer2, kImage2, std::move(wait_fence2), std::nullopt);
+
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+
+  // Both fences unsignaled: blocked.
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal event fence only: still blocked waiting on counter.
+  event_fence_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal counter fence: unblocked.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  counter_fence_copy.signal(0, ZX_COUNTER_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+}
+
+// Flatland2Test.AcquireFenceWithoutWaitRightClosesSession
+// Verifies that passing an acquire fence missing ZX_RIGHT_WAIT causes WaitFence::From()
+// to return ZX_ERR_ACCESS_DENIED, logging the error and closing the session.
+TEST_F(Flatland2Test, AcquireFenceWithoutWaitRightClosesSession) {
+  std::optional<std::string> error_log;
+  auto flatland = CreateFlatland2(&error_log);
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const LayerId kLayer(1);
+  const ImageId kImage(2);
+
+  flatland->CreateLayer(kLayer);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_without_wait;
+  ASSERT_EQ(fence.duplicate(ZX_DEFAULT_EVENT_RIGHTS & ~ZX_RIGHT_WAIT, &fence_without_wait), ZX_OK);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence_without_wait));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  ASSERT_TRUE(error_log.has_value());
+  EXPECT_NE(error_log->find("ZX_ERR_ACCESS_DENIED"), std::string::npos);
+  Present(flatland, false);
+}
+
+// Flatland2Test.UnstackedLayerAcquireDoesNotBlockPresent
+// Verifies that a layer not currently part of any reachable layer stack does not block
+// Present with its acquire fence. When later added to a layer stack, the subsequent Present
+// blocks until the acquire fence is signaled.
+TEST_F(Flatland2Test, UnstackedLayerAcquireDoesNotBlockPresent) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  // Present completes unblocked because the layer is not in any reachable layer stack.
+  Present(flatland, true);
+
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+
+  // Add the layer to the stack.
+  flatland->SetStackLayers(kStack, {kLayer});
+
+  // Next Present blocks because the pending acquire fence is now collected.
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+
+  // Blocked waiting on fence. Now signal the fence to unblock.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fence_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  flatland->OnNextFrameBegin(1, {});
+
+  auto uber_struct = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct, nullptr);
+  auto global_image = flatland->GetGlobalImageIdForTest(kImage);
+  auto layer_handle = uber_struct->layer_stacks.begin()->second[0];
+  const auto& layer = uber_struct->layers.find(layer_handle)->second;
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(layer.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(layer.content).image_id, global_image);
+}
+
+// Flatland2Test.NonImageModeAcquireDoesNotBlockPresent
+// Verifies that a layer in a reachable stack in INVISIBLE or SOLID_COLOR mode does not block
+// Present on its pending acquire fence. When the layer's composition mode is later switched to
+// IMAGE, the subsequent Present blocks until the fence is signaled.
+TEST_F(Flatland2Test, NonImageModeAcquireDoesNotBlockPresent) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  // Set layer to INVISIBLE mode.
+  fuchsia_ui_composition::LayerProperties invisible_props;
+  invisible_props.composition_mode(fuchsia_ui_composition::CompositionMode::kInvisible);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(invisible_props)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  // Present completes unblocked because the layer is in INVISIBLE mode, not IMAGE mode.
+  Present(flatland, true);
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+
+  // Switch mode to SOLID_COLOR. Present still completes unblocked.
+  fuchsia_ui_composition::LayerProperties solid_props;
+  solid_props.composition_mode(fuchsia_ui_composition::CompositionMode::kSolidColor);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(solid_props)));
+  Present(flatland, true);
+  EXPECT_NE(GetUberStruct(flatland.get()), nullptr);
+
+  // Switch mode to IMAGE.
+  fuchsia_ui_composition::LayerProperties image_props;
+  image_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(image_props)));
+
+  // Next Present blocks because the layer is now published in IMAGE mode.
+  fuchsia_ui_composition::wire::PresentArgs present_args;
+  flatland->Present(present_args);
+  RunLoopUntilIdle();
+
+  // Blocked waiting on fence. Now signal the fence to unblock.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fence_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  flatland->OnNextFrameBegin(1, {});
+
+  auto uber_struct = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct, nullptr);
+  auto global_image = flatland->GetGlobalImageIdForTest(kImage);
+  auto layer_handle = uber_struct->layer_stacks.begin()->second[0];
+  const auto& layer = uber_struct->layers.find(layer_handle)->second;
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(layer.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(layer.content).image_id, global_image);
+}
+
+// Flatland2Test.AcquiredFenceNotRewaitedOnSubsequentPresent
+// Verifies that after an image's acquire fence is waited and signaled in frame 1, a subsequent
+// frame 2 modifying another property without calling SetLayerImage does not re-wait on that fence.
+TEST_F(Flatland2Test, AcquiredFenceNotRewaitedOnSubsequentPresent) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  layer_props.display_rect(fuchsia_math::RectU{0, 0, 100, 100});
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::move(wait_fence), std::nullopt);
+
+  // Frame 1: Present blocks because the acquire fence is unsignaled.
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(GetUberStruct(flatland.get()), nullptr);
+
+  // Signal the acquire fence. Frame 1 unblocks and publishes.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fence_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  flatland->OnNextFrameBegin(1, {});
+
+  auto uber_struct1 = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct1, nullptr);
+  auto global_image = flatland->GetGlobalImageIdForTest(kImage);
+  auto layer_handle = uber_struct1->layer_stacks.begin()->second[0];
+  const auto& layer1 = uber_struct1->layers.find(layer_handle)->second;
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(layer1.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(layer1.content).image_id, global_image);
+
+  // Frame 2: Modify another property (display_rect) without calling SetLayerImage.
+  // The acquire fence was already consumed in frame 1, so Present() must NOT re-wait on it
+  // and must publish immediately.
+  fuchsia_ui_composition::LayerProperties updated_props;
+  updated_props.display_rect(fuchsia_math::RectU{10, 20, 50, 50});
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(updated_props)));
+
+  Present(flatland, true);
+
+  auto uber_struct2 = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct2, nullptr);
+  const auto& layer2 = uber_struct2->layers.find(layer_handle)->second;
+  EXPECT_EQ(layer2.common.display_rect,
+            (types::Rectangle({.x = 10, .y = 20, .width = 50, .height = 50})));
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(layer2.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(layer2.content).image_id, global_image);
+}
+
+// Flatland2Test.ReleaseFenceHeldWhileDisplayed
+// Verifies that a release fence provided in SetLayerImage survives Present and is held
+// for the binding's displayed lifetime: it never enters any Present's release set while
+// the binding remains active and displayed.
+TEST_F(Flatland2Test, ReleaseFenceHeldWhileDisplayed) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event release_fence;
+  ASSERT_EQ(zx::event::create(0, &release_fence), ZX_OK);
+  zx::event release_copy = utils::CopyZxHandle(release_fence);
+
+  fuchsia_ui_composition::wire::SignalFence signal_fence =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(release_fence));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+  const auto session_id = flatland->GetSessionId();
+
+  // Present repeatedly without modifying the layer binding.
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+    fuchsia_ui_composition::wire::PresentArgs present_args;
+    flatland->Present(present_args);
+    RunLoopUntilIdle();
+
+    // Verify the fence never entered this Present's release set.
+    for (const auto& [id_pair, fences] : pending_release_fences_) {
+      if (id_pair.session_id == session_id) {
+        EXPECT_TRUE(fences.empty());
+      }
+    }
+    ApplySessionUpdatesAndSignalFences();
+    EXPECT_FALSE(utils::IsEventSignalled(release_copy, ZX_EVENT_SIGNALED));
+  }
+}
+
+// Flatland2Test.RebindDeliversPredecessorFence
+// Verifies that rebinding an image on a layer delivers the predecessor binding's release fence
+// into the next Present's release set. Tests both event (basic) and counter (timestamp) variants.
+TEST_F(Flatland2Test, RebindDeliversPredecessorFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair_a = BufferCollectionImportExportTokens::New();
+  auto ref_pair_b = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair_a.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair_b.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImageA(4);
+  const ImageId kImageB(5);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props_a = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageA, ToWire(ref_pair_a.DuplicateImportToken()), 0, props_a);
+  auto props_b = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageB, ToWire(ref_pair_b.DuplicateImportToken()), 0, props_b);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence_a;
+  ASSERT_EQ(zx::event::create(0, &fence_a), ZX_OK);
+  zx::event fence_a_copy = utils::CopyZxHandle(fence_a);
+
+  zx::event fence_b;
+  ASSERT_EQ(zx::event::create(0, &fence_b), ZX_OK);
+  zx::event fence_b_copy = utils::CopyZxHandle(fence_b);
+
+  // Bind Image A with fence_a.
+  fuchsia_ui_composition::wire::SignalFence signal_fence_a =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence_a));
+  flatland->SetLayerImage(kLayer, kImageA, std::nullopt, std::move(signal_fence_a));
+
+  // Present 1: displays Image A; fence_a is held, not delivered.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_a_copy, ZX_EVENT_SIGNALED));
+
+  // Rebind: Bind Image B with fence_b over Image A.
+  fuchsia_ui_composition::wire::SignalFence signal_fence_b =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence_b));
+  flatland->SetLayerImage(kLayer, kImageB, std::nullopt, std::move(signal_fence_b));
+
+  // Present 2: fence_a is delivered into the release set; fence_b is held.
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseFencesContain(session_id, fence_a_copy));
+  EXPECT_FALSE(ReleaseFencesContain(session_id, fence_b_copy));
+  EXPECT_FALSE(utils::IsEventSignalled(fence_a_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence_b_copy, ZX_EVENT_SIGNALED));
+
+  // Frame retirement signals fence_a; fence_b remains unsignaled.
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(fence_a_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence_b_copy, ZX_EVENT_SIGNALED));
+}
+
+// Flatland2Test.RebindDeliversPredecessorCounterFence
+// Verifies that rebinding an image on a layer delivers the predecessor binding's zx::counter
+// release fence into the next Present's release counters set.
+TEST_F(Flatland2Test, RebindDeliversPredecessorCounterFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair_a = BufferCollectionImportExportTokens::New();
+  auto ref_pair_b = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair_a.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair_b.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImageA(4);
+  const ImageId kImageB(5);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props_a = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageA, ToWire(ref_pair_a.DuplicateImportToken()), 0, props_a);
+  auto props_b = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageB, ToWire(ref_pair_b.DuplicateImportToken()), 0, props_b);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::counter counter_a;
+  ASSERT_EQ(zx::counter::create(0, &counter_a), ZX_OK);
+  zx::counter counter_a_copy;
+  ASSERT_EQ(counter_a.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_a_copy), ZX_OK);
+
+  zx::counter counter_b;
+  ASSERT_EQ(zx::counter::create(0, &counter_b), ZX_OK);
+  zx::counter counter_b_copy;
+  ASSERT_EQ(counter_b.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_b_copy), ZX_OK);
+
+  // Bind Image A with counter_a.
+  fuchsia_ui_composition::wire::SignalFence signal_fence_a =
+      fuchsia_ui_composition::wire::SignalFence::WithTimestamp(std::move(counter_a));
+  flatland->SetLayerImage(kLayer, kImageA, std::nullopt, std::move(signal_fence_a));
+
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  // Rebind: Bind Image B with counter_b over Image A.
+  fuchsia_ui_composition::wire::SignalFence signal_fence_b =
+      fuchsia_ui_composition::wire::SignalFence::WithTimestamp(std::move(counter_b));
+  flatland->SetLayerImage(kLayer, kImageB, std::nullopt, std::move(signal_fence_b));
+
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseCountersContain(session_id, counter_a_copy));
+  EXPECT_FALSE(ReleaseCountersContain(session_id, counter_b_copy));
+
+  // Before retirement, counter_a is unsignaled.
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_a_copy, ZX_COUNTER_SIGNALED));
+
+  ApplySessionUpdatesAndSignalFences();
+
+  // After retirement, counter_a is signaled with ZX_COUNTER_SIGNALED.
+  EXPECT_TRUE(utils::IsCounterSignalled(counter_a_copy, ZX_COUNTER_SIGNALED));
+
+  // counter_b remains unsignaled.
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_b_copy, ZX_COUNTER_SIGNALED));
+}
+
+// Flatland2Test.RebindSameImageDeliversPredecessorFence
+// Rebinding the *same* ImageId to a layer with a new release fence via SetLayerImage:
+// - Delivers the predecessor binding's release fence into the next Present's release set and
+//   signals it on retirement.
+// - Retains the newly bound release fence on the layer as held.
+// - Keeps ImageObject::ref_count invariant.
+TEST_F(Flatland2Test, RebindSameImageDeliversPredecessorFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  const auto global_image_id = flatland->GetGlobalImageIdForTest(kImage);
+  ASSERT_NE(global_image_id, allocation::kInvalidImageId);
+  const auto* img_obj = flatland->GetImageObjectForTest(global_image_id);
+  ASSERT_NE(img_obj, nullptr);
+  EXPECT_EQ(img_obj->ref_count, 1u);
+
+  zx::event fence1;
+  ASSERT_EQ(zx::event::create(0, &fence1), ZX_OK);
+  zx::event fence1_copy = utils::CopyZxHandle(fence1);
+
+  zx::event fence2;
+  ASSERT_EQ(zx::event::create(0, &fence2), ZX_OK);
+  zx::event fence2_copy = utils::CopyZxHandle(fence2);
+
+  // Bind Image with fence1.
+  fuchsia_ui_composition::wire::SignalFence signal_fence1 =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence1));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence1));
+  EXPECT_EQ(flatland->GetImageObjectForTest(global_image_id)->ref_count, 2u);
+
+  // Present 1: displays Image; fence1 is held, not delivered.
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+
+  for (const auto& [id_pair, fences] : pending_release_fences_) {
+    if (id_pair.session_id == session_id) {
+      EXPECT_TRUE(fences.empty());
+    }
+  }
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence1_copy, ZX_EVENT_SIGNALED));
+  EXPECT_EQ(flatland->GetImageObjectForTest(global_image_id)->ref_count, 2u);
+
+  // Rebind the same Image with fence2.
+  fuchsia_ui_composition::wire::SignalFence signal_fence2 =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence2));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence2));
+
+  // ref_count remains invariant (2u).
+  ASSERT_NE(flatland->GetImageObjectForTest(global_image_id), nullptr);
+  EXPECT_EQ(flatland->GetImageObjectForTest(global_image_id)->ref_count, 2u);
+
+  // Present 2: fence1 is delivered into the release set; fence2 is held.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseFencesContain(session_id, fence1_copy));
+  EXPECT_FALSE(ReleaseFencesContain(session_id, fence2_copy));
+  EXPECT_FALSE(utils::IsEventSignalled(fence1_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence2_copy, ZX_EVENT_SIGNALED));
+
+  // Retirement signals fence1; fence2 remains unsignaled.
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(fence1_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence2_copy, ZX_EVENT_SIGNALED));
+  EXPECT_EQ(flatland->GetImageObjectForTest(global_image_id)->ref_count, 2u);
+
+  // Subsequent present without rebinding: fence2 continues to be held.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args3;
+  flatland->Present(present_args3);
+  RunLoopUntilIdle();
+
+  for (const auto& [id_pair, fences] : pending_release_fences_) {
+    if (id_pair.session_id == session_id) {
+      EXPECT_TRUE(fences.empty());
+    }
+  }
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence2_copy, ZX_EVENT_SIGNALED));
+  EXPECT_EQ(flatland->GetImageObjectForTest(global_image_id)->ref_count, 2u);
+}
+
+// Flatland2Test.HeldReleaseFenceSurvivesModeChange
+// Verifies that:
+// 1. A layer in IMAGE mode with a bound image and release fence holds the fence across Present.
+// 2. Switching composition_mode to SOLID_COLOR or INVISIBLE does not supersede the binding,
+//    so the release fence is NOT delivered into the release set and remains held and unsignaled.
+// 3. Switching mode back to IMAGE and calling ResetLayer supersedes the binding and delivers
+//    the release fence into the release set, signaling it on retirement.
+TEST_F(Flatland2Test, HeldReleaseFenceSurvivesModeChange) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props_image;
+  layer_props_image.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props_image)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  // Bind Image with fence.
+  fuchsia_ui_composition::wire::SignalFence signal_fence =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+  const auto session_id = flatland->GetSessionId();
+
+  // Present 1: displays Image; fence is held.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  for (const auto& [id_pair, fences] : pending_release_fences_) {
+    if (id_pair.session_id == session_id) {
+      EXPECT_TRUE(fences.empty());
+    }
+  }
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Mode switch: change composition_mode to SOLID_COLOR.
+  fuchsia_ui_composition::LayerProperties layer_props_solid;
+  layer_props_solid.composition_mode(fuchsia_ui_composition::CompositionMode::kSolidColor);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props_solid)));
+
+  // Present 2: mode switch is not a supersession. Release fence is NOT delivered.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+  for (const auto& [id_pair, fences] : pending_release_fences_) {
+    if (id_pair.session_id == session_id) {
+      EXPECT_TRUE(fences.empty());
+    }
+  }
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Mode switch: change composition_mode to INVISIBLE.
+  fuchsia_ui_composition::LayerProperties layer_props_invisible;
+  layer_props_invisible.composition_mode(fuchsia_ui_composition::CompositionMode::kInvisible);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props_invisible)));
+
+  // Present 3: still held and NOT delivered.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args3;
+  flatland->Present(present_args3);
+  RunLoopUntilIdle();
+  for (const auto& [id_pair, fences] : pending_release_fences_) {
+    if (id_pair.session_id == session_id) {
+      EXPECT_TRUE(fences.empty());
+    }
+  }
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Switch mode back to IMAGE.
+  fuchsia_ui_composition::LayerProperties layer_props_back;
+  layer_props_back.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props_back)));
+
+  // Now supersede the binding by calling ResetLayer.
+  flatland->ResetLayer(kLayer);
+
+  // Present 4: fence is now delivered into the release set.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args4;
+  flatland->Present(present_args4);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseFencesContain(session_id, fence_copy));
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Retirement signals the fence.
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+}
+
+// Flatland2Test.ResetLayerDeliversFence
+// Verifies that calling ResetLayer on a layer with a bound image and release fence
+// delivers the release fence into the next Present's release set.
+TEST_F(Flatland2Test, ResetLayerDeliversFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  fuchsia_ui_composition::wire::SignalFence signal_fence =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Reset the layer.
+  flatland->ResetLayer(kLayer);
+
+  // Present: fence is delivered into the release set.
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseFencesContain(session_id, fence_copy));
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+}
+
+// Flatland2Test.ResetLayerDeliversCounterFence
+// Verifies that calling ResetLayer on a layer with a bound image and zx::counter release fence
+// delivers the counter release fence into the next Present's release counters set and signals it.
+TEST_F(Flatland2Test, ResetLayerDeliversCounterFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::counter counter;
+  ASSERT_EQ(zx::counter::create(0, &counter), ZX_OK);
+  zx::counter counter_copy;
+  ASSERT_EQ(counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_copy), ZX_OK);
+
+  fuchsia_ui_composition::wire::SignalFence signal_fence =
+      fuchsia_ui_composition::wire::SignalFence::WithTimestamp(std::move(counter));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+
+  // Reset the layer.
+  flatland->ResetLayer(kLayer);
+
+  // Present: counter fence is delivered into the release counters set.
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseCountersContain(session_id, counter_copy));
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+}
+
+// Flatland2Test.LayerCleanupDeliversFence
+// Verifies that when a layer is destroyed via layer-stack cleanup (ref_count reaching zero),
+// its held release fence joins that Present's release set and is signaled.
+TEST_F(Flatland2Test, LayerCleanupDeliversFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence;
+  ASSERT_EQ(zx::event::create(0, &fence), ZX_OK);
+  zx::event fence_copy = utils::CopyZxHandle(fence);
+
+  fuchsia_ui_composition::wire::SignalFence signal_fence =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Client releases the layer ID. Layer is kept alive only by stack membership (ref_count == 1).
+  flatland->ReleaseLayer(kLayer);
+
+  // Present again: layer is still in stack, fence is still held.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  // Now clear the scene graph, causing the stack's transform to become dead during Present().
+  // In ProcessDeadTransforms, the layer object's ref_count drops to 0 (cleanup), unbinding the
+  // image and delivering the fence into that Present's release set.
+  flatland->Clear();
+
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args3;
+  flatland->Present(present_args3);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseFencesContain(session_id, fence_copy));
+  EXPECT_FALSE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(fence_copy, ZX_EVENT_SIGNALED));
+}
+
+// Flatland2Test.LayerCleanupDeliversCounterFence
+// Verifies that when a layer is destroyed via layer-stack cleanup (ref_count reaching zero),
+// its held zx::counter release fence joins that Present's release counters set and is signaled.
+TEST_F(Flatland2Test, LayerCleanupDeliversCounterFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImage(4);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                   .size(fuchsia_math::wire::SizeU{100, 100})
+                   .Build();
+  flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::counter counter;
+  ASSERT_EQ(zx::counter::create(0, &counter), ZX_OK);
+  zx::counter counter_copy;
+  ASSERT_EQ(counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &counter_copy), ZX_OK);
+
+  fuchsia_ui_composition::wire::SignalFence signal_fence =
+      fuchsia_ui_composition::wire::SignalFence::WithTimestamp(std::move(counter));
+  flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+
+  // Client releases the layer ID. Layer is kept alive only by stack membership (ref_count == 1).
+  flatland->ReleaseLayer(kLayer);
+
+  // Present again: layer is still in stack, counter fence is still held.
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+
+  // Now clear the scene graph, causing the stack's transform to become dead during Present().
+  // In ProcessDeadTransforms, the layer object's ref_count drops to 0 (cleanup), unbinding the
+  // image and delivering the counter fence into that Present's release counters set.
+  flatland->Clear();
+
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args3;
+  flatland->Present(present_args3);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseCountersContain(session_id, counter_copy));
+  EXPECT_FALSE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsCounterSignalled(counter_copy, ZX_COUNTER_SIGNALED));
+}
+
+// Flatland2Test.StompDeliversMiddleFence
+// Verifies asymmetric stomp behavior: two binds between Presents.
+// The middle binding's acquire fence is dropped un-waited, but its release fence
+// is staged and delivered into the next Present's release set.
+TEST_F(Flatland2Test, StompDeliversMiddleFence) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair_a = BufferCollectionImportExportTokens::New();
+  auto ref_pair_b = BufferCollectionImportExportTokens::New();
+  auto ref_pair_c = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair_a.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair_b.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair_c.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(3)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer(2);
+  const LayerStackId kStack(3);
+  const ImageId kImageA(4);
+  const ImageId kImageB(5);
+  const ImageId kImageC(6);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props_a = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageA, ToWire(ref_pair_a.DuplicateImportToken()), 0, props_a);
+  auto props_b = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageB, ToWire(ref_pair_b.DuplicateImportToken()), 0, props_b);
+  auto props_c = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageC, ToWire(ref_pair_c.DuplicateImportToken()), 0, props_c);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer, fidl::ToWire(arena, std::move(layer_props)));
+
+  // Initial bind Image A.
+  flatland->SetLayerImage(kLayer, kImageA, std::nullopt, std::nullopt);
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+
+  // Middle binding B: acquire fence B is NEVER signaled; release fence B.
+  zx::event acquire_b;
+  ASSERT_EQ(zx::event::create(0, &acquire_b), ZX_OK);
+  zx::event release_b;
+  ASSERT_EQ(zx::event::create(0, &release_b), ZX_OK);
+  zx::event release_b_copy = utils::CopyZxHandle(release_b);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence_b =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(acquire_b));
+  fuchsia_ui_composition::wire::SignalFence signal_fence_b =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(release_b));
+  flatland->SetLayerImage(kLayer, kImageB, std::move(wait_fence_b), std::move(signal_fence_b));
+
+  // Stomp: Final binding C in the same batch: acquire fence C, release fence C.
+  zx::event acquire_c;
+  ASSERT_EQ(zx::event::create(0, &acquire_c), ZX_OK);
+  zx::event acquire_c_copy = utils::CopyZxHandle(acquire_c);
+  zx::event release_c;
+  ASSERT_EQ(zx::event::create(0, &release_c), ZX_OK);
+  zx::event release_c_copy = utils::CopyZxHandle(release_c);
+
+  fuchsia_ui_composition::wire::WaitFence wait_fence_c =
+      fuchsia_ui_composition::wire::WaitFence::WithBasic(std::move(acquire_c));
+  fuchsia_ui_composition::wire::SignalFence signal_fence_c =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(release_c));
+  flatland->SetLayerImage(kLayer, kImageC, std::move(wait_fence_c), std::move(signal_fence_c));
+
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  // Present is blocked on acquire_c, NOT acquire_b (acquire_b was dropped un-waited).
+  // The published UberStruct still has Image A because Present 2 hasn't published yet.
+  auto layer_handle = flatland->GetLayerHandleForTest(kLayer);
+  auto uber_struct = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct, nullptr);
+  ASSERT_TRUE(uber_struct->layers.contains(layer_handle));
+  const auto& us_layer = uber_struct->layers.at(layer_handle);
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(us_layer.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(us_layer.content).image_id,
+            flatland->GetGlobalImageIdForTest(kImageA));
+
+  // Signal acquire_c.
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  acquire_c_copy.signal(0, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+
+  // Present unblocks. Release fence B was delivered into the release set; release fence C was not.
+  EXPECT_TRUE(ReleaseFencesContain(session_id, release_b_copy));
+  EXPECT_FALSE(ReleaseFencesContain(session_id, release_c_copy));
+
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(release_b_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(release_c_copy, ZX_EVENT_SIGNALED));
+
+  // Applying session updates publishes Image C to the UberStructSystem.
+  auto uber_struct2 = GetUberStruct(flatland.get());
+  ASSERT_NE(uber_struct2, nullptr);
+  ASSERT_TRUE(uber_struct2->layers.contains(layer_handle));
+  const auto& us_layer2 = uber_struct2->layers.at(layer_handle);
+  ASSERT_TRUE(std::holds_alternative<UberStructLayer::ImageModeProperties>(us_layer2.content));
+  EXPECT_EQ(std::get<UberStructLayer::ImageModeProperties>(us_layer2.content).image_id,
+            flatland->GetGlobalImageIdForTest(kImageC));
+}
+
+// Flatland2Test.SharedImageFencesIndependent
+// Verifies that release fences are per-binding, not per-image: binding the same image to
+// two layers creates independent fences. Retiring the binding on one layer delivers
+// only that layer's release fence; the other layer's fence remains held.
+TEST_F(Flatland2Test, SharedImageFencesIndependent) {
+  auto flatland = CreateFlatland2({.skips_present_credits = true});
+  auto allocator = CreateAllocator();
+
+  auto ref_pair1 = BufferCollectionImportExportTokens::New();
+  auto ref_pair2 = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair1.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair2.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(2)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer1(2);
+  const LayerId kLayer2(3);
+  const LayerStackId kStack(4);
+  const ImageId kImage1(5);
+  const ImageId kImage2(6);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer1);
+  flatland->CreateLayer(kLayer2);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer1, kLayer2});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props1 = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                    .size(fuchsia_math::wire::SizeU{100, 100})
+                    .Build();
+  flatland->CreateImage2(kImage1, ToWire(ref_pair1.DuplicateImportToken()), 0, props1);
+  auto props2 = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                    .size(fuchsia_math::wire::SizeU{100, 100})
+                    .Build();
+  flatland->CreateImage2(kImage2, ToWire(ref_pair2.DuplicateImportToken()), 0, props2);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer1, fidl::ToWire(arena, layer_props));
+  flatland->SetLayerProperties(kLayer2, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event fence1;
+  ASSERT_EQ(zx::event::create(0, &fence1), ZX_OK);
+  zx::event fence1_copy = utils::CopyZxHandle(fence1);
+
+  zx::event fence2;
+  ASSERT_EQ(zx::event::create(0, &fence2), ZX_OK);
+  zx::event fence2_copy = utils::CopyZxHandle(fence2);
+
+  // Both layers bind the same Image 1 with separate release fences.
+  fuchsia_ui_composition::wire::SignalFence signal_fence1 =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence1));
+  flatland->SetLayerImage(kLayer1, kImage1, std::nullopt, std::move(signal_fence1));
+  fuchsia_ui_composition::wire::SignalFence signal_fence2 =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence2));
+  flatland->SetLayerImage(kLayer2, kImage1, std::nullopt, std::move(signal_fence2));
+
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args1;
+  flatland->Present(present_args1);
+  RunLoopUntilIdle();
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_FALSE(utils::IsEventSignalled(fence1_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence2_copy, ZX_EVENT_SIGNALED));
+
+  // Rebind only Layer 1 to Image 2 with a new fence. Layer 2 is untouched.
+  zx::event fence3;
+  ASSERT_EQ(zx::event::create(0, &fence3), ZX_OK);
+  zx::event fence3_copy = utils::CopyZxHandle(fence3);
+
+  fuchsia_ui_composition::wire::SignalFence signal_fence3 =
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(fence3));
+  flatland->SetLayerImage(kLayer1, kImage2, std::nullopt, std::move(signal_fence3));
+
+  const auto session_id = flatland->GetSessionId();
+  EXPECT_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _));
+  fuchsia_ui_composition::wire::PresentArgs present_args2;
+  flatland->Present(present_args2);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(ReleaseFencesContain(session_id, fence1_copy));
+  EXPECT_FALSE(ReleaseFencesContain(session_id, fence2_copy));
+  EXPECT_FALSE(ReleaseFencesContain(session_id, fence3_copy));
+
+  ApplySessionUpdatesAndSignalFences();
+  EXPECT_TRUE(utils::IsEventSignalled(fence1_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence2_copy, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(fence3_copy, ZX_EVENT_SIGNALED));
+}
+
+// Flatland2Test.ReleaseCounterWithoutWriteRightClosesSession
+// Verifies that a counter duplicated with ZX_RIGHT_SIGNAL but not ZX_RIGHT_WRITE causes
+// SignalFence::From() to return ZX_ERR_ACCESS_DENIED, closing the session. Conversely, an event
+// duplicated with ZX_RIGHT_SIGNAL alone is accepted.
+TEST_F(Flatland2Test, ReleaseCounterWithoutWriteRightClosesSession) {
+  {
+    std::optional<std::string> error_log;
+    auto flatland = CreateFlatland2(&error_log);
+    auto allocator = CreateAllocator();
+
+    auto ref_pair = BufferCollectionImportExportTokens::New();
+    RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+    EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+        .WillOnce(ReturnPromise(fpromise::ok()));
+
+    const LayerId kLayer(1);
+    const ImageId kImage(2);
+
+    flatland->CreateLayer(kLayer);
+
+    fidl::Arena arena;
+    auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+    flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+    zx::counter counter;
+    ASSERT_EQ(zx::counter::create(0, &counter), ZX_OK);
+    zx::counter counter_without_write;
+    // Duplicated with SIGNAL but missing WRITE.
+    ASSERT_EQ(counter.duplicate(ZX_RIGHT_SIGNAL, &counter_without_write), ZX_OK);
+
+    fuchsia_ui_composition::wire::SignalFence signal_fence =
+        fuchsia_ui_composition::wire::SignalFence::WithTimestamp(std::move(counter_without_write));
+    flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+    ASSERT_TRUE(error_log.has_value());
+    EXPECT_NE(error_log->find("ZX_ERR_ACCESS_DENIED"), std::string::npos);
+    Present(flatland, false);
+  }
+
+  // An event duplicated with ZX_RIGHT_SIGNAL alone passes.
+  {
+    std::optional<std::string> error_log;
+    auto flatland = CreateFlatland2(&error_log);
+    auto allocator = CreateAllocator();
+
+    auto ref_pair = BufferCollectionImportExportTokens::New();
+    RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+    EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+        .WillOnce(ReturnPromise(fpromise::ok()));
+
+    const LayerId kLayer(1);
+    const ImageId kImage(2);
+
+    flatland->CreateLayer(kLayer);
+
+    fidl::Arena arena;
+    auto props = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+    flatland->CreateImage2(kImage, ToWire(ref_pair.DuplicateImportToken()), 0, props);
+
+    zx::event event;
+    ASSERT_EQ(zx::event::create(0, &event), ZX_OK);
+    zx::event event_signal_only;
+    ASSERT_EQ(event.duplicate(ZX_RIGHT_SIGNAL, &event_signal_only), ZX_OK);
+
+    fuchsia_ui_composition::wire::SignalFence signal_fence =
+        fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(event_signal_only));
+    flatland->SetLayerImage(kLayer, kImage, std::nullopt, std::move(signal_fence));
+
+    EXPECT_FALSE(error_log.has_value());
+  }
+}
+
+// Flatland2Test.ReleaseFencesSignaledOnTeardown
+// Verifies that when a session is destroyed with held and staged release fences,
+// the fences and counters are passed to RemoveSession() and signaled, matching FIDL
+// requirements (destruction of session ends all bindings).
+TEST_F(Flatland2Test, ReleaseFencesSignaledOnTeardown) {
+  auto flatland = CreateFlatland2();
+  auto allocator = CreateAllocator();
+
+  auto ref_pair_a = BufferCollectionImportExportTokens::New();
+  auto ref_pair_b = BufferCollectionImportExportTokens::New();
+  auto ref_pair_c = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair_a.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair_b.export_token), CreateToken(), true);
+  RegisterBufferCollection(allocator, std::move(ref_pair_c.export_token), CreateToken(), true);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .Times(3)
+      .WillRepeatedly(ReturnPromise(fpromise::ok()));
+
+  const TransformId kRoot(1);
+  const LayerId kLayer1(2);
+  const LayerId kLayer2(3);
+  const LayerStackId kStack(4);
+  const ImageId kImageA(5);
+  const ImageId kImageB(6);
+  const ImageId kImageC(7);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayer(kLayer1);
+  flatland->CreateLayer(kLayer2);
+  flatland->CreateLayerStack(kStack);
+  flatland->SetStackLayers(kStack, {kLayer1, kLayer2});
+  flatland->SetTransformContent(kRoot, kStack);
+
+  fidl::Arena arena;
+  auto props_a = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageA, ToWire(ref_pair_a.DuplicateImportToken()), 0, props_a);
+  auto props_b = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageB, ToWire(ref_pair_b.DuplicateImportToken()), 0, props_b);
+  auto props_c = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                     .size(fuchsia_math::wire::SizeU{100, 100})
+                     .Build();
+  flatland->CreateImage2(kImageC, ToWire(ref_pair_c.DuplicateImportToken()), 0, props_c);
+
+  fuchsia_ui_composition::LayerProperties layer_props;
+  layer_props.composition_mode(fuchsia_ui_composition::CompositionMode::kImage);
+  flatland->SetLayerProperties(kLayer1, fidl::ToWire(arena, layer_props));
+  flatland->SetLayerProperties(kLayer2, fidl::ToWire(arena, std::move(layer_props)));
+
+  zx::event staged_fence = utils::CreateEvent();
+  zx::event staged_fence_dup = utils::CopyZxHandle(staged_fence);
+
+  zx::event held_fence = utils::CreateEvent();
+  zx::event held_fence_dup = utils::CopyZxHandle(held_fence);
+
+  zx::counter held_counter;
+  ASSERT_EQ(zx::counter::create(0, &held_counter), ZX_OK);
+  zx::counter held_counter_dup;
+  ASSERT_EQ(held_counter.duplicate(ZX_RIGHT_SAME_RIGHTS, &held_counter_dup), ZX_OK);
+
+  // Bind Image A with staged_fence on Layer 1.
+  flatland->SetLayerImage(
+      kLayer1, kImageA, std::nullopt,
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(staged_fence)));
+
+  // Rebind Layer 1 to Image B with held_fence (unbinds Image A, moving staged_fence to
+  // unbound_release_fences_ without presenting).
+  flatland->SetLayerImage(
+      kLayer1, kImageB, std::nullopt,
+      fuchsia_ui_composition::wire::SignalFence::WithBasic(std::move(held_fence)));
+
+  // Bind Layer 2 to Image C with held_counter.
+  flatland->SetLayerImage(
+      kLayer2, kImageC, std::nullopt,
+      fuchsia_ui_composition::wire::SignalFence::WithTimestamp(std::move(held_counter)));
+
+  // Destroy the session before Present().
+  // Teardown should deliver all held and staged fences/counters to RemoveSession().
+  const auto session_id = flatland->GetSessionId();
+  std::vector<zx::event> captured_release_fences;
+  std::vector<zx::counter> captured_release_counters;
+  EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(session_id, ::testing::_, ::testing::_))
+      .WillOnce([&](scheduling::SessionId, std::vector<zx::event> release_fences,
+                    std::vector<zx::counter> release_counters) {
+        captured_release_fences = std::move(release_fences);
+        captured_release_counters = std::move(release_counters);
+      });
+
+  flatland.reset();
+  RunLoopUntilIdle();
+
+  // Assert that the client's fence KOIDs were delivered to RemoveSession.
+  const auto staged_koid = fsl::GetKoid(staged_fence_dup.get());
+  const auto held_koid = fsl::GetKoid(held_fence_dup.get());
+  const auto counter_koid = fsl::GetKoid(held_counter_dup.get());
+
+  bool found_staged_fence = false;
+  bool found_held_fence = false;
+  for (const auto& fence : captured_release_fences) {
+    if (fsl::GetKoid(fence.get()) == staged_koid) {
+      found_staged_fence = true;
+    }
+    if (fsl::GetKoid(fence.get()) == held_koid) {
+      found_held_fence = true;
+    }
+  }
+  EXPECT_TRUE(found_staged_fence);
+  EXPECT_TRUE(found_held_fence);
+
+  bool found_held_counter = false;
+  for (const auto& counter : captured_release_counters) {
+    if (fsl::GetKoid(counter.get()) == counter_koid) {
+      found_held_counter = true;
+    }
+  }
+  EXPECT_TRUE(found_held_counter);
+
+  // Before signaling the captured handles, the client's duplicate handles remain unsignaled.
+  EXPECT_FALSE(utils::IsEventSignalled(staged_fence_dup, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsEventSignalled(held_fence_dup, ZX_EVENT_SIGNALED));
+  EXPECT_FALSE(utils::IsCounterSignalled(held_counter_dup, ZX_COUNTER_SIGNALED));
+
+  // Simulating retirement in the presenter signals the captured handles, which must signal the
+  // client's handles.
+  for (auto& fence : captured_release_fences) {
+    fence.signal(0, ZX_EVENT_SIGNALED);
+  }
+  for (auto& counter : captured_release_counters) {
+    counter.write(1);
+    counter.signal(0, ZX_COUNTER_SIGNALED);
+  }
+
+  EXPECT_TRUE(utils::IsEventSignalled(staged_fence_dup, ZX_EVENT_SIGNALED));
+  EXPECT_TRUE(utils::IsEventSignalled(held_fence_dup, ZX_EVENT_SIGNALED));
+  EXPECT_TRUE(utils::IsCounterSignalled(held_counter_dup, ZX_COUNTER_SIGNALED));
 }
 
 // These tests exercise the legacy bridging logic where Flatland1 mutator calls

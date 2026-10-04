@@ -6,19 +6,22 @@ use fuchsia_criterion::FuchsiaCriterion;
 use fuchsia_criterion::criterion::Criterion;
 use futures::executor::block_on;
 
-use fxfs::lsm_tree::merge::{MergeLayerIterator, MergeResult};
+use fxfs::checksum::Checksums;
+use fxfs::lsm_tree::merge::MergeFn;
 use fxfs::lsm_tree::types::{Item, LayerIterator, LayerKey, MergeableKey, Value};
 use fxfs::lsm_tree::{LSMTree, Query, compact_with_iterator, layers_from_handles};
-use fxfs::object_handle::ObjectHandle;
-use fxfs::object_store::Extent;
+use fxfs::object_store::allocator::merge::merge as allocator_merge;
 use fxfs::object_store::allocator::{AllocatorKey, AllocatorValue};
 use fxfs::object_store::journal::CompactionYielder;
+use fxfs::object_store::merge::merge as object_merge;
 use fxfs::object_store::object_record::{
-    AttributeId, AttributeKey, ObjectKey, ObjectKeyData, ObjectValue,
+    AttributeId, AttributeKey, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectValue, Timestamp,
 };
+use fxfs::object_store::{Extent, ExtentValue};
 use fxfs::testing::fake_object::{FakeObject, FakeObjectHandle};
 use fxfs::testing::writer::Writer;
 use std::sync::Arc;
+use storage_units::BlockSize;
 
 /// Extent size in bytes used for generating and querying extent-based records.
 const EXTENT_SIZE: u64 = 1024;
@@ -26,16 +29,13 @@ const EXTENT_SIZE: u64 = 1024;
 /// Number of extents to scan in range query benchmarks.
 const RANGE_QUERY_EXTENTS: u64 = 10;
 
-/// Merge function for LSM tree layers that resolves key collisions by emitting the left item.
-fn emit_left_merge_fn<K: MergeableKey, V: Value>(
-    _left: &MergeLayerIterator<'_, K, V>,
-    _right: &MergeLayerIterator<'_, K, V>,
-) -> MergeResult<K, V> {
-    MergeResult::EmitLeft
-}
-
 /// Helper to construct a sealed LSM tree with `depth` persistent layers and `size` total items.
-fn create_tree_generic<K, V, F>(depth: u64, size: u64, mut populate_layer: F) -> LSMTree<K, V>
+fn create_tree_generic<K, V, F>(
+    depth: u64,
+    size: u64,
+    merge_fn: MergeFn<K, V>,
+    mut populate_layer: F,
+) -> LSMTree<K, V>
 where
     K: MergeableKey,
     V: Value,
@@ -45,12 +45,14 @@ where
     let mut handles = Vec::new();
 
     for layer_idx in 0..depth {
-        let layer_tree = LSMTree::new(emit_left_merge_fn, None);
+        let layer_tree = LSMTree::new(merge_fn, None);
         populate_layer(&layer_tree, layer_idx, items_per_layer);
         layer_tree.seal();
 
-        let object = Arc::new(FakeObject::new());
-        let handle = FakeObjectHandle::new(object.clone());
+        let handle = FakeObjectHandle::new_with_block_size(
+            Arc::new(FakeObject::new()),
+            BlockSize::SIZE_4KIB,
+        );
 
         block_on(async {
             let layer_set = layer_tree.layer_set();
@@ -60,50 +62,65 @@ where
                 iter,
                 items_per_layer as usize,
                 Writer::new(&handle).await,
-                handle.block_size(),
+                BlockSize::SIZE_4KIB,
                 None::<CompactionYielder<'static>>,
             )
             .await
             .unwrap();
         });
 
-        handles.push(FakeObjectHandle::new(object));
+        handles.push(handle);
     }
 
     let layers = block_on(async { layers_from_handles(handles).await.unwrap() });
 
-    let tree = LSMTree::new(emit_left_merge_fn, None);
+    let tree = LSMTree::new(merge_fn, None);
     tree.set_layers(layers);
     tree
 }
 
-/// Populates an LSM tree with standard object records (`ObjectKey::object(key_id)`).
+/// Populates an LSM tree with realistic file object records (`ObjectKey::object(key_id)`),
+/// with 50% key overlap across layers when `depth > 1`.
 fn create_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
-    create_tree_generic(depth, size, |tree, layer_idx, items_per_layer| {
+    create_tree_generic(depth, size, object_merge, |tree, layer_idx, items_per_layer| {
         for i in 0..items_per_layer {
-            let key_id = i * depth + layer_idx;
-            tree.insert(Item::new(ObjectKey::object(key_id), ObjectValue::Some)).unwrap();
+            let key_id = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
+            let value = ObjectValue::file(
+                1,
+                4096,
+                Timestamp::default(),
+                Timestamp::default(),
+                Timestamp::default(),
+                Timestamp::default(),
+                None,
+                None,
+            );
+            tree.insert(Item::new(ObjectKey::object(key_id), value)).unwrap();
         }
     })
 }
 
-/// Populates an LSM tree with long child keys to benchmark performance on large keys.
+/// Populates an LSM tree with long child keys and realistic child values,
+/// with 50% key overlap across layers when `depth > 1`.
 fn create_long_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
-    create_tree_generic(depth, size, |tree, layer_idx, items_per_layer| {
+    create_tree_generic(depth, size, object_merge, |tree, layer_idx, items_per_layer| {
         for i in 0..items_per_layer {
-            let key_id = i * depth + layer_idx;
+            let key_id = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
             let name = "a".repeat(300);
             let key = ObjectKey { object_id: key_id, data: ObjectKeyData::Child { name } };
-            tree.insert(Item::new(key, ObjectValue::Some)).unwrap();
+            let value = ObjectValue::child(key_id + 100, ObjectDescriptor::File);
+            tree.insert(Item::new(key, value)).unwrap();
         }
     })
 }
 
-/// Populates an LSM tree with attribute extent records interleaved across layers.
+/// Populates an LSM tree with attribute extent records containing Fletcher checksums.  When
+/// `depth > 1`, half of the extents are present in every layer with identical ranges.
 fn create_extent_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
-    create_tree_generic(depth, size, |tree, layer_idx, items_per_layer| {
-        let mut offset = layer_idx * EXTENT_SIZE;
-        for _ in 0..items_per_layer {
+    create_tree_generic(depth, size, object_merge, |tree, layer_idx, items_per_layer| {
+        for i in 0..items_per_layer {
+            let extent_idx = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
+            let offset = extent_idx * EXTENT_SIZE;
             let key = ObjectKey {
                 object_id: 1,
                 data: ObjectKeyData::Attribute(
@@ -111,21 +128,26 @@ fn create_extent_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> 
                     AttributeKey::Extent(Extent(offset..offset + EXTENT_SIZE)),
                 ),
             };
-            tree.insert(Item::new(key, ObjectValue::Some)).unwrap();
-            offset += depth * EXTENT_SIZE;
+            let value = ObjectValue::Extent(ExtentValue::with_checksum(
+                offset + layer_idx * 1_000_000_000,
+                Checksums::fletcher(vec![0xdeadbeefcafe0000 + i; 16]),
+                0,
+            ));
+            tree.insert(Item::new(key, value)).unwrap();
         }
     })
 }
 
-/// Populates an LSM tree with allocator extent records interleaved across layers.
+/// Populates an LSM tree with allocator extent records, with 50% overlap across layers when
+/// `depth > 1`.
 fn create_allocator_tree(depth: u64, size: u64) -> LSMTree<AllocatorKey, AllocatorValue> {
-    create_tree_generic(depth, size, |tree, layer_idx, items_per_layer| {
-        let mut offset = layer_idx * EXTENT_SIZE;
-        for _ in 0..items_per_layer {
+    create_tree_generic(depth, size, allocator_merge, |tree, layer_idx, items_per_layer| {
+        for i in 0..items_per_layer {
+            let extent_idx = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
+            let offset = extent_idx * EXTENT_SIZE;
             let key = AllocatorKey { device_range: Extent(offset..offset + EXTENT_SIZE) };
-            let value = AllocatorValue::Abs { count: 1, owner_object_id: 1 };
+            let value = AllocatorValue::Abs { count: 1, owner_object_id: extent_idx + 1 };
             tree.insert(Item::new(key, value)).unwrap();
-            offset += depth * EXTENT_SIZE;
         }
     })
 }

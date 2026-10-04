@@ -1,0 +1,22 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//sdk/lib/driver_test_realm/realm_builder/client.shard.cml",
+        "//sdk/lib/sys/component/realm_builder.shard.cml",
+        "//sdk/lib/syslog/client.shard.cml",
+        "//src/sys/test_runners/rust/default.shard.cml",
+    ],
+    program: {
+        binary: "bin/pci_driver_test",
+    },
+    offer: [
+        {
+            protocol: [ "fuchsia.kernel.IoportResource" ],
+            from: "parent",
+            to: "#realm_builder",
+            availability: "optional",
+        },
+    ],
+}

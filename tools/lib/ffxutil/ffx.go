@@ -210,7 +210,6 @@ func (b *strictFfxCmdBuilder) setConfigMap(user, global map[string]any) error {
 	}
 	// Strip out certain configs that don't apply to strict invocations
 	// TODO(slgrady): remove this code once we remove non-strict ffx invocations.
-	delete(global, "daemon.autostart")
 	delete(global, "ffx.isolated")
 
 	for k, v := range global {

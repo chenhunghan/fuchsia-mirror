@@ -2,47 +2,39 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/host.gni")
+import("//build/bazel/bazel_host_tool.gni")
 
-source_set("common") {
-  sources = [ "netprotocol.c" ]
-  public_deps = [ "//src/bringup/lib/netboot" ]
+if (is_host) {
+  bazel_host_tool("netruncmd") {
+    bazel_target = ":netruncmd"
+    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/netruncmd"
+    install_host_tool = true
+  }
+
+  bazel_host_tool("netcp") {
+    bazel_target = ":netcp"
+    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/netcp"
+    install_host_tool = true
+  }
+
+  bazel_host_tool("netls") {
+    bazel_target = ":netls"
+    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/netls"
+    install_host_tool = true
+  }
+
+  bazel_host_tool("netaddr") {
+    bazel_target = ":netaddr"
+    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/netaddr"
+    install_host_tool = true
+  }
 }
 
-executable("netruncmd") {
-  sources = [ "netruncmd.c" ]
-  deps = [ ":common" ]
-}
-
-executable("netcp") {
-  sources = [ "netcp.c" ]
+group("netprotocol") {
   deps = [
-    ":common",
-    "//zircon/system/ulib/tftp",
-  ]
-}
-
-executable("netls") {
-  sources = [ "netls.c" ]
-  deps = [ ":common" ]
-}
-
-executable("netaddr") {
-  sources = [ "netaddr.c" ]
-  deps = [ ":common" ]
-}
-
-install_host_tools("netprotocol") {
-  deps = [
-    ":netaddr",
-    ":netcp",
-    ":netls",
-    ":netruncmd",
-  ]
-  outputs = [
-    "netaddr",
-    "netcp",
-    "netls",
-    "netruncmd",
+    ":netaddr($host_toolchain)",
+    ":netcp($host_toolchain)",
+    ":netls($host_toolchain)",
+    ":netruncmd($host_toolchain)",
   ]
 }

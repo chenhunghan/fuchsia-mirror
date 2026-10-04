@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia-archive",
+    srcs = [
+        "src/async_read.rs",
+        "src/async_utf8_reader.rs",
+        "src/error.rs",
+        "src/lib.rs",
+        "src/name.rs",
+        "src/read.rs",
+        "src/utf8_reader.rs",
+        "src/write.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:itertools",
+    ],
+    # Used widely across the repository (build, bringup, developer, devices, lib, security, starnix, sys, tools).
+    visibility = ["//visibility:public"],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "reject-invalid-fars-test",
+    srcs = ["tests/reject_invalid_fars.rs"],
+    crate_root = "tests/reject_invalid_fars.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":fuchsia-archive",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)

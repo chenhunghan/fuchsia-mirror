@@ -1,0 +1,54 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//src/devices/driver-lab/meta/debug.shard.cml",
+        "driver/platform-device.shard.cml",
+        "driver_component/driver.shard.cml",
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        runner: "driver",
+        binary: "driver/lab_proxy.so",
+        bind: "meta/bind/lab_proxy.bindbc",
+    },
+    use: [
+        {
+            service: [
+                "fuchsia.hardware.clock.Service",
+                "fuchsia.hardware.gpio.Service",
+                "fuchsia.hardware.i2c.Service",
+                "fuchsia.hardware.reset.Service",
+                "fuchsia.hardware.serial.Service",
+                "fuchsia.hardware.spi.Service",
+            ],
+        },
+    ],
+    config: {
+        // Whether the proxy is enabled. If false, sessions are rejected.
+        enabled: { type: "bool" },
+
+        // Capacity of the audit ring buffer (<= 1024).
+        audit_capacity: { type: "uint32" },
+
+        // Maximum items allowed in a single snapshot (<= 64).
+        max_snapshot_items: { type: "uint32" },
+
+        // Maximum items allowed in a single sequence (<= 64).
+        max_sequence_items: { type: "uint32" },
+
+        // Maximum delay allowed per sequence step in ns (<= 100ms).
+        max_delay_ns: { type: "uint64" },
+
+        // Maximum sequence duration in ns (<= 1s).
+        max_sequence_duration_ns: { type: "uint64" },
+
+        // Maximum deadline timeout for polls and waits in ns (<= 1s).
+        max_deadline_ns: { type: "uint64" },
+
+        // Maximum operations allowed per second per session (0 = unlimited).
+        max_ops_per_second: { type: "uint32" },
+    },
+}

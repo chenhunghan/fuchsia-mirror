@@ -50,14 +50,24 @@ type WrappedKey = flexible union {
     2: zxcrypt vector<uint8>:132;
 
     /// Fscrypt INO_LBLK32 directory (For use with starnix only)
-    ///   In: 16-byte key_identifier + 16-byte UUID + 16-byte nonce.
-    ///   Out: 32-byte xts_key1, 32-byte xts_key2, 16-byte ino_hash, 16-byte dirhash.
+    ///   In: 16-byte key_identifier + 16-byte nonce.
+    ///   Out: 32-byte cts_key, 16-byte ino_hash, 16-byte dirhash.
     3: fscrypt_ino_lblk32_dir FscryptKeyIdentifierAndNonce;
 
     /// Fscrypt INO_LBLK32 file (For use with starnix only)
-    ///   In: 16-byte key_identifier + 16-byte UUID.
-    ///   Out: 32-byte xts_key1, 32-byte xts_key2, 16-byte ino_hash.
+    ///   In: 16-byte key_identifier.
+    ///   Out: 16-byte ino_hash (hardware key slot is registered via `key_token`).
     4: fscrypt_ino_lblk32_file FscryptKeyIdentifier;
+
+    /// Fscrypt INO_LBLK64 directory (For use with starnix only)
+    ///   In: 16-byte key_identifier + 16-byte nonce.
+    ///   Out: 32-byte cts_key, 16-byte dirhash.
+    5: fscrypt_ino_lblk64_dir FscryptKeyIdentifierAndNonce;
+
+    /// Fscrypt INO_LBLK64 file (For use with starnix only)
+    ///   In: 16-byte key_identifier.
+    ///   Out: empty unwrapped_key (hardware key slot is registered via `key_token`).
+    6: fscrypt_ino_lblk64_file FscryptKeyIdentifier;
 };
 
 @discoverable
@@ -77,20 +87,27 @@ closed protocol Crypt {
     }) error zx.Status;
 
     /// Creates a new key wrapped with the key identified by `wrapping_key_id`.  `owner` identifies
-    /// the owner of the key and must be supplied to `UnwrapKey` along with  `wrapping_key_id`.
-    /// The `wrapping_key_id` has no meaning to Fxfs.
+    /// the owner of the key and must be supplied to `UnwrapKey` along with the returned
+    /// `wrapped_key`.  The `wrapping_key_id` has no meaning to Fxfs. `flags` specifies the fscrypt
+    /// policy flags (e.g. filename padding and IV/DUN derivation mode) for the encrypted directory
+    /// or file.  If the key uses hardware inline encryption, `key_token` is returned so the
+    /// filesystem can register the key with its block session.
     strict CreateKeyWithId(struct {
         owner uint64;
         wrapping_key_id array<uint8, 16>;
         object_type ObjectType;
-    }) -> (struct {
+        flags fuchsia.io.FscryptPolicyFlags;
+    }) -> (resource struct {
         wrapped_key WrappedKey;
         unwrapped_key vector<uint8>:80;
+        key_token zx.Handle:<EVENTPAIR, optional>;
     }) error zx.Status;
 
     /// Unwraps a key.  `owner` must be the same as that passed to `CreateKey`.
     /// This can fail due to permission reasons, but an incorrect key or owner will not fail;
     /// it will just return an unwrapped key that won't actually decrpyt the data.
+    /// If the key uses hardware inline encryption, `key_token` is returned so the filesystem can
+    /// register the key with its block session.
     /// ZX_ERR_UNAVAILABLE is returned if the key is known but cannot be unwrapped (e.g. it is
     /// locked).
     /// ZX_ERR_NOT_FOUND is returned if the key is not known. In some cases, implementations are
@@ -99,8 +116,9 @@ closed protocol Crypt {
     strict UnwrapKey(struct {
         owner uint64;
         wrapped_key WrappedKey;
-    }) -> (struct {
+    }) -> (resource struct {
         unwrapped_key vector<uint8>:128;
+        key_token zx.Handle:<EVENTPAIR, optional>;
     }) error zx.Status;
 };
 

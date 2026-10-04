@@ -42,6 +42,8 @@ bazel_file = os.path.join(workdir, target_pkg, "BUILD.bazel")
 gn_file = os.path.join(workdir, target_pkg, "BUILD.gn")
 
 bazel_targets = []
+package_targets = set()
+fidl_targets = set()
 alias_map = {}
 if os.path.isfile(bazel_file):
     try:
@@ -63,21 +65,68 @@ if os.path.isfile(bazel_file):
                         actual = kw.value.value
                 if tname:
                     bazel_targets.append(tname)
+                    if func in ("fx_package", "fuchsia_package"):
+                        package_targets.add(tname)
+                    if func == "fidl_library":
+                        fidl_targets.add(tname)
                     if func == "alias" and actual and actual.startswith(":"):
                         alias_map[tname] = actual[1:]
     except Exception:
         pass
+
+CONVERTIBLE_GN_TEMPLATES = {
+    "static_library",
+    "source_set",
+    "shared_library",
+    "executable",
+    "library_headers",
+    "rustc_library",
+    "rustc_binary",
+    "rustc_macro",
+    "rustc_test",
+    "go_library",
+    "go_binary",
+    "go_test",
+    "python_library",
+    "python_binary",
+    "fidl",
+    "sdk_source_set",
+    "sdk_static_library",
+    "sdk_shared_library",
+    "zx_library",
+    "fuchsia_package",
+    "fuchsia_package_with_single_component",
+    "fuchsia_component",
+    "fuchsia_component_manifest",
+    "resource",
+}
+
+GN_PACKAGE_TEMPLATES = {
+    "fuchsia_package",
+    "fuchsia_package_with_single_component",
+}
 
 gn_only_targets = {"verify_bazel2gn", "tests", "benchmarks"}
 if os.path.isfile(gn_file):
     try:
         with open(gn_file, "r", encoding="utf-8", errors="ignore") as f:
             gn_src = f.read()
-        above_sentinel = gn_src.split("BAZEL2GN SENTINEL")[0] if "BAZEL2GN SENTINEL" in gn_src else ""
-        for m in re.finditer(r'^\s*[a-zA-Z0-9_]+\(\s*"([^"]+)"\s*\)', above_sentinel, flags=re.MULTILINE):
-            t = m.group(1)
-            if t not in bazel_targets:
-                gn_only_targets.add(t)
+        for m in re.finditer(r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)', gn_src, flags=re.MULTILINE):
+            if m.group(1) in GN_PACKAGE_TEMPLATES:
+                package_targets.add(m.group(2))
+        if bazel_targets:
+            above_sentinel = gn_src.split("BAZEL2GN SENTINEL")[0] if "BAZEL2GN SENTINEL" in gn_src else gn_src
+            for m in re.finditer(r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)', above_sentinel, flags=re.MULTILINE):
+                t = m.group(2)
+                if t not in bazel_targets:
+                    gn_only_targets.add(t)
+        else:
+            for m in re.finditer(r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)', gn_src, flags=re.MULTILINE):
+                tmpl, t = m.group(1), m.group(2)
+                if tmpl in CONVERTIBLE_GN_TEMPLATES and t not in bazel_targets:
+                    bazel_targets.append(t)
+                elif tmpl not in CONVERTIBLE_GN_TEMPLATES and t not in bazel_targets:
+                    gn_only_targets.add(t)
     except Exception:
         pass
 
@@ -91,7 +140,7 @@ try:
     )
     files = [line.strip() for line in out.splitlines() if line.strip()]
 except Exception:
-    for repo in [workdir, os.path.join(workdir, "vendor/google")]:
+    for repo in [workdir, os.path.join(workdir, "vendor/" + "google")]:
         if os.path.isdir(os.path.join(repo, ".git")):
             try:
                 out = subprocess.check_output(
@@ -162,11 +211,28 @@ for fpath in sorted(set(files)):
         if sub in gn_only_targets and sub not in bazel_targets:
             excluded_gn_only_references.add(f"//{pkg} (:{sub})")
             continue
-        true_rdep_packages.add(pkg)
+        is_pkg_target = sub in package_targets or (
+            sub == default_target and len(bazel_targets) == 1 and bazel_targets[0] in package_targets
+        )
+        caller_pkg = (
+            "bundles/assembly"
+            if (pkg == "bundles/assembly" or pkg.startswith("bundles/assembly/"))
+            else pkg
+        )
+        if is_pkg_target and rel.endswith((".gn", ".gni")) and not pkg.startswith(("bundles/assembly", "build/images")):
+            excluded_gn_only_references.add(f"//{pkg} (:{sub})")
+            continue
+        true_rdep_packages.add(caller_pkg)
         if sub in per_target_rdeps:
-            per_target_rdeps[sub].add(pkg)
+            per_target_rdeps[sub].add(caller_pkg)
         elif sub == default_target and len(bazel_targets) == 1:
-            per_target_rdeps[bazel_targets[0]].add(pkg)
+            per_target_rdeps[bazel_targets[0]].add(caller_pkg)
+        else:
+            # GN fidl() callers depend on generated binding sub-targets
+            # (<name>_rust, <name>_cpp, <name>_hlcpp, ...) of the fidl_library.
+            owners = [t for t in fidl_targets if sub.startswith(t + "_")]
+            if owners:
+                per_target_rdeps[max(owners, key=len)].add(caller_pkg)
 
 for alias_name, actual_name in alias_map.items():
     if alias_name in per_target_rdeps and actual_name in per_target_rdeps:
@@ -217,6 +283,9 @@ def recommend_narrow_visibility(rdep_pkgs):
     if len(pkgs) <= 5:
         result = list(vendor_entries)
         for p in pkgs:
+            if p == "bundles/assembly":
+                result.append("//bundles/assembly:__subpackages__")
+                continue
             if any(p != other and p.startswith(other + "/") for other in pkgs if len(other.split("/")) >= 3):
                 continue
             has_child = any(other != p and other.startswith(p + "/") for other in pkgs)
@@ -240,7 +309,10 @@ def recommend_narrow_visibility(rdep_pkgs):
         parts_d3 = d3.split("/")
         if len(parts_d3) < 3:
             for p in group:
-                result.add(f"//{p}:__pkg__")
+                if p == "bundles/assembly":
+                    result.add("//bundles/assembly:__subpackages__")
+                else:
+                    result.add(f"//{p}:__pkg__")
             continue
 
         split_group = [g.split("/") for g in group]

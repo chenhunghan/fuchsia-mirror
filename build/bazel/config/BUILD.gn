@@ -30,7 +30,6 @@ generated_file("bazel_args_json") {
 generated_file("global_args.json") {
   outputs = [ "$root_build_dir/bazel_args/global_args.json" ]
   contents = {
-    upload_build_events = bazel_upload_build_events
     auto_refresh_compdb = bazel_auto_refresh_compdb
     rust_sysroot = rebased_rustc_prefix
   }

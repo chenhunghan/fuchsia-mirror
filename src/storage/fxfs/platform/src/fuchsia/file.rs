@@ -296,6 +296,10 @@ impl FxFile {
     }
 
     async fn fscrypt_wrapping_key_id(&self) -> Result<Option<WrappingKeyId>, zx::Status> {
+        Ok(self.fscrypt_policy().await?.map(|p| p.key_identifier))
+    }
+
+    async fn fscrypt_policy(&self) -> Result<Option<fio::FscryptPolicy>, zx::Status> {
         if self.handle.store().is_encrypted() {
             if let Some(key) = self
                 .handle
@@ -307,12 +311,27 @@ impl FxFile {
             {
                 match key {
                     EncryptionKey::Fxfs(fxfs_key) => {
-                        return Ok(Some(fxfs_key.wrapping_key_id));
+                        return Ok(Some(fio::FscryptPolicy {
+                            key_identifier: fxfs_key.wrapping_key_id,
+                            flags: fio::FscryptPolicyFlags::PAD_16,
+                        }));
                     }
                     EncryptionKey::FscryptInoLblk32File { key_identifier } => {
-                        return Ok(Some(*key_identifier));
+                        return Ok(Some(fio::FscryptPolicy {
+                            key_identifier: *key_identifier,
+                            flags: fio::FscryptPolicyFlags::PAD_16
+                                | fio::FscryptPolicyFlags::IV_INO_LBLK_32,
+                        }));
                     }
-                    EncryptionKey::FscryptInoLblk32Dir { .. } => {
+                    EncryptionKey::FscryptInoLblk64File { key_identifier } => {
+                        return Ok(Some(fio::FscryptPolicy {
+                            key_identifier: *key_identifier,
+                            flags: fio::FscryptPolicyFlags::PAD_16
+                                | fio::FscryptPolicyFlags::IV_INO_LBLK_64,
+                        }));
+                    }
+                    EncryptionKey::FscryptInoLblk32Dir { .. }
+                    | EncryptionKey::FscryptInoLblk64Dir { .. } => {
                         error!("Unexpected key type for file: {:?}", key);
                         return Ok(None);
                     }
@@ -542,7 +561,7 @@ impl vfs::node::Node for FxFile {
                     .get_inline_selinux_context()
                     .await
                     .map_err(map_to_status)?,
-                wrapping_key_id: self.fscrypt_wrapping_key_id().await?,
+                encryption_policy: self.fscrypt_policy().await?,
             },
             Immutable {
                 protocols: fio::NodeProtocolKinds::FILE,
@@ -2788,7 +2807,10 @@ mod tests {
         crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).unwrap();
         encrypted_directory
             .update_attributes(&fio::MutableNodeAttributes {
-                wrapping_key_id: Some(WRAPPING_KEY_ID),
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier: WRAPPING_KEY_ID,
+                    flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
+                }),
                 ..Default::default()
             })
             .await
@@ -2808,12 +2830,15 @@ mod tests {
         )
         .await;
         let (mutable_attributes, _immutable_attributes) = encryped_tmpfile
-            .get_attributes(fio::NodeAttributesQuery::WRAPPING_KEY_ID)
+            .get_attributes(fio::NodeAttributesQuery::ENCRYPTION_POLICY)
             .await
             .expect("get_attributes wire call failed")
             .map_err(zx::Status::err_from_raw)
             .expect("get_attributes failed");
-        assert_eq!(mutable_attributes.wrapping_key_id, Some(WRAPPING_KEY_ID));
+        assert_eq!(
+            mutable_attributes.encryption_policy.map(|p| p.key_identifier),
+            Some(WRAPPING_KEY_ID)
+        );
 
         // Similar to a regular file, linking a temporary unnamed file into the directory will only
         // work if they have the same wrapping key ID.
@@ -2836,12 +2861,12 @@ mod tests {
         )
         .await;
         let (mutable_attributes, _immutable_attributes) = unencryped_tmpfile
-            .get_attributes(fio::NodeAttributesQuery::WRAPPING_KEY_ID)
+            .get_attributes(fio::NodeAttributesQuery::ENCRYPTION_POLICY)
             .await
             .expect("get_attributes wire call failed")
             .map_err(zx::Status::err_from_raw)
             .expect("get_attributes failed");
-        assert_eq!(mutable_attributes.wrapping_key_id, None);
+        assert_eq!(mutable_attributes.encryption_policy, None);
         let (status, dst_token) = encrypted_directory.get_token().await.expect("FIDL call failed");
         zx::Status::ok(status).expect("get_token failed");
         assert_eq!(
@@ -2877,7 +2902,10 @@ mod tests {
         crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).unwrap();
         encrypted_directory
             .update_attributes(&fio::MutableNodeAttributes {
-                wrapping_key_id: Some(WRAPPING_KEY_ID),
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier: WRAPPING_KEY_ID,
+                    flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
+                }),
                 ..Default::default()
             })
             .await
@@ -3395,13 +3423,16 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         let (mutable_attributes, _) = file
-            .get_attributes(fio::NodeAttributesQuery::WRAPPING_KEY_ID)
+            .get_attributes(fio::NodeAttributesQuery::ENCRYPTION_POLICY)
             .await
             .expect("get_attributes wire call failed")
             .map_err(zx::Status::err_from_raw)
             .expect("get_attributes failed");
 
-        assert_eq!(mutable_attributes.wrapping_key_id, Some(WRAPPING_KEY_ID));
+        assert_eq!(
+            mutable_attributes.encryption_policy.map(|p| p.key_identifier),
+            Some(WRAPPING_KEY_ID)
+        );
 
         fixture.close().await;
     }

@@ -33,7 +33,7 @@ class TrustedFlatlandFactoryTest : public LoggingEventLoop, public ::testing::Te
     ::testing::Test::SetUp();
 
     mock_flatland_presenter_ = std::make_shared<::testing::StrictMock<MockFlatlandPresenter>>();
-    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _)).Times(::testing::AtLeast(0));
+    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _, _)).Times(::testing::AtLeast(0));
     ON_CALL(*mock_flatland_presenter_, ScheduleUpdateForSession(_, _, _, _, _, _, _))
         .WillByDefault(::testing::Invoke(
             [&](zx::time requested_presentation_time, scheduling::SchedulingIdPair id_pair,

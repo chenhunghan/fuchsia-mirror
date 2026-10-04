@@ -2,12 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fcntl.h>
+#include <grp.h>
+#include <signal.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include <gtest/gtest.h>
 #include <linux/capability.h>
@@ -681,5 +687,204 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<SecurebitsLockedTest::ParamType> &info) {
       return info.param.name;
     });
+
+TEST(PrctlTest, PDeathSigGetSetAndFork) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    int pdeathsig = -1;
+    // PR_GET_PDEATHSIG initially returns 0.
+    ASSERT_THAT(prctl(PR_GET_PDEATHSIG, &pdeathsig), SyscallSucceeds());
+    EXPECT_EQ(pdeathsig, 0);
+
+    // Setting an invalid signal fails with EINVAL.
+    EXPECT_THAT(prctl(PR_SET_PDEATHSIG, -1), SyscallFailsWithErrno(EINVAL));
+    EXPECT_THAT(prctl(PR_SET_PDEATHSIG, 1024), SyscallFailsWithErrno(EINVAL));
+
+    // Set a valid parent death signal (SIGUSR1).
+    ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+    ASSERT_THAT(prctl(PR_GET_PDEATHSIG, &pdeathsig), SyscallSucceeds());
+    EXPECT_EQ(pdeathsig, SIGUSR1);
+
+    // Newly created child process does not inherit the parent death signal.
+    test_helper::ForkHelper child_helper;
+    child_helper.RunInForkedProcess([] {
+      int child_pdeathsig = -1;
+      ASSERT_THAT(prctl(PR_GET_PDEATHSIG, &child_pdeathsig), SyscallSucceeds());
+      EXPECT_EQ(child_pdeathsig, 0);
+    });
+    EXPECT_TRUE(child_helper.WaitForChildren());
+
+    // Setting 0 clears the parent death signal.
+    ASSERT_THAT(prctl(PR_SET_PDEATHSIG, 0), SyscallSucceeds());
+    ASSERT_THAT(prctl(PR_GET_PDEATHSIG, &pdeathsig), SyscallSucceeds());
+    EXPECT_EQ(pdeathsig, 0);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+TEST(PrctlTest, PDeathSigOnParentAndSubreaperExit) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    auto child_ready = test_helper::MakeRendezvous();
+    auto parent_signal_received = test_helper::MakeRendezvous();
+
+    helper.RunInForkedProcess([&] {
+      // ForkHelper's constructor enables PR_SET_CHILD_SUBREAPER on this process.
+      // Only wait for the direct child (`parent`) so that the reparented grandchild remains
+      // alive when this subreaper process exits.
+      test_helper::ForkHelper subreaper_helper;
+      subreaper_helper.OnlyWaitForForkedChildren();
+      pid_t subreaper_pid = getpid();
+
+      subreaper_helper.RunInForkedProcess([&] {
+        pid_t current_parent_pid = getpid();
+        helper.RunInForkedProcess([&] {
+          test_helper::SignalMaskHelper sigmask;
+          sigmask.blockSignal(SIGUSR1);
+          ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+
+          // Signal the parent process that PR_SET_PDEATHSIG is configured.
+          child_ready.poker.poke();
+
+          // Expect SIGUSR1 from the original parent process when it exits.
+          siginfo_t info = {};
+          EXPECT_EQ(sigmask.timedWaitForSignal(SIGUSR1, 5000, &info), SIGUSR1);
+          EXPECT_EQ(info.si_pid, current_parent_pid);
+
+          // Signal the subreaper process to exit and verify a second SIGUSR1 from the subreaper.
+          parent_signal_received.poker.poke();
+
+          info = {};
+          EXPECT_EQ(sigmask.timedWaitForSignal(SIGUSR1, 5000, &info), SIGUSR1);
+          EXPECT_EQ(info.si_pid, subreaper_pid);
+        });
+
+        child_ready.holder.hold();
+      });
+
+      parent_signal_received.holder.hold();
+      EXPECT_TRUE(subreaper_helper.WaitForChildren());
+    });
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+TEST(PrctlTest, PDeathSigOnCreatorThreadExit) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    test_helper::ForkHelper thread_fork_helper;
+    auto child_ready = test_helper::MakeRendezvous();
+    pid_t parent_pid = getpid();
+
+    std::thread creator_thread([&] {
+      thread_fork_helper.RunInForkedProcess([&] {
+        test_helper::SignalMaskHelper sigmask;
+        sigmask.blockSignal(SIGUSR1);
+        ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+
+        child_ready.poker.poke();
+
+        siginfo_t info = {};
+        EXPECT_EQ(sigmask.timedWaitForSignal(SIGUSR1, 5000, &info), SIGUSR1);
+        EXPECT_EQ(info.si_pid, parent_pid);
+      });
+      child_ready.holder.hold();
+    });
+    creator_thread.join();
+
+    EXPECT_TRUE(thread_fork_helper.WaitForChildren());
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+TEST(PrctlTest, PDeathSigClearedOnCredentialChange) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
+  }
+
+  constexpr uid_t kUser1Uid = 65533;
+  constexpr gid_t kUser1Gid = 65534;
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+
+    SAFE_SYSCALL(setgroups(0, nullptr));
+    SAFE_SYSCALL(setresgid(kUser1Gid, kUser1Gid, kUser1Gid));
+    SAFE_SYSCALL(setresuid(kUser1Uid, kUser1Uid, kUser1Uid));
+
+    int pdeathsig = -1;
+    ASSERT_THAT(prctl(PR_GET_PDEATHSIG, &pdeathsig), SyscallSucceeds());
+    EXPECT_EQ(pdeathsig, 0);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+TEST(PrctlTest, PDeathSigExec) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
+  }
+
+  std::string helper_binary = test_helper::GetTestResourcePath("print_helper");
+  test_helper::ScopedTempDir temp_dir;
+  auto mount = ASSERT_RESULT_SUCCESS_AND_RETURN(
+      test_helper::ScopedMount::Mount("none", temp_dir.path(), "tmpfs"));
+
+  constexpr int kDirPerms = S_IRWXU | S_IXGRP | S_IXOTH;
+  SAFE_SYSCALL(chmod(temp_dir.path().c_str(), kDirPerms));
+
+  std::string normal_binary = temp_dir.path() + "/normal_print_helper";
+  std::string suid_binary = temp_dir.path() + "/suid_print_helper";
+  std::filesystem::copy_file(helper_binary, normal_binary);
+  std::filesystem::copy_file(helper_binary, suid_binary);
+
+  constexpr uid_t kRootUid = 0;
+  constexpr gid_t kRootGid = 0;
+  constexpr uid_t kUser1Uid = 65533;
+  constexpr gid_t kUser1Gid = 65534;
+
+  SAFE_SYSCALL(chown(normal_binary.c_str(), kRootUid, kRootGid));
+  SAFE_SYSCALL(chmod(normal_binary.c_str(), S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+
+  SAFE_SYSCALL(chown(suid_binary.c_str(), kRootUid, kRootGid));
+  SAFE_SYSCALL(
+      chmod(suid_binary.c_str(), S_ISUID | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+
+  auto run_exec_and_read_pdeathsig = [&](const std::string &binary_path) -> int {
+    fbl::unique_fd out_fd(SAFE_SYSCALL(test_helper::MemFdCreate("pdeathsig_out", O_RDWR)));
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      SAFE_SYSCALL(dup2(out_fd.get(), STDOUT_FILENO));
+      SAFE_SYSCALL(setgroups(0, nullptr));
+      SAFE_SYSCALL(setresgid(kUser1Gid, kUser1Gid, kUser1Gid));
+      SAFE_SYSCALL(setresuid(kUser1Uid, kUser1Uid, kUser1Uid));
+      SAFE_SYSCALL(prctl(PR_SET_PDEATHSIG, SIGUSR1));
+
+      char *const argv[] = {
+          const_cast<char *>(binary_path.c_str()),
+          const_cast<char *>("pdeathsig"),
+          nullptr,
+      };
+      char *const envp[] = {nullptr};
+      SAFE_SYSCALL(execve(binary_path.c_str(), argv, envp));
+    });
+    EXPECT_TRUE(helper.WaitForChildren());
+
+    SAFE_SYSCALL(lseek(out_fd.get(), 0, SEEK_SET));
+    char buf[32] = {};
+    ssize_t bytes_read = SAFE_SYSCALL(read(out_fd.get(), buf, sizeof(buf) - 1));
+    EXPECT_GT(bytes_read, 0);
+    char *end = nullptr;
+    int observed_pdeathsig = static_cast<int>(strtol(buf, &end, 10));
+    EXPECT_EQ(*end, '\n');
+    return observed_pdeathsig;
+  };
+
+  // Non-secure execve(2) preserves the parent death signal.
+  EXPECT_EQ(run_exec_and_read_pdeathsig(normal_binary), SIGUSR1);
+
+  // Set-user-ID execve(2) clears the parent death signal.
+  EXPECT_EQ(run_exec_and_read_pdeathsig(suid_binary), 0);
+}
 
 }  // namespace

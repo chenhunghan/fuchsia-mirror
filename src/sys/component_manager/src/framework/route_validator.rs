@@ -73,12 +73,8 @@ async fn validate(
     let instance =
         scope.find_absolute(&moniker).await.map_err(|_| fcomponent::Error::InstanceNotFound)?;
 
-    let sandbox = instance
-        .lock_resolved_state()
-        .await
-        .map_err(|_| fcomponent::Error::InstanceCannotResolve)?
-        .sandbox
-        .clone();
+    let sandbox =
+        instance.component_sandbox().await.map_err(|_| fcomponent::Error::InstanceCannotResolve)?;
     let reports = validate_sandbox(&sandbox, component_instance_token, &scope.moniker).await;
     Ok(reports)
 }
@@ -102,11 +98,9 @@ async fn route(
         .map_err(|_| fsys::RouteValidatorError::InstanceNotFound)?;
 
     let sandbox = instance
-        .lock_resolved_state()
+        .component_sandbox()
         .await
-        .map_err(|_| fsys::RouteValidatorError::InstanceNotResolved)?
-        .sandbox
-        .clone();
+        .map_err(|_| fsys::RouteValidatorError::InstanceNotResolved)?;
     let mut reports = validate_sandbox(&sandbox, component_instance_token, &scope.moniker).await;
 
     if targets.is_empty() {

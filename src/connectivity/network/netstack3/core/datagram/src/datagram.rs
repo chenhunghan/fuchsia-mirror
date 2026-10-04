@@ -45,8 +45,8 @@ use netstack3_ip::socket::{
     SendOneShotIpPacketError, SendOptions, SocketHopLimits,
 };
 use netstack3_ip::{
-    BaseTransportIpContext, HopLimits, IpLayerIpExt, MulticastMembershipHandler, ResolveRouteError,
-    SocketMetadata, TransportIpContext,
+    BaseTransportIpContext, HopLimits, IpLayerIpExt, MaybeSegmentableTransportSerializer,
+    MulticastMembershipHandler, ResolveRouteError, SocketMetadata, TransportIpContext,
 };
 use packet::BufferMut;
 use packet_formats::icmp::{Icmpv4DestUnreachableCode, Icmpv6DestUnreachableCode};
@@ -1464,7 +1464,8 @@ pub trait DatagramSocketSpec: Sized + 'static {
 
     /// The type of serializer returned by [`DatagramSocketSpec::make_packet`]
     /// for a given IP version and buffer type.
-    type Serializer<I: IpExt, B: BufferMut>: TransportPacketSerializer<I, Buffer = B>;
+    type Serializer<I: IpExt, B: BufferMut>: TransportPacketSerializer<I, Buffer = B>
+        + MaybeSegmentableTransportSerializer;
     /// The potential error for serializing a packet. For example, in UDP, this
     /// should be infallible but for ICMP, there will be an error if the input
     /// is not an echo request.

@@ -370,6 +370,80 @@ impl<'a> DriverDispatcherRef<'a> {
             PhantomData,
         )
     }
+
+    /// Registers a wake vector event with the dispatcher.
+    ///
+    /// The wake vector stays registered until the returned [`WakeVectorRegistration`] is dropped
+    /// or [`WakeVectorRegistration::unregister`] is called.
+    pub fn register_wake_vector(
+        &self,
+        handle: &impl zx::AsHandleRef,
+        signals: zx::Signals,
+    ) -> Result<WakeVectorRegistration, Status> {
+        let raw_handle = handle.as_handle_ref().raw_handle();
+        // SAFETY: `self.0.0` is a valid `fdf_dispatcher_t` pointer, and `raw_handle` is
+        // borrowed per the C API.
+        Status::ok(unsafe {
+            fdf_sys::fdf_dispatcher_register_wake_vector(
+                self.0.0.as_ptr(),
+                raw_handle,
+                signals.bits(),
+            )
+        })?;
+        Ok(WakeVectorRegistration {
+            dispatcher: Some(AsyncDispatcher::new(self)),
+            handle: raw_handle,
+            signals,
+        })
+    }
+}
+
+/// A registration handle for a wake vector event, returned by
+/// [`DriverDispatcherRef::register_wake_vector`] and
+/// [`OnDriverDispatcher::register_wake_vector`]. Caller must hold on to this as long as they want
+/// this wake vector to be active.
+///
+/// Automatically unregisters the wake vector from the dispatcher when dropped.
+#[derive(Debug)]
+pub struct WakeVectorRegistration {
+    /// Always `Some` until the registration is unregistered.
+    dispatcher: Option<AsyncDispatcher>,
+    handle: zx::sys::zx_handle_t,
+    signals: zx::Signals,
+}
+
+impl WakeVectorRegistration {
+    /// Unregisters the wake vector. Unlike dropping the registration, this reports failures.
+    ///
+    /// Returns [`Status::NOT_FOUND`] if the dispatcher no longer has a wake vector registered for
+    /// this handle. That can happen if another registration for the same handle was unregistered
+    /// with empty signals, which removes the handle's wake vector entirely.
+    pub fn unregister(mut self) -> Result<(), Status> {
+        self.unregister_inner()
+    }
+
+    fn unregister_inner(&mut self) -> Result<(), Status> {
+        let Some(dispatcher) = self.dispatcher.take() else { return Ok(()) };
+        let dispatcher_ref =
+            DriverDispatcherRef::from_async_dispatcher(dispatcher.as_async_dispatcher_ref());
+        // SAFETY: `dispatcher_ref.0.0` is a valid `fdf_dispatcher_t` pointer, and `self.handle`
+        // is borrowed per the C API.
+        Status::ok(unsafe {
+            fdf_sys::fdf_dispatcher_unregister_wake_vector(
+                dispatcher_ref.0.0.as_ptr(),
+                self.handle,
+                self.signals.bits(),
+            )
+        })
+    }
+}
+
+impl Drop for WakeVectorRegistration {
+    fn drop(&mut self) {
+        // The only possible error is NOT_FOUND (see `unregister`), which means the wake vector
+        // is already gone, so there is nothing left to clean up.
+        let _: Result<(), Status> = self.unregister_inner();
+    }
 }
 
 /// Used to wrap a non-send future as send when we've dynamically checked that the dispatcher
@@ -449,6 +523,18 @@ pub trait OnDriverDispatcher: OnDispatcher {
         } else {
             Task::new_failed(Status::BAD_STATE)
         }
+    }
+
+    /// Registers a wake vector event with this driver dispatcher.
+    fn register_wake_vector(
+        &self,
+        handle: &impl zx::AsHandleRef,
+        signals: zx::Signals,
+    ) -> Result<WakeVectorRegistration, Status> {
+        let dispatcher = self.try_get_async_dispatcher().ok_or(Status::BAD_STATE)?;
+        let dispatcher_ref =
+            DriverDispatcherRef::from_async_dispatcher(dispatcher.as_async_dispatcher_ref());
+        dispatcher_ref.register_wake_vector(handle, signals)
     }
 }
 
@@ -800,6 +886,33 @@ mod tests {
             executor.run_singlethreaded(slow_pong(fin_tx, pong_tx, pong_rx));
 
             fin_rx.recv().expect("to receive final value");
+        });
+    }
+
+    #[test]
+    fn wake_vector_registration() {
+        with_raw_dispatcher("wake vector test", |dispatcher| {
+            let dispatcher_ref =
+                DriverDispatcherRef::from_async_dispatcher(dispatcher.as_async_dispatcher_ref());
+            let event = zx::Event::create();
+            let signals = zx::Signals::USER_0;
+
+            // Register and explicitly unregister.
+            let reg = dispatcher_ref.register_wake_vector(&event, signals).unwrap();
+            assert_eq!(reg.unregister(), Ok(()));
+
+            // Unregistering with empty signals removes the handle's wake vector entirely, so a
+            // second registration for the same handle reports NOT_FOUND.
+            let reg_all =
+                dispatcher_ref.register_wake_vector(&event, zx::Signals::empty()).unwrap();
+            let reg_user0 = dispatcher_ref.register_wake_vector(&event, signals).unwrap();
+            assert_eq!(reg_all.unregister(), Ok(()));
+            assert_eq!(reg_user0.unregister(), Err(Status::NOT_FOUND));
+
+            // Test automatic unregister on drop via OnDriverDispatcher.
+            {
+                let _reg_drop = dispatcher.register_wake_vector(&event, signals).unwrap();
+            }
         });
     }
 }

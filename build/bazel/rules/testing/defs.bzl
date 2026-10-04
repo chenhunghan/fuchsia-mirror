@@ -2,6 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Rules for verifying the outputs and providers of Bazel test rules."""
+
+load("//build/bazel/rules/testing:fx_test.bzl", "FuchsiaTestInfo")
+
 def _verify_file_path_impl(ctx):
     files_list = ctx.attr.target[DefaultInfo].files.to_list()
     if len(files_list) < 1:
@@ -22,5 +26,82 @@ verify_file_path = rule(
     attrs = {
         "target": attr.label(mandatory = True),
         "expected_file_path": attr.string(mandatory = True),
+    },
+)
+
+def _verify_fx_test_environments_impl(ctx):
+    actual = ctx.attr.test[FuchsiaTestInfo].environments
+    expected = [json.decode(env) for env in ctx.attr.expected_environments]
+    if actual != expected:
+        fail(
+            "The actual environments (`%s`) do not match the expected environments (`%s`)." %
+            (actual, expected),
+        )
+    actual_build_only = ctx.attr.test[FuchsiaTestInfo].build_only
+    if actual_build_only != ctx.attr.expected_build_only:
+        fail(
+            "The actual build_only (`%s`) does not match the expected build_only (`%s`)." %
+            (actual_build_only, ctx.attr.expected_build_only),
+        )
+    return []
+
+_verify_fx_test_environments = rule(
+    doc = "Verifies that the `environments` and `build_only` fields of a target's `FuchsiaTestInfo` match the expected values.",
+    implementation = _verify_fx_test_environments_impl,
+    attrs = {
+        "test": attr.label(
+            mandatory = True,
+            providers = [FuchsiaTestInfo],
+        ),
+        "expected_environments": attr.string_list(mandatory = True),
+        "expected_build_only": attr.bool(default = False),
+    },
+)
+
+def verify_fx_test_environments(name, test, expected_environments, expected_build_only = False, **kwargs):
+    """Verifies that an `fx_test()` target's `FuchsiaTestInfo.environments` matches `expected_environments`.
+
+    Args:
+        name: The target name.
+        test: The `fx_test()` target to verify.
+        expected_environments: The expected list of environment dicts.
+        expected_build_only: The expected value of `build_only`.
+        **kwargs: Common rule attributes (e.g. `testonly`).
+    """
+    _verify_fx_test_environments(
+        name = name,
+        test = test,
+        expected_environments = [json.encode(env) for env in expected_environments],
+        expected_build_only = expected_build_only,
+        **kwargs
+    )
+
+def _verify_fx_test_realms_impl(ctx):
+    test_info = ctx.attr.test[FuchsiaTestInfo]
+    actual_realms = {
+        c.component_name: c.realm or ""
+        for c in test_info.test_components
+    }
+    if actual_realms != ctx.attr.expected_realms:
+        fail(
+            "Expected test component realms {}, got {}.".format(
+                ctx.attr.expected_realms,
+                actual_realms,
+            ),
+        )
+    return []
+
+verify_fx_test_realms = rule(
+    doc = "Verifies the `realm` values on `FuchsiaTestInfo.test_components` of an `fx_test()` target.",
+    implementation = _verify_fx_test_realms_impl,
+    attrs = {
+        "test": attr.label(
+            providers = [FuchsiaTestInfo],
+            mandatory = True,
+        ),
+        "expected_realms": attr.string_dict(
+            doc = "Map of `component_name` to expected `realm` moniker (or empty string if hermetic).",
+            mandatory = True,
+        ),
     },
 )

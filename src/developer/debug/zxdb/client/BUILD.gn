@@ -205,6 +205,7 @@ static_library("client") {
 source_set("test_support") {
   testonly = true
   sources = [
+    "mock_async_task.h",
     "mock_breakpoint.cc",
     "mock_breakpoint.h",
     "mock_breakpoint_location.h",

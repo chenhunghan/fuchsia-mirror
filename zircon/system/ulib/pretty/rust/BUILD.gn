@@ -15,11 +15,6 @@ rustc_library("pretty") {
   ]
   deps = [ "//src/lib/kprint" ]
   with_unit_tests = true
-
-  # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
-  if (is_kernel) {
-    configs += [ "//zircon/kernel/switch:allow-collapsible-if" ]
-  }
 }
 
 fuchsia_unittest_package("pretty-rust-tests") {

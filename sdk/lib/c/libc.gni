@@ -593,7 +593,9 @@ variant_replaces_allocator = toolchain_variant.tags + [ "replaces-allocator" ] -
 #     the code requires but that aren't also llvm_libc_source_set() targets.
 #     - Type: list(label)
 #
-#   * allow_fini, allow_init, basic_abi, configs, global_symbols, non_test_deps, testonly_deps, testonly_public_deps, undefined_symbols
+#   * allow_fini, allow_init, basic_abi, configs, global_symbols,
+#     non_test_deps, remove_configs, testonly_deps, testonly_public_deps,
+#     undefined_symbols
 #     - Optional: See libc_source_set().  If $global_symbols is omitted
 #     and $basic_abi is true, then it defaults to $functions.
 #
@@ -674,6 +676,7 @@ template("llvm_libc_source_set") {
                              "public",
                              "public_configs",
                              "public_deps",
+                             "remove_configs",
                              "sources",
                              "testonly_deps",
                              "testonly_public_deps",
@@ -841,6 +844,10 @@ template("llvm_libc_source_set") {
 #       under test.  These are dependencies of the testonly target.
 #     - Type: list(label_without_toolchain)
 #
+#   * visibility
+#     - Optional: As for llvm_libc_source_set().
+#     - Type: list(label_pattern)
+#     - Default: []
 template("llvm_libc_group") {
   group_name = target_name
   target_dir = rebase_path(".", libc)
@@ -857,6 +864,11 @@ template("llvm_libc_group") {
     }
 
     group(subtarget) {
+      visibility = [ "$libc/*" ]
+      if (defined(invoker.visibility)) {
+        visibility += invoker.visibility
+      }
+
       if (suffix != "") {
         testonly = true
       }

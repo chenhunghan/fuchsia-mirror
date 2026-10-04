@@ -675,6 +675,7 @@ type FFXTester struct {
 type ffxTestRun struct {
 	result        *ffxutil.TestRunResult
 	output        string
+	errOutput     string
 	totalDuration time.Duration
 }
 
@@ -841,8 +842,9 @@ func (t *FFXTester) testWithFile(ctx context.Context, test testsharder.Test, std
 	origStdout := t.ffx.Stdout()
 	origStderr := t.ffx.Stderr()
 	var buf bytes.Buffer
+	var errBuf bytes.Buffer
 	stdout = io.MultiWriter(stdout, &buf)
-	stderr = io.MultiWriter(stderr, &buf)
+	stderr = io.MultiWriter(stderr, &buf, &errBuf)
 	t.ffx.SetStdoutStderr(stdout, stderr)
 	defer t.ffx.SetStdoutStderr(origStdout, origStderr)
 
@@ -855,7 +857,7 @@ func (t *FFXTester) testWithFile(ctx context.Context, test testsharder.Test, std
 	if runResult == nil && err == nil {
 		err = fmt.Errorf("no test result was found")
 	}
-	t.testRuns[test.PackageURL] = ffxTestRun{runResult, buf.String(), clock.Now(ctx).Sub(startTime)}
+	t.testRuns[test.PackageURL] = ffxTestRun{runResult, buf.String(), errBuf.String(), clock.Now(ctx).Sub(startTime)}
 	return err
 }
 
@@ -874,7 +876,7 @@ func (t *FFXTester) ProcessResult(ctx context.Context, test testsharder.Test, ou
 	if testRun.result != nil {
 		testOutDir := testRun.result.GetTestOutputDir()
 		t.testOutDirs = append(t.testOutDirs, testOutDir)
-		testResult, err = processTestResult(testRun.result, test, testRun.totalDuration, false)
+		testResult, err = processTestResult(testRun.result, test, testRun.errOutput, testRun.totalDuration, false)
 		if !finalTestResult.IsMultipliedRun {
 			t.wg.Add(1)
 			go func() {
@@ -917,7 +919,35 @@ func (t *FFXTester) ProcessResult(ctx context.Context, test testsharder.Test, ou
 	return finalTestResult, nil
 }
 
-func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, totalDuration time.Duration, removeProfiles bool) (*runtests.TestDetails, error) {
+// failureReason returns a FailureReason for a test suite or test case if
+// status is a failure, or nil otherwise. It uses the first non-empty string in
+// stderr if available, and otherwise falls back to a synthetic timeout message
+// (when status is TestAborted) or "unknown failure reason".
+func failureReason(status runtests.TestStatus, timeout time.Duration, stderr ...string) *runtests.FailureReason {
+	if !runtests.IsFailure(status) {
+		return nil
+	}
+	for _, s := range stderr {
+		if msg := strings.TrimSpace(s); msg != "" {
+			return &runtests.FailureReason{
+				Errors: []*runtests.FailureReasonError{{Message: msg}},
+			}
+		}
+	}
+	msg := "unknown failure reason"
+	if status == runtests.TestAborted {
+		if timeout > 0 {
+			msg = fmt.Sprintf("test timed out after %s", timeout)
+		} else {
+			msg = "test timed out"
+		}
+	}
+	return &runtests.FailureReason{
+		Errors: []*runtests.FailureReasonError{{Message: msg}},
+	}
+}
+
+func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, errOutput string, totalDuration time.Duration, removeProfiles bool) (*runtests.TestDetails, error) {
 	testOutDir := runResult.GetTestOutputDir()
 	suiteResults, err := runResult.GetSuiteResults()
 	if err != nil {
@@ -940,6 +970,7 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 	default:
 		testResult.Status = runtests.TestFailure
 	}
+	testResult.FailureReason = failureReason(testResult.Status, test.Timeout, errOutput)
 	testResult.Tags = append(testResult.Tags, build.TestTag{Key: "test_outcome", Value: suiteResult.Outcome})
 
 	var suiteArtifacts []string
@@ -972,6 +1003,8 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 		switch testCase.Outcome {
 		case ffxutil.TestPassed:
 			status = runtests.TestSuccess
+		case ffxutil.TestTimedOut:
+			status = runtests.TestAborted
 		case ffxutil.TestSkipped:
 			status = runtests.TestSkipped
 		default:
@@ -979,7 +1012,7 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 		}
 
 		var artifacts []string
-		var failReason string
+		var caseStderr string
 		testCaseArtifactDir := filepath.Join(testOutDir, testCase.ArtifactDir)
 		for artifact, metadata := range testCase.Artifacts {
 			if _, err := os.Stat(filepath.Join(testCaseArtifactDir, artifact)); os.IsNotExist(err) {
@@ -992,22 +1025,18 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 			if metadata.ArtifactType == ffxutil.StderrType {
 				stderrBytes, err := os.ReadFile(filepath.Join(testCaseArtifactDir, artifact))
 				if err != nil {
-					failReason = fmt.Sprintf("failed to read stderr for test case %s: %s", testCase.Name, err)
+					caseStderr = fmt.Sprintf("failed to read stderr for test case %s: %s", testCase.Name, err)
 				} else {
-					failReason = string(stderrBytes)
+					caseStderr = string(stderrBytes)
 				}
 			}
 			artifacts = append(artifacts, artifact)
-		}
-		var failureReason *runtests.FailureReason
-		if runtests.IsFailure(status) {
-			failureReason = runtests.FailureReasonFromMessage(failReason)
 		}
 		cases = append(cases, runtests.TestCaseResult{
 			DisplayName:   testCase.Name,
 			CaseName:      testCase.Name,
 			Status:        status,
-			FailureReason: failureReason,
+			FailureReason: failureReason(status, test.Timeout, caseStderr, errOutput),
 			Format:        "FTF",
 			OutputFiles:   artifacts,
 			OutputDir:     testCaseArtifactDir,
@@ -1316,20 +1345,7 @@ func (t *FFXTester) RunSnapshot(ctx context.Context, snapshotFile string) error 
 		return t.ffx.Snapshot(ctx, t.localOutputDir, snapshotFile)
 	}, nil)
 	if err != nil {
-		logger.Errorf(ctx, "%s: %s", constants.FailedToRunSnapshotMsg, err)
-		// TODO(https://fxbug.dev/387497485): For debugging. Remove when issue is fixed.
-		target := os.Getenv(botanistconstants.NodenameEnvKey)
-		if err := t.ffx.Doctor(ctx); err != nil {
-			logger.Errorf(ctx, "failed to run `ffx doctor`: %s", err)
-		}
-		if err := t.ffx.RunWithTarget(ctx, "target", "list", target); err != nil {
-			logger.Errorf(ctx, "failed to run `ffx target list`: %s", err)
-		}
-		// Try capturing snapshot using target nodename.
-		t.ffx.SetTarget(target)
-		if err := t.ffx.Snapshot(ctx, t.localOutputDir, snapshotFile); err != nil {
-			logger.Errorf(ctx, "%s: %s", constants.FailedToRunSnapshotMsg, err)
-		}
+		err = fmt.Errorf("%s: %w", constants.FailedToRunSnapshotMsg, err)
 	}
 	logger.Debugf(ctx, "ran snapshot in %s", clock.Now(ctx).Sub(startTime))
 	return err

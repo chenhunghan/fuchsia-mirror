@@ -15,13 +15,13 @@ closed protocol Device {
     strict TransmitVector(struct {
         data vector<uint8>:MAX_TRANSFER_SIZE;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Half-duplex receive data from a SPI device; always reads the full size requested.
     strict ReceiveVector(struct {
         size uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         data vector<uint8>:MAX_TRANSFER_SIZE;
     });
     /// Full-duplex SPI transaction. Received data will exactly equal the length of the transmit
@@ -29,7 +29,7 @@ closed protocol Device {
     strict ExchangeVector(struct {
         txdata vector<uint8>:MAX_TRANSFER_SIZE;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
         rxdata vector<uint8>:MAX_TRANSFER_SIZE;
     });
 
@@ -41,13 +41,13 @@ closed protocol Device {
     /// Assert CS for this device.
     /// Returns ZX_ERR_NOT_SUPPORTED if there is more than one device on the bus.
     strict AssertCs() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Deassert CS for this device.
     /// Returns ZX_ERR_BAD_STATE if CS is already deasserted.
     /// Returns ZX_ERR_NOT_SUPPORTED if there is more than one device on the bus.
     strict DeassertCs() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     compose fuchsia.hardware.sharedmemory.SharedVmoIo;

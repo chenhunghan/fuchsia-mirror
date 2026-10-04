@@ -14,6 +14,6 @@ closed protocol Debug {
     strict SetDefaultSensorMode(resource struct {
         mode uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

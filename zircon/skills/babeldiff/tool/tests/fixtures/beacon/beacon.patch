@@ -1,0 +1,292 @@
+From fc3328bc7dad01fc06e277faba7e23b19b74d39e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 22 Sep 2026 22:21:46 +0000
+Subject: [PATCH] [kernel] Port BeaconDispatcher subscriptions to Rust
+
+---
+ zircon/kernel/object/beacon_dispatcher.cc     |  63 +----------
+ zircon/kernel/object/beacon_dispatcher.rs     | 101 ++++++++++++++++++
+ zircon/kernel/object/beacon_dispatcher_ffi.rs |  64 +++++++++++
+ .../object/include/object/beacon_dispatcher.h |  11 ++
+ 4 files changed, 181 insertions(+), 58 deletions(-)
+ create mode 100644 zircon/kernel/object/beacon_dispatcher.rs
+ create mode 100644 zircon/kernel/object/beacon_dispatcher_ffi.rs
+
+diff --git a/zircon/kernel/object/beacon_dispatcher.cc b/zircon/kernel/object/beacon_dispatcher.cc
+index e1d12f6..4d66dfa 100644
+--- a/zircon/kernel/object/beacon_dispatcher.cc
++++ b/zircon/kernel/object/beacon_dispatcher.cc
+@@ -39,74 +39,21 @@ zx_status_t BeaconDispatcher::Create(uint32_t options, KernelHandle<BeaconDispat
+ }
+ 
+ zx_status_t BeaconDispatcher::Subscribe(uint64_t key, uint32_t* out_index) {
+-  Guard<CriticalMutex> guard{get_lock()};
+-  if (subscriber_count_ >= kMaxSubscribers) {
+-    return ZX_ERR_NO_RESOURCES;
+-  }
+-  // Keys must be unique so that Unsubscribe can find them.
+-  for (uint32_t i = 0; i < subscriber_count_; i++) {
+-    if (subscribers_[i] == key) {
+-      return ZX_ERR_ALREADY_EXISTS;
+-    }
+-  }
+-  subscribers_[subscriber_count_] = key;
+-  *out_index = subscriber_count_++;
+-  return ZX_OK;
++  return rust_beacon_dispatcher_subscribe(this, key, out_index);
+ }
+ 
+ zx_status_t BeaconDispatcher::Unsubscribe(uint64_t key) {
+-  Guard<CriticalMutex> guard{get_lock()};
+-  for (uint32_t i = 0; i < subscriber_count_; i++) {
+-    if (subscribers_[i] == key) {
+-      // Swap the last subscriber into the hole.
+-      subscribers_[i] = subscribers_[--subscriber_count_];
+-      return ZX_OK;
+-    }
+-  }
+-  return ZX_ERR_NOT_FOUND;
++  return rust_beacon_dispatcher_unsubscribe(this, key);
+ }
+ 
+ zx_status_t BeaconDispatcher::Flash(uint32_t mode) {
+-  zx_status_t status = CheckMode(mode);
+-  if (status != ZX_OK) {
+-    return status;
+-  }
+-  Guard<CriticalMutex> guard{get_lock()};
+-  switch (mode) {
+-    case ZX_BEACON_MODE_ONCE:
+-      flashes_++;
+-      break;
+-    case ZX_BEACON_MODE_REPEAT:
+-    case ZX_BEACON_MODE_BURST:
+-      flashes_ += kBurstLength;
+-      break;
+-    default:
+-      return ZX_ERR_NOT_SUPPORTED;
+-  }
+-  UpdateStateLocked(0u, ZX_BEACON_FLASHED);
+-  return ZX_OK;
+-}
+-
+-// static
+-zx_status_t BeaconDispatcher::CheckMode(uint32_t mode) {
+-  return mode <= ZX_BEACON_MODE_MAX ? ZX_OK : ZX_ERR_INVALID_ARGS;
++  return rust_beacon_dispatcher_flash(this, mode);
+ }
+ 
+ zx_status_t BeaconDispatcher::GetSubscriber(uint32_t index, uint64_t* out_key) const {
+-  Guard<CriticalMutex> guard{get_lock()};
+-  const uint64_t* key = FindLocked(index);
+-  if (!key) {
+-    return ZX_ERR_OUT_OF_RANGE;
+-  }
+-  *out_key = *key;
+-  return ZX_OK;
++  return rust_beacon_dispatcher_get_subscriber(this, index, out_key);
+ }
+ 
+ uint64_t BeaconDispatcher::FlashCount() const {
+-  Guard<CriticalMutex> guard{&lock_};
+-  return flashes_;
+-}
+-
+-const uint64_t* BeaconDispatcher::FindLocked(uint32_t index) const {
+-  return index < subscriber_count_ ? &subscribers_[index] : nullptr;
++  return rust_beacon_dispatcher_flash_count(this);
+ }
+diff --git a/zircon/kernel/object/beacon_dispatcher.rs b/zircon/kernel/object/beacon_dispatcher.rs
+new file mode 100644
+index 0000000..3cc1117
+--- /dev/null
++++ b/zircon/kernel/object/beacon_dispatcher.rs
+@@ -0,0 +1,93 @@
++// Copyright 2026 The Fuchsia Authors
++//
++// Use of this source code is governed by a MIT-style
++// license that can be found in the LICENSE file or at
++// https://opensource.org/licenses/MIT
++
++// A synthetic dispatcher used to test babeldiff. It is not part of Zircon.
++
++use crate::object::dispatcher::StateLockGuard;
++use zx_status::Status;
++use zx_types::{
++    ZX_BEACON_FLASHED, ZX_BEACON_MODE_BURST, ZX_BEACON_MODE_MAX, ZX_BEACON_MODE_ONCE,
++    ZX_BEACON_MODE_REPEAT,
++};
++
++const MAX_SUBSCRIBERS: u32 = 8;
++const BURST_LENGTH: u64 = 3;
++
++impl BeaconDispatcher {
++    pub fn subscribe(&self, key: u64) -> Result<u32, Status> {
++        ksync::lock!(let mut guard = self.lock());
++        if guard.subscriber_count >= MAX_SUBSCRIBERS {
++            return Err(Status::NO_RESOURCES);
++        }
++        // Keys must be unique so that Unsubscribe can find them.
++        for i in 0..guard.subscriber_count {
++            if guard.subscribers[i as usize] == key {
++                return Err(Status::ALREADY_EXISTS);
++            }
++        }
++        let index = guard.subscriber_count;
++        guard.subscribers[index as usize] = key;
++        guard.subscriber_count += 1;
++        Ok(index)
++    }
++
++    pub fn unsubscribe(&self, key: u64) -> Result<(), Status> {
++        ksync::lock!(let mut guard = self.lock());
++        for i in 0..guard.subscriber_count {
++            if guard.subscribers[i as usize] == key {
++                // Swap the last subscriber into the hole.
++                guard.subscriber_count -= 1;
++                let last = guard.subscribers[guard.subscriber_count as usize];
++                guard.subscribers[i as usize] = last;
++                return Ok(());
++            }
++        }
++        Err(Status::NOT_FOUND)
++    }
++
++    pub fn flash(&self, mode: u32) -> Result<(), Status> {
++        Self::check_mode(mode)?;
++        ksync::lock!(let mut guard = self.lock());
++        match mode {
++            ZX_BEACON_MODE_ONCE => guard.flashes += 1,
++            ZX_BEACON_MODE_REPEAT | ZX_BEACON_MODE_BURST => guard.flashes += BURST_LENGTH,
++            _ => return Err(Status::NOT_SUPPORTED),
++        }
++        self.update_state_locked(&mut guard, 0, ZX_BEACON_FLASHED);
++        Ok(())
++    }
++
++    fn check_mode(mode: u32) -> Result<(), Status> {
++        if mode <= ZX_BEACON_MODE_MAX { Ok(()) } else { Err(Status::INVALID_ARGS) }
++    }
++
++    /// # Safety
++    ///
++    /// Nothing here is unsafe; the section exists to test that babeldiff
++    /// expects safety documentation in Rust.
++    pub fn get_subscriber(&self, index: u32) -> Result<u64, Status> {
++        ksync::lock!(let guard = self.lock());
++        let key = self.find_locked(&guard, index).ok_or(Status::OUT_OF_RANGE)?;
++        Ok(*key)
++    }
++
++    pub fn flash_count(&self) -> u64 {
++        ksync::lock!(let guard = self.lock.lock());
++        let token = guard.token();
++        // SAFETY: `token` proves the lock is held.
++        unsafe { *self.flashes.get(&token) }
++    }
++
++    fn find_locked<'a>(&self, guard: &'a StateLockGuard<'_>, index: u32) -> Option<&'a u64> {
++        if index < guard.subscriber_count {
++            // SAFETY: `index` is below `subscriber_count`, which never exceeds the array's
++            // length.
++            Some(unsafe { guard.subscribers.get_unchecked(index as usize) })
++        } else {
++            None
++        }
++    }
++}
+diff --git a/zircon/kernel/object/beacon_dispatcher_ffi.rs b/zircon/kernel/object/beacon_dispatcher_ffi.rs
+new file mode 100644
+index 0000000..14d44a5
+--- /dev/null
++++ b/zircon/kernel/object/beacon_dispatcher_ffi.rs
+@@ -0,0 +1,64 @@
++// Copyright 2026 The Fuchsia Authors
++//
++// Use of this source code is governed by a MIT-style
++// license that can be found in the LICENSE file or at
++// https://opensource.org/licenses/MIT
++
++use super::beacon_dispatcher::BeaconDispatcher;
++use zx_types::{ZX_OK, zx_status_t};
++
++/// # Safety
++///
++/// `out_index` must be valid for writes.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn rust_beacon_dispatcher_subscribe(
++    beacon: &BeaconDispatcher,
++    key: u64,
++    out_index: *mut u32,
++) -> zx_status_t {
++    match beacon.subscribe(key) {
++        Ok(index) => {
++            // SAFETY: The caller guarantees `out_index` is valid for writes.
++            unsafe { *out_index = index };
++            ZX_OK
++        }
++        Err(status) => status.into_raw(),
++    }
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn rust_beacon_dispatcher_unsubscribe(
++    beacon: &BeaconDispatcher,
++    key: u64,
++) -> zx_status_t {
++    Status::from_result(beacon.unsubscribe(key))
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn rust_beacon_dispatcher_flash(beacon: &BeaconDispatcher, mode: u32) -> zx_status_t {
++    Status::from_result(beacon.flash(mode))
++}
++
++/// # Safety
++///
++/// `out_key` must be valid for writes.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn rust_beacon_dispatcher_get_subscriber(
++    beacon: &BeaconDispatcher,
++    index: u32,
++    out_key: *mut u64,
++) -> zx_status_t {
++    match beacon.get_subscriber(index) {
++        Ok(key) => {
++            // SAFETY: The caller guarantees `out_key` is valid for writes.
++            unsafe { *out_key = key };
++            ZX_OK
++        }
++        Err(status) => status.into_raw(),
++    }
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn rust_beacon_dispatcher_flash_count(beacon: &BeaconDispatcher) -> u64 {
++    beacon.flash_count()
++}
+diff --git a/zircon/kernel/object/include/object/beacon_dispatcher.h b/zircon/kernel/object/include/object/beacon_dispatcher.h
+index 2329b8f..3a71b52 100644
+--- a/zircon/kernel/object/include/object/beacon_dispatcher.h
++++ b/zircon/kernel/object/include/object/beacon_dispatcher.h
+@@ -13,6 +13,17 @@
+ 
+ #include <object/dispatcher.h>
+ 
++class BeaconDispatcher;
++extern "C" {
++zx_status_t rust_beacon_dispatcher_subscribe(BeaconDispatcher* beacon, uint64_t key,
++                                             uint32_t* out_index);
++zx_status_t rust_beacon_dispatcher_unsubscribe(BeaconDispatcher* beacon, uint64_t key);
++zx_status_t rust_beacon_dispatcher_flash(BeaconDispatcher* beacon, uint32_t mode);
++zx_status_t rust_beacon_dispatcher_get_subscriber(const BeaconDispatcher* beacon, uint32_t index,
++                                                  uint64_t* out_key);
++uint64_t rust_beacon_dispatcher_flash_count(const BeaconDispatcher* beacon);
++}
++
+ class BeaconDispatcher final : public SoloDispatcher<BeaconDispatcher, ZX_DEFAULT_BEACON_RIGHTS> {
+  public:
+   static zx_status_t Create(uint32_t options, KernelHandle<BeaconDispatcher>* handle,
+-- 
+2.43.0
+

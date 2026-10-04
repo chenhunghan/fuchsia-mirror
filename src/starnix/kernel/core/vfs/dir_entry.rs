@@ -349,7 +349,7 @@ impl DirEntry {
         name: &FsStr,
     ) -> Result<DirEntryHandle, Errno> {
         let (node, _) = self.get_or_create_child(current_task, mount, name, |d, mount, name| {
-            d.lookup(current_task, mount, name)
+            Ok((d.lookup(current_task, mount, name)?, CreationStatus::Existed))
         })?;
         Ok(node)
     }
@@ -370,13 +370,18 @@ impl DirEntry {
                 mount,
                 names[i],
                 |parent_node, _mount, _name| {
-                    if let Some(node) = next_node {
-                        return node;
-                    }
-                    nodes =
-                        parent_node.ops().lookup_pipelined(parent_node, current_task, &names[i..]);
-                    nodes.reverse();
-                    nodes.pop().unwrap()
+                    let node = if let Some(node) = next_node {
+                        node?
+                    } else {
+                        nodes = parent_node.ops().lookup_pipelined(
+                            parent_node,
+                            current_task,
+                            &names[i..],
+                        );
+                        nodes.reverse();
+                        nodes.pop().expect("lookup_pipelined must return at least one result")?
+                    };
+                    Ok((node, CreationStatus::Existed))
                 },
             ) {
                 Ok((entry, _)) => {
@@ -406,9 +411,9 @@ impl DirEntry {
         name: &FsStr,
         create_node_fn: impl FnOnce(&FsNodeHandle, &MountInfo, &FsStr) -> Result<FsNodeHandle, Errno>,
     ) -> Result<DirEntryHandle, Errno> {
-        let (entry, exists) =
+        let (entry, status) =
             self.create_entry_internal(current_task, mount, name, create_node_fn)?;
-        if exists {
+        if status == CreationStatus::Existed {
             return error!(EEXIST);
         }
         Ok(entry)
@@ -423,7 +428,7 @@ impl DirEntry {
         name: &FsStr,
         create_node_fn: impl FnOnce(&FsNodeHandle, &MountInfo, &FsStr) -> Result<FsNodeHandle, Errno>,
     ) -> Result<DirEntryHandle, Errno> {
-        let (entry, _exists) =
+        let (entry, _status) =
             self.create_entry_internal(current_task, mount, name, create_node_fn)?;
         Ok(entry)
     }
@@ -434,7 +439,7 @@ impl DirEntry {
         mount: &MountInfo,
         name: &FsStr,
         create_node_fn: impl FnOnce(&FsNodeHandle, &MountInfo, &FsStr) -> Result<FsNodeHandle, Errno>,
-    ) -> Result<(DirEntryHandle, bool), Errno> {
+    ) -> Result<(DirEntryHandle, CreationStatus), Errno> {
         if DirEntry::is_reserved_name(name) {
             return error!(EEXIST);
         }
@@ -445,14 +450,22 @@ impl DirEntry {
         if name.contains(&path::SEPARATOR) {
             return error!(EINVAL);
         }
-        let (entry, exists) =
-            self.get_or_create_child(current_task, mount, name, create_node_fn)?;
-        if !exists {
+        let (entry, status) =
+            self.get_or_create_child(current_task, mount, name, |d, mount, name| {
+                match d.lookup(current_task, mount, name) {
+                    Ok(node) => Ok((node, CreationStatus::Existed)),
+                    Err(e) if e == ENOENT => {
+                        Ok((create_node_fn(d, mount, name)?, CreationStatus::Created))
+                    }
+                    Err(e) => Err(e),
+                }
+            })?;
+        if status == CreationStatus::Created {
             // An entry was created. Update the ctime and mtime of this directory.
             self.node.update_ctime_mtime();
             entry.notify_creation();
         }
-        Ok((entry, exists))
+        Ok((entry, status))
     }
 
     // This is marked as test-only because it sets the owner/group to root instead of the current
@@ -948,13 +961,23 @@ impl DirEntry {
         }
     }
 
+    /// Retrieves a child `DirEntry` from the cache or obtains one via `create_fn`.
+    ///
+    /// Checks the in-memory child cache. A cached child is validated using `revalidate()` and
+    /// evicted if revalidation fails. On a cache miss, or after evicting a stale child, calls
+    /// `create_fn` to acquire the underlying `FsNode` and its `CreationStatus`. Nodes returned by
+    /// `create_fn` are not revalidated, and `create_fn` is called at most once.
     fn get_or_create_child(
         self: &DirEntryHandle,
         current_task: &CurrentTask,
         mount: &MountInfo,
         name: &FsStr,
-        create_fn: impl FnOnce(&FsNodeHandle, &MountInfo, &FsStr) -> Result<FsNodeHandle, Errno>,
-    ) -> Result<(DirEntryHandle, bool), Errno> {
+        create_fn: impl FnOnce(
+            &FsNodeHandle,
+            &MountInfo,
+            &FsStr,
+        ) -> Result<(FsNodeHandle, CreationStatus), Errno>,
+    ) -> Result<(DirEntryHandle, CreationStatus), Errno> {
         assert!(!DirEntry::is_reserved_name(name));
         // Only directories can have children.
         if !self.node.is_dir() {
@@ -969,44 +992,31 @@ impl DirEntry {
             self,
         )?;
 
-        // Check if the child is already in children. In that case, we can
-        // simply return the child and we do not need to call init_fn.
+        // Check if the child is already in children. In that case, we can simply return the
+        // child if it is still valid, and we do not need to call create_fn.
+        //
+        // The cache is queried in its own statement so that the children lock is released before
+        // the child is revalidated or evicted.
         let child = self.children.read().get(name).and_then(Weak::upgrade);
-        let (child, create_result) = if let Some(child) = child {
-            // Do not cache a child in a locked directory
-            if self.node.fail_if_locked(current_task, &self.node.info()).is_ok() {
-                child.node.fs().did_access_dir_entry(&child);
-            }
-            (child, CreationResult::Existed { create_fn })
-        } else {
-            let (child, create_result) =
-                self.lock_children().get_or_create_child(current_task, mount, name, create_fn)?;
-            child.node.fs().purge_old_entries();
-            (child, create_result)
-        };
-
-        let (child, exists) = match create_result {
-            CreationResult::Created => (child, false),
-            CreationResult::Existed { create_fn } => {
-                if child.ops.revalidate(current_task, &child)? {
-                    (child, true)
-                } else {
-                    self.internal_remove_child(&child);
-                    child.destroy(&current_task.kernel().mounts);
-
-                    let (child, create_result) = self.lock_children().get_or_create_child(
-                        current_task,
-                        mount,
-                        name,
-                        create_fn,
-                    )?;
-                    child.node.fs().purge_old_entries();
-                    (child, matches!(create_result, CreationResult::Existed { .. }))
+        if let Some(child) = child {
+            if child.ops.revalidate(current_task, &child)? {
+                // Do not cache a child in a locked directory
+                if self.node.fail_if_locked(current_task, &self.node.info()).is_ok() {
+                    child.node.fs().did_access_dir_entry(&child);
                 }
+                return Ok((child, CreationStatus::Existed));
             }
-        };
+            // The cached child is stale. Evict it so that create_fn provides a fresh node.
+            self.internal_remove_child(&child);
+            child.destroy(&current_task.kernel().mounts);
+        }
 
-        Ok((child, exists))
+        // If another thread added the child since the check above, it is returned without being
+        // revalidated because it was just added. Otherwise, create_fn provides the node.
+        let (child, status) =
+            self.lock_children().get_or_create_child(current_task, mount, name, create_fn)?;
+        child.node.fs().purge_old_entries();
+        Ok((child, status))
     }
 
     // This function is only useful for tests and has some oddities.
@@ -1243,9 +1253,15 @@ struct DirEntryLockedChildren<'a> {
     children: LockDepWriteGuard<'a, DirEntryChildren>,
 }
 
-enum CreationResult<F> {
+/// Represents whether a node returned by `create_fn` was freshly created
+/// or already existed on the underlying filesystem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreationStatus {
+    /// The node was newly created. Updates directory ctime/mtime.
     Created,
-    Existed { create_fn: F },
+    /// The node already existed (e.g., found in the cache, or resolved via lookup or pipelined
+    /// lookup).
+    Existed,
 }
 
 impl<'a> DirEntryLockedChildren<'a> {
@@ -1256,62 +1272,53 @@ impl<'a> DirEntryLockedChildren<'a> {
         name: &FsStr,
     ) -> Result<DirEntryHandle, Errno> {
         assert!(!DirEntry::is_reserved_name(name));
-        let (node, _) =
-            self.get_or_create_child(current_task, mount, name, |_, _, _| error!(ENOENT))?;
+        let (node, _) = self.get_or_create_child(current_task, mount, name, |d, mount, name| {
+            Ok((d.lookup(current_task, mount, name)?, CreationStatus::Existed))
+        })?;
         Ok(node)
     }
 
-    fn get_or_create_child<
-        F: FnOnce(&FsNodeHandle, &MountInfo, &FsStr) -> Result<FsNodeHandle, Errno>,
-    >(
+    fn get_or_create_child(
         &mut self,
         current_task: &CurrentTask,
         mount: &MountInfo,
         name: &FsStr,
-        create_fn: F,
-    ) -> Result<(DirEntryHandle, CreationResult<F>), Errno> {
-        let create_child = |create_fn: F| {
-            // Before creating the child, check for existence.
-            let (node, create_result) = match self.entry.node.lookup(current_task, mount, name) {
-                Ok(node) => (node, CreationResult::Existed { create_fn }),
-                Err(e) if e == ENOENT => {
-                    (create_fn(&self.entry.node, mount, name)?, CreationResult::Created)
-                }
-                Err(e) => return Err(e),
-            };
-
-            assert!(
-                node.info().mode & FileMode::IFMT != FileMode::EMPTY,
-                "FsNode initialization did not populate the FileMode in FsNodeInfo."
-            );
-
-            let entry = DirEntry::new(node, Some(self.entry.clone()), name.to_owned());
-
-            if let Err(err) = security::fs_node_init_with_dentry(current_task, &entry) {
-                // Null out the `parent` reference from `entry` otherwise dropping `entry` will
-                // attempt to remove itself from `parent`, triggering a deadlock with `self`.
-                entry.parent.update(None);
-                return Err(err);
-            }
-
-            Ok((entry, create_result))
-        };
-
+        create_fn: impl FnOnce(
+            &FsNodeHandle,
+            &MountInfo,
+            &FsStr,
+        ) -> Result<(FsNodeHandle, CreationStatus), Errno>,
+    ) -> Result<(DirEntryHandle, CreationStatus), Errno> {
         if let Some(child) = self.children.get(name).and_then(Weak::upgrade) {
             // Do not cache a child in a locked directory
             if self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok() {
                 child.node.fs().did_access_dir_entry(&child);
             }
-            return Ok((child, CreationResult::Existed { create_fn }));
+            return Ok((child, CreationStatus::Existed));
         }
 
-        let (child, create_result) = create_child(create_fn)?;
+        let (node, status) = create_fn(&self.entry.node, mount, name)?;
+
+        assert!(
+            node.info().mode & FileMode::IFMT != FileMode::EMPTY,
+            "FsNode initialization did not populate the FileMode in FsNodeInfo."
+        );
+
+        let child = DirEntry::new(node, Some(self.entry.clone()), name.to_owned());
+
+        if let Err(err) = security::fs_node_init_with_dentry(current_task, &child) {
+            // Null out the `parent` reference from `child` otherwise dropping `child` will
+            // attempt to remove itself from `parent`, triggering a deadlock with `self`.
+            child.parent.update(None);
+            return Err(err);
+        }
+
         // Do not cache a child in a locked directory
         if self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok() {
             self.children.insert(name, Arc::downgrade(&child));
         }
 
-        Ok((child, create_result))
+        Ok((child, status))
     }
 }
 

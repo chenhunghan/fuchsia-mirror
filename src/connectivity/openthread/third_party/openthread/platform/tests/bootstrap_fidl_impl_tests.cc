@@ -177,7 +177,7 @@ TEST_F(BootstrapThreadImplTest, ImportSettingsFailUnreadable) {
               fidl::WireUnownedResult<fuchsia_lowpan_bootstrap::Thread::ImportSettings>& result) {
             // Confirm that the call failed:
             ASSERT_EQ(result.status(), ZX_ERR_IO);
-            ASSERT_EQ(result.reason(), fidl::Reason::kPeerClosedWhileReading);
+            ASSERT_TRUE(result.is_peer_closed());
             errored = true;
           });
 
@@ -213,7 +213,7 @@ TEST_F(BootstrapThreadImplTest, ImportSettingsFailNonWritable) {
               fidl::WireUnownedResult<fuchsia_lowpan_bootstrap::Thread::ImportSettings>& result) {
             // Confirm that the call failed:
             ASSERT_EQ(result.status(), ZX_ERR_IO);
-            ASSERT_EQ(result.reason(), fidl::Reason::kPeerClosedWhileReading);
+            ASSERT_TRUE(result.is_peer_closed());
             errored = true;
           });
 

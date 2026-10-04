@@ -62,7 +62,7 @@ closed protocol MacAddressing {
     strict SetMode(struct {
         mode MacFilterMode;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Adds multicast address to the list of multicast groups.
@@ -79,7 +79,7 @@ closed protocol MacAddressing {
     strict AddMulticastAddress(struct {
         address fuchsia.net.MacAddress;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Removes multicast address from the list of multicast groups.
     ///
@@ -89,6 +89,6 @@ closed protocol MacAddressing {
     strict RemoveMulticastAddress(struct {
         address fuchsia.net.MacAddress;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

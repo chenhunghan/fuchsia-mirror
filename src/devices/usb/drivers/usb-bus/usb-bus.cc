@@ -15,6 +15,8 @@
 
 #include "src/devices/usb/drivers/usb-bus/usb-device.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_bus {
 
 zx_status_t UsbBus::Create(void* ctx, zx_device_t* parent) {
@@ -213,8 +215,8 @@ zx_status_t UsbBus::UsbBusInterfaceReinitializeDevice(uint32_t device_id) {
     size_t actual;
 
     device->UsbGetDeviceDescriptor(&old_desc);
-    auto status =
-        device->GetDescriptor(USB_DT_DEVICE, 0, 0, &updated_desc, sizeof(updated_desc), &actual);
+    auto status = device->GetDescriptor(fdescriptor::DescriptorType::kDevice, 0, 0, &updated_desc,
+                                        sizeof(updated_desc), &actual);
     if (actual != sizeof(updated_desc)) {
       status = ZX_ERR_IO;
     }

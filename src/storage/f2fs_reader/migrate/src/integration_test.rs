@@ -344,6 +344,17 @@ async fn test_fxfs_read_lblk32_ino_file() {
         .await
         .expect("open failed");
 
+    let (crypt_client_end, crypt_proxy) = fidl::endpoints::create_endpoints::<CryptMarker>();
+    let crypt_service_clone = Arc::clone(&crypt_service);
+    fuchsia_async::Task::spawn(async move {
+        if let Err(err) = crypt_service_clone.handle_connection(crypt_proxy.into_stream()).await {
+            log::error!(err:?; "Crypt service failure");
+        }
+    })
+    .detach();
+    let crypt =
+        Arc::new(RemoteCrypt::new_with_device(crypt_client_end, fxfs.device())) as Arc<dyn Crypt>;
+
     let root_vol = fxfs_root_volume(fxfs.clone()).await.expect("Opening root volume");
     let vol = root_vol
         .volume("userdata", StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() })
@@ -494,6 +505,17 @@ async fn test_fxfs_verify_encrypted_data() {
         .expect("open failed");
 
     assert_eq!(&uuid, fxfs.super_block_header().guid.0.as_bytes());
+
+    let (crypt_client_end, crypt_proxy) = fidl::endpoints::create_endpoints::<CryptMarker>();
+    let crypt_service_clone = Arc::clone(&crypt_service);
+    fuchsia_async::Task::spawn(async move {
+        if let Err(err) = crypt_service_clone.handle_connection(crypt_proxy.into_stream()).await {
+            log::error!(err:?; "Crypt service failure");
+        }
+    })
+    .detach();
+    let crypt =
+        Arc::new(RemoteCrypt::new_with_device(crypt_client_end, fxfs.device())) as Arc<dyn Crypt>;
 
     let root_vol = fxfs_root_volume(fxfs.clone()).await.expect("Opening root volume");
     let vol = root_vol

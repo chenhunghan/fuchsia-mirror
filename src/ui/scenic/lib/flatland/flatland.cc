@@ -324,9 +324,24 @@ Flatland::~Flatland() {
     FX_DCHECK(status == ZX_OK);
   }
 
-  // This will signal the release fence (if any) that we pass to it, and therefore enable the wait
-  // above to succeed.
-  flatland_presenter_->RemoveSession(session_id_, std::move(image_release_fence));
+  // Gather any held or staged release fences/counters accumulated during the session's lifetime.
+  // `ProcessDeadTransforms()` staged every held release fence into `unbound_release_fences_`.
+  std::vector<zx::event> release_fences;
+  std::vector<zx::counter> release_counters;
+  for (auto& fence : unbound_release_fences_) {
+    fence.MoveInto(release_fences, release_counters);
+  }
+  unbound_release_fences_.clear();
+  if (image_release_fence.has_value()) {
+    release_fences.push_back(std::move(*image_release_fence));
+  }
+
+  // Passing these release fences/counters along with `image_release_fence` to `RemoveSession()`
+  // schedules a cleanup frame where Scenic signals them. This fulfills the Flatland2 FIDL
+  // contract (session destruction ends every binding it holds, requiring its release fence to be
+  // signaled) and allows the image release waiter above to complete.
+  flatland_presenter_->RemoveSession(session_id_, std::move(release_fences),
+                                     std::move(release_counters));
 
   FX_LOGS(INFO) << "Flatland DESTROYED session_id=" << session_id_;
 }
@@ -417,7 +432,7 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
     }
   }
 
-  std::vector<zx::event> acquire_fences;
+  std::vector<zx::handle> acquire_fences;
   if (args.has_acquire_fences()) {
     acquire_fences.reserve(args.acquire_fences().size());
     for (auto& fence : args.acquire_fences()) {
@@ -540,7 +555,7 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
             // copied, and only the mode-specific properties which match the composition mode
             // are copied.
             auto& us_layer = us_layer_it->second;
-            const auto& layer_obj = layer_obj_it->second;
+            auto& layer_obj = layer_obj_it->second;
 
             if (!IsLayerSampleRectValidForPresent(layer_obj)) {
               CloseConnection(FlatlandError::kBadOperation);
@@ -554,6 +569,9 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
                 break;
               case LayerObject::Mode::kImage:
                 us_layer.content = layer_obj.image_mode;
+                if (layer_obj.pending_acquire_fence.is_valid()) {
+                  acquire_fences.push_back(layer_obj.pending_acquire_fence.TakeHandle());
+                }
                 break;
               case LayerObject::Mode::kSolidColor:
                 us_layer.content = layer_obj.solid_color_mode;
@@ -615,6 +633,12 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
   const bool recompute_view_tree = !links_to_children_.empty() || view_tree_dirty_;
   view_tree_dirty_ = false;
 
+  // Move release fences of released bindings into the Present release fences and counters.
+  for (auto& fence : unbound_release_fences_) {
+    fence.MoveInto(release_fences, release_counters);
+  }
+  unbound_release_fences_.clear();
+
   // Safe to capture |this| because the Flatland is guaranteed to outlive |fence_queue_|,
   // Flatland is non-movable and FenceQueue does not fire closures after destruction.
   // TODO(https://fxbug.dev/42156567): make the fences be the first arg, and the closure be the
@@ -668,8 +692,7 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
   }
 
   // TODO(https://fxbug.dev/474444799): If |config_.pass_acquire_fences| is true, these fences
-  // can be directly queued on the render task rather than waiting on cpu. This will be possible
-  // in the new Flatland API where we define per-layer fences.
+  // can be directly queued on the render task rather than waiting on cpu.
   fence_queue_->QueueTask(std::move(task), std::move(acquire_fences));
 
   pending_link_operations_.clear();
@@ -1732,6 +1755,12 @@ void Flatland::SetImageSampleRegion(ContentId image_id, types::RectangleF rect) 
     return;
   }
 
+  if (!types::RectangleF::IsValid(rect.origin(), rect.extent())) {
+    error_reporter_->ERROR() << "SetImageSampleRegion called with invalid rect";
+    CloseConnection(FlatlandError::kBadOperation);
+    return;
+  }
+
   if (image_id == kInvalidContentId) {
     error_reporter_->ERROR() << "SetImageSampleRegion called with content id 0";
     CloseConnection(FlatlandError::kBadOperation);
@@ -2138,8 +2167,8 @@ void Flatland::SetHitRegions(TransformId transform_id,
     const auto& rect = region.region;
 
     if (!types::RectangleF::IsValid(rect)) {
-      error_reporter_->ERROR() << "SetHitRegions failed, contains invalid dimensions: ("
-                               << rect.width << "," << rect.height << ")";
+      error_reporter_->ERROR() << "SetHitRegions failed, contains invalid rect: (" << rect.x << ","
+                               << rect.y << "," << rect.width << "," << rect.height << ")";
       CloseConnection(FlatlandError::kBadOperation);
       return;
     }
@@ -3005,14 +3034,46 @@ void Flatland::SetLayerImage(
     return;
   }
 
-  // TODO(https://fxbug.dev/540952629): Add support for acquire and release fences.
-  if (acquire_fence.has_value() || release_fence.has_value()) {
-    error_reporter_->ERROR() << "SetLayerImage: fences not yet implemented";
-    CloseConnection(FlatlandError::kBadOperation);
-    return;
+  WaitFence wait_fence;
+  if (acquire_fence.has_value()) {
+    auto result = WaitFence::From(std::move(acquire_fence.value()));
+    if (result.is_error()) {
+      error_reporter_->ERROR() << "SetLayerImage: invalid acquire fence: "
+                               << zx_status_get_string(result.error_value());
+      CloseConnection(FlatlandError::kBadOperation);
+      return;
+    }
+    wait_fence = std::move(result.value());
+  }
+
+  SignalFence signal_fence;
+  if (release_fence.has_value()) {
+    auto result = SignalFence::From(std::move(release_fence.value()));
+    if (result.is_error()) {
+      error_reporter_->ERROR() << "SetLayerImage: invalid release fence: "
+                               << zx_status_get_string(result.error_value());
+      CloseConnection(FlatlandError::kBadOperation);
+      return;
+    }
+    signal_fence = std::move(result.value());
   }
 
   BindLayerImage(layer_object, image_it->second);
+
+  // Store the acquire fence on the layer.
+  // Overwriting `pending_acquire_fence` drops any previous acquire fence *unwaited*, via
+  // its destructor. A client might never signal an abandoned fence for a superseded image
+  // that is never shown, so Scenic must not accumulate nor wait on it (prevents DoS and
+  // matches `fuchsia.hardware.display` SetLayerImage semantics).
+  layer_object.pending_acquire_fence = std::move(wait_fence);
+
+  // Store the release fence on the layer.
+  // Unlike `pending_acquire`, the binding's release fence survives Present() and remains
+  // on the layer for the binding's entire displayed lifetime. When the binding is superseded,
+  // UnbindLayerImage() moves it to unbound_release_fences_ so it joins the next Present's
+  // release fences. In a same-frame stomp, the middle binding's release fence is staged
+  // even though its acquire fence was dropped un-waited.
+  layer_object.binding_release_fence = std::move(signal_fence);
 }
 
 void Flatland::SetLayerProperties(SetLayerPropertiesRequestView request,
@@ -3387,9 +3448,11 @@ void Flatland::ReleaseImageObject(allocation::GlobalImageId id) {
   images_to_release_on_present_.push_back(id);
 }
 
-// TODO(https://fxbug.dev/540952629): When release fences are implemented, UnbindLayerImage will
-// also stage the binding's release fence.
 void Flatland::UnbindLayerImage(LayerObject& layer) {
+  layer.pending_acquire_fence = WaitFence{};
+  if (layer.binding_release_fence.is_valid()) {
+    unbound_release_fences_.push_back(std::move(layer.binding_release_fence));
+  }
   auto& image_mode = layer.image_mode;
   if (image_mode.image_id == allocation::kInvalidImageId) {
     return;
@@ -3402,10 +3465,11 @@ void Flatland::UnbindLayerImage(LayerObject& layer) {
 }
 
 void Flatland::BindLayerImage(LayerObject& layer, allocation::GlobalImageId id) {
+  // Rebinding the same image counts as a new binding: its predecessor's release
+  // fence is delivered and pending acquire fence dropped, like any other
+  // supersession. Incrementing the ref-count before `UnbindLayerImage()` keeps
+  // the image alive across the swap.
   FX_CHECK(id != allocation::kInvalidImageId);
-  if (layer.image_mode.image_id == id) {
-    return;
-  }
 
   auto it = image_objects_.find(id);
   FX_CHECK(it != image_objects_.end()) << "Image not found: " << id.value();
@@ -3508,6 +3572,12 @@ void Flatland::SetLayerImageForTest(LayerHandle handle, allocation::GlobalImageI
   // Tests bind ids that were never imported; give them an ImageObject.
   image_objects_.try_emplace(image, ImageObject{.ref_count = 0});
   BindLayerImage(it->second, image);
+}
+
+void Flatland::UnbindLayerImageForTest(LayerHandle handle) {
+  auto it = layer_objects_.find(handle);
+  FX_CHECK(it != layer_objects_.end()) << "Layer not found: " << handle;
+  UnbindLayerImage(it->second);
 }
 
 void Flatland::SetLayerSolidColorForTest(LayerHandle handle) {

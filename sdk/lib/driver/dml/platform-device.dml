@@ -1,0 +1,185 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    service: "fuchsia.hardware.platform.device.Service",
+    defs: {
+        MAX_RESOURCE_NAME_LENGTH: {
+            type: "uint32",
+            const: 128,
+        },
+        Mmio: {
+            type: "object",
+            description: "Definition of an MMIO resource for a platform device node.",
+            properties: {
+                base: {
+                    type: "uint64",
+                    description: "Physical address of MMIO region (does not need to be page aligned).",
+                },
+                length: {
+                    type: "uint64",
+                    description: "Length of MMIO region in bytes (does not need to be page aligned).",
+                },
+                name: {
+                    type: "string",
+                    max_size: 128,
+                    description: "Name that can be used to retrieve the MMIO via GetMmioByName.",
+                },
+            },
+            required: [
+                "base",
+                "length",
+            ],
+        },
+        ZirconInterruptMode: {
+            type: "uint32",
+            description: "Mode for creating zircon interrupts (matches ZX_INTERRUPT_MODE_* values).",
+            enum: {
+                DEFAULT: 0x0,
+                EDGE_LOW: 0x2,
+                EDGE_HIGH: 0x4,
+                LEVEL_LOW: 0x6,
+                LEVEL_HIGH: 0x8,
+                EDGE_BOTH: 0xA,
+            },
+        },
+        UserspaceIrq: {
+            type: "object",
+            description: "The specification for a userspace-provided interrupt.",
+            properties: {
+                irq: {
+                    type: "uint32",
+                    description: "The userspace IRQ number, unique to the interrupt controller driver that provides it.",
+                },
+                controller_id: {
+                    type: "uint32",
+                    description: "A unique identifier for the controller that provides this interrupt.",
+                },
+            },
+            required: [
+                "controller_id",
+                "irq",
+            ],
+        },
+        IrqSpec: {
+            type: "object",
+            description: "Specification for a kernel-provided or userspace-provided interrupt.",
+            properties: {
+                irq: {
+                    type: "uint32",
+                    description: "The IRQ number of a kernel-provided interrupt.",
+                },
+                userspace_irq: {
+                    ref: "#/UserspaceIrq",
+                    description: "The specification for a userspace-provided interrupt.",
+                },
+            },
+            oneOf: [
+                [
+                    "irq",
+                    "userspace_irq",
+                ],
+            ],
+        },
+        Irq: {
+            type: "object",
+            description: "Definition of an interrupt resource for a platform device node.",
+            properties: {
+                irq: {
+                    ref: "#/IrqSpec",
+                    description: "Interrupt specification.",
+                },
+                mode: {
+                    ref: "#/ZirconInterruptMode",
+                    description: "Bit flag for setting the interrupt mode.",
+                },
+                name: {
+                    type: "string",
+                    max_size: 128,
+                    description: "Name that can be used to retrieve the IRQ via GetInterruptByName.",
+                },
+                wake_vector: {
+                    type: "bool",
+                    description: "If set to true, this interrupt will wake the device out of suspend.",
+                },
+            },
+            required: [ "irq" ],
+        },
+        Bti: {
+            type: "object",
+            description: "Definition of a bus transaction initiator (BTI) for a platform device node.",
+            properties: {
+                iommu_id: {
+                    type: "uint32",
+                    description: "IOMMU identifier.",
+                },
+                bti_id: {
+                    type: "uint32",
+                    description: "BTI identifier.",
+                },
+                name: {
+                    type: "string",
+                    max_size: 128,
+                    description: "Name that can be used to retrieve the BTI via GetBtiByName.",
+                },
+            },
+            required: [
+                "bti_id",
+                "iommu_id",
+            ],
+        },
+        Smc: {
+            type: "object",
+            description: "Definition of a Secure Monitor Call (SMC) resource.",
+            properties: {
+                service_call_num_base: {
+                    type: "uint32",
+                    description: "Base service call number.",
+                },
+                count: {
+                    type: "uint32",
+                    description: "Count of service call numbers.",
+                },
+                exclusive: {
+                    type: "bool",
+                    description: "Whether the device has exclusive access to this SMC range.",
+                },
+                name: {
+                    type: "string",
+                    max_size: 128,
+                    description: "Name used to retrieve the SMC via GetSmcByName.",
+                },
+            },
+            required: [
+                "count",
+                "service_call_num_base",
+            ],
+        },
+    },
+    constraints: {
+        mmios: {
+            type: "vector",
+            description: "Memory mapped I/O regions provided to the device.",
+            element: { ref: "#/Mmio" },
+            max_count: 32,
+        },
+        irqs: {
+            type: "vector",
+            description: "Interrupts provided to the device.",
+            element: { ref: "#/Irq" },
+            max_count: 64,
+        },
+        btis: {
+            type: "vector",
+            description: "Bus transaction initiators provided to the device.",
+            element: { ref: "#/Bti" },
+            max_count: 10,
+        },
+        smcs: {
+            type: "vector",
+            description: "Secure Monitor Call resources provided to the device.",
+            element: { ref: "#/Smc" },
+            max_count: 10,
+        },
+    },
+}

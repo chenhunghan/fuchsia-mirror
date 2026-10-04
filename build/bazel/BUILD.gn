@@ -71,6 +71,7 @@ group("tests") {
   deps = [
     "bazel_sdk:tests",
     "fuchsia_idk:tests",
+    "rules/tests:bazel_tests",
     "scripts:tests",
     "update-rustc-third-party:generate_crate_annotations_test($host_toolchain)",
   ]
@@ -140,6 +141,48 @@ generated_file("gn_build_variables_for_bazel") {
   ]
 
   # LINT.ThenChange(//src/lib/fuchsia-sync/build/args.gni)
+
+  # LINT.IfChange
+  declaration = "//src/starnix/lib/starnix_sync/build/args.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "starnix_sync_detect_lock_dep_cycles"
+      value = starnix_sync_detect_lock_dep_cycles
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//src/starnix/lib/starnix_sync/build/args.gni)
+
+  # LINT.IfChange(starnix_enable_trace_and_debug_logs_in_release)
+  declaration = "//src/starnix/build/args.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "starnix_enable_trace_and_debug_logs_in_release"
+      value = starnix_enable_trace_and_debug_logs_in_release
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//src/starnix/build/args.gni:starnix_enable_trace_and_debug_logs_in_release)
+
+  # LINT.IfChange
+  declaration = "//src/developer/fuchsia-criterion/build/args.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "local_bench"
+      value = local_bench
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//src/developer/fuchsia-criterion/build/args.gni)
 
   # LINT.IfChange
   declaration = "//build/info/info.gni"
@@ -320,9 +363,25 @@ generated_file("gn_build_variables_for_bazel") {
   ]
 
   # LINT.ThenChange(//build/rust/config.gni)
+
+  deps = [ ":test_environments_for_bazel($default_toolchain)" ]
 }
 
 if (current_toolchain == default_toolchain) {
+  # Generates a JSON file containing all Fuchsia target test environment
+  # definitions from //build/testing/environments.gni. It is used by
+  # `generate_fuchsia_build_info()` to generate
+  # `@fuchsia_build_info//:environments.bzl`.
+  generated_file("test_environments_for_bazel") {
+    # LINT.IfChange(test_environments_for_bazel_path)
+    outputs = [ "$root_build_dir/test_environments_for_bazel.json" ]
+
+    # LINT.ThenChange(//build/bazel/scripts/workspace_utils.py:test_environments_for_bazel_path)
+    output_conversion = "json"
+    contents = {
+      import("//build/testing/environments.gni")
+    }
+  }
   group("bazel_args_json") {
     deps = [
       "//build/bazel/config:bazel_args_json($default_toolchain)",

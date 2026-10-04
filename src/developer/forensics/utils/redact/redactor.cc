@@ -25,8 +25,10 @@ constexpr std::string_view kUuidPattern =
 // http(s) urls
 constexpr std::string_view kUrlPattern = R"(https?://[^"',!<> ]*)";
 
-// Hex strings
-constexpr std::string_view k16HexPattern = R"((\b[0-9a-fA-F]{16}\b))";
+// Hex strings. Does not capture 16-digit decimal strings preceded by "<digits>." so that the
+// fractional part of floating-point numbers is not redacted. This is accomplished by not having a
+// capture group for the first alternative.
+constexpr std::string_view k16HexPattern = R"(\b[0-9]+\.[0-9]{16}\b|(\b[0-9a-fA-F]{16}\b))";
 constexpr std::string_view k32HexPattern = R"((\b[0-9a-fA-F]{32}\b))";
 const auto* kHexIgnorePrefixes = new std::vector<std::string>({"elf:", "build_id: '"});
 

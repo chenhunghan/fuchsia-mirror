@@ -28,11 +28,11 @@ After you have captured the trace, you can view and analyze the CPU frequency
 data in [Perfetto](https://ui.perfetto.dev/):
 
 1.  Open the trace file in Perfetto.
-2.  In the track list, look for the **Processing Rate:CPU:N** counters (where
-    *N* is the CPU core index, for example, `Processing Rate:CPU:0`) under the
+2.  In the track list, look for the **Rate:CPU:N** counters (where
+    *N* is the CPU core index, for example, `Rate:CPU:0`) under the
     kernel process.
 
-The "Processing Rate" counters display values representing the CPU's operating
+The "Rate" counters display values representing the CPU's operating
 frequency relative to a normalized scale:
 
 *   A value of **1000** represents the CPU running at its **maximum frequency**

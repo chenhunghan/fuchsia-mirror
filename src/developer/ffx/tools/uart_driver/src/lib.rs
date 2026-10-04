@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
+mod analytics;
+
 /// Default serial baud rate (1,000,000 baud).
 pub const DEFAULT_BAUD_RATE: NonZeroU32 = match NonZeroU32::new(1_000_000) {
     Some(v) => v,
@@ -372,12 +374,37 @@ async fn implementation(
         ParsedToolCommand::Run(cmd) => cmd,
     };
 
+    let metrics = ffx_command::MetricsSession::start(&ctx).await.ok();
+    let invoker = ctx.get::<String, _>("fuchsia.analytics.ffx_invoker").ok();
+
+    let res =
+        execute_driver_command(&ctx, &ffx, &command, invoker.as_deref(), logging_enabled).await;
+
+    if let Some(metrics) = metrics {
+        let redacted_args = ffx.redact_subcmd(&command);
+        let enhanced_args = match ffx_command::send_enhanced_analytics().await {
+            true => Some(ffx.unredacted_args_for_analytics()),
+            false => None,
+        };
+        let _ = metrics.command_finished(&res, &redacted_args, enhanced_args.as_deref()).await;
+    }
+
+    res
+}
+
+async fn execute_driver_command(
+    ctx: &EnvironmentContext,
+    ffx: &FfxCommandLine,
+    command: &UartDriverCommand,
+    invoker: Option<&str>,
+    logging_enabled: &mut bool,
+) -> Result<ExitStatus> {
     let invocation_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
 
-    let socket_path = resolve_socket_path(&ctx, command.socket.as_deref(), &command.target)?;
+    let socket_path = resolve_socket_path(ctx, command.socket.as_deref(), &command.target)?;
 
     if command.background {
         #[cfg(unix)]
@@ -388,7 +415,7 @@ async fn implementation(
             );
             return Ok(ExitStatus::from_raw(0));
         }
-        let log_dir = resolve_log_dir(&ctx, command.log_dir.as_deref())?;
+        let log_dir = resolve_log_dir(ctx, command.log_dir.as_deref())?;
         let log_id = uart_driver_api::get_log_id_from_socket_path(&socket_path);
         let (file, _log_path) = rotate_and_open_log_file(&log_dir, log_id).map_err(|e| {
             ffx_command::Error::Config(
@@ -399,11 +426,16 @@ async fn implementation(
                 .into(),
             )
         })?;
-        return spawn_background_daemon(&ffx, &command, file);
+        // Spawn the daemon child process before awaiting network telemetry so slow
+        // analytics uploads cannot delay daemon socket creation.
+        let res = spawn_background_daemon(ffx, command, file);
+        analytics::emit_uart_driver_invoked_event(command, invoker).await;
+        return res;
     }
 
-    let _log_path = init_logger(&ctx, &command, &socket_path, invocation_id, logging_enabled)?;
-    run_driver_daemon(&ctx, command, socket_path).await
+    let _log_path = init_logger(ctx, command, &socket_path, invocation_id, logging_enabled)?;
+    analytics::emit_uart_driver_invoked_event(command, invoker).await;
+    run_driver_daemon(ctx, command.clone(), socket_path).await
 }
 
 #[cfg(test)]

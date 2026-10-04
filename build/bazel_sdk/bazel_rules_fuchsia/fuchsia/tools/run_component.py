@@ -4,10 +4,15 @@
 # found in the LICENSE file.
 
 import argparse
+import json
 import os
 import subprocess
 
-from fuchsia.tools.fuchsia_task_lib import *
+from fuchsia.tools.fuchsia_task_lib import (
+    ArgumentScope,
+    FuchsiaTask,
+    ScopedArgumentParser,
+)
 
 
 class FuchsiaTaskRunComponent(FuchsiaTask):

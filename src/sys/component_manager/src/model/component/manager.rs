@@ -4,10 +4,8 @@
 
 use crate::model::component::{ComponentInstance, RouterError};
 use ::routing::component_instance::TopInstanceInterface;
-use anyhow::format_err;
 use async_trait::async_trait;
 use capability_source::{BuiltinCapabilities, CapabilitySource, NamespaceCapabilities};
-use clonable_error::ClonableError;
 use errors::RebootError;
 use fidl::endpoints::{self};
 use fidl_fuchsia_component_runtime::RouteRequest;
@@ -17,8 +15,7 @@ use fuchsia_async as fasync;
 use fuchsia_component::client;
 use fuchsia_sync::Mutex;
 use log::warn;
-use moniker::Moniker;
-use routing::error::{ComponentInstanceError, RoutingError};
+use routing::error::RoutingError;
 use runtime_capabilities::{Capability, Connector, Routable, Router, WeakInstanceToken};
 use std::sync::Arc;
 use vfs::directory::entry::OpenRequest;
@@ -95,20 +92,8 @@ impl ComponentManagerInstance {
 
         impl RootCapabilityRouter {
             async fn get_router(&self) -> Result<Arc<Router<Connector>>, RouterError> {
-                let component_output = self
-                    .root
-                    .lock_resolved_state()
-                    .await
-                    .map_err(|e| {
-                        RoutingError::from(ComponentInstanceError::ResolveFailed {
-                            moniker: Moniker::root(),
-                            err: ClonableError::from(format_err!("{:?}", e)),
-                        })
-                    })?
-                    .sandbox
-                    .component_output
-                    .clone();
-                match component_output.capabilities().get(&self.source_name) {
+                let component_output = self.root.get_component_output_dict().await?;
+                match component_output.get(&self.source_name) {
                     Some(Capability::ConnectorRouter(router)) => Ok(router),
                     _ => Err(RouterError::NotFound(Arc::new(
                         RoutingError::UseFromRootExposeNotFound {

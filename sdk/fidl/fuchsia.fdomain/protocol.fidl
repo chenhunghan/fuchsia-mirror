@@ -35,7 +35,7 @@ type AioStopped = struct {
 
 type Error = flexible union {
     /// An error produced by interacting with the handle itself.
-    1: target_error zx.Status;
+    1: target_error zx.Result;
 
     /// An invalid handle ID was given.
     2: bad_handle_id struct {

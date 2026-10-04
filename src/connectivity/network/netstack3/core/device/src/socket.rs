@@ -18,9 +18,11 @@ use netstack3_base::{
     AnyDevice, ContextPair, Counter, Device, DeviceIdContext, FrameDestination, Inspectable,
     Inspector, InspectorDeviceExt, InspectorExt, NetworkSerializer, ReferenceNotifiers,
     ReferenceNotifiersExt as _, RemoveResourceResultWithContext, ResourceCounterContext,
-    SendFrameContext, SendFrameErrorReason, StrongDeviceIdentifier, WeakDeviceIdentifier as _,
+    SendFrameContext, SendFrameErrorReason, StrongDeviceIdentifier, TxMetadataBindingsTypes,
+    WeakDeviceIdentifier as _,
 };
 use netstack3_hashmap::{HashMap, HashSet};
+use netstack3_ip::DeviceIpLayerMetadata;
 use packet::{BufferMut, ParsablePacket as _};
 use packet_formats::error::ParseError;
 use packet_formats::ethernet::{EtherType, EthernetFrameLengthCheck};
@@ -543,7 +545,7 @@ where
     pub fn send_frame<S, D>(
         &mut self,
         id: &ApiSocketId<C>,
-        metadata: DeviceSocketMetadata<D, <C::CoreContext as DeviceIdContext<D>>::DeviceId>,
+        metadata: DeviceSocketMetadata<D, C::CoreContext, C::BindingsContext>,
         body: S,
     ) -> Result<(), SendFrameErrorReason>
     where
@@ -553,7 +555,7 @@ where
         C::CoreContext: DeviceIdContext<D>
             + SendFrameContext<
                 C::BindingsContext,
-                DeviceSocketMetadata<D, <C::CoreContext as DeviceIdContext<D>>::DeviceId>,
+                DeviceSocketMetadata<D, C::CoreContext, C::BindingsContext>,
             >,
         C::BindingsContext: DeviceLayerTypes,
     {
@@ -610,14 +612,21 @@ pub trait DeviceSocketSendTypes: Device {
 }
 
 /// Metadata required to send a frame on a device socket.
-#[derive(Debug, PartialEq)]
-pub struct DeviceSocketMetadata<D: DeviceSocketSendTypes, DeviceId> {
+#[derive(Derivative)]
+#[derivative(Debug(bound = "D::Metadata: Debug"))]
+pub struct DeviceSocketMetadata<D, C, BT>
+where
+    D: DeviceSocketSendTypes,
+    C: DeviceIdContext<D>,
+    BT: TxMetadataBindingsTypes,
+{
     /// The device ID to send via.
-    pub device_id: DeviceId,
+    pub device_id: C::DeviceId,
     /// The metadata required to send that's specific to the device type.
     pub metadata: D::Metadata,
-    // TODO(https://fxbug.dev/391946195): Include send buffer ownership metadata
-    // here.
+    /// IP layer metadata associated with the frame, including the send buffer
+    /// ownership metadata.
+    pub ip_layer_metadata: DeviceIpLayerMetadata<BT>,
 }
 
 /// Parameters needed to apply system-framing of an Ethernet frame.
@@ -1964,8 +1973,8 @@ mod tests {
     impl DeviceSocketSendTypes for AnyDevice {
         type Metadata = FakeSendMetadata;
     }
-    impl<BC, D: FakeStrongDeviceId> SendableFrameMeta<FakeCoreCtx<D>, BC>
-        for DeviceSocketMetadata<AnyDevice, D>
+    impl<BC: TxMetadataBindingsTypes, D: FakeStrongDeviceId> SendableFrameMeta<FakeCoreCtx<D>, BC>
+        for DeviceSocketMetadata<AnyDevice, FakeCoreCtx<D>, BC>
     {
         fn send_meta<S>(
             self,
@@ -2011,7 +2020,11 @@ mod tests {
             let buf = packet::Buf::new(PAYLOAD.to_vec(), ..);
             api.send_frame(
                 &socket,
-                DeviceSocketMetadata { device_id: DEVICE, metadata: FakeSendMetadata },
+                DeviceSocketMetadata {
+                    device_id: DEVICE,
+                    metadata: FakeSendMetadata,
+                    ip_layer_metadata: DeviceIpLayerMetadata::empty(),
+                },
                 buf,
             )
             .expect("send failed");

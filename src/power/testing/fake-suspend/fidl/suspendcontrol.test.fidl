@@ -25,6 +25,6 @@ closed protocol Device {
 
     strict Resume(flexible union {
         1: result SuspendResult;
-        2: error zx.Status;
+        2: error zx.Result;
     }) -> () error zx.Status;
 };

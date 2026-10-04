@@ -29,6 +29,8 @@ mod ledger_view;
 mod network;
 mod record;
 mod single_target_diagnostics;
+#[cfg(target_os = "linux")]
+mod ssh_agent;
 mod target;
 mod types;
 mod usb;

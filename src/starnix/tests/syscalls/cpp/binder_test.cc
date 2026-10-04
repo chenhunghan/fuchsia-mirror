@@ -5,7 +5,9 @@
 #include <fcntl.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
+#include <poll.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -15,11 +17,15 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <format>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <fbl/unique_fd.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <linux/android/binder.h>
 #include <linux/android/binderfs.h>
@@ -525,6 +531,324 @@ TEST_F(BinderTest, BinderObjectCookieMismatch) {
   ParsedMessage pm3 = send_binder_object(binder_ptr, cookie1);
   EXPECT_THAT(pm3.returns_, testing::Contains(BR_TRANSACTION_COMPLETE));
   EXPECT_THAT(pm3.returns_, testing::Not(testing::Contains(BR_FAILED_REPLY)));
+}
+
+// Only the process that opened a binder FD may mmap it, regardless of whether the mapping is
+// private or shared.
+TEST_F(BinderTest, CrossProcessMmapFails) {
+  using namespace starnix_binder;
+  for (int flags : {MAP_PRIVATE, MAP_SHARED}) {
+    SCOPED_TRACE(flags == MAP_PRIVATE ? "MAP_PRIVATE" : "MAP_SHARED");
+
+    // Each binder FD can only be mapped once, so open a new one for each mapping type.
+    fbl::unique_fd binder =
+        fbl::unique_fd(open(TestPath("binderfs/binder").c_str(), O_RDWR | O_CLOEXEC));
+    ASSERT_TRUE(binder) << strerror(errno);
+
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      // Mapping a binder FD from a process other than the one that opened it must fail with
+      // EINVAL.
+      EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, kBinderMMapSize, PROT_READ, flags,
+                                                binder.get(), 0),
+                  SyscallResultIsErrno(EINVAL));
+    });
+    ASSERT_TRUE(helper.WaitForChildren());
+
+    // The process that originally opened the binder FD can still mmap it.
+    EXPECT_THAT(
+        test_helper::ScopedMMap::MMap(nullptr, kBinderMMapSize, PROT_READ, flags, binder.get(), 0),
+        SyscallResultIsOk());
+  }
+}
+
+// Unlike mmap, ioctls on a binder FD are permitted from processes other than the one that opened
+// it, e.g. after the FD is inherited across fork() or passed to another process.
+TEST_F(BinderTest, CrossProcessIoctlSucceeds) {
+  fbl::unique_fd binder =
+      fbl::unique_fd(open(TestPath("binderfs/binder").c_str(), O_RDWR | O_CLOEXEC));
+  ASSERT_TRUE(binder) << strerror(errno);
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    struct binder_version version = {};
+    EXPECT_THAT(ioctl(binder.get(), BINDER_VERSION, &version), SyscallSucceeds());
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+// The commands returned by binder reads, except BR_NOOP, and the payloads of the returned
+// BR_TRANSACTION commands.
+struct BinderReadResult {
+  std::vector<binder_driver_return_protocol> commands;
+  std::vector<binder_transaction_data> transactions;
+
+  bool Contains(binder_driver_return_protocol command) const {
+    return std::ranges::find(commands, command) != commands.end();
+  }
+};
+
+// Writes the `write_size` bytes of `write_buffer` to `binder`, and then reads from it, with a
+// single BINDER_WRITE_READ.
+BinderReadResult WriteRead(const fbl::unique_fd& binder, const void* write_buffer,
+                           size_t write_size) {
+  std::array<uint32_t, 32> read_buffer = {};
+  struct binder_write_read write_read = {
+      .write_size = write_size,
+      .write_consumed = 0,
+      .write_buffer = (binder_uintptr_t)write_buffer,
+      .read_size = sizeof(read_buffer),
+      .read_consumed = 0,
+      .read_buffer = (binder_uintptr_t)read_buffer.data(),
+  };
+  EXPECT_THAT(ioctl(binder.get(), BINDER_WRITE_READ, &write_read), SyscallSucceeds());
+
+  BinderReadResult result;
+  const char* const data = reinterpret_cast<const char*>(read_buffer.data());
+  size_t offset = 0;
+  while (offset < write_read.read_consumed) {
+    binder_driver_return_protocol command;
+    memcpy(&command, data + offset, sizeof(command));
+    offset += sizeof(command);
+    if (command == BR_TRANSACTION) {
+      binder_transaction_data transaction;
+      memcpy(&transaction, data + offset, sizeof(transaction));
+      result.transactions.push_back(transaction);
+    }
+    if (command != BR_NOOP) {
+      result.commands.push_back(command);
+    }
+    // The size of the parameters of a command is encoded in its value.
+    offset += _IOC_SIZE(command);
+  }
+  EXPECT_EQ(offset, write_read.read_consumed) << "binder read buffer did not parse cleanly";
+  return result;
+}
+
+// Reads from `binder` until `command`, or a transaction failure, has been returned. Returns all
+// the commands returned, starting with those of `result`.
+BinderReadResult ReadUntil(const fbl::unique_fd& binder, BinderReadResult result,
+                           binder_driver_return_protocol command) {
+  while (!result.Contains(command) && !result.Contains(BR_DEAD_REPLY) &&
+         !result.Contains(BR_FAILED_REPLY) && !testing::Test::HasFailure()) {
+    BinderReadResult next = WriteRead(binder, nullptr, 0);
+    result.commands.insert(result.commands.end(), next.commands.begin(), next.commands.end());
+    result.transactions.insert(result.transactions.end(), next.transactions.begin(),
+                               next.transactions.end());
+  }
+  return result;
+}
+
+BinderReadResult ReadUntil(const fbl::unique_fd& binder, binder_driver_return_protocol command) {
+  return ReadUntil(binder, BinderReadResult(), command);
+}
+
+// Sends a two-way transaction without data to `handle`, and returns the commands read afterwards.
+BinderReadResult SendTwoWayTransaction(const fbl::unique_fd& binder, uint32_t handle) {
+  const starnix_binder::TransactionWriteBuffer transaction = {
+      .command = BC_TRANSACTION,
+      .data = {.target = {.handle = handle}},
+  };
+  return WriteRead(binder, &transaction, sizeof(transaction));
+}
+
+// Replies without data to the transaction being handled by the calling thread, and returns the
+// commands read afterwards.
+BinderReadResult SendEmptyReply(const fbl::unique_fd& binder) {
+  const starnix_binder::ReplyWriteBuffer reply = {.command = BC_REPLY, .data = {}};
+  return WriteRead(binder, &reply, sizeof(reply));
+}
+
+// A binder object owned by the calling process.
+constexpr flat_binder_object kLocalObject = {
+    .hdr = {.type = BINDER_TYPE_BINDER},
+    .flags = 0x7f | FLAT_BINDER_FLAG_ACCEPTS_FDS,
+    .binder = 0x1000,
+    .cookie = 0x2000,
+};
+
+// Returns the data of a transaction to `handle` that only contains `*object`, at offset `*offset`.
+binder_transaction_data TransactionDataWithObject(uint32_t handle, uint32_t flags,
+                                                  const flat_binder_object* object,
+                                                  const binder_size_t* offset) {
+  return {
+      .target = {.handle = handle},
+      .flags = flags,
+      .data_size = sizeof(*object),
+      .offsets_size = sizeof(*offset),
+      .data = {.ptr = {.buffer = (binder_uintptr_t)object, .offsets = (binder_uintptr_t)offset}},
+  };
+}
+
+// Forks a process that becomes the context manager of the binder device in `binder_dir`, and then
+// runs `serve` with its binder fd. Returns once the context manager has been set.
+void ForkContextManager(test_helper::ForkHelper& fork_helper, const std::string& binder_dir,
+                        fit::function<void(const fbl::unique_fd&)> serve) {
+  auto ready = test_helper::MakeRendezvous();
+  fork_helper.RunInForkedProcess([&] {
+    auto fd_and_mapping = starnix_binder::OpenBinderAndMap(binder_dir);
+    ASSERT_TRUE(fd_and_mapping.fd_);
+    ASSERT_THAT(fd_and_mapping.mapping_, SyscallResultIsOk());
+    ASSERT_THAT(ioctl(fd_and_mapping.fd_.get(), BINDER_SET_CONTEXT_MGR, 0), SyscallSucceeds());
+    starnix_binder::EnterLooper(fd_and_mapping.fd_);
+    ready.poker.poke();
+    serve(fd_and_mapping.fd_);
+  });
+  // Close the parent's copy of the pipe's write side, so that `hold()` returns if the child exits
+  // without poking.
+  ready.poker = test_helper::Poker();
+  ready.holder.hold();
+}
+
+// Waits until `fd` is readable, for at most 10 seconds.
+void WaitUntilReadable(const fbl::unique_fd& fd) {
+  struct pollfd pfd = {.fd = fd.get(), .events = POLLIN, .revents = 0};
+  EXPECT_THAT(HANDLE_EINTR(poll(&pfd, 1, 10'000)), SyscallSucceedsWithValue(1));
+}
+
+// A single write/read of a two-way transaction returns both its BR_TRANSACTION_COMPLETE and its
+// BR_REPLY. The BR_TRANSACTION_COMPLETE of the reply is returned on its own.
+TEST_F(BinderTest, TwoWayTransactionCompleteIsReadWithReply) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  ForkContextManager(fork_helper, TestPath("binderfs"), [](const fbl::unique_fd& binder) {
+    ASSERT_TRUE(ReadUntil(binder, BR_TRANSACTION).Contains(BR_TRANSACTION));
+    EXPECT_THAT(SendEmptyReply(binder).commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  EXPECT_THAT(SendTwoWayTransaction(binder_and_map.fd_, kServiceManagerHandle).commands,
+              testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_REPLY));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+// A single write/read of a two-way transaction returns both its BR_TRANSACTION_COMPLETE and its
+// BR_DEAD_REPLY, if the recipient exits without replying.
+TEST_F(BinderTest, TwoWayTransactionCompleteIsReadWithDeadReply) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  // The context manager exits as soon as it has received the transaction.
+  ForkContextManager(fork_helper, TestPath("binderfs"), [](const fbl::unique_fd& binder) {
+    EXPECT_TRUE(ReadUntil(binder, BR_TRANSACTION).Contains(BR_TRANSACTION));
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  EXPECT_THAT(SendTwoWayTransaction(binder_and_map.fd_, kServiceManagerHandle).commands,
+              testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_DEAD_REPLY));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+// When a thread replies to a transaction nested in its own two-way transaction (A -> B -> A), the
+// BR_TRANSACTION_COMPLETE of its reply is returned on its own: the read does not wait for the
+// reply to its own transaction.
+TEST_F(BinderTest, TransactionCompleteForNestedReplyIsReadAlone) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  // Written to by A once its reply to the nested transaction has returned.
+  test_helper::ScopedPipe nested_reply_sent;
+
+  // B, the context manager.
+  ForkContextManager(fork_helper, TestPath("binderfs"), [&](const fbl::unique_fd& binder) {
+    // Receive A's transaction, which carries a binder object owned by A.
+    BinderReadResult result = ReadUntil(binder, BR_TRANSACTION);
+    ASSERT_EQ(result.transactions.size(), 1u);
+    const binder_transaction_data& transaction = result.transactions[0];
+    ASSERT_EQ(transaction.offsets_size, sizeof(binder_size_t));
+    binder_size_t offset;
+    memcpy(&offset, (const void*)transaction.data.ptr.offsets, sizeof(offset));
+    flat_binder_object object;
+    memcpy(&object, (const void*)(transaction.data.ptr.buffer + offset), sizeof(object));
+    ASSERT_EQ(object.hdr.type, BINDER_TYPE_HANDLE);
+
+    // Send a transaction to A's object. It is nested in A's transaction, so A's thread receives it.
+    EXPECT_TRUE(ReadUntil(binder, SendTwoWayTransaction(binder, object.handle), BR_REPLY)
+                    .Contains(BR_REPLY));
+
+    // Only reply to A's transaction once A's reply to the nested transaction has returned. If that
+    // reply waited for this one, the wait times out instead of deadlocking, and A reads both.
+    WaitUntilReadable(nested_reply_sent.ReadSide());
+    SendEmptyReply(binder);
+  });
+
+  // A.
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  const auto& binder = binder_and_map.fd_;
+
+  // Send a transaction carrying a binder object owned by A to B, and receive B's nested
+  // transaction.
+  const flat_binder_object object = kLocalObject;
+  const binder_size_t offset = 0;
+  const TransactionWriteBuffer transaction = {
+      .command = BC_TRANSACTION,
+      .data = TransactionDataWithObject(kServiceManagerHandle, 0, &object, &offset),
+  };
+  ASSERT_TRUE(
+      ReadUntil(binder, WriteRead(binder, &transaction, sizeof(transaction)), BR_TRANSACTION)
+          .Contains(BR_TRANSACTION));
+
+  // Reply to the nested transaction. Only its BR_TRANSACTION_COMPLETE is returned, even though A's
+  // own transaction is still waiting for its reply.
+  BinderReadResult result = SendEmptyReply(binder);
+  EXPECT_THAT(result.commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+
+  // Let B reply to A's transaction.
+  ASSERT_THAT(write(nested_reply_sent.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  EXPECT_TRUE(ReadUntil(binder, std::move(result), BR_REPLY).Contains(BR_REPLY));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+// The BR_TRANSACTION_COMPLETE of a two-way transaction is not lost when the same read also returns
+// a refcount command queued after it.
+TEST_F(BinderTest, TwoWayTransactionCompleteIsNotOverwrittenByRefcountCommand) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  // Written to once the first read has returned.
+  test_helper::ScopedPipe first_read_done;
+  ForkContextManager(fork_helper, TestPath("binderfs"), [&](const fbl::unique_fd& binder) {
+    ASSERT_TRUE(ReadUntil(binder, BR_TRANSACTION).Contains(BR_TRANSACTION));
+    // Only reply once the first read has returned, so that it cannot return the reply.
+    WaitUntilReadable(first_read_done.ReadSide());
+    SendEmptyReply(binder);
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  const auto& binder = binder_and_map.fd_;
+
+  // With a single write, send a two-way transaction, and then a oneway transaction carrying a
+  // binder object sent for the first time. The BR_ACQUIRE for the object is queued after the
+  // BR_TRANSACTION_COMPLETE of the two-way transaction.
+  const flat_binder_object object = kLocalObject;
+  const binder_size_t offset = 0;
+  const struct __attribute__((packed)) {
+    TransactionWriteBuffer two_way;
+    TransactionWriteBuffer oneway;
+  } write_buffer = {
+      .two_way = {.command = BC_TRANSACTION, .data = {.target = {.handle = kServiceManagerHandle}}},
+      .oneway = {.command = BC_TRANSACTION,
+                 .data = TransactionDataWithObject(kServiceManagerHandle, TF_ONE_WAY, &object,
+                                                   &offset)},
+  };
+  BinderReadResult result = WriteRead(binder, &write_buffer, sizeof(write_buffer));
+  ASSERT_THAT(write(first_read_done.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  result = ReadUntil(binder, std::move(result), BR_REPLY);
+
+  // Each transaction has its BR_TRANSACTION_COMPLETE.
+  EXPECT_EQ(std::ranges::count(result.commands, BR_TRANSACTION_COMPLETE), 2);
+  EXPECT_TRUE(result.Contains(BR_ACQUIRE));
+  EXPECT_TRUE(result.Contains(BR_REPLY));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
 }
 
 }  // namespace

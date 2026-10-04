@@ -4,7 +4,7 @@
 
 use crate::node::{Node, NodePropertyEntry};
 use crate::types::{NodeDictionary, NodeState};
-use driver_manager_types::{Collection, NodeOffer, OfferTransport, to_property2};
+use driver_manager_types::{Collection, NodeOffer, OfferTransport};
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_device_fs as fdevfs;
@@ -24,21 +24,11 @@ impl Node {
     ) -> Result<Rc<Node>, fdf::NodeError> {
         let name = args.name.ok_or(fdf::NodeError::NameMissing)?;
 
-        if args.properties.is_some() && args.properties2.is_some() {
-            return Err(fdf::NodeError::UnsupportedArgs);
-        }
-
         self.wait_for_child_to_exit(&name).await?;
 
         let child = Node::new(&name, self.weak_self.clone(), self.node_manager.clone_box());
 
-        let mut properties = if let Some(props) = args.properties2 {
-            props
-        } else if let Some(props) = args.properties {
-            props.into_iter().map(|prop| to_property2(&prop)).collect()
-        } else {
-            vec![]
-        };
+        let mut properties = args.properties2.unwrap_or_default();
 
         let has_manual_service_property =
             properties.iter().any(|prop| prop.key == bind_fuchsia::SERVICE);

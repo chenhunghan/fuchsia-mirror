@@ -24,6 +24,7 @@ from compare_utils import (
     ACTION_RUSTC,
     CompareCommandsQuery,
     CompareCommandsResult,
+    ConfiguredBazelLabel,
     compare_gn_and_bazel_commands_for,
 )
 
@@ -226,13 +227,21 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
                 mock_bazel_launcher,
                 "execroot",
                 [
-                    CompareCommandsQuery(bazel="//foo:bar"),
-                    CompareCommandsQuery(bazel="//foo:baz"),
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    ),
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:baz", "host")
+                    ),
                 ],
             ),
             {
-                "//foo:bar": "rustc --crate-name bar",
-                "//foo:baz": "rustc --crate-name baz",
+                ConfiguredBazelLabel(
+                    "//foo:bar", "host"
+                ): "rustc --crate-name bar",
+                ConfiguredBazelLabel(
+                    "//foo:baz", "host"
+                ): "rustc --crate-name baz",
             },
         )
 
@@ -247,6 +256,104 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
                 "--consistent_labels",
                 "--output=jsonproto",
                 'mnemonic("Rustc", //foo:bar + //foo:baz)',
+            ],
+        )
+
+    def test_query_bazel_commands_multiple_configs(self) -> None:
+        mock_bazel_launcher = build_utils.MockBazelLauncher()
+        mock_bazel_launcher.push_expected_outputs(
+            [
+                json.dumps(
+                    {
+                        "targets": [
+                            {"id": "1", "label": "//foo:bar"},
+                        ],
+                        "actions": [
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "rustc",
+                                    "--crate-name",
+                                    "bar",
+                                    "--target=x86_64-unknown-linux-gnu",
+                                ],
+                                "mnemonic": "Rustc",
+                            },
+                        ],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "targets": [
+                            {"id": "1", "label": "//foo:bar"},
+                        ],
+                        "actions": [
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "rustc",
+                                    "--crate-name",
+                                    "bar",
+                                    "--target=x86_64-unknown-fuchsia",
+                                ],
+                                "mnemonic": "Rustc",
+                            },
+                        ],
+                    }
+                ),
+            ]
+        )
+
+        self.assertDictEqual(
+            compare_utils.query_bazel_commands(
+                mock_bazel_launcher,
+                "execroot",
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    ),
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel(
+                            "//foo:bar", "fuchsia_platform"
+                        )
+                    ),
+                ],
+            ),
+            {
+                ConfiguredBazelLabel(
+                    "//foo:bar",
+                    "host",
+                ): "rustc --crate-name bar --target=x86_64-unknown-linux-gnu",
+                ConfiguredBazelLabel(
+                    "//foo:bar",
+                    "fuchsia_platform",
+                ): "rustc --crate-name bar --target=x86_64-unknown-fuchsia",
+            },
+        )
+
+        self.assertEqual(len(mock_bazel_launcher.command_runner.results), 2)
+        self.assertEqual(
+            mock_bazel_launcher.command_runner.results[0].args,
+            [
+                "bazel",
+                "aquery",
+                "--config=host",
+                "--config=quiet",
+                "--consistent_labels",
+                "--output=jsonproto",
+                'mnemonic("Rustc", //foo:bar)',
+            ],
+        )
+        self.assertEqual(
+            mock_bazel_launcher.command_runner.results[1].args,
+            [
+                "bazel",
+                "aquery",
+                "--config=fuchsia_platform",
+                "--config=quiet",
+                "--consistent_labels",
+                "--output=jsonproto",
+                'mnemonic("Rustc", //foo:bar)',
             ],
         )
 
@@ -278,10 +385,17 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_bazel_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             ),
             {
-                "//foo:bar": "CARGO_PKG_NAME=bar rustc --crate-name bar",
+                ConfiguredBazelLabel(
+                    "//foo:bar",
+                    "host",
+                ): "CARGO_PKG_NAME=bar rustc --crate-name bar",
             },
         )
 
@@ -310,10 +424,16 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_bazel_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             ),
             {
-                "//foo:bar": "rustc --crate-name bar",
+                ConfiguredBazelLabel(
+                    "//foo:bar", "host"
+                ): "rustc --crate-name bar",
             },
         )
 
@@ -327,7 +447,11 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_bazel_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             )
 
     def test_query_bazel_commands_empty_labels(self) -> None:
@@ -345,7 +469,11 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             )
 
     def test_query_bazel_commands_missing_actions(self) -> None:
@@ -363,7 +491,11 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             )
 
     def test_query_bazel_commands_target_not_in_results(self) -> None:
@@ -388,7 +520,11 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             )
 
     def test_query_bazel_commands_empty_arguments(self) -> None:
@@ -413,7 +549,11 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             compare_utils.query_bazel_commands(
                 mock_launcher,
                 "execroot",
-                [CompareCommandsQuery(bazel="//foo:bar")],
+                [
+                    CompareCommandsQuery(
+                        bazel=ConfiguredBazelLabel("//foo:bar", "host")
+                    )
+                ],
             )
 
     def test_query_ninja_and_bazel_commands(self) -> None:
@@ -463,11 +603,11 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             [
                 CompareCommandsQuery(
                     gn="//foo:bar",
-                    bazel="//foo:bar",
+                    bazel=ConfiguredBazelLabel("//foo:bar", "host"),
                 ),
                 CompareCommandsQuery(
                     gn="//foo:baz",
-                    bazel="//foo:baz",
+                    bazel=ConfiguredBazelLabel("//foo:baz", "host"),
                 ),
             ],
             mock_ninja,
@@ -486,8 +626,12 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
         self.assertDictEqual(
             bazel_cmds_map,
             {
-                "//foo:bar": "rustc --crate-name bar",
-                "//foo:baz": "rustc --crate-name baz",
+                ConfiguredBazelLabel(
+                    "//foo:bar", "host"
+                ): "rustc --crate-name bar",
+                ConfiguredBazelLabel(
+                    "//foo:baz", "host"
+                ): "rustc --crate-name baz",
             },
         )
 
@@ -613,6 +757,56 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             ],
         )
 
+    def test_query_ninja_commands_host_vs_fuchsia_outputs(self) -> None:
+        mock_output = (
+            "rustc --target=x86_64-unknown-linux-gnu -o host_x64/obj/rust/libmy_lib.rlib\n"
+            + "clang -target x86_64-unknown-linux-gnu -c ../../src/c_lib.c -o host_x64/obj/cc/c_lib.o\n"
+            + "rustc --target=x86_64-unknown-fuchsia -o obj/rust/libmy_lib.rlib\n"
+            + "clang -target x86_64-unknown-fuchsia -c ../../src/c_lib.c -o obj/cc/c_lib.o\n"
+        )
+        _, mock_ninja = self._get_ninja_runners(mock_output)
+        self._write_ninja_outputs(
+            {
+                "//rust:my_lib(//build/toolchain:host_x64)": [
+                    "host_x64/obj/rust/libmy_lib.rlib"
+                ],
+                "//rust:my_lib": ["obj/rust/libmy_lib.rlib"],
+                "//cc:c_lib(//build/toolchain:host_x64)": [
+                    "host_x64/obj/cc/c_lib.o"
+                ],
+                "//cc:c_lib": ["obj/cc/c_lib.o"],
+            }
+        )
+        targets = [
+            CompareCommandsQuery(
+                gn="//rust:my_lib(//build/toolchain:host_x64)",
+                action_type="rustc",
+            ),
+            CompareCommandsQuery(
+                gn="//cc:c_lib(//build/toolchain:host_x64)",
+                action_type="c_compile",
+            ),
+            CompareCommandsQuery(gn="//rust:my_lib", action_type="rustc"),
+            CompareCommandsQuery(gn="//cc:c_lib", action_type="c_compile"),
+        ]
+        results = compare_utils.query_ninja_commands(mock_ninja, targets)
+        self.assertIn(
+            "x86_64-unknown-linux-gnu",
+            results["//rust:my_lib(//build/toolchain:host_x64)"],
+        )
+        self.assertIn(
+            "x86_64-unknown-fuchsia",
+            results["//rust:my_lib"],
+        )
+        self.assertIn(
+            "x86_64-unknown-linux-gnu",
+            results["//cc:c_lib(//build/toolchain:host_x64)"],
+        )
+        self.assertIn(
+            "x86_64-unknown-fuchsia",
+            results["//cc:c_lib"],
+        )
+
     def test_query_bazel_commands_batched(self) -> None:
         mock_launcher = build_utils.MockBazelLauncher()
         mock_launcher.push_expected_outputs(
@@ -662,11 +856,18 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             ]
         )
         targets = [
-            CompareCommandsQuery(bazel="//rust:my_lib", action_type="rustc"),
             CompareCommandsQuery(
-                bazel="//cc:cc_lib", action_type="cpp_compile"
+                bazel=ConfiguredBazelLabel("//rust:my_lib", "host"),
+                action_type="rustc",
             ),
-            CompareCommandsQuery(bazel="//cc:cc_bin", action_type="cpp_link"),
+            CompareCommandsQuery(
+                bazel=ConfiguredBazelLabel("//cc:cc_lib", "host"),
+                action_type="cpp_compile",
+            ),
+            CompareCommandsQuery(
+                bazel=ConfiguredBazelLabel("//cc:cc_bin", "host"),
+                action_type="cpp_link",
+            ),
         ]
         results = compare_utils.query_bazel_commands(
             mock_launcher,
@@ -674,9 +875,16 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             targets,
         )
         self.assertEqual(len(results), 3)
-        self.assertIn("rustc", results["//rust:my_lib"])
-        self.assertIn("src/cc_lib.cc", results["//cc:cc_lib"])
-        self.assertIn("cc_bin", results["//cc:cc_bin"])
+        self.assertIn(
+            "rustc", results[ConfiguredBazelLabel("//rust:my_lib", "host")]
+        )
+        self.assertIn(
+            "src/cc_lib.cc",
+            results[ConfiguredBazelLabel("//cc:cc_lib", "host")],
+        )
+        self.assertIn(
+            "cc_bin", results[ConfiguredBazelLabel("//cc:cc_bin", "host")]
+        )
 
         last_args = mock_launcher.command_runner.results[0].args
         self.assertEqual(
@@ -731,22 +939,33 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
         link_cmd = compare_utils.query_bazel_commands(
             mock_launcher,
             "execroot",
-            [CompareCommandsQuery(bazel="//cc:my_bin", action_type="cpp_link")],
+            [
+                CompareCommandsQuery(
+                    bazel=ConfiguredBazelLabel("//cc:my_bin", "host"),
+                    action_type="cpp_link",
+                )
+            ],
         )
-        self.assertIn("my_bin", link_cmd["//cc:my_bin"])
+        self.assertIn(
+            "my_bin", link_cmd[ConfiguredBazelLabel("//cc:my_bin", "host")]
+        )
 
     def test_target_query_dataclass(self) -> None:
         t_gn = CompareCommandsQuery(gn="//foo:bar")
         self.assertEqual(t_gn.gn, "//foo:bar")
-        self.assertEqual(t_gn.bazel, "")
+        self.assertIsNone(t_gn.bazel)
         self.assertEqual(t_gn.action_type, "rustc")
         self.assertIsNone(t_gn.source)
 
         t_bazel = CompareCommandsQuery(
-            bazel="//foo:baz", action_type="cpp_compile", source="foo.cc"
+            bazel=ConfiguredBazelLabel("//foo:baz", "host"),
+            action_type="cpp_compile",
+            source="foo.cc",
         )
         self.assertEqual(t_bazel.gn, "")
-        self.assertEqual(t_bazel.bazel, "//foo:baz")
+        self.assertIsNotNone(t_bazel.bazel)
+        self.assertEqual(t_bazel.bazel_label, "//foo:baz")
+        self.assertEqual(t_bazel.bazel_config, "host")
         self.assertEqual(t_bazel.action_type, "cpp_compile")
         self.assertEqual(t_bazel.source, "foo.cc")
 
@@ -754,12 +973,16 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             {
                 "gn": "//a:b",
                 "bazel": "//c:d",
+                "bazel_config": "fuchsia_platform",
                 "type": "c_compile",
                 "source": "src.c",
             }
         )
         self.assertEqual(t_dict.gn, "//a:b")
-        self.assertEqual(t_dict.bazel, "//c:d")
+        self.assertIsNotNone(t_dict.bazel)
+        assert t_dict.bazel  # make mypy happy
+        self.assertEqual(t_dict.bazel.label, "//c:d")
+        self.assertEqual(t_dict.bazel.config, "fuchsia_platform")
         self.assertEqual(t_dict.action_type, "c_compile")
         self.assertEqual(t_dict.source, "src.c")
 
@@ -768,7 +991,20 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
             CompareCommandsQuery()
 
         with self.assertRaises(ValueError):
-            CompareCommandsQuery(gn="", bazel="")
+            CompareCommandsQuery(gn="", bazel=None)
+
+        # Must have bazel_config when bazel is set
+        with self.assertRaises(ValueError):
+            CompareCommandsQuery(bazel=ConfiguredBazelLabel("//foo:bar", ""))
+
+        with self.assertRaises(ValueError):
+            CompareCommandsQuery.from_dict({"gn": "//a:b", "bazel": "//c:d"})
+
+        # Invalid bazel_config
+        with self.assertRaises(ValueError):
+            CompareCommandsQuery(
+                bazel=ConfiguredBazelLabel("//foo:bar", "invalid_config")
+            )
 
         # Invalid action type
         with self.assertRaises(ValueError):
@@ -777,7 +1013,9 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
 
 class CompareCommandsResultTest(unittest.TestCase):
     def test_default_fields(self) -> None:
-        query = CompareCommandsQuery(gn="//src:foo", bazel="//src:foo")
+        query = CompareCommandsQuery(
+            gn="//src:foo", bazel=ConfiguredBazelLabel("//src:foo", "host")
+        )
         res = CompareCommandsResult(query=query)
 
         self.assertEqual(res.query, query)
@@ -789,7 +1027,9 @@ class CompareCommandsResultTest(unittest.TestCase):
 
     def test_custom_fields(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src:foo", bazel="//src:foo", action_type=ACTION_RUSTC
+            gn="//src:foo",
+            bazel=ConfiguredBazelLabel("//src:foo", "host"),
+            action_type=ACTION_RUSTC,
         )
         res = CompareCommandsResult(
             query=query,
@@ -847,7 +1087,9 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_compare_rustc_success(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src/lib:bar", bazel="//src/lib:bar", action_type=ACTION_RUSTC
+            gn="//src/lib:bar",
+            bazel=ConfiguredBazelLabel("//src/lib:bar", "host"),
+            action_type=ACTION_RUSTC,
         )
         gn_cmd = "../../prebuilt/third_party/rust/bin/rustc --crate-name=bar ../../src/lib/bar.rs"
         bazel_cmd = "prebuilt/third_party/rust/bin/rustc --crate-name=bar src/lib/bar.rs"
@@ -881,7 +1123,7 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
     def test_compare_clang_cpp_compile_success(self) -> None:
         query = CompareCommandsQuery(
             gn="//src/app:foo",
-            bazel="//src/app:foo",
+            bazel=ConfiguredBazelLabel("//src/app:foo", "host"),
             action_type=ACTION_CPP_COMPILE,
         )
         gn_cmd = "../../prebuilt/third_party/clang/bin/clang++ -c ../../src/app/foo.cc -o obj/src/app/foo.o"
@@ -913,7 +1155,7 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
         # Test c_compile with clang
         query_c = CompareCommandsQuery(
             gn="//src/app:c_target",
-            bazel="//src/app:c_target",
+            bazel=ConfiguredBazelLabel("//src/app:c_target", "host"),
             action_type=ACTION_C_COMPILE,
         )
         gn_c_cmd = "../../prebuilt/third_party/clang/bin/clang -c ../../src/app/foo.c -o obj/foo.o"
@@ -922,7 +1164,7 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
         # Test cpp_link with lld
         query_link = CompareCommandsQuery(
             gn="//src/app:link_target",
-            bazel="//src/app:link_target",
+            bazel=ConfiguredBazelLabel("//src/app:link_target", "host"),
             action_type=ACTION_CPP_LINK,
         )
         gn_link_cmd = "../../prebuilt/third_party/clang/bin/lld -o obj/foo.so ../../src/app/foo.o"
@@ -933,7 +1175,10 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
         ) as mock_query:
             mock_query.return_value = (
                 {query_c.gn: gn_c_cmd, query_link.gn: gn_link_cmd},
-                {query_c.bazel: bazel_c_cmd, query_link.bazel: bazel_link_cmd},
+                {
+                    query_c.bazel: bazel_c_cmd,
+                    query_link.bazel: bazel_link_cmd,
+                },
             )
             results = compare_gn_and_bazel_commands_for(
                 [query_c, query_link], self.bazel_paths
@@ -949,7 +1194,9 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_wrapped_and_chained_commands(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src/lib:bar", bazel="//src/lib:bar", action_type=ACTION_RUSTC
+            gn="//src/lib:bar",
+            bazel=ConfiguredBazelLabel("//src/lib:bar", "host"),
+            action_type=ACTION_RUSTC,
         )
         gn_cmd = "touch obj/stamp && ../../prebuilt/third_party/rust/bin/rustc --crate-name=bar ../../src/lib/bar.rs"
         bazel_cmd = "wrapper -- prebuilt/third_party/rust/bin/rustc --crate-name=bar src/lib/bar.rs"
@@ -981,7 +1228,9 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_no_matching_tool_candidate_fallback(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src/lib:bar", bazel="//src/lib:bar", action_type=ACTION_RUSTC
+            gn="//src/lib:bar",
+            bazel=ConfiguredBazelLabel("//src/lib:bar", "host"),
+            action_type=ACTION_RUSTC,
         )
         gn_cmd = "custom_tool --crate-name=bar ../../src/lib/bar.rs"
         bazel_cmd = "custom_tool --crate-name=bar src/lib/bar.rs"
@@ -1005,14 +1254,19 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_missing_gn_command(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src:bar", bazel="//src:bar", action_type=ACTION_RUSTC
+            gn="//src:bar",
+            bazel=ConfiguredBazelLabel("//src:bar", "host"),
+            action_type=ACTION_RUSTC,
         )
         bazel_cmd = "rustc src/bar.rs"
 
         with mock.patch.object(
             compare_utils, "query_ninja_and_bazel_commands"
         ) as mock_query:
-            mock_query.return_value = ({}, {query.bazel: bazel_cmd})
+            mock_query.return_value = (
+                {},
+                {query.bazel: bazel_cmd},
+            )
             results = compare_gn_and_bazel_commands_for(
                 [query], self.bazel_paths
             )
@@ -1030,7 +1284,9 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_missing_bazel_command(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src:bar", bazel="//src:bar", action_type=ACTION_RUSTC
+            gn="//src:bar",
+            bazel=ConfiguredBazelLabel("//src:bar", "host"),
+            action_type=ACTION_RUSTC,
         )
         gn_cmd = "rustc ../../src/bar.rs"
 
@@ -1055,7 +1311,9 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_missing_both_commands(self) -> None:
         query = CompareCommandsQuery(
-            gn="//src:bar", bazel="//src:bar", action_type=ACTION_RUSTC
+            gn="//src:bar",
+            bazel=ConfiguredBazelLabel("//src:bar", "host"),
+            action_type=ACTION_RUSTC,
         )
 
         with mock.patch.object(
@@ -1079,13 +1337,19 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
     def test_multiple_queries_mixed_results(self) -> None:
         q_success = CompareCommandsQuery(
-            gn="//src:success", bazel="//src:success", action_type=ACTION_RUSTC
+            gn="//src:success",
+            bazel=ConfiguredBazelLabel("//src:success", "host"),
+            action_type=ACTION_RUSTC,
         )
         q_fail = CompareCommandsQuery(
-            gn="//src:fail", bazel="//src:fail", action_type=ACTION_RUSTC
+            gn="//src:fail",
+            bazel=ConfiguredBazelLabel("//src:fail", "host"),
+            action_type=ACTION_RUSTC,
         )
         q_cpp = CompareCommandsQuery(
-            gn="//src:cpp", bazel="//src:cpp", action_type=ACTION_CPP_COMPILE
+            gn="//src:cpp",
+            bazel=ConfiguredBazelLabel("//src:cpp", "fuchsia_platform"),
+            action_type=ACTION_CPP_COMPILE,
         )
 
         gn_cmds = {
@@ -1093,9 +1357,15 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
             "//src:cpp": "clang++ -c ../../src/cpp.cc -o obj/cpp.o",
         }
         bazel_cmds = {
-            "//src:success": "rustc --crate-name=success src/success.rs",
-            "//src:fail": "rustc src/fail.rs",
-            "//src:cpp": "clang++ -c src/cpp.cc -o bazel-out/cpp.o",
+            ConfiguredBazelLabel(
+                "//src:success",
+                "host",
+            ): "rustc --crate-name=success src/success.rs",
+            ConfiguredBazelLabel("//src:fail", "host"): "rustc src/fail.rs",
+            ConfiguredBazelLabel(
+                "//src:cpp",
+                "fuchsia_platform",
+            ): "clang++ -c src/cpp.cc -o bazel-out/cpp.o",
         }
 
         with mock.patch.object(
@@ -1119,7 +1389,10 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
         self.assertIn("clang++", results[2].normalized_gn_args)
 
     def test_read_response_files_forwarded(self) -> None:
-        query = CompareCommandsQuery(gn="//src:foo", bazel="//src:foo")
+        query = CompareCommandsQuery(
+            gn="//src:foo",
+            bazel=ConfiguredBazelLabel("//src:foo", "host"),
+        )
         with mock.patch.object(
             compare_utils, "query_ninja_and_bazel_commands"
         ) as mock_query:

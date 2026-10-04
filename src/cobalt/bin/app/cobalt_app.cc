@@ -146,6 +146,8 @@ CobaltConfig CobaltApp::CreateCobaltConfig(
       .validated_clock = system_clock,
 
       .diagnostics = std::move(diagnostics),
+
+      .defer_observation_encryption = true,
   };
   return cfg;
 }

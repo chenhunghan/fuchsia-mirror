@@ -14,7 +14,7 @@ import types
 from collections import defaultdict
 from collections.abc import Set
 from importlib.resources import as_file, files
-from typing import Any, Dict, List, NamedTuple, Optional, Self, TextIO, Tuple
+from typing import Any, NamedTuple, Self, TextIO
 
 from tp_shell import PerfettoTraceProcessor
 from trace_processing import data  # type: ignore[attr-defined]
@@ -28,17 +28,17 @@ class _FlowKey:
     """A helper struct to group flow events."""
 
     def __init__(
-        self, category: Optional[str], name: Optional[str], pid: int, id: str
+        self, category: str | None, name: str | None, pid: int, id: str
     ) -> None:
-        self.category: Optional[str] = category
-        self.name: Optional[str] = name
+        self.category: str | None = category
+        self.name: str | None = name
         self.pid: int = pid  # Only used for 'local' flow ids.
         self.id: str = id
 
     @classmethod
-    def from_trace_event(cls, trace_event: Dict[str, Any]) -> Self:
-        category: Optional[str] = trace_event.get("cat")
-        name: Optional[str] = trace_event.get("name")
+    def from_trace_event(cls, trace_event: dict[str, Any]) -> Self:
+        category: str | None = trace_event.get("cat")
+        name: str | None = trace_event.get("name")
         # _FlowKey is globally scoped unless specifically local.
         pid: int = 0
 
@@ -103,28 +103,28 @@ class _AsyncKey:
     """A helper struct to group async events."""
 
     def __init__(
-        self, category: Optional[str], name: Optional[str], pid: int, id: int
+        self, category: str | None, name: str | None, pid: int, id: int
     ) -> None:
-        self.category: Optional[str] = category
-        self.name: Optional[str] = name
+        self.category: str | None = category
+        self.name: str | None = name
         self.pid: int = pid
         self.id: int = id
 
     @classmethod
-    def from_trace_event(cls, trace_event: Dict[str, Any]) -> Self:
-        category: Optional[str] = trace_event.get("cat", None)
-        name: Optional[str] = trace_event.get("name", None)
+    def from_trace_event(cls, trace_event: dict[str, Any]) -> Self:
+        category: str | None = trace_event.get("cat", None)
+        name: str | None = trace_event.get("name", None)
         pid: int = trace_event["pid"]
 
         # Helper to parse an object into an int, returning None if the object is
         # not parseable.
-        def try_parse_int(s: str) -> Optional[int]:
+        def try_parse_int(s: str) -> int | None:
             try:
                 return int(s, 0)  # 0 base allows guessing hex, binary, etc
             except (TypeError, ValueError):
                 return None
 
-        id: Optional[int] = None
+        id: int | None = None
         if "id" in trace_event:
             if isinstance(trace_event["id"], int):
                 id = trace_event["id"]
@@ -466,7 +466,7 @@ def create_model_from_string(json_string: str) -> trace_model.Model:
 
 
 def _validate_field_type(
-    d: Dict[str, Any], field: str, ty: type | types.UnionType
+    d: dict[str, Any], field: str, ty: type | types.UnionType
 ) -> None:
     """
     Check that a given field exists in the dictionary and has the expected type
@@ -544,7 +544,7 @@ def _consume_json_for_trace_events(
     # present and are of the correct type.  If any of these fields are missing
     # or is of a different type than what is asserted here, then the JSON trace
     # event is considered to be malformed.
-    def check_trace_event(json_trace_event: Dict[str, Any]) -> None:
+    def check_trace_event(json_trace_event: dict[str, Any]) -> None:
         _validate_field_type(json_trace_event, "ph", str)
         if json_trace_event["ph"] != "M":
             _validate_field_type(json_trace_event, "cat", str)
@@ -561,7 +561,7 @@ def _consume_json_for_trace_events(
     # begin/end pairs and complete events.
     def add_to_duration_stack(
         duration_event: trace_model.DurationEvent,
-        duration_stack: List[trace_model.DurationEvent],
+        duration_stack: list[trace_model.DurationEvent],
     ) -> None:
         duration_stack.append(duration_event)
         if len(duration_stack) > 1:
@@ -572,14 +572,14 @@ def _consume_json_for_trace_events(
 
     # Obtain the overall list of trace events.
     _validate_field_type(root_object, "traceEvents", list)
-    trace_events: List[Dict[str, Any]] = root_object["traceEvents"].copy()
+    trace_events: list[dict[str, Any]] = root_object["traceEvents"].copy()
 
     # Add synthetic end events for each complete event in the trace data to
     # assist with maintaining each thread's duration stack.  This isn't strictly
     # necessary, however it makes the duration stack bookkeeping simpler.
     for trace_event in root_object["traceEvents"]:
         if trace_event["ph"] == "X":
-            synthetic_end_event: Dict[str, Any] = trace_event.copy()
+            synthetic_end_event: dict[str, Any] = trace_event.copy()
             synthetic_end_event["ph"] = "fuchsia_synthetic_end"
             synthetic_end_event["ts"] = trace_event["ts"] + trace_event["dur"]
             trace_events.append(synthetic_end_event)
@@ -599,19 +599,19 @@ def _consume_json_for_trace_events(
     del root_object
 
     # Maintains the current duration stack for each track.
-    duration_stacks: Dict[
-        Tuple[int, int], List[trace_model.DurationEvent]
+    duration_stacks: dict[
+        tuple[int, int], list[trace_model.DurationEvent]
     ] = defaultdict(list)
     # Maintains in progress async events.
-    live_async_events: Dict[_AsyncKey, trace_model.AsyncEvent] = {}
+    live_async_events: dict[_AsyncKey, trace_model.AsyncEvent] = {}
     # Maintains in progress flow sequences.
-    live_flows: Dict[_FlowKey, trace_model.FlowEvent] = {}
+    live_flows: dict[_FlowKey, trace_model.FlowEvent] = {}
     # Flows with "next slide" binding that are waiting to be bound.
-    unbound_flow_events: Dict[
-        Tuple[int, int], List[trace_model.FlowEvent]
+    unbound_flow_events: dict[
+        tuple[int, int], list[trace_model.FlowEvent]
     ] = defaultdict(list)
     # Final list of events to be written into the Model.
-    result_events: List[trace_model.Event] = []
+    result_events: list[trace_model.Event] = []
 
     dropped_flow_event_counter: int = 0
     dropped_async_event_counter: int = 0
@@ -628,7 +628,7 @@ def _consume_json_for_trace_events(
         phase: str = trace_event["ph"]
         pid: int = trace_event["pid"]
         tid: int = int(trace_event["tid"])
-        track_key: Tuple[int, int] = (pid, tid)
+        track_key: tuple[int, int] = (pid, tid)
         duration_stack = duration_stacks[track_key]
 
         if phase in ("X", "B"):
@@ -687,9 +687,9 @@ def _consume_json_for_trace_events(
             live_async_events[async_key] = async_event
         elif phase == "e":
             async_key = _AsyncKey.from_trace_event(trace_event)
-            begin_async_event: Optional[
-                trace_model.AsyncEvent
-            ] = live_async_events.pop(async_key, None)
+            begin_async_event: trace_model.AsyncEvent | None = (
+                live_async_events.pop(async_key, None)
+            )
             if begin_async_event is not None:
                 begin_async_event.duration = (
                     trace_time.TimePoint.from_epoch_delta(
@@ -712,7 +712,7 @@ def _consume_json_for_trace_events(
             instant_event = trace_model.InstantEvent.consume_dict(trace_event)
             result_events.append(instant_event)
         elif phase == "s" or phase == "t" or phase == "f":
-            binding_point: Optional[str] = None
+            binding_point: str | None = None
             if "bp" in trace_event:
                 if trace_event["bp"] == "e":
                     binding_point = "enclosing"
@@ -726,7 +726,7 @@ def _consume_json_for_trace_events(
                 binding_point = "next"
 
             flow_key: _FlowKey = _FlowKey.from_trace_event(trace_event)
-            previous_flow: Optional[trace_model.FlowEvent] = None
+            previous_flow: trace_model.FlowEvent | None = None
             if phase == "s":
                 if flow_key in live_flows:
                     dropped_flow_event_counter += 1
@@ -741,7 +741,7 @@ def _consume_json_for_trace_events(
                 dropped_flow_event_counter += 1
                 continue
 
-            enclosing_duration: Optional[trace_model.DurationEvent] = (
+            enclosing_duration: trace_model.DurationEvent | None = (
                 duration_stack[-1] if binding_point == "enclosing" else None
             )
             flow_event = trace_model.FlowEvent.consume_dict(
@@ -888,7 +888,7 @@ def consume_json_to_create_model(
 
     # Map pid -> tid because some of these subclasses (such as ContextSwitch)
     # need to use the mapping but don't have the pid field.
-    tid_to_pid: Dict[int, int] = {}
+    tid_to_pid: dict[int, int] = {}
 
     # Process system trace events.
     if system_trace_events_list:
@@ -954,10 +954,10 @@ def construct_model(
     # Construct the map of Processes, including ones without trace events.
 
     # Maps from PIDs to Process objects.
-    processes: Dict[int, trace_model.Process] = {}
+    processes: dict[int, trace_model.Process] = {}
     # Maps from Process objects to dicts that map from TIDs to Thread objects.
-    process_threads_map: Dict[
-        trace_model.Process, Dict[int, trace_model.Thread]
+    process_threads_map: dict[
+        trace_model.Process, dict[int, trace_model.Thread]
     ] = {}
 
     def get_process(pid: int) -> trace_model.Process:

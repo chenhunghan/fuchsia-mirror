@@ -16,6 +16,24 @@ extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t
+cpp_vmar_dispatcher_create(VmAddressRegion* vmar, uint32_t base_arch_mmu_flags,
+                           ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* handle_out,
+                           ffi::Uninitialized<zx_rights_t>* rights_out) {
+  KernelHandle<VmAddressRegionDispatcher> handle;
+  zx_rights_t rights;
+  zx_status_t status = VmAddressRegionDispatcher::Create(
+      fbl::ImportFromRawPtr(vmar), static_cast<arch_mmu_flags_t>(base_arch_mmu_flags), &handle,
+      &rights);
+  if (status != ZX_OK) {
+    return status;
+  }
+  handle_out->Initialize(ktl::move(handle));
+  rights_out->Initialize(rights);
+  return ZX_OK;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t
 cpp_vmar_dispatcher_set_memory_priority(VmAddressRegionDispatcher* vmar, uint32_t priority) {
   return vmar->SetMemoryPriority(static_cast<VmAddressRegion::MemoryPriority>(priority));
 }

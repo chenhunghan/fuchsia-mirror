@@ -35,7 +35,6 @@ Add a new target by adding it as a dependency to the appropriate target(s) as fo
     - If it supports the host platform, add it to "long_targets_to_build_in_host_configuration".
 """
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
 load(":rules.bzl", "build_for_host")
@@ -95,6 +94,12 @@ filegroup(
         "//src/developer/build_info:build-info-component",
         # Tests `fx_package()` with a C++ binary.
         "//src/developer/build_info:build-info-service",
+        # Tests `fx_package()` with a Rust binary.
+        "//src/recovery/factory-reset-trigger",
+        # Tests `fx_test()`.
+        "//build/bazel/rules/packages/tests:build_only_tests",
+        # Tests `fx_package()`, `fx_test_component()` and `fx_test()`.
+        "//build/bazel/rules/packages/tests:quick_build_only_tests",
         # Build libraries that support next-generation FIDL bindings for Rust.
         # TODO(https://fxbug.dev/454452299): Replace these build-only tests with:
         # * A `test_suite()` containing all the test targets in the package once the tests build.
@@ -210,7 +215,7 @@ filegroup(
 # with one command, and remove the deps from `//build/tools:host_tests`.
 test_suite(
     name = "host_tests",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//build/bazel/rules/build_flags/tests:host_tests",
         "//build/bazel/rules/host_tests/tests:host_tests",

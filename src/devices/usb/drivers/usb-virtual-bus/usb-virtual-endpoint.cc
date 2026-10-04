@@ -8,6 +8,8 @@
 
 #include "src/devices/usb/drivers/usb-virtual-bus/usb-virtual-bus.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace usb_virtual_bus {
 
 namespace {
@@ -18,14 +20,14 @@ size_t GetLength(RequestVariant& req) {
              : std::get<Request>(req).request()->header.length;
 }
 
-fuchsia_hardware_usb_descriptor::UsbSetup GetSetup(RequestVariant& req) {
+fdescriptor::UsbSetup GetSetup(RequestVariant& req) {
   if (std::holds_alternative<usb::FidlRequest>(req)) {
     return *std::get<usb::FidlRequest>(req)->information()->control()->setup();
   }
 
   usb_setup_t setup = std::get<Request>(req).request()->setup;
-  return fuchsia_hardware_usb_descriptor::UsbSetup(setup.bm_request_type, setup.b_request,
-                                                   setup.w_value, setup.w_index, setup.w_length);
+  return fdescriptor::UsbSetup(setup.bm_request_type, setup.b_request, setup.w_value, setup.w_index,
+                               setup.w_length);
 }
 
 }  // namespace
@@ -404,7 +406,7 @@ void UsbVirtualEp::HandleControl(RequestVariant req) {
     return;
   }
 
-  fuchsia_hardware_usb_descriptor::UsbSetup setup = GetSetup(req);
+  fdescriptor::UsbSetup setup = GetSetup(req);
 
   fdf::debug("{} type: 0x{:02X} req: {} value: {} index: {} length: {}", __func__,
              setup.bm_request_type(), setup.b_request(), setup.w_value(), setup.w_index(),
@@ -416,7 +418,7 @@ void UsbVirtualEp::HandleControl(RequestVariant req) {
     return;
   }
 
-  const bool is_in = ((setup.bm_request_type() & USB_ENDPOINT_DIR_MASK) == USB_ENDPOINT_IN);
+  const bool is_in = usb_request_is_in(setup.bm_request_type());
   std::vector<uint8_t> write(0);
   if (!is_in && setup.w_length() > 0) {
     zx::result<void*> result;

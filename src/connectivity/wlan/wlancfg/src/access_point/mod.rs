@@ -28,6 +28,7 @@ pub struct AccessPoint {
     iface_manager: Arc<Mutex<dyn IfaceManagerApi>>,
     update_sender: listener::ApListenerMessageSender,
     ap_provider_lock: Arc<Mutex<()>>,
+    power_manager: Arc<dyn wlan_power_manager::PowerManager>,
 }
 
 // This number was chosen arbitrarily.
@@ -42,8 +43,9 @@ impl AccessPoint {
         iface_manager: Arc<Mutex<dyn IfaceManagerApi>>,
         update_sender: listener::ApListenerMessageSender,
         ap_provider_lock: Arc<Mutex<()>>,
+        power_manager: Arc<dyn wlan_power_manager::PowerManager>,
     ) -> Self {
-        Self { iface_manager, update_sender, ap_provider_lock }
+        Self { iface_manager, update_sender, ap_provider_lock, power_manager }
     }
 
     fn send_listener_message(&self, message: listener::ApMessage) -> Result<(), Error> {
@@ -157,6 +159,7 @@ impl AccessPoint {
                     band,
                     responder,
                 } => {
+                    let _wake_lease = self.power_manager.take_wake_lease("wlancfg-ap-start").await;
                     let ap_config = match derive_ap_config(&config, mode, band) {
                         Ok(config) => config,
                         Err(e) => {
@@ -192,6 +195,7 @@ impl AccessPoint {
                     config,
                     responder,
                 } => {
+                    let _wake_lease = self.power_manager.take_wake_lease("wlancfg-ap-stop").await;
                     let ssid = match config.id {
                         Some(id) => types::Ssid::from_bytes_unchecked(id.ssid),
                         None => {
@@ -225,6 +229,8 @@ impl AccessPoint {
                     }
                 }
                 fidl_policy::AccessPointControllerRequest::StopAllAccessPoints { .. } => {
+                    let _wake_lease =
+                        self.power_manager.take_wake_lease("wlancfg-ap-stop-all").await;
                     let mut iface_manager = self.iface_manager.lock().await;
                     match iface_manager.stop_all_aps().await {
                         Ok(()) => {}
@@ -484,6 +490,7 @@ mod tests {
         requests: fidl_policy::AccessPointProviderRequestStream,
         ap: AccessPoint,
         iface_manager: Arc<Mutex<FakeIfaceManager>>,
+        power_manager: Arc<wlan_power_manager_testing::TestPowerManager>,
     }
 
     /// Setup channels and proxies needed for the tests to use use the AP Provider and
@@ -495,8 +502,14 @@ mod tests {
         let iface_manager = FakeIfaceManager::new();
         let iface_manager = Arc::new(Mutex::new(iface_manager));
         let (sender, _) = mpsc::unbounded();
-        let ap = AccessPoint::new(iface_manager.clone(), sender, Arc::new(Mutex::new(())));
-        TestValues { provider, requests, ap, iface_manager }
+        let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
+        let ap = AccessPoint::new(
+            iface_manager.clone(),
+            sender,
+            Arc::new(Mutex::new(())),
+            power_manager.clone(),
+        );
+        TestValues { provider, requests, ap, iface_manager, power_manager }
     }
 
     /// Tests the case where StartAccessPoint is called and there is a valid interface to service
@@ -878,5 +891,52 @@ mod tests {
             exec.run_until_stalled(&mut start_fut),
             Poll::Ready(Ok(fidl_policy::RequestStatus::Acknowledged))
         );
+    }
+
+    #[fuchsia::test]
+    fn test_ap_wake_leases() {
+        let mut exec = fasync::TestExecutor::new();
+        let test_values = test_setup();
+        let serve_fut = test_values.ap.serve_provider_requests(test_values.requests);
+        let mut serve_fut = pin!(serve_fut);
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        let (controller, _) = request_controller(&test_values.provider);
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        // 1. StartAccessPoint
+        let network_id = fidl_policy::NetworkIdentifier {
+            ssid: b"test".to_vec(),
+            type_: fidl_policy::SecurityType::None,
+        };
+        let network_config = fidl_policy::NetworkConfig {
+            id: Some(network_id),
+            credential: None,
+            ..Default::default()
+        };
+        let start_fut = controller.start_access_point(
+            &network_config,
+            fidl_policy::ConnectivityMode::LocalOnly,
+            fidl_policy::OperatingBand::Any,
+        );
+        let mut start_fut = pin!(start_fut);
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+        assert_matches!(exec.run_until_stalled(&mut start_fut), Poll::Ready(Ok(_)));
+
+        // 2. StopAccessPoint
+        let stop_fut = controller.stop_access_point(&network_config);
+        let mut stop_fut = pin!(stop_fut);
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+        assert_matches!(exec.run_until_stalled(&mut stop_fut), Poll::Ready(Ok(_)));
+
+        // 3. StopAllAccessPoints
+        let _ = controller.stop_all_access_points();
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        // Verify that all AP wake leases were taken.
+        let calls = test_values.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-ap-start".to_string()));
+        assert!(calls.contains(&"wlancfg-ap-stop".to_string()));
+        assert!(calls.contains(&"wlancfg-ap-stop-all".to_string()));
     }
 }

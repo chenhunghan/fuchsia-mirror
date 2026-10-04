@@ -41,6 +41,10 @@
             availability: "optional",
         },
         {
+            service: "fuchsia.hardware.power.charger.Service",
+            availability: "optional",
+        },
+        {
             service: "fuchsia.power.battery.InfoService",
             availability: "optional",
         },

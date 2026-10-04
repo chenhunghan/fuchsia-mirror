@@ -82,6 +82,7 @@ pub enum MlmeRequest {
     QueryApfPacketFilterSupport(
         responder::Responder<Result<fidl_common::ApfPacketFilterSupport, i32>>,
     ),
+    QueryRssiMonitorSupport(responder::Responder<Result<fidl_common::RssiMonitorSupport, i32>>),
     SetMacAddress(fidl_ieee80211::MacAddr, responder::Responder<Result<(), i32>>),
     InstallApfPacketFilter(
         fidl_mlme::MlmeInstallApfPacketFilterRequest,
@@ -108,6 +109,8 @@ pub enum MlmeRequest {
     GetScheduledScanEnabled(
         responder::Responder<Result<fidl_mlme::MlmeGetScheduledScanEnabledResponse, i32>>,
     ),
+    StartRssiMonitor(fidl_mlme::MlmeStartRssiMonitorRequest, responder::Responder<Result<(), i32>>),
+    StopRssiMonitor(responder::Responder<Result<(), i32>>),
 }
 
 impl MlmeRequest {
@@ -144,11 +147,14 @@ impl MlmeRequest {
             Self::QuerySpectrumManagementSupport(_) => "QuerySpectrumManagementSupport",
             Self::QueryTelemetrySupport(_) => "QueryTelemetrySupport",
             Self::QueryApfPacketFilterSupport(_) => "QueryApfPacketFilterSupport",
+            Self::QueryRssiMonitorSupport(_) => "QueryRssiMonitorSupport",
             Self::SetMacAddress(..) => "SetMacAddress",
             Self::InstallApfPacketFilter(..) => "InstallApfPacketFilter",
             Self::ReadApfPacketFilterData(_) => "ReadApfPacketFilterData",
             Self::SetApfPacketFilterEnabled(..) => "SetApfPacketFilterEnabled",
             Self::GetApfPacketFilterEnabled(_) => "GetApfPacketFilterEnabled",
+            Self::StartRssiMonitor(..) => "StartRssiMonitor",
+            Self::StopRssiMonitor(_) => "StopRssiMonitor",
         }
     }
 }
@@ -207,6 +213,7 @@ fn mlme_event_name(event: &MlmeEvent) -> &str {
         MlmeEvent::StopConf { .. } => "StopConf",
         MlmeEvent::EapolConf { .. } => "EapolConf",
         MlmeEvent::SignalReport { .. } => "SignalReport",
+        MlmeEvent::OnRssiThresholdBreached { .. } => "OnRssiThresholdBreached",
         MlmeEvent::EapolInd { .. } => "EapolInd",
         MlmeEvent::RelayCapturedFrame { .. } => "RelayCapturedFrame",
         MlmeEvent::OnChannelSwitched { .. } => "OnChannelSwitched",

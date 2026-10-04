@@ -65,10 +65,10 @@ impl_csr_encoding!(Ro, {
 impl_csr_encoding!(RwSafe, {});
 impl_csr_encoding!(RwUnsafe, {});
 impl_csr_encoding!(WoSafe, {
-    assert!(false, "All CSRs are readable");
+    panic!("All CSRs are readable");
 });
 impl_csr_encoding!(WoUnsafe, {
-    assert!(false, "All CSRs are readable");
+    panic!("All CSRs are readable");
 });
 
 impl<Encoding, Layout> Csr<Encoding, Layout>
@@ -90,7 +90,7 @@ impl<Encoding: ControlAndStatusRegisterEncoding> CsrIo<Encoding> {
     pub const fn new() -> Self {
         // Associated constants are evaluated lazily, so force an evaluation
         // now.
-        let _ = Encoding::VALID;
+        const { Encoding::VALID };
         Self(PhantomData)
     }
 }

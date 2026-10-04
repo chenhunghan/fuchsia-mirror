@@ -4,6 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#[cfg(target_arch = "x86_64")]
+use crate::arch_rs::x86::vm::is_vaddr_canonical;
 use crate::object::{
     Dispatcher, HandleValue, ProcessDispatcher, ThreadDispatcher, VmObjectDispatcher,
 };
@@ -97,7 +99,7 @@ pub fn sys_thread_start_regs(
     #[cfg(target_arch = "x86_64")]
     {
         // A noncanonical address cannot be written into the MSR.
-        if !crate::arch_rs::x86::is_vaddr_canonical(tp) {
+        if !is_vaddr_canonical(tp as usize) {
             return Err(Status::INVALID_ARGS);
         }
     }

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::MIN_INTERVAL_FOR_SYSLOG_MS;
 use crate::driver_utils::Driver;
+use crate::{MIN_INTERVAL_FOR_SYSLOG_MS, round_for_syslog};
 use anyhow::{Error, Result, format_err};
 use async_trait::async_trait;
 use diagnostics_hierarchy::LinearHistogramParams;
@@ -473,7 +473,7 @@ impl<T: Sensor<T>> SensorLogger<T> {
                         info!(
                             name = sensor_names[index].as_str(),
                             unit = T::unit().as_str(),
-                            value;
+                            value = round_for_syslog(value);
                             "Reading sensor"
                         );
                     }
@@ -530,10 +530,10 @@ impl<T: Sensor<T>> SensorLogger<T> {
                     if self.output_stats_to_syslog {
                         info!(
                             name = sensor_names[index].as_str(),
-                            max,
-                            min,
-                            avg,
-                            med,
+                            max = round_for_syslog(max),
+                            min = round_for_syslog(min),
+                            avg = round_for_syslog(avg),
+                            med = round_for_syslog(med),
                             unit = T::unit().as_str();
                             "Sensor statistics",
                         );

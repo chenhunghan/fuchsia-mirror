@@ -2,19 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
-load(
-    "//build/bazel/rules/cc:fx_packaged_binary.bzl",
-    "fx_packaged_binary",
-)
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
 )
 load(
     "//build/bazel/rules/packages:fx_package.bzl",
     "fx_package",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_test.bzl",
+    "fx_test",
 )
 
 package(default_applicable_licenses = ["//:license"])
@@ -24,22 +30,30 @@ exports_files(
     visibility = ["//bundles/assembly:__subpackages__"],
 )
 
-fx_cc_binary(
-    name = "build_info",
-    srcs = [
-        "build_info.cc",
-        "build_info.h",
-        "main.cc",
-    ],
-    tags = ["manual"],
+cc_library(
+    name = "lib",
+    srcs = ["build_info.cc"],
+    hdrs = ["build_info.h"],
     deps = [
         "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fsl",
+    ],
+)
+
+fx_cc_binary(
+    name = "build_info",
+    srcs = ["main.cc"],
+    tags = ["manual"],
+    deps = [
+        ":lib",
         "//sdk/lib/async-loop:async-loop-cpp",
         "//sdk/lib/async-loop:async-loop-default",
         "//sdk/lib/component/outgoing/cpp",
         "//sdk/lib/fdio",
         "//sdk/lib/syslog/cpp",
-        "//src/lib/fsl",
     ],
 )
 
@@ -86,4 +100,62 @@ fx_package(
         "//build/bazel/rules/tests:__subpackages__",
         "//bundles/assembly:__subpackages__",
     ],
+)
+
+fx_cc_binary(
+    name = "build_info_unittest_bin",
+    testonly = True,
+    srcs = ["build_info_unittest.cc"],
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//sdk/lib/vfs/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_packaged_binary(
+    name = "build_info_unittest_packaged_bin",
+    testonly = True,
+    binary = ":build_info_unittest_bin",
+    binary_name = "build_info_unittest",
+)
+
+fx_component_manifest(
+    name = "build-info-unittest-manifest",
+    testonly = True,
+    component_name = "build-info-unittest",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/build_info_unittest.cml",
+)
+
+fx_test_component(
+    name = "build-info-unittest-component",
+    compiled_manifest = ":build-info-unittest-manifest",
+    component_name = "build-info-unittest",
+    deps = [
+        ":build_info_unittest_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "build-info-unittest-package",
+    package_name = "build-info-unittest",
+    test_components = [
+        ":build-info-unittest-component",
+    ],
+)
+
+fx_test(
+    name = "build-info-unittest",
+    # Tests may produce ERROR logs when validating behavior in scenarios where
+    # build-info is not present (e.g. not allowlisted).
+    max_log_severity = "ERROR",
+    package = ":build-info-unittest-package",
 )

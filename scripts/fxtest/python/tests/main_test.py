@@ -147,6 +147,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
             "package-repositories.json",
             "package-targets.json",
             "all_package_manifests.list",
+            "bazel_test_packages.list",
         ]:
             shutil.copy(
                 os.path.join(self.test_data_path, name),
@@ -246,10 +247,16 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         return m
 
     def _mock_generate_test_list(self) -> mock.MagicMock:
-        test_list_entries = test_list_file.TestListFile.entries_from_file(
-            self.test_list_input
-        )
-        m = mock.AsyncMock(return_value=test_list_entries)
+        # Read the file at call time so that tests which modify it afterwards
+        # do not have to reinstall this mock.
+        async def generate(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> typing.Any:
+            return test_list_file.TestListFile.entries_from_file(
+                self.test_list_input
+            )
+
+        m = mock.AsyncMock(side_effect=generate)
         patch = mock.patch("main.AsyncMain._generate_test_list", m)
         patch.start()
         self.addCleanup(patch.stop)
@@ -1823,6 +1830,159 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                 "SKIPPED: host_x64/example_e2e_test",
             }.issubset(set(contents)),
             f"Contents were:\n {contents_for_printing}",
+        )
+
+    async def test_publishes_bazel_test_packages(self) -> None:
+        """Test that built Bazel test package manifests are published and unbuilt ones are skipped."""
+
+        bazel_list_path = os.path.join(self.out_dir, "bazel_test_packages.list")
+        with open(bazel_list_path) as f:
+            bazel_list_data = json.load(f)
+        built_manifest = bazel_list_data["content"]["manifests"][0]
+        built_manifest_abs = os.path.join(self.out_dir, built_manifest)
+        os.makedirs(os.path.dirname(built_manifest_abs), exist_ok=True)
+        with open(built_manifest_abs, "w") as f:
+            f.write("{}")
+
+        unbuilt_manifest = (
+            "gen/build/bazel/output_base/execroot/_main/bazel-out/"
+            "fuchsia_platform_x64-opt/bin/unbuilt.package_manifest.json"
+        )
+        bazel_list_data["content"]["manifests"].append(unbuilt_manifest)
+        with open(bazel_list_path, "w") as f:
+            json.dump(bazel_list_data, f)
+
+        published_manifests: list[str] = []
+
+        async def capture_publish_list(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> None:
+            argv = [str(arg) for arg in args]
+            if "publish" not in argv or "--package-list" not in argv:
+                return
+            # The merged list lives in a temporary directory that is deleted as
+            # soon as publishing returns, so it has to be read in-flight.
+            with open(argv[argv.index("--package-list") + 1]) as f:
+                published_manifests.extend(json.load(f)["content"]["manifests"])
+
+        self._mock_run_command(0, async_handler=capture_publish_list)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--allow-temporary-package-server"])
+        )
+        self.assertEqual(ret, 0)
+
+        self.assertIn(built_manifest, published_manifests)
+        self.assertNotIn(unbuilt_manifest, published_manifests)
+        # The GN manifests must still be published alongside them.
+        self.assertIn("obj/foo/package_manifest.json", published_manifests)
+
+    def _add_bazel_device_test(self) -> str:
+        """Adds a Bazel-built device test to the build output test data.
+
+        This is opt-in rather than part of the shared test data because an
+        extra device test changes the behavior of every test that selects all
+        device tests.
+
+        Returns the Bazel label of the added test.
+        """
+        label = "@@//build/bazel/rules/packages/tests:example_test"
+        package_name = "bazel-test-package-example"
+        url = f"fuchsia-pkg://fuchsia.com/{package_name}#meta/example_test.cm"
+
+        tests_json_path = os.path.join(self.out_dir, "tests.json")
+        with open(tests_json_path) as f:
+            tests = json.load(f)
+        tests.append(
+            {
+                "environments": [{"dimensions": {"device_type": "AEMU"}}],
+                "expects_ssh": True,
+                "test": {
+                    "label": label,
+                    "name": url,
+                    "os": "fuchsia",
+                    "package_url": url,
+                },
+            }
+        )
+        with open(tests_json_path, "w") as f:
+            json.dump(tests, f)
+
+        with open(self.test_list_input) as f:
+            test_list = json.load(f)
+        test_list["data"].append(
+            {
+                "name": url,
+                "labels": [label],
+                "tags": [],
+                "execution": {
+                    "type": "fuchsia_component",
+                    "component_url": url,
+                    "max_severity_logs": "WARN",
+                },
+            }
+        )
+        self.test_list_input = os.path.join(self.out_dir, "test-list.json")
+        with open(self.test_list_input, "w") as f:
+            json.dump(test_list, f)
+
+        # Pretend the package is already published, otherwise Merkle hash
+        # validation fails before the test is ever built.
+        with open(self.package_target_file_path) as f:
+            package_targets = json.load(f)
+        package_targets["signed"]["targets"][f"{package_name}/0"] = {
+            "custom": {
+                "merkle": "ba2e100000000000000000000000000000000000000000000000000000000000"
+            }
+        }
+        with open(self.package_target_file_path, "w") as f:
+            json.dump(package_targets, f)
+
+        return label
+
+    async def test_builds_bazel_host_and_device_tests(self) -> None:
+        """Test that Bazel tests are built once per Bazel configuration"""
+
+        device_label = self._add_bazel_device_test()
+        host_label = "@@//build/bazel/rules/host_tests/tests/cc:static_test"
+
+        command_mock = self._mock_run_command(0)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-e2e"])
+        )
+        self.assertEqual(ret, 0)
+
+        # Host and device tests are built in mutually exclusive Bazel
+        # configurations, so each gets its own invocation.
+        self.assertIsSubset(
+            {
+                (
+                    "fx",
+                    "--dir",
+                    self.out_dir,
+                    "build",
+                    "--host",
+                    "--quiet",
+                    host_label,
+                ),
+                (
+                    "fx",
+                    "--dir",
+                    self.out_dir,
+                    "build",
+                    "--fuchsia_platform",
+                    "--quiet",
+                    device_label,
+                ),
+            },
+            self._make_call_args_prefix_set(command_mock.call_args_list),
         )
 
     async def test_build_e2e(self) -> None:
@@ -4095,3 +4255,98 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         # Invalid JSON raises JSONDecodeError
         with self.assertRaises(json.JSONDecodeError):
             main._is_fuchsia_repo_registered("not json")
+
+    async def test_no_preflight_skips_device_discovery_and_binding(
+        self,
+    ) -> None:
+        """Test that --no-preflight skips device discovery and binding while checking package server."""
+        command_mock = self._mock_run_command(0)
+        self._mock_has_tests_in_base([])
+
+        mock_has_active = mock.AsyncMock(return_value=True)
+        mock_bind = mock.AsyncMock()
+        mock_pkg_server = mock.AsyncMock(return_value=True)
+        mock_wait_repo = mock.AsyncMock(return_value=True)
+
+        with (
+            mock.patch.object(
+                main.AsyncMain, "_has_active_device", mock_has_active
+            ),
+            mock.patch.object(
+                main.AsyncMain, "_bind_to_active_device", mock_bind
+            ),
+            mock.patch(
+                "main.has_package_server_connected_to_device", mock_pkg_server
+            ),
+            mock.patch.object(
+                main.AsyncMain,
+                "_wait_for_repository_registration",
+                mock_wait_repo,
+            ),
+        ):
+            ret = await main.async_main_wrapper(
+                args.parse_args(
+                    ["--simple", "--no-build", "--device", "--no-preflight"]
+                )
+            )
+            self.assertEqual(ret, 0)
+            mock_has_active.assert_not_awaited()
+            mock_bind.assert_not_awaited()
+            mock_pkg_server.assert_awaited_once()
+            mock_wait_repo.assert_not_awaited()
+
+            # Verify the device test itself still ran.
+            call_prefixes = self._make_call_args_prefix_set(
+                command_mock.call_args_list
+            )
+            self.assertIsSubset(
+                {("fx", "--dir", self.out_dir, "ffx", "test", "run")},
+                call_prefixes,
+            )
+
+    async def test_present_package_server_skips_duplicate_repo_registration_wait(
+        self,
+    ) -> None:
+        """Test that _wait_for_repository_registration is skipped when package server is already present."""
+        self._mock_run_command(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        mock_wait_repo = mock.AsyncMock(return_value=True)
+        with mock.patch.object(
+            main.AsyncMain, "_wait_for_repository_registration", mock_wait_repo
+        ):
+            ret = await main.async_main_wrapper(
+                args.parse_args(["--simple", "--no-build", "--device"])
+            )
+            self.assertEqual(ret, 0)
+            mock_wait_repo.assert_not_awaited()
+
+    async def test_device_environment_only_queried_for_e2e_or_test_pilot(
+        self,
+    ) -> None:
+        """Test that get_device_environment_from_exec_env is skipped for standard device tests."""
+        self._mock_run_command(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        mock_get_dev_env = self._mock_get_device_environment(
+            environment.DeviceEnvironment(
+                "localhost", "8080", "foo", "/foo.key"
+            )
+        )
+
+        # Standard device test (no e2e, no test-pilot) should not query DeviceEnvironment.
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-build", "--device"])
+        )
+        self.assertEqual(ret, 0)
+        mock_get_dev_env.assert_not_awaited()
+
+        # E2E test run should query DeviceEnvironment.
+        mock_get_dev_env.reset_mock()
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-build", "--only-e2e"])
+        )
+        self.assertEqual(ret, 0)
+        mock_get_dev_env.assert_awaited_once()

@@ -4,11 +4,16 @@
 
 import("//build/zircon/migrated_targets.gni")
 
+# LINT.IfChange
 zx_library("tftp") {
   sdk = "static"
   sdk_headers = [ "tftp/tftp.h" ]
 
-  sources = [ "tftp.c" ]
+  sources = [
+    "internal.h",
+    "tftp.c",
+  ]
+  friend = [ "test:*" ]
   if (is_efi_toolchain) {
     defines = [ "TFTP_EFILIB" ]
 
@@ -33,6 +38,8 @@ zx_library("tftp") {
   # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
   configs += [ "//build/config:Wno-conversion" ]
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 group("tests") {
   testonly = true

@@ -6,8 +6,10 @@
 
 #include <fuchsia/hardware/usb/c/banjo.h>
 #include <fuchsia/hardware/usb/composite/c/banjo.h>
-#include <lib/ddk/binding_driver.h>
-#include <lib/ddk/debug.h>
+#include <fuchsia/hardware/usb/composite/cpp/banjo.h>
+#include <lib/driver/compat/cpp/banjo_client.h>
+#include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/fit/defer.h>
 #include <lib/operation/ethernet.h>
 #include <sys/types.h>
@@ -17,10 +19,13 @@
 #include <cinttypes>
 
 #include <usb/cdc.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 
 #include "src/connectivity/ethernet/drivers/usb-cdc-ecm/usb-cdc-ecm-lib.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace {
 
@@ -34,31 +39,28 @@ constexpr uint64_t kEthernetRecvDelay = 10;
 constexpr uint64_t kEthernetInitialTransmitDelay = 0;
 constexpr uint64_t kEthernetInitialRecvDelay = 0;
 constexpr uint16_t kEthernetInitialPacketFilter =
-    (USB_CDC_PACKET_TYPE_DIRECTED | USB_CDC_PACKET_TYPE_BROADCAST | USB_CDC_PACKET_TYPE_MULTICAST);
+    (fdescriptor::kCdcPacketTypeDirected | fdescriptor::kCdcPacketTypeBroadcast |
+     fdescriptor::kCdcPacketTypeMulticast);
 
 }  // namespace
 
 namespace usb_cdc_ecm {
 
 static bool WantInterface(usb_interface_descriptor_t* intf, void* arg) {
-  return intf->b_interface_class == USB_CLASS_CDC;
+  return intf->b_interface_class == fidl::ToUnderlying(fdescriptor::UsbClass::kCdc);
 }
 
-void UsbCdcEcm::DdkUnbind(ddk::UnbindTxn unbind_txn) {
+void UsbCdcEcm::Stop(fdf::StopCompleter completer) {
+  int_wait_.Cancel();
+
   // TODO: Instead of taking the lock here and holding up the whole driver host, offload to the
-  // worker thread and take ownership of the UnbindTxn.
-  fbl::AutoLock tx_lock(&mutex_);
-  unbound_ = true;
-  unbind_txn.Reply();
-}
-
-UsbCdcEcm::~UsbCdcEcm() {
-  if (int_thread_created_.load()) {
-    thrd_join(int_thread_, nullptr);
+  // worker thread and take ownership of the completer.
+  {
+    fbl::AutoLock tx_lock(&mutex_);
+    unbound_ = true;
   }
+  completer(zx::ok());
 }
-
-void UsbCdcEcm::DdkRelease() { delete this; }
 
 void UsbCdcEcm::UpdateOnlineStatus(bool is_online) {
   fbl::AutoLock lock(&mutex_);
@@ -76,7 +78,7 @@ void UsbCdcEcm::UpdateOnlineStatus(bool is_online) {
   };
 
   if (is_online) {
-    zxlogf(INFO, "Connected to network");
+    fdf::info("Connected to network");
     online_ = true;
 
     std::optional<usb::Request<>> request;
@@ -88,10 +90,10 @@ void UsbCdcEcm::UpdateOnlineStatus(bool is_online) {
     if (ethernet_ifc_.ops) {
       ethernet_ifc_status(&ethernet_ifc_, ETHERNET_STATUS_ONLINE);
     } else {
-      zxlogf(WARNING, "Not connected to ethermac interface");
+      fdf::warn("Not connected to ethermac interface");
     }
   } else {
-    zxlogf(INFO, "No connection to network");
+    fdf::info("No connection to network");
     online_ = false;
     if (ethernet_ifc_.ops) {
       ethernet_ifc_status(&ethernet_ifc_, 0);
@@ -100,11 +102,11 @@ void UsbCdcEcm::UpdateOnlineStatus(bool is_online) {
 }
 
 zx_status_t UsbCdcEcm::EthernetImplQuery(uint32_t options, ethernet_info_t* info) {
-  zxlogf(DEBUG, "%s called", __FUNCTION__);
+  fdf::debug("{} called", __FUNCTION__);
 
   // No options are supported
   if (options) {
-    zxlogf(ERROR, "Unexpected options (0x%08" PRIx32 ") to EthernetImplQuery", options);
+    fdf::error("Unexpected options (0x{:08x}) to EthernetImplQuery", options);
     return ZX_ERR_INVALID_ARGS;
   }
 
@@ -138,7 +140,7 @@ zx_status_t UsbCdcEcm::EthernetImplStart(const ethernet_ifc_protocol_t* ifc) {
 
 void UsbCdcEcm::EthernetImplQueueTx(uint32_t options, ethernet_netbuf_t* netbuf,
                                     ethernet_impl_queue_tx_callback completion_cb, void* cookie) {
-  zxlogf(TRACE, "%s called", __FUNCTION__);
+  fdf::trace("{} called", __FUNCTION__);
   eth::BorrowedOperation<> op(netbuf, completion_cb, cookie, sizeof(ethernet_netbuf_t));
 
   size_t length = op.operation()->data_size;
@@ -147,7 +149,7 @@ void UsbCdcEcm::EthernetImplQueueTx(uint32_t options, ethernet_netbuf_t* netbuf,
     return;
   }
 
-  zxlogf(TRACE, "Sending %zu bytes to endpoint 0x%08" PRIx8 "", length, tx_endpoint_->addr);
+  fdf::trace("Sending {} bytes to endpoint 0x{:08x}", length, tx_endpoint_->addr);
 
   fbl::AutoLock lock(&mutex_);
 
@@ -171,12 +173,13 @@ void UsbCdcEcm::EthernetImplQueueTx(uint32_t options, ethernet_netbuf_t* netbuf,
 
 zx_status_t UsbCdcEcm::EthernetImplSetParam(uint32_t param, int32_t value, const uint8_t* data,
                                             size_t data_size) {
-  zxlogf(DEBUG, "%s called", __FUNCTION__);
+  fdf::debug("{} called", __FUNCTION__);
   zx_status_t status;
 
   switch (param) {
     case ETHERNET_SETPARAM_PROMISC:
-      status = SetPacketFilterMode(USB_CDC_PACKET_TYPE_PROMISCUOUS, static_cast<bool>(value));
+      status =
+          SetPacketFilterMode(fdescriptor::kCdcPacketTypePromiscuous, static_cast<bool>(value));
       break;
     default:
       status = ZX_ERR_NOT_SUPPORTED;
@@ -195,12 +198,12 @@ zx_status_t UsbCdcEcm::SetPacketFilterMode(uint16_t mode, bool on) {
     bits &= ~mode;
   }
 
-  status =
-      usb_.ControlOut(USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                      USB_CDC_SET_ETHERNET_PACKET_FILTER, bits, 0, ZX_TIME_INFINITE, nullptr, 0);
+  status = usb_.ControlOut(kClassInterfaceOut,
+                           fidl::ToUnderlying(fdescriptor::CdcRequest::kSetEthernetPacketFilter),
+                           bits, comm_intf_num_, ZX_TIME_INFINITE, nullptr, 0);
 
   if (status != ZX_OK) {
-    zxlogf(ERROR, "Set packet filter failed: %d", status);
+    fdf::error("Set packet filter failed: {}", status);
     return status;
   }
   rx_packet_filter_ = bits;
@@ -209,27 +212,26 @@ zx_status_t UsbCdcEcm::SetPacketFilterMode(uint16_t mode, bool on) {
 
 void UsbCdcEcm::HandleInterrupt(usb::Request<void>& request) {
   if (request.request()->response.actual < sizeof(usb_cdc_notification_t)) {
-    zxlogf(DEBUG, "Ignored interrupt (size = %lu)", request.request()->response.actual);
+    fdf::debug("Ignored interrupt (size = {})", request.request()->response.actual);
     return;
   }
 
   usb_cdc_notification_t usb_req = {};
   ssize_t result = request.CopyFrom(&usb_req, sizeof(usb_cdc_notification_t), 0);
   if (result != static_cast<ssize_t>(sizeof(usb_cdc_notification_t))) {
-    zxlogf(DEBUG, "Ignored interrupt (copied %ld from request)", result);
+    fdf::debug("Ignored interrupt (copied {} from request)", result);
     return;
   }
 
-  if (usb_req.bmRequestType == (USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-      usb_req.bNotification == USB_CDC_NC_NETWORK_CONNECTION) {
+  if (usb_req.bmRequestType == kClassInterfaceIn &&
+      usb_req.bNotification == fdescriptor::CdcNotification::kNetworkConnection) {
     UpdateOnlineStatus(usb_req.wValue != 0);
-  } else if (usb_req.bmRequestType == (USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) &&
-             usb_req.bNotification == USB_CDC_NC_CONNECTION_SPEED_CHANGE) {
+  } else if (usb_req.bmRequestType == kClassInterfaceIn &&
+             usb_req.bNotification == fdescriptor::CdcNotification::kConnectionSpeedChange) {
     // The ethermac driver doesn't care about speed changes, so even though we track this
     // information, it's currently unused.
     if (usb_req.wLength != 8) {
-      zxlogf(ERROR, "Invalid size (%" PRIu16 ") for CONNECTION_SPEED_CHANGE notification",
-             usb_req.wLength);
+      fdf::error("Invalid size ({}) for CONNECTION_SPEED_CHANGE notification", usb_req.wLength);
       return;
     }
 
@@ -237,33 +239,33 @@ void UsbCdcEcm::HandleInterrupt(usb::Request<void>& request) {
     uint32_t new_us_bps = 0, new_ds_bps = 0;
     result = request.CopyFrom(&new_us_bps, sizeof(new_us_bps), sizeof(usb_cdc_notification_t));
     if (result != static_cast<ssize_t>(sizeof(uint32_t))) {
-      zxlogf(ERROR, "Failed to read new upstream speed: %ld", result);
+      fdf::error("Failed to read new upstream speed: {}", result);
       return;
     }
 
     result = request.CopyFrom(&new_us_bps, sizeof(new_us_bps),
                               sizeof(usb_cdc_notification_t) + sizeof(uint32_t));
     if (result != static_cast<ssize_t>(sizeof(uint32_t))) {
-      zxlogf(ERROR, "Failed to read new downstream speed: %ld", result);
+      fdf::error("Failed to read new downstream speed: {}", result);
       return;
     }
 
     if (new_us_bps != us_bps_) {
-      zxlogf(INFO, "Connection speed change... upstream bits/s: %" PRIu32 "", new_us_bps);
+      fdf::info("Connection speed change... upstream bits/s: {}", new_us_bps);
       us_bps_ = new_us_bps;
     }
     if (new_ds_bps != ds_bps_) {
-      zxlogf(INFO, "Connection speed change... downstream bits/s: %" PRIu32 "", new_ds_bps);
+      fdf::info("Connection speed change... downstream bits/s: {}", new_ds_bps);
       ds_bps_ = new_ds_bps;
     }
   } else {
-    zxlogf(ERROR, "Ignored interrupt (type = %" PRIu8 ", request = %" PRIu8 ")",
-           usb_req.bmRequestType, usb_req.bNotification);
+    fdf::error("Ignored interrupt (type = {}, request = {})", usb_req.bmRequestType,
+               usb_req.bNotification);
     return;
   }
 }
 
-int UsbCdcEcm::InterruptThread() {
+void UsbCdcEcm::ScheduleInterruptTask(async_dispatcher_t* dispatcher) {
   usb_request_complete_callback_t complete = {
       .callback = [](void* ctx, usb_request_t* request) -> void {
         static_cast<UsbCdcEcm*>(ctx)->InterruptComplete(request);
@@ -271,54 +273,54 @@ int UsbCdcEcm::InterruptThread() {
       .ctx = this,
   };
 
-  while (true) {
-    // Pass ownership of request to parent device.
-    sync_completion_reset(&completion_);
-    usb_.RequestQueue(interrupt_request_->request(), &complete);
-
-    // Parent device has handed ownership of request back to us.
-    sync_completion_wait(&completion_, ZX_TIME_INFINITE);
-
-    zx_status_t request_status = interrupt_request_->request()->response.status;
-    if (request_status == ZX_OK) {
-      HandleInterrupt(interrupt_request_.value());
-    } else if (request_status == ZX_ERR_PEER_CLOSED || request_status == ZX_ERR_IO_NOT_PRESENT) {
-      zxlogf(DEBUG, "Terminating interrupt handling thread");
-      return request_status;
-    } else if (request_status == ZX_ERR_IO_REFUSED || request_status == ZX_ERR_IO_INVALID) {
-      zxlogf(DEBUG, "Resetting interrupt endpoint");
-      usb_.ResetEndpoint(int_endpoint_->addr);
-    } else {
-      zxlogf(ERROR, "Error waiting for interrupt - ignoring: %s",
-             zx_status_get_string(request_status));
-    }
-  }
+  int_event_.signal(ZX_USER_SIGNAL_0, 0);  // clear signal.
+  usb_.RequestQueue(interrupt_request_->request(), &complete);
+  int_wait_.Begin(dispatcher);
 }
 
-void UsbCdcEcm::DdkInit(ddk::InitTxn txn) {
-  zx_status_t status = Init();
-  txn.Reply(status);
+void UsbCdcEcm::TaskHandler(async_dispatcher_t* dispatcher, async::WaitBase* wait,
+                            zx_status_t status, const zx_packet_signal_t* signal) {
+  if (status == ZX_ERR_CANCELED) {
+    return;
+  }
+
+  zx_status_t request_status = interrupt_request_->request()->response.status;
+  if (request_status == ZX_OK) {
+    HandleInterrupt(interrupt_request_.value());
+  } else if (request_status == ZX_ERR_PEER_CLOSED || request_status == ZX_ERR_IO_NOT_PRESENT) {
+    fdf::debug("Terminating interrupt handling thread");
+    return;
+  } else if (request_status == ZX_ERR_IO_REFUSED || request_status == ZX_ERR_IO_INVALID) {
+    fdf::debug("Resetting interrupt endpoint");
+    usb_.ResetEndpoint(int_endpoint_->addr);
+  } else {
+    fdf::error("Error waiting for interrupt - ignoring: {}", zx_status_get_string(request_status));
+  }
+
+  ScheduleInterruptTask(dispatcher);
 }
 
 zx_status_t UsbCdcEcm::Init() {
-  zxlogf(DEBUG, "Starting %s", __FUNCTION__);
-
-  // Initialize context
-  zx_status_t status = usb_.ControlOut(
-      USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_CDC_SET_ETHERNET_PACKET_FILTER,
-      kEthernetInitialPacketFilter, 0, ZX_TIME_INFINITE, nullptr, 0);
-  if (status != ZX_OK) {
-    zxlogf(ERROR, "Failed to set initial packet filter: %s", zx_status_get_string(status));
-    return status;
-  }
-  rx_packet_filter_ = kEthernetInitialPacketFilter;
+  fdf::debug("Starting {}", __FUNCTION__);
 
   // Find the CDC descriptors and endpoints
   auto parser = UsbCdcDescriptorParser::Parse(usb_);
   if (parser.is_error()) {
-    zxlogf(ERROR, "Failed to parse usb descriptor: %s", parser.status_string());
+    fdf::error("Failed to parse usb descriptor: {}", parser);
     return parser.error_value();
   }
+
+  comm_intf_num_ = parser->GetCommInterface().number;
+
+  // Initialize context
+  zx_status_t status = usb_.ControlOut(
+      kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::CdcRequest::kSetEthernetPacketFilter),
+      kEthernetInitialPacketFilter, comm_intf_num_, ZX_TIME_INFINITE, nullptr, 0);
+  if (status != ZX_OK) {
+    fdf::error("Failed to set initial packet filter: {}", zx_status_get_string(status));
+    return status;
+  }
+  rx_packet_filter_ = kEthernetInitialPacketFilter;
 
   // Parse endpoint information
   int_endpoint_ = parser->GetInterruptEndpoint();
@@ -350,7 +352,7 @@ zx_status_t UsbCdcEcm::Init() {
   // Allocate tx transaction buffers
   uint16_t tx_buf_sz = mtu_;
   if (tx_buf_sz > kMaxTxBufferSize) {
-    zxlogf(ERROR, "Insufficient space for even a single tx buffer");
+    fdf::error("Insufficient space for even a single tx buffer");
     return status;
   }
 
@@ -376,7 +378,7 @@ zx_status_t UsbCdcEcm::Init() {
   // Allocate rx transaction buffers
   uint32_t rx_buf_sz = mtu_;
   if (rx_buf_sz > kMaxRxBufferSize) {
-    zxlogf(ERROR, "Insufficient space for even a single rx buffer");
+    fdf::error("Insufficient space for even a single rx buffer");
     return ZX_ERR_NO_MEMORY;
   }
 
@@ -393,54 +395,79 @@ zx_status_t UsbCdcEcm::Init() {
     rx_buf_remain -= rx_buf_sz;
   }
 
-  // Kick off the handler thread
-  int thread_result = thrd_create_with_name(
-      &int_thread_,
-      [](void* arg) -> int { return static_cast<UsbCdcEcm*>(arg)->InterruptThread(); }, this,
-      "ecm_int_handler_thread");
-  if (thread_result != thrd_success) {
-    zxlogf(ERROR, "Failed to create interrupt handler thread (%d)", thread_result);
-    return ZX_ERR_NO_RESOURCES;
-  }
-  int_thread_created_.store(true);
+  // Kick off the interrupt handler
+  ScheduleInterruptTask(dispatcher());
 
   return ZX_OK;
 }
 
-zx_status_t UsbCdcEcm::Bind(void* ctx, zx_device_t* parent) {
-  zxlogf(DEBUG, "Starting %s", __FUNCTION__);
+zx::result<> UsbCdcEcm::Start(fdf::DriverContext context) {
+  fdf::debug("Starting {}", __FUNCTION__);
 
-  usb::UsbDevice usb;
-  zx_status_t status = usb::UsbDevice::CreateFromDevice(parent, &usb);
-  if (status != ZX_OK) {
-    return status;
+  auto incoming = std::shared_ptr<fdf::Namespace>(context.take_incoming());
+
+  zx::result<ddk::UsbProtocolClient> usb_client =
+      compat::ConnectBanjo<ddk::UsbProtocolClient>(incoming);
+  if (usb_client.is_error()) {
+    fdf::error("Failed to connect to USB banjo protocol: {}", usb_client);
+    return usb_client.take_error();
+  }
+  usb_protocol_t usb_proto;
+  usb_client->GetProto(&usb_proto);
+  usb_ = usb::UsbDevice(&usb_proto);
+  if (!usb_.is_valid()) {
+    fdf::error("Received invalid USB banjo protocol client");
+    return zx::error(ZX_ERR_PROTOCOL_NOT_SUPPORTED);
   }
 
-  auto device = std::make_unique<UsbCdcEcm>(parent, usb);
-
+  zx::result<ddk::UsbCompositeProtocolClient> usb_composite_client =
+      compat::ConnectBanjo<ddk::UsbCompositeProtocolClient>(incoming);
+  if (usb_composite_client.is_error()) {
+    fdf::error("Failed to connect to USB composite banjo protocol: {}", usb_composite_client);
+    return usb_composite_client.take_error();
+  }
   usb_composite_protocol_t usb_composite;
-  status = device_get_protocol(parent, ZX_PROTOCOL_USB_COMPOSITE, &usb_composite);
-  if (status != ZX_OK) {
-    return status;
+  usb_composite_client->GetProto(&usb_composite);
+
+  if (zx_status_t status = usb_claim_additional_interfaces(&usb_composite, WantInterface, nullptr);
+      status != ZX_OK) {
+    fdf::error("Failed to claim additional interfaces: {}", zx::make_result(status));
+    return zx::error(status);
   }
 
-  status = usb_claim_additional_interfaces(&usb_composite, WantInterface, NULL);
+  zx_status_t status = zx::event::create(0, &int_event_);
   if (status != ZX_OK) {
-    return status;
+    fdf::error("Failed to create interrupt event ({})", zx_status_get_string(status));
+    return zx::error(status);
   }
 
-  auto args = ddk::DeviceAddArgs("usb-cdc-ecm").set_proto_id(ZX_PROTOCOL_ETHERNET_IMPL);
-  status = device->DdkAdd(args);
-  if (status != ZX_OK) {
-    zxlogf(ERROR, "%s: Error adding device: %s", __func__, zx_status_get_string(status));
-    return status;
+  if (zx_status_t status = Init(); status != ZX_OK) {
+    fdf::error("Failed to initialize device: {}", zx::make_result(status));
+    return zx::error(status);
   }
 
-  // The object is owned by the DDK, now that it has been added. It will be deleted
-  // when the device is released.
-  [[maybe_unused]] auto unused = device.release();
+  // Serve the EthernetImpl banjo protocol to the child node through the compat device server.
+  compat::DeviceServer::BanjoConfig banjo_config;
+  banjo_config.callbacks[ZX_PROTOCOL_ETHERNET_IMPL] = banjo_server_.callback();
 
-  return ZX_OK;
+  device_server_.Initialize(std::string(kChildNodeName), std::nullopt, std::move(banjo_config));
+  if (zx_status_t status = device_server_.Serve(dispatcher(), outgoing().get()); status != ZX_OK) {
+    fdf::error("Failed to serve compat device server: {}", zx::make_result(status));
+    return zx::error(status);
+  }
+
+  const std::array<fuchsia_driver_framework::NodeProperty2, 1> properties = {
+      banjo_server_.property()};
+  std::vector<fuchsia_driver_framework::Offer> offers = device_server_.CreateOffers2();
+
+  zx::result child = AddChild(kChildNodeName, properties, offers);
+  if (child.is_error()) {
+    fdf::error("Error adding child node: {}", child);
+    return child.take_error();
+  }
+  child_ = std::move(child.value());
+
+  return zx::ok();
 }
 
 zx_status_t UsbCdcEcm::SendLocked(const eth::BorrowedOperation<void>& op) {
@@ -456,7 +483,7 @@ zx_status_t UsbCdcEcm::SendLocked(const eth::BorrowedOperation<void>& op) {
   {
     fbl::AutoLock ethernet_lock(&ethernet_mutex_);
     if (ethernet_ifc_.ops == nullptr) {
-      zxlogf(ERROR, "No ethernet interface during QueueTx");
+      fdf::error("No ethernet interface during QueueTx");
       tx_request_pool_.Add(*std::move(request));
       return ZX_ERR_BAD_STATE;
     }
@@ -465,7 +492,7 @@ zx_status_t UsbCdcEcm::SendLocked(const eth::BorrowedOperation<void>& op) {
   request->request()->header.length = op.operation()->data_size;
   ssize_t bytes_copied = request->CopyTo(op.operation()->data_buffer, op.operation()->data_size, 0);
   if (bytes_copied < 0) {
-    zxlogf(ERROR, "Failed to copy data into send txn (error %zd)", bytes_copied);
+    fdf::error("Failed to copy data into send txn (error {})", bytes_copied);
     tx_request_pool_.Add(*std::move(request));
     return ZX_ERR_IO;
   }
@@ -485,12 +512,12 @@ void UsbCdcEcm::UsbReadComplete(usb_request_t* usb_request) {
   usb::Request<> request(usb_request, parent_req_size_);
 
   if (request.request()->response.status != ZX_OK) {
-    zxlogf(DEBUG, "UsbReadComplete called with status %s",
-           zx_status_get_string(request.request()->response.status));
+    fdf::debug("UsbReadComplete called with status {}",
+               zx_status_get_string(request.request()->response.status));
   }
 
   if (request.request()->response.status == ZX_ERR_IO_NOT_PRESENT) {
-    zxlogf(WARNING, "USB device not present");
+    fdf::warn("USB device not present");
     // The device has gone away, instead of requeueing the request - add it back to the pool. If the
     // device comes back online it will be queued then.
     fbl::AutoLock lock(&mutex_);
@@ -510,20 +537,19 @@ void UsbCdcEcm::UsbReadComplete(usb_request_t* usb_request) {
   });
 
   if (request.request()->response.status == ZX_ERR_IO_REFUSED) {
-    zxlogf(DEBUG, "Resetting receive endpoint");
+    fdf::debug("Resetting receive endpoint");
     usb_.ResetEndpoint(rx_endpoint_->addr);
     return;
   } else if (request.request()->response.status == ZX_ERR_IO_INVALID) {
     if (rx_endpoint_delay_ < kEthernetMaxRecvDelay) {
       rx_endpoint_delay_ += kEthernetMaxRecvDelay;
     }
-    zxlogf(DEBUG, "Slowing down the requests by %lu usec. Resetting the recv endpoint",
-           kEthernetRecvDelay);
+    fdf::debug("Slowing down the requests by {} usec. Resetting the recv endpoint",
+               kEthernetRecvDelay);
     usb_.ResetEndpoint(rx_endpoint_->addr);
     return;
   } else if (request.request()->response.status != ZX_OK) {
-    zxlogf(WARNING, "USB request status: %s",
-           zx_status_get_string(request.request()->response.status));
+    fdf::warn("USB request status: {}", zx_status_get_string(request.request()->response.status));
     return;
   }
 
@@ -531,7 +557,7 @@ void UsbCdcEcm::UsbReadComplete(usb_request_t* usb_request) {
   const size_t len = request.request()->response.actual;
   const zx_status_t status = request.Mmap(&read_data);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "request.Mmap failed with status: %s", zx_status_get_string(status));
+    fdf::error("request.Mmap failed with status: {}", zx_status_get_string(status));
     return;
   }
 
@@ -552,12 +578,12 @@ void UsbCdcEcm::UsbWriteComplete(usb_request_t* usb_request) {
   usb::Request<> request(usb_request, parent_req_size_);
 
   if (request.request()->response.status == ZX_ERR_IO_REFUSED) {
-    zxlogf(DEBUG, "Resetting transmit endpoint");
+    fdf::debug("Resetting transmit endpoint");
     usb_.ResetEndpoint(tx_endpoint_->addr);
 
   } else if (request.request()->response.status == ZX_ERR_IO_INVALID) {
-    zxlogf(DEBUG, "Slowing down the requests by %lu usec. Resetting the transmit endpoint",
-           kEthernetTransmitDelay);
+    fdf::debug("Slowing down the requests by {} usec. Resetting the transmit endpoint",
+               kEthernetTransmitDelay);
     if (tx_endpoint_delay_ < kEthernetMaxTransmitDelay) {
       tx_endpoint_delay_ += kEthernetTransmitDelay;
     }
@@ -581,11 +607,4 @@ void UsbCdcEcm::UsbWriteComplete(usb_request_t* usb_request) {
 
 }  // namespace usb_cdc_ecm
 
-static zx_driver_ops_t ecm_driver_ops = []() {
-  zx_driver_ops_t ops{};
-  ops.version = DRIVER_OPS_VERSION;
-  ops.bind = usb_cdc_ecm::UsbCdcEcm::Bind;
-  return ops;
-}();
-
-ZIRCON_DRIVER(ethernet_usb_cdc_ecm, ecm_driver_ops, "zircon", "0.1");
+FUCHSIA_DRIVER_EXPORT2(usb_cdc_ecm::UsbCdcEcm);

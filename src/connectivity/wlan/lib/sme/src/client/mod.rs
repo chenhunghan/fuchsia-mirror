@@ -354,6 +354,7 @@ pub enum ConnectTransactionEvent {
     OnRoamResult { result: RoamResult },
     OnDisconnect { info: fidl_sme::DisconnectInfo },
     OnSignalReport { ind: fidl_internal::SignalReportIndication },
+    OnRssiThresholdBreached { cur_rssi_dbm: i8 },
     OnChannelSwitched { info: fidl_internal::ChannelSwitchInfo },
 }
 
@@ -968,6 +969,25 @@ impl ClientSme {
     ) -> oneshot::Receiver<Result<fidl_mlme::MlmeGetApfPacketFilterEnabledResponse, i32>> {
         let (responder, receiver) = Responder::new();
         self.context.mlme_sink.send(MlmeRequest::GetApfPacketFilterEnabled(responder));
+        receiver
+    }
+
+    pub fn start_rssi_monitor(
+        &mut self,
+        min_rssi_dbm: i8,
+        max_rssi_dbm: i8,
+    ) -> oneshot::Receiver<Result<(), i32>> {
+        let (responder, receiver) = Responder::new();
+        self.context.mlme_sink.send(MlmeRequest::StartRssiMonitor(
+            fidl_mlme::MlmeStartRssiMonitorRequest { min_rssi_dbm, max_rssi_dbm },
+            responder,
+        ));
+        receiver
+    }
+
+    pub fn stop_rssi_monitor(&mut self) -> oneshot::Receiver<Result<(), i32>> {
+        let (responder, receiver) = Responder::new();
+        self.context.mlme_sink.send(MlmeRequest::StopRssiMonitor(responder));
         receiver
     }
 }
@@ -2390,6 +2410,25 @@ mod tests {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut _receiver = sme.get_apf_packet_filter_enabled();
         assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::GetApfPacketFilterEnabled(..)));
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_start_rssi_monitor() {
+        let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
+        let mut _receiver = sme.start_rssi_monitor(-80, -50);
+        let req = assert_matches!(
+            mlme_stream.try_recv(),
+            Ok(MlmeRequest::StartRssiMonitor(req, ..)) => req
+        );
+        assert_eq!(req.min_rssi_dbm, -80);
+        assert_eq!(req.max_rssi_dbm, -50);
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_stop_rssi_monitor() {
+        let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
+        let mut _receiver = sme.stop_rssi_monitor();
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::StopRssiMonitor(..)));
     }
 
     fn assert_no_connect(mlme_stream: &mut mpsc::UnboundedReceiver<MlmeRequest>) {

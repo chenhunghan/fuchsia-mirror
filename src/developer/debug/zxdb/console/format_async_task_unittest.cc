@@ -10,6 +10,7 @@
 
 #include "src/developer/debug/zxdb/client/async_task.h"
 #include "src/developer/debug/zxdb/client/async_task_tree.h"
+#include "src/developer/debug/zxdb/client/mock_async_task.h"
 #include "src/developer/debug/zxdb/common/test_with_loop.h"
 #include "src/developer/debug/zxdb/expr/mock_eval_context.h"
 #include "src/developer/debug/zxdb/format/async_output_buffer_test_util.h"
@@ -21,37 +22,6 @@ namespace zxdb {
 namespace {
 
 const std::string kAwaiteeMarker = "└─ ";
-
-class MockAsyncTask : public AsyncTask {
- public:
-  MockAsyncTask(uint64_t id, Type type, Identifier identifier, std::string state)
-      : AsyncTask(nullptr),
-        id_(id),
-        type_(type),
-        identifier_(std::move(identifier)),
-        state_(std::move(state)) {}
-
-  uint64_t GetId() const override { return id_; }
-  Type GetType() const override { return type_; }
-  const Location& GetLocation() const override { return location_; }
-  const Identifier& GetIdentifier() const override { return identifier_; }
-  std::string GetState() const override { return state_; }
-  const std::vector<NamedValue>& GetValues() const override { return values_; }
-  std::vector<Ref> GetChildren() const override { return children_; }
-
-  void set_location(const Location& loc) { location_ = loc; }
-  void set_values(std::vector<NamedValue> values) { values_ = std::move(values); }
-  void set_children(std::vector<Ref> children) { children_ = std::move(children); }
-
- private:
-  uint64_t id_;
-  Type type_;
-  Identifier identifier_;
-  std::string state_;
-  Location location_;
-  std::vector<NamedValue> values_;
-  std::vector<Ref> children_;
-};
 
 class MockAsyncTaskTreeDelegate : public AsyncTaskTree::Delegate {
  public:

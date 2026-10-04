@@ -1510,10 +1510,9 @@ pub mod capability_util {
 
         let capability_name = path.split().first().cloned().unwrap();
         let router_capability = component
-            .lock_resolved_state()
+            .component_sandbox()
             .await
             .unwrap()
-            .sandbox
             .component_output
             .framework()
             .get(capability_name)

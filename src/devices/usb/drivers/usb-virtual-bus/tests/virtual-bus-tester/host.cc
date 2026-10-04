@@ -7,6 +7,7 @@
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <lib/driver/compat/cpp/compat.h>
 
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 
 namespace virtualbus {
@@ -17,9 +18,8 @@ void Device::Control(ControlRequest& request, ControlCompleter::Sync& completer)
     static const size_t kMaxControlDataSize = 100;
     size_t actual;
     std::vector<uint8_t> data(kMaxControlDataSize);
-    auto status =
-        usb_client_.ControlIn(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, 0xFF, 0xA, 0,
-                              ZX_TIME_INFINITE, data.data(), data.size(), &actual);
+    auto status = usb_client_.ControlIn(kStandardInterfaceIn, 0xFF, 0xA, 0, ZX_TIME_INFINITE,
+                                        data.data(), data.size(), &actual);
     if (status != ZX_OK) {
       completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
       return;
@@ -29,9 +29,8 @@ void Device::Control(ControlRequest& request, ControlCompleter::Sync& completer)
     return;
   }
 
-  auto status = usb_client_.ControlOut(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, 0xFF,
-                                       0xA, 0, ZX_TIME_INFINITE, request.out_data().data(),
-                                       request.out_data().size());
+  auto status = usb_client_.ControlOut(kStandardInterfaceOut, 0xFF, 0xA, 0, ZX_TIME_INFINITE,
+                                       request.out_data().data(), request.out_data().size());
   if (status != ZX_OK) {
     completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
     return;
@@ -79,12 +78,12 @@ zx::result<> Device::Start(fdf::DriverContext context) {
 
   for (auto& interface : *usb_interface_list) {
     for (auto ep_itr : interface.GetEndpointList()) {
-      if (usb_ep_direction(ep_itr.descriptor()) == USB_ENDPOINT_OUT) {
+      if (usb_ep_direction(ep_itr.descriptor()) == fdescriptor::EndpointDirection::kOut) {
         if (usb_ep_type(ep_itr.descriptor()) == fdescriptor::EndpointType::kBulk) {
           bulk_out_addr_ = ep_itr.descriptor()->b_endpoint_address;
         }
       }
-      if (usb_ep_direction(ep_itr.descriptor()) == USB_ENDPOINT_IN) {
+      if (usb_ep_direction(ep_itr.descriptor()) == fdescriptor::EndpointDirection::kIn) {
         if (usb_ep_type(ep_itr.descriptor()) == fdescriptor::EndpointType::kBulk) {
           bulk_in_addr_ = ep_itr.descriptor()->b_endpoint_address;
         }

@@ -7,98 +7,28 @@
 
 // clang-format off
 
-#include <zircon/compiler.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <stdint.h>
+#include <zircon/compiler.h>
 
-__BEGIN_CDECLS
+#include <usb/descriptors.h>
 
-// video interface subclasses
-#define USB_SUBCLASS_VIDEO_CONTROL                 0x01
-#define USB_SUBCLASS_VIDEO_STREAMING               0x02
-#define USB_SUBCLASS_VIDEO_INTERFACE_COLLECTION    0x03
-
-// video class specific descriptor types
-#define USB_VIDEO_CS_DEVICE                        0x21
-#define USB_VIDEO_CS_CONFIGURATION                 0x22
-#define USB_VIDEO_CS_STRING                        0x23
-#define USB_VIDEO_CS_INTERFACE                     0x24
-#define USB_VIDEO_CS_ENDPOINT                      0x25
-
-// video class specific VC interface descriptor subtypes
-#define USB_VIDEO_VC_HEADER                        0x01
-#define USB_VIDEO_VC_INPUT_TERMINAL                0x02
-#define USB_VIDEO_VC_OUTPUT_TERMINAL               0x03
-#define USB_VIDEO_VC_SELECTOR_UNIT                 0x04
-#define USB_VIDEO_VC_PROCESSING_UNIT               0x05
-#define USB_VIDEO_VC_EXTENSION_UNIT                0x06
-#define USB_VIDEO_VC_ENCODING_UNIT                 0x07
-
-// video class specific VS interface descriptor subtypes
-#define USB_VIDEO_VS_INPUT_HEADER                  0x01
-#define USB_VIDEO_VS_OUTPUT_HEADER                 0x02
-#define USB_VIDEO_VS_STILL_IMAGE_FRAME             0x03
-#define USB_VIDEO_VS_FORMAT_UNCOMPRESSED           0x04
-#define USB_VIDEO_VS_FRAME_UNCOMPRESSED            0x05
-#define USB_VIDEO_VS_FORMAT_MJPEG                  0x06
-#define USB_VIDEO_VS_FRAME_MJPEG                   0x07
-#define USB_VIDEO_VS_FORMAT_MPEG2TS                0x0A
-#define USB_VIDEO_VS_FORMAT_DV                     0x0C
-#define USB_VIDEO_VS_COLORFORMAT                   0x0D
-#define USB_VIDEO_VS_FORMAT_FRAME_BASED            0x10
-#define USB_VIDEO_VS_FRAME_FRAME_BASED             0x11
-#define USB_VIDEO_VS_FORMAT_STREAM_BASED           0x12
-#define USB_VIDEO_VS_FORMAT_H264                   0x13
-#define USB_VIDEO_VS_FRAME_H264                    0x14
-#define USB_VIDEO_VS_FORMAT_H264_SIMULCAST         0x15
-#define USB_VIDEO_VS_FORMAT_VP8                    0x16
-#define USB_VIDEO_VS_FRAME_VP8                     0x17
-#define USB_VIDEO_VS_FORMAT_VP8_SIMULCAST          0x18
-
-// video class specific endpoint descriptor subtypes
-#define USB_VIDEO_EP_GENERAL                       0x01
-#define USB_VIDEO_EP_ENDPOINT                      0x02
-#define USB_VIDEO_EP_INTERRUPT                     0x03
-
-// video class specific request codes
-#define USB_VIDEO_SET_CUR                          0x01
-#define USB_VIDEO_SET_CUR_ALL                      0x11
-#define USB_VIDEO_GET_CUR                          0x81
-#define USB_VIDEO_GET_MIN                          0x82
-#define USB_VIDEO_GET_MAX                          0x83
-#define USB_VIDEO_GET_RES                          0x84
-#define USB_VIDEO_GET_LEN                          0x85
-#define USB_VIDEO_GET_INFO                         0x86
-#define USB_VIDEO_GET_DEF                          0x87
-#define USB_VIDEO_GET_CUR_ALL                      0x91
-#define USB_VIDEO_GET_MIN_ALL                      0x92
-#define USB_VIDEO_GET_MAX_ALL                      0x93
-#define USB_VIDEO_GET_RES_ALL                      0x94
-#define USB_VIDEO_GET_DEF_ALL                      0x97
-
-// video streaming interface control selectors
-#define USB_VIDEO_VS_PROBE_CONTROL                 0x01
-#define USB_VIDEO_VS_COMMIT_CONTROL                0x02
-#define USB_VIDEO_VS_STILL_PROBE_CONTROL           0x03
-#define USB_VIDEO_VS_STILL_COMMIT_CONTROL          0x04
-#define USB_VIDEO_VS_STILL_IMAGE_TRIGGER_CONTROL   0x05
-#define USB_VIDEO_VS_STREAM_ERROR_CODE_CONTROL     0x06
-#define USB_VIDEO_VS_GENERATE_KEY_FRAME_CONTROL    0x07
-#define USB_VIDEO_VS_UPDATE_FRAME_SEGMENT_CONTROL  0x08
-#define USB_VIDEO_VS_SYNCH_DELAY_CONTROL           0x09
+// Video interface subclasses, class-specific descriptor types/subtypes, request codes,
+// control selectors, and payload header flags are defined in fuchsia.hardware.usb.descriptor.
 
 // TODO(https://fxbug.dev/42061398): Change fields to use snake_case naming convention.
 
 // header for usb_video_vc_* below
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;        // USB_VIDEO_CS_INTERFACE
+    uint8_t bDescriptorType;        // DescriptorType::kCsInterface
     uint8_t bDescriptorSubtype;
 } __PACKED usb_video_vc_desc_header;
 
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;        // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubtype;     // USB_VIDEO_VC_HEADER
+    uint8_t bDescriptorType;        // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubtype;     // VideoVcDescriptorSubtype::kHeader
     uint16_t bcdUVC;
     uint16_t wTotalLength;
     uint32_t dwClockFrequency;
@@ -108,8 +38,8 @@ typedef struct {
 
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;        // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubtype;     // USB_VIDEO_VC_INPUT_TERMINAL
+    uint8_t bDescriptorType;        // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubtype;     // VideoVcDescriptorSubtype::kInputTerminal
     uint8_t bTerminalID;
     uint16_t wTerminalType;
     uint8_t bAssocTerminal;
@@ -118,8 +48,8 @@ typedef struct {
 
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;        // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubtype;     // USB_VIDEO_VC_OUTPUT_TERMINAL
+    uint8_t bDescriptorType;        // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubtype;     // VideoVcDescriptorSubtype::kOutputTerminal
     uint8_t bTerminalID;
     uint16_t wTerminalType;
     uint8_t bAssocTerminal;
@@ -130,15 +60,15 @@ typedef struct {
 // class specific VC interrupt endpoint descriptor
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;        // USB_VIDEO_CS_ENDPOINT
+    uint8_t bDescriptorType;        // DescriptorType::kCsEndpoint
     uint8_t bDescriptorSubtype;     // EndpointType::kInterrupt
     uint16_t wMaxTransferSize;
 } __PACKED usb_video_vc_interrupt_endpoint_desc;
 
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;        // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubtype;     // USB_VIDEO_VS_HEADER
+    uint8_t bDescriptorType;        // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubtype;     // VideoVsDescriptorSubtype::kInputHeader
     uint8_t bNumFormats;
     uint16_t wTotalLength;
     uint8_t bEndpointAddress;
@@ -154,8 +84,8 @@ typedef struct {
 // Definition of above without the variable component:
 typedef struct {
   uint8_t bLength;
-  uint8_t bDescriptorType;     // USB_VIDEO_CS_INTERFACE
-  uint8_t bDescriptorSubtype;  // USB_VIDEO_VS_HEADER
+  uint8_t bDescriptorType;     // DescriptorType::kCsInterface
+  uint8_t bDescriptorSubtype;  // VideoVsDescriptorSubtype::kInputHeader
   uint8_t bNumFormats;
   uint16_t wTotalLength;
   uint8_t bEndpointAddress;
@@ -166,8 +96,6 @@ typedef struct {
   uint8_t bTriggerUsage;
   uint8_t bControlSize;
 } __PACKED usb_video_vs_input_header_desc_short;
-
-#define GUID_LENGTH 16
 
 // A GUID consists of a:
 //  - four-byte integer
@@ -181,42 +109,43 @@ typedef struct {
 // See USB Video Class revision 1.5, FAQ section 2.9
 // for GUID Data Structure Layout.
 
-#define USB_VIDEO_GUID_YUY2_STRING "32595559-0000-0010-8000-00AA00389B71"
-#define USB_VIDEO_GUID_YUY2_VALUE { \
-    0x59, 0x55, 0x59, 0x32, \
-    0x00, 0x00, \
-    0x10, 0x00, \
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 \
-}
+inline constexpr char kUsbVideoGuidYuy2String[] = "32595559-0000-0010-8000-00AA00389B71";
+inline constexpr char kUsbVideoGuidNv12String[] = "3231564E-0000-0010-8000-00AA00389B71";
+inline constexpr char kUsbVideoGuidM420String[] = "3032344D-0000-0010-8000-00AA00389B71";
+inline constexpr char kUsbVideoGuidI420String[] = "30323449-0000-0010-8000-00AA00389B71";
 
-#define USB_VIDEO_GUID_NV12_STRING "3231564E-0000-0010-8000-00AA00389B71"
-#define USB_VIDEO_GUID_NV12_VALUE { \
-    0x4e, 0x56, 0x31, 0x32, \
-    0x00, 0x00, \
-    0x10, 0x00, \
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 \
-}
+inline constexpr uint8_t kUsbVideoGuidYuy2Value[fuchsia_hardware_usb_descriptor::kVideoGuidLength] = {
+    0x59, 0x55, 0x59, 0x32,
+    0x00, 0x00,
+    0x10, 0x00,
+    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
+};
 
-#define USB_VIDEO_GUID_M420_STRING "3032344D-0000-0010-8000-00AA00389B71"
-#define USB_VIDEO_GUID_M420_VALUE { \
-    0x4d, 0x34, 0x32, 0x30, \
-    0x00, 0x00, \
-    0x10, 0x00, \
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 \
-}
+inline constexpr uint8_t kUsbVideoGuidNv12Value[fuchsia_hardware_usb_descriptor::kVideoGuidLength] = {
+    0x4e, 0x56, 0x31, 0x32,
+    0x00, 0x00,
+    0x10, 0x00,
+    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
+};
 
-#define USB_VIDEO_GUID_I420_STRING "30323449-0000-0010-8000-00AA00389B71"
-#define USB_VIDEO_GUID_I420_VALUE { \
-    0x49, 0x34, 0x32, 0x30, \
-    0x00, 0x00, \
-    0x10, 0x00, \
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 \
-}
+inline constexpr uint8_t kUsbVideoGuidM420Value[fuchsia_hardware_usb_descriptor::kVideoGuidLength] = {
+    0x4d, 0x34, 0x32, 0x30,
+    0x00, 0x00,
+    0x10, 0x00,
+    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
+};
+
+inline constexpr uint8_t kUsbVideoGuidI420Value[fuchsia_hardware_usb_descriptor::kVideoGuidLength] = {
+    0x49, 0x34, 0x32, 0x30,
+    0x00, 0x00,
+    0x10, 0x00,
+    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
+};
 
 // Header common to all frame descriptors:
 typedef struct {
   uint8_t bLength;
-  uint8_t bDescriptorType;  // USB_VIDEO_CS_INTERFACE
+  uint8_t bDescriptorType;  // DescriptorType::kCsInterface
   uint8_t bDescriptorSubType;
   uint8_t bFormatIndex;
   uint8_t bNumFrameDescriptors;
@@ -225,11 +154,11 @@ typedef struct {
 // USB Video Payload Uncompressed
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;         // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubType;      // USB_VIDEO_VS_FORMAT_UNCOMPRESSED
+    uint8_t bDescriptorType;         // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubType;      // VideoVsDescriptorSubtype::kFormatUncompressed
     uint8_t bFormatIndex;
     uint8_t bNumFrameDescriptors;
-    uint8_t guidFormat[GUID_LENGTH];
+    uint8_t guidFormat[fuchsia_hardware_usb_descriptor::kVideoGuidLength];
     uint8_t bBitsPerPixel;
     uint8_t bDefaultFrameIndex;
     uint8_t bAspectRatioX;
@@ -241,8 +170,8 @@ typedef struct {
 // USB Video Payload MJPEG
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;         // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubType;      // USB_VIDEO_VS_FORMAT_MJPEG
+    uint8_t bDescriptorType;         // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubType;      // VideoVsDescriptorSubtype::kFormatMjpeg
     uint8_t bFormatIndex;
     uint8_t bNumFrameDescriptors;
     uint8_t bmFlags;
@@ -256,11 +185,11 @@ typedef struct {
 // USB Video Payload Frame Based
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;         // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubType;      // USB_VIDEO_VS_FORMAT_FRAME_BASED
+    uint8_t bDescriptorType;         // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubType;      // VideoVsDescriptorSubtype::kFormatFrameBased
     uint8_t bFormatIndex;
     uint8_t bNumFrameDescriptors;
-    uint8_t guidFormat[GUID_LENGTH];
+    uint8_t guidFormat[fuchsia_hardware_usb_descriptor::kVideoGuidLength];
     uint8_t bBitsPerPixel;
     uint8_t bDefaultFrameIndex;
     uint8_t bAspectRatioX;
@@ -273,7 +202,7 @@ typedef struct {
 // Header common to all frame descriptors
 typedef struct {
   uint8_t bLength;
-  uint8_t bDescriptorType;  // USB_VIDEO_CS_INTERFACE
+  uint8_t bDescriptorType;  // DescriptorType::kCsInterface
   uint8_t bDescriptorSubType;
   uint8_t bFrameIndex;
 } __PACKED usb_video_frame_header;
@@ -281,8 +210,8 @@ typedef struct {
 // Uncompressed and MJPEG formats have the same frame descriptor structure.
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;         // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubType;      // USB_VIDEO_VS_FRAME_UNCOMPRESSED / USB_VIDEO_VS_FRAME_MJPEG
+    uint8_t bDescriptorType;         // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubType;      // VideoVsDescriptorSubtype::kFrameUncompressed / kFrameMjpeg
     uint8_t bFrameIndex;
     uint8_t bmCapabilities;
     uint16_t wWidth;
@@ -297,8 +226,8 @@ typedef struct {
 
 typedef struct {
     uint8_t bLength;
-    uint8_t bDescriptorType;         // USB_VIDEO_CS_INTERFACE
-    uint8_t bDescriptorSubType;      // USB_VIDEO_VS_FRAME_UNCOMPRESSED / USB_VIDEO_VS_FRAME_MJPEG
+    uint8_t bDescriptorType;         // DescriptorType::kCsInterface
+    uint8_t bDescriptorSubType;      // VideoVsDescriptorSubtype::kFrameFrameBased
     uint8_t bFrameIndex;
     uint8_t bmCapabilities;
     uint16_t wWidth;
@@ -310,13 +239,6 @@ typedef struct {
     uint32_t dwBytesPerLine;
     uint32_t dwFrameInterval[];
 } __PACKED usb_video_vs_frame_based_frame_desc;
-
-// Stream negotiation
-#define USB_VIDEO_BM_HINT_FRAME_INTERVAL        (1 << 0)
-#define USB_VIDEO_BM_HINT_KEY_FRAME_RATE        (1 << 1)
-#define USB_VIDEO_BM_HINT_P_FRAME_RATE          (1 << 2)
-#define USB_VIDEO_BM_HINT_COMP_QUALITY          (1 << 3)
-#define USB_VIDEO_BM_HINT_COMP_WINDOW_SIZE      (1 << 4)
 
 typedef struct {
    uint16_t bmHint;
@@ -344,16 +266,6 @@ typedef struct {
    uint32_t bmLayoutPerStream;
 } __PACKED usb_video_vc_probe_and_commit_controls;
 
-// For accessing payload bmHeaderInfo bitmap
-#define USB_VIDEO_VS_PAYLOAD_HEADER_FID         (1 << 0)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_EOF         (1 << 1)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_PTS         (1 << 2)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_SCR         (1 << 3)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_RES         (1 << 4)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_STI         (1 << 5)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_ERR         (1 << 6)
-#define USB_VIDEO_VS_PAYLOAD_HEADER_EOH         (1 << 7)
-
 // Common header for all payloads.
 typedef struct {
     uint8_t bHeaderLength;
@@ -370,7 +282,22 @@ typedef struct {
     uint16_t scrSourceClockSOFCounter;
 } __PACKED usb_video_vs_uncompressed_payload_header;
 
-__END_CDECLS
-
+static_assert(sizeof(usb_video_vc_desc_header) == 3);
+static_assert(sizeof(usb_video_vc_header_desc) == 12);
+static_assert(sizeof(usb_video_vc_input_terminal_desc) == 8);
+static_assert(sizeof(usb_video_vc_output_terminal_desc) == 9);
+static_assert(sizeof(usb_video_vc_interrupt_endpoint_desc) == 5);
+static_assert(sizeof(usb_video_vs_input_header_desc) == 13);
+static_assert(sizeof(usb_video_vs_input_header_desc_short) == 13);
+static_assert(sizeof(usb_video_format_header) == 5);
+static_assert(sizeof(usb_video_vs_uncompressed_format_desc) == 27);
+static_assert(sizeof(usb_video_vs_mjpeg_format_desc) == 11);
+static_assert(sizeof(usb_video_vs_frame_based_format_desc) == 28);
+static_assert(sizeof(usb_video_frame_header) == 4);
+static_assert(sizeof(usb_video_vs_frame_desc) == 26);
+static_assert(sizeof(usb_video_vs_frame_based_frame_desc) == 26);
+static_assert(sizeof(usb_video_vc_probe_and_commit_controls) == 44);
+static_assert(sizeof(usb_video_vs_payload_header) == 2);
+static_assert(sizeof(usb_video_vs_uncompressed_payload_header) == 12);
 
 #endif  // SRC_DEVICES_USB_LIB_USB_INCLUDE_USB_VIDEO_H_

@@ -14,23 +14,27 @@
 #include <zircon/time.h>
 #include <zircon/types.h>
 
+#include <atomic>
+
 #include "lib/sync/completion.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_hub {
 
 // A timeout guarding DDK routines from blocking their thread indefinitely.
-static constexpr auto kSafetyTimeout = ZX_SEC(5);
+static constexpr auto kSafetyTimeout = ZX_TIME_INFINITE;
 
 usb_speed_t PortStatus::GetSpeed(usb_speed_t hub_speed) const {
   usb_speed_t speed;
-  if (hub_speed == USB_SPEED_SUPER) {
-    speed = USB_SPEED_SUPER;
+  if (hub_speed == fidl::ToUnderlying(fdescriptor::UsbSpeed::kSuper)) {
+    speed = fidl::ToUnderlying(fdescriptor::UsbSpeed::kSuper);
   } else if (status.w_port_status & USB_PORT_LOW_SPEED) {
-    speed = USB_SPEED_LOW;
+    speed = fidl::ToUnderlying(fdescriptor::UsbSpeed::kLow);
   } else if (status.w_port_status & USB_PORT_HIGH_SPEED) {
-    speed = USB_SPEED_HIGH;
+    speed = fidl::ToUnderlying(fdescriptor::UsbSpeed::kHigh);
   } else {
-    speed = USB_SPEED_FULL;
+    speed = fidl::ToUnderlying(fdescriptor::UsbSpeed::kFull);
   }
   return speed;
 }
@@ -51,7 +55,7 @@ zx_status_t UsbHubDevice::Init() {
 }
 
 zx_status_t UsbHubDevice::UsbHubInterfaceResetPort(uint32_t port) {
-  return SetFeature(USB_RECIP_PORT, USB_FEATURE_PORT_RESET, static_cast<uint8_t>(port));
+  return SetFeature(kClassPortOut, USB_FEATURE_PORT_RESET, static_cast<uint8_t>(port));
 }
 
 zx_status_t UsbHubDevice::GetPortStatus() {
@@ -107,7 +111,9 @@ void UsbHubDevice::DdkInit(ddk::InitTxn txn) {
     txn_->Reply(status);
   }
   speed_ = usb_.GetSpeed();
-  uint16_t desc_type = (speed_ == USB_SPEED_SUPER ? USB_HUB_DESC_TYPE_SS : USB_HUB_DESC_TYPE);
+  uint16_t desc_type = (speed_ == fdescriptor::UsbSpeed::kSuper
+                            ? fidl::ToUnderlying(fdescriptor::DescriptorType::kHubSuperSpeed)
+                            : fidl::ToUnderlying(fdescriptor::DescriptorType::kHub));
 
   auto result = GetUsbHubDescriptor(desc_type);
   if (result.is_error()) {
@@ -310,7 +316,7 @@ zx_status_t UsbHubDevice::StartInterruptLoop() {
 }
 
 zx_status_t UsbHubDevice::ResetPort(PortNumber port) {
-  zx_status_t status = SetFeature(USB_RECIP_PORT, USB_FEATURE_PORT_RESET, port.value());
+  zx_status_t status = SetFeature(kClassPortOut, USB_FEATURE_PORT_RESET, port.value());
   if (status != ZX_OK) {
     return status;
   }
@@ -386,7 +392,7 @@ zx_status_t UsbHubDevice::PowerOnPorts() {
   std::vector<zx_status_t> port_statuses;
   port_statuses.reserve(hub_descriptor_.b_nbr_ports);
   for (uint8_t i = 0; i < hub_descriptor_.b_nbr_ports; i++) {
-    port_statuses.push_back(SetFeature(USB_RECIP_PORT, USB_FEATURE_PORT_POWER, i + 1));
+    port_statuses.push_back(SetFeature(kClassPortOut, USB_FEATURE_PORT_POWER, i + 1));
   }
 
   for (auto& status : port_statuses) {
@@ -398,8 +404,9 @@ zx_status_t UsbHubDevice::PowerOnPorts() {
 }
 
 zx::result<usb_port_status_t> UsbHubDevice::GetPortStatus(PortNumber port) {
-  zx::result<std::vector<uint8_t>> result = ControlIn(
-      USB_RECIP_PORT | USB_DIR_IN, USB_REQ_GET_STATUS, 0, port.value(), sizeof(usb_port_status_t));
+  zx::result<std::vector<uint8_t>> result =
+      ControlIn(kClassPortIn, fidl::ToUnderlying(fdescriptor::StandardRequest::kGetStatus), 0,
+                port.value(), sizeof(usb_port_status_t));
   if (result.is_error()) {
     return zx::error(result.error_value());
   }
@@ -415,42 +422,42 @@ zx::result<usb_port_status_t> UsbHubDevice::GetPortStatus(PortNumber port) {
   if (port_change & USB_C_PORT_CONNECTION) {
     zxlogf(DEBUG, "USB_C_PORT_CONNECTION ");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_CONNECTION, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_CONNECTION, port.value()));
   }
   if (port_change & USB_C_PORT_ENABLE) {
     zxlogf(DEBUG, "USB_C_PORT_ENABLE ");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_ENABLE, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_ENABLE, port.value()));
   }
   if (port_change & USB_C_PORT_SUSPEND) {
     zxlogf(DEBUG, "USB_C_PORT_SUSPEND ");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_SUSPEND, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_SUSPEND, port.value()));
   }
   if (port_change & USB_C_PORT_OVER_CURRENT) {
     zxlogf(DEBUG, "USB_C_PORT_OVER_CURRENT ");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_OVER_CURRENT, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_OVER_CURRENT, port.value()));
   }
   if (port_change & USB_C_PORT_RESET) {
     zxlogf(DEBUG, "USB_C_PORT_RESET");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_RESET, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_RESET, port.value()));
   }
   if (port_change & USB_C_BH_PORT_RESET) {
     zxlogf(DEBUG, "USB_C_BH_PORT_RESET");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_BH_PORT_RESET, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_BH_PORT_RESET, port.value()));
   }
   if (port_change & USB_C_PORT_LINK_STATE) {
     zxlogf(DEBUG, "USB_C_PORT_LINK_STATE");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_LINK_STATE, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_LINK_STATE, port.value()));
   }
   if (port_change & USB_C_PORT_CONFIG_ERROR) {
     zxlogf(DEBUG, "USB_C_PORT_CONFIG_ERROR");
     pending_operations.push_back(
-        ClearFeature(USB_RECIP_PORT, USB_FEATURE_C_PORT_CONFIG_ERROR, port.value()));
+        ClearFeature(kClassPortOut, USB_FEATURE_C_PORT_CONFIG_ERROR, port.value()));
   }
   for (auto& feature_status : pending_operations) {
     if (feature_status != ZX_OK) {
@@ -501,17 +508,19 @@ zx_status_t UsbHubDevice::Bind(std::unique_ptr<fpromise::executor> executor, zx_
 }
 
 zx_status_t UsbHubDevice::SetFeature(uint8_t request_type, uint16_t feature, uint16_t index) {
-  return ControlOut(request_type, USB_REQ_SET_FEATURE, feature, index, nullptr, 0);
+  return ControlOut(request_type, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetFeature),
+                    feature, index, nullptr, 0);
 }
 
 zx_status_t UsbHubDevice::ClearFeature(uint8_t request_type, uint16_t feature, uint16_t index) {
-  return ControlOut(request_type, USB_REQ_CLEAR_FEATURE, feature, index, nullptr, 0);
+  return ControlOut(request_type, fidl::ToUnderlying(fdescriptor::StandardRequest::kClearFeature),
+                    feature, index, nullptr, 0);
 }
 
 zx::result<std::vector<uint8_t>> UsbHubDevice::ControlIn(uint8_t request_type, uint8_t request,
                                                          uint16_t value, uint16_t index,
                                                          size_t read_size) {
-  if ((request_type & USB_DIR_MASK) != USB_DIR_IN) {
+  if (!usb_request_is_in(request_type)) {
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
@@ -525,15 +534,15 @@ zx::result<std::vector<uint8_t>> UsbHubDevice::ControlIn(uint8_t request_type, u
   usb_request->request()->setup.w_length = static_cast<uint16_t>(read_size);
 
   std::vector<uint8_t> data;
-  zx_status_t status;
+  std::atomic<zx_status_t> status = ZX_OK;
   sync_completion_t completion;
   executor_->schedule_task(
       RequestQueue(*std::move(usb_request)).then([&](fpromise::result<Request, void>& value) {
         auto request = std::move(value.take_ok_result().value);
-        auto rq_status = request.request()->response.status;
-        if (rq_status != ZX_OK) {
+        auto request_status = request.request()->response.status;
+        if (request_status != ZX_OK) {
           request_pool_.Add(std::move(request));
-          status = rq_status;
+          status = request_status;
         } else {
           if (read_size != 0) {
             data.resize(request.request()->response.actual);
@@ -545,12 +554,15 @@ zx::result<std::vector<uint8_t>> UsbHubDevice::ControlIn(uint8_t request_type, u
         sync_completion_signal(&completion);
       }));
   sync_completion_wait(&completion, ZX_TIME_INFINITE);
+  if (status != ZX_OK) {
+    return zx::error(status.load());
+  }
   return zx::ok(data);
 }
 
 zx_status_t UsbHubDevice::ControlOut(uint8_t request_type, uint8_t request, uint16_t value,
                                      uint16_t index, const void* write_buffer, size_t write_size) {
-  if ((request_type & USB_DIR_MASK) != USB_DIR_OUT) {
+  if (!usb_request_is_out(request_type)) {
     return ZX_ERR_INVALID_ARGS;
   }
   ZX_ASSERT(write_size <= kMaxRequestLength);

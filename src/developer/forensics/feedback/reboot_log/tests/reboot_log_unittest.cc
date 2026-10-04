@@ -1004,6 +1004,37 @@ TEST_F(RebootLogStrTest, Succeed_SetDlogWithEmbeddedNullCharacters) {
   EXPECT_EQ(reboot_log.RebootLogStr().find('\0'), std::string::npos);
 }
 
+TEST_F(RebootLogStrTest, SucceedSetDlogWithoutEnd) {
+  constexpr std::string_view kContents =
+      R"(HW REBOOT REASON (UNKNOWN)
+
+ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)
+
+UPTIME (ms)
+1234
+RUNTIME (ms)
+1098
+
+--- BEGIN DLOG DUMP ---
+test dlog dump line1
+test dlog dump line2
+)";
+
+  WriteZirconRebootLogContents(std::string(kContents));
+  WriteGracefulShutdownInfoContents(
+      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+
+  const RebootLog reboot_log =
+      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
+
+  std::string dlog;
+  ASSERT_TRUE(files::ReadFileToString(previous_boot_kernel_log_path_, &dlog));
+  EXPECT_EQ(dlog, "test dlog dump line1\ntest dlog dump line2\n--- DLOG DUMP TRUNCATED ---");
+  EXPECT_THAT(reboot_log.RebootLogStr(), HasSubstr(kContents));
+}
+
 TEST_F(RebootLogStrTest, Succeed_EmptyDlog) {
   constexpr std::string_view kContents =
       R"(HW REBOOT REASON (UNKNOWN)

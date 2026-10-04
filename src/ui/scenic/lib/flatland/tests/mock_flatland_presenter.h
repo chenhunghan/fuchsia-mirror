@@ -23,7 +23,8 @@ class MockFlatlandPresenter : public FlatlandPresenter {
                bool schedule_asap));
   MOCK_METHOD(std::vector<scheduling::FuturePresentationInfo>, GetFuturePresentationInfos, ());
   MOCK_METHOD(void, RemoveSession,
-              (scheduling::SessionId session_id, std::optional<zx::event> release_fence));
+              (scheduling::SessionId session_id, std::vector<zx::event> release_fences,
+               std::vector<zx::counter> release_counters));
 };
 
 }  // namespace flatland

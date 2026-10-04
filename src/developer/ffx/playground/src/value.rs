@@ -4,9 +4,9 @@
 
 use fidl_codec_fdomain::{AsPlatform as _, ObjectType, Value as FidlValue, library as lib};
 use futures::future::BoxFuture;
-use num::BigInt;
-use num::rational::BigRational;
-use num::traits::ToPrimitive;
+use num_bigint::BigInt;
+use num_rational::Ratio;
+use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +19,8 @@ mod iterator;
 
 pub use in_use_handle::InUseHandle;
 pub use iterator::{RangeCursor, ReplayableIterator, ReplayableIteratorCursor};
+
+pub type BigRational = Ratio<BigInt>;
 
 /// Errors occurring during various value conversions.
 #[derive(Error, Debug, Clone)]
@@ -632,6 +634,15 @@ pub enum PlaygroundValue {
     TypeHinted(String, Box<Value>),
 }
 
+fn big_rational_to_f64(x: &BigRational) -> Option<f64> {
+    if let (Some(numer), Some(denom)) = (x.numer().to_i64(), x.denom().to_i64()) {
+        Ratio::new_raw(numer, denom).to_f64()
+    } else {
+        let float = x.numer().to_f64()? / x.denom().to_f64()?;
+        (!float.is_nan()).then_some(float)
+    }
+}
+
 impl PlaygroundValue {
     #[allow(clippy::result_large_err)] // TODO(https://fxbug.dev/401255249)
     /// Convert this playground value to a raw FIDL value if possible.
@@ -645,45 +656,56 @@ impl PlaygroundValue {
                 y.to_fidl_value(ns, &ty)
             }
             (LookupResultOrType::Type(lib::Type::U8), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_u8()
                 .map(FidlValue::U8)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::U8).into()),
             (LookupResultOrType::Type(lib::Type::U16), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_u16()
                 .map(FidlValue::U16)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::U16).into()),
             (LookupResultOrType::Type(lib::Type::U32), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_u32()
                 .map(FidlValue::U32)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::U32).into()),
             (LookupResultOrType::Type(lib::Type::U64), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_u64()
                 .map(FidlValue::U64)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::U64).into()),
             (LookupResultOrType::Type(lib::Type::I8), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_i8()
                 .map(FidlValue::I8)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::I8).into()),
             (LookupResultOrType::Type(lib::Type::I16), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_i16()
                 .map(FidlValue::I16)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::I16).into()),
             (LookupResultOrType::Type(lib::Type::I32), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_i32()
                 .map(FidlValue::I32)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::I32).into()),
             (LookupResultOrType::Type(lib::Type::I64), PlaygroundValue::Num(x)) => x
+                .to_integer()
                 .to_i64()
                 .map(FidlValue::I64)
                 .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::I64).into()),
-            (LookupResultOrType::Type(lib::Type::F32), PlaygroundValue::Num(x)) => x
-                .to_f32()
-                .map(FidlValue::F32)
-                .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::F32).into()),
-            (LookupResultOrType::Type(lib::Type::F64), PlaygroundValue::Num(x)) => x
-                .to_f64()
-                .map(FidlValue::F64)
-                .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::F64).into()),
+            (LookupResultOrType::Type(lib::Type::F32), PlaygroundValue::Num(x)) => {
+                big_rational_to_f64(&x)
+                    .and_then(|f| f.to_f32())
+                    .map(FidlValue::F32)
+                    .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::F32).into())
+            }
+            (LookupResultOrType::Type(lib::Type::F64), PlaygroundValue::Num(x)) => {
+                big_rational_to_f64(&x)
+                    .map(FidlValue::F64)
+                    .ok_or_else(|| ValueError::ConversionOverflow(lib::Type::F64).into())
+            }
             (LookupResultOrType::Type(lib::Type::Identifier { name, .. }), v) => v
                 .to_fidl_value_by_type_or_lookup(
                     ns,

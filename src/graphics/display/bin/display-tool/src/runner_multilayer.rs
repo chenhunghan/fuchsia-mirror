@@ -15,7 +15,7 @@ use {
 };
 
 use crate::draw::MappedImage;
-use crate::fps::Counter;
+use crate::fps::{Counter, RenderTimes};
 
 // ANSI X3.64 (ECMA-48) escape code for clearing the terminal screen.
 const CLEAR: &str = "\x1B[2K\r";
@@ -132,13 +132,18 @@ impl<'a, S: MultiLayerScene> MultiLayerFenceLoop<'a, S> {
         let mut vsync_listener = self.coordinator.add_vsync_listener(None)?;
 
         let mut counter = Counter::new();
+        let mut render_times = RenderTimes::new();
         loop {
             // Log the frame rate.
             counter.add(zx::MonotonicInstant::get());
             let stats = counter.stats();
             print!(
-                "{}Display {:.2} fps ({:.5} ms)",
-                CLEAR, stats.sample_rate_hz, stats.sample_time_delta_ms
+                "{}Display {:.2} fps ({:.5} ms) render {:.3} ms clean {:.3} ms",
+                CLEAR,
+                stats.sample_rate_hz,
+                stats.sample_time_delta_ms,
+                render_times.render_ms(),
+                render_times.clean_ms()
             );
             std::io::stdout().flush()?;
 
@@ -158,7 +163,16 @@ impl<'a, S: MultiLayerScene> MultiLayerFenceLoop<'a, S> {
                 // Render the scene into the current presentation.
                 {
                     duration!(c"gfx", c"render frame", "image" => current_config as u32);
+                    let render_start = zx::MonotonicInstant::get();
                     self.scene.render(&mut current_presentation.images)?;
+                    let render_and_clean = zx::MonotonicInstant::get() - render_start;
+                    let clean = current_presentation
+                        .images
+                        .iter()
+                        .fold(zx::MonotonicDuration::ZERO, |sum, image| {
+                            sum + image.take_clean_time()
+                        });
+                    render_times.add(render_and_clean, clean);
                 }
 
                 // Request the swap.

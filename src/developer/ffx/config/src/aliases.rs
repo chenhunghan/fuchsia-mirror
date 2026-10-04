@@ -48,7 +48,6 @@ const FFX_ISOLATED: &str = "ffx.isolated";
 const FASTBOOT_USB_DISCOVERY_DISABLED: &str = "fastboot.usb.disabled";
 const FFX_ANALYTICS_DISABLED: &str = "ffx.analytics.disabled";
 const MDNS_DISCOVERY_ENABLED: &str = "discovery.mdns.enabled";
-const MDNS_AUTOCONNECT_ENABLED: &str = "discovery.mdns.autoconnect";
 
 // Get the aliased value, along with the isolation alias -- both bools.
 fn get_with_isolated_alias(
@@ -87,15 +86,6 @@ pub fn is_mdns_discovery_disabled(ctx: &EnvironmentContext) -> bool {
     }
 }
 
-pub fn is_mdns_autoconnect_disabled(ctx: &EnvironmentContext) -> bool {
-    let default = false;
-    match get_with_isolated_alias(ctx, MDNS_AUTOCONNECT_ENABLED) {
-        None => return default,
-        // The option is _enabled_, so we have to invert it
-        Some((mdns_conn, iso)) => mdns_conn.map(|b| !b).unwrap_or_else(|| iso.unwrap_or(default)),
-    }
-}
-
 /// When run in an isolated dir, also set `ffx.isolated`. This will only work
 /// "usefully" if it is invoked with the global EnvironmentContext, i.e. the
 /// installed by ffx_config::init()
@@ -121,7 +111,6 @@ mod test {
         assert!(is_usb_discovery_disabled(&env.context));
         assert!(is_analytics_disabled(&env.context));
         assert!(is_mdns_discovery_disabled(&env.context));
-        assert!(is_mdns_autoconnect_disabled(&env.context));
     }
 
     #[fuchsia::test]

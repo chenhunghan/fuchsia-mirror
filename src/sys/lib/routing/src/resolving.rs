@@ -237,10 +237,9 @@ impl ResolvedAncestorComponent {
         component: &Arc<C>,
     ) -> Result<Self, ResolverError> {
         let parent_component = get_parent(component).await?;
-        let resolved_parent = parent_component.lock_resolved_state().await?;
         Ok(Self {
-            address: resolved_parent.address().await?,
-            context_to_resolve_children: resolved_parent.context_to_resolve_children(),
+            address: parent_component.address_maybe_resolve().await?,
+            context_to_resolve_children: parent_component.context_to_resolve_children().await?,
         })
     }
 
@@ -253,8 +252,7 @@ impl ResolvedAncestorComponent {
             // Loop until the parent has a valid context_to_resolve_children,
             // or an error getting the next parent, or its resolved state.
             {
-                let resolved_parent = parent_component.lock_resolved_state().await?;
-                let address = resolved_parent.address().await?;
+                let address = parent_component.address_maybe_resolve().await?;
                 // TODO(https://fxbug.dev/42053123): change this test to something more
                 // explicit, that is, return the parent's address and context if
                 // the component address is a packaged component (determined in
@@ -286,7 +284,9 @@ impl ResolvedAncestorComponent {
                 if address.scheme() != "realm-builder" {
                     return Ok(Self {
                         address,
-                        context_to_resolve_children: resolved_parent.context_to_resolve_children(),
+                        context_to_resolve_children: parent_component
+                            .context_to_resolve_children()
+                            .await?,
                     });
                 }
             }
@@ -824,19 +824,16 @@ struct RemoteError(fresolution::ResolverError);
 mod tests {
     use super::*;
     use crate::bedrock::sandbox_construction::ComponentSandbox;
-    use crate::component_instance::{ResolvedInstanceInterface, TopInstanceInterface};
+    use crate::component_instance::TopInstanceInterface;
     use crate::policy::GlobalPolicyChecker;
     use assert_matches::assert_matches;
     use async_trait::async_trait;
     use capability_source::{BuiltinCapabilities, NamespaceCapabilities};
-    use cm_rust::offer::OfferDecl;
-    use cm_rust::{CapabilityDecl, CollectionDecl, ExposeDecl, UseDecl};
     use cm_rust_testing::new_decl_from_json;
-    use cm_types::Name;
     use fidl::endpoints::create_endpoints;
     use fidl_fuchsia_component_decl as fdecl;
     use fidl_fuchsia_mem as fmem;
-    use moniker::{BorrowedChildName, ChildName, Moniker};
+    use moniker::{BorrowedChildName, Moniker};
     use serde_json::json;
 
     fn from_absolute_url(url: &str) -> ComponentAddress {
@@ -1290,16 +1287,26 @@ mod tests {
                 Ok(ExtendedInstanceInterface::AboveRoot(Arc::new(MockTopInstance::default())))
             }
         }
-        async fn lock_resolved_state<'a>(
-            self: &'a Arc<Self>,
-        ) -> Result<Box<dyn ResolvedInstanceInterface<Component = Self> + 'a>, ComponentInstanceError>
-        {
-            Ok(Box::new(self.resolved_state.as_ref().unwrap()))
-        }
         async fn component_sandbox(
             self: &Arc<Self>,
         ) -> Result<ComponentSandbox, ComponentInstanceError> {
             unimplemented!()
+        }
+        async fn get_child_maybe_resolve(
+            self: &Arc<Self>,
+            _moniker: &BorrowedChildName,
+        ) -> Result<Option<Arc<Self>>, ComponentInstanceError> {
+            unimplemented!()
+        }
+        async fn address_maybe_resolve(
+            self: &Arc<Self>,
+        ) -> Result<ComponentAddress, ResolverError> {
+            self.resolved_state.as_ref().unwrap().address.clone()
+        }
+        async fn context_to_resolve_children(
+            self: &Arc<Self>,
+        ) -> Result<Option<ComponentResolutionContext>, ComponentInstanceError> {
+            Ok(self.resolved_state.as_ref().unwrap().context_to_resolve_children.clone())
         }
     }
     impl MockComponentInstance {
@@ -1312,40 +1319,6 @@ mod tests {
     struct MockResolvedState {
         address: Result<ComponentAddress, ResolverError>,
         context_to_resolve_children: Option<ComponentResolutionContext>,
-    }
-    #[async_trait]
-    impl ResolvedInstanceInterface for MockResolvedState {
-        type Component = MockComponentInstance;
-        fn try_uses(&self) -> Option<Box<[UseDecl]>> {
-            unimplemented!()
-        }
-        fn try_exposes(&self) -> Option<Box<[ExposeDecl]>> {
-            unimplemented!()
-        }
-        fn try_offers(&self) -> Option<Box<[OfferDecl]>> {
-            unimplemented!()
-        }
-        fn try_capabilities(&self) -> Option<Box<[CapabilityDecl]>> {
-            unimplemented!()
-        }
-        fn try_collections(&self) -> Option<Box<[CollectionDecl]>> {
-            unimplemented!()
-        }
-        fn get_child(&self, _moniker: &BorrowedChildName) -> Option<Arc<Self::Component>> {
-            unimplemented!()
-        }
-        fn children_in_collection(
-            &self,
-            _collection: &Name,
-        ) -> Vec<(ChildName, Arc<Self::Component>)> {
-            unimplemented!()
-        }
-        async fn address(&self) -> Result<ComponentAddress, ResolverError> {
-            self.address.clone()
-        }
-        fn context_to_resolve_children(&self) -> Option<ComponentResolutionContext> {
-            self.context_to_resolve_children.clone()
-        }
     }
 
     #[fuchsia::test]

@@ -26,20 +26,20 @@ def main() -> int:
         print("Manifest file not found", file=sys.stderr)
         return 1
 
-    parser = DebugSymbolsManifestParser(build_dir)
-    parser.enable_build_id_resolution()
+    manifest_parser = DebugSymbolsManifestParser(build_dir)
+    manifest_parser.enable_build_id_resolution()
     try:
-        parser.parse_manifest_file(manifest_file)
+        manifest_parser.parse_manifest_file(manifest_file)
     except Exception as e:
         print(
             f"Error parsing debug symbols manifest file: {e}", file=sys.stderr
         )
         return 1
 
-    if not parser.entries:
+    if not manifest_parser.entries:
         return 0
 
-    copy_debug_symbols_to_build_dir(build_dir, parser.entries)
+    copy_debug_symbols_to_build_dir(build_dir, manifest_parser.entries)
     return 0
 
 

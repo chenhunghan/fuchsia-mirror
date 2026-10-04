@@ -12,7 +12,7 @@ filesystem) image as the contents of a bootloader partition.
 """
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(usage=USAGE)
     parser.add_argument(
         "--metadata",

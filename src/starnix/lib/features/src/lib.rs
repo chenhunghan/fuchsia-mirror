@@ -53,6 +53,7 @@ pub enum Feature {
     AndroidUsb,
     // TODO(https://fxbug.dev/485370648) remove when unnecessary
     FakeIon,
+    UnifiedTracing,
 }
 
 /// Error returned when a feature is not recognized.
@@ -151,6 +152,7 @@ mod test {
             (Feature::AndroidUsb, "android_usb"),
             // TODO(https://fxbug.dev/485370648) remove when unnecessary
             (Feature::FakeIon, "fake_ion"),
+            (Feature::UnifiedTracing, "unified_tracing"),
         ] {
             let string = feature.to_string();
             assert_eq!(string.as_str(), expected_str);

@@ -41,7 +41,8 @@ SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
              write_parameters.max_write_size, redactor_.get(), std::move(encoder)),
       log_source_(archive_dispatcher, std::move(services), &store_),
       writer_(write_dispatcher, std::in_place, write_parameters.logs_dir,
-              write_parameters.max_num_files, std::move(decoder), write_parameters.metadata_path),
+              write_parameters.max_num_files, write_parameters.total_log_size, std::move(decoder),
+              write_parameters.metadata_path),
       receiver_(this, archive_dispatcher),
       next_collection_id_(0) {}
 

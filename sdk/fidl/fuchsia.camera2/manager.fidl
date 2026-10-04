@@ -74,12 +74,12 @@ closed protocol MuteControl {
     strict Mute(struct {
         device_id int32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     strict Unmute(struct {
         device_id int32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 

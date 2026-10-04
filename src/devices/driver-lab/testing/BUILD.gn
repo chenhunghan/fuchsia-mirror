@@ -1,0 +1,104 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bind/bind.gni")
+import("//build/components.gni")
+import("//build/drivers.gni")
+
+driver_bind_rules("bind") {
+  testonly = true
+  rules = "meta/lab_root.bind"
+  bind_output = "lab_root.bindbc"
+  deps = [
+    "//src/devices/bind/fuchsia.test",
+    "//src/devices/driver-lab/bind:fuchsia.driver.lab",
+  ]
+}
+
+fuchsia_rust_driver("driver") {
+  testonly = true
+  edition = "2024"
+  output_name = "lab_root"
+  sources = [ "src/lib.rs" ]
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_rust",
+    "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_rust",
+    "//sdk/fidl/fuchsia.hardware.i2c:fuchsia.hardware.i2c_rust",
+    "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
+    "//sdk/fidl/fuchsia.hardware.reset:fuchsia.hardware.reset_rust",
+    "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
+    "//sdk/fidl/fuchsia.hardware.spi:fuchsia.hardware.spi_rust",
+    "//sdk/lib/driver/component/rust",
+    "//sdk/lib/driver/fake-platform-device/rust",
+    "//sdk/rust/zx",
+    "//src/devices/bind/fuchsia:fuchsia_rust",
+    "//src/devices/driver-lab/bind:fuchsia.driver.lab_rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/mapped-vmo",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+}
+
+fuchsia_driver_component("component") {
+  testonly = true
+  component_name = "lab_root"
+  manifest = "meta/lab_root.cml"
+  deps = [
+    ":bind",
+    ":driver",
+  ]
+  info = "meta/lab_root_info.json"
+}
+
+driver_bind_rules("sample_bind") {
+  testonly = true
+  rules = "meta/lab_sample_driver.bind"
+  bind_output = "lab_sample_driver.bindbc"
+  deps = [ "//src/devices/driver-lab/bind:fuchsia.driver.lab" ]
+}
+
+fuchsia_rust_driver("sample_driver") {
+  testonly = true
+  edition = "2024"
+  output_name = "lab_sample_driver"
+  source_root = "src/sample_driver.rs"
+  sources = [ "src/sample_driver.rs" ]
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
+    "//sdk/lib/driver/component/rust",
+    "//sdk/rust/zx",
+    "//src/devices/driver-lab:driver_lab_rust",
+    "//src/lib/fidl/rust_next/fidl_next",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/mapped-vmo",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+}
+
+fuchsia_driver_component("sample_component") {
+  testonly = true
+  component_name = "lab_sample_driver"
+  manifest = "meta/lab_sample_driver.cml"
+  deps = [
+    ":sample_bind",
+    ":sample_driver",
+  ]
+  info = "meta/lab_sample_driver_info.json"
+}
+
+# Standalone package so the conformance workflow can register lab_root
+# and lab_sample_driver ephemerally on a running engineering target.
+fuchsia_driver_package("pkg") {
+  testonly = true
+  package_name = "lab_root"
+  driver_components = [
+    ":component",
+    ":sample_component",
+  ]
+}

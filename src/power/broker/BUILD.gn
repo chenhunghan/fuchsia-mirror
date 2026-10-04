@@ -22,6 +22,15 @@ group("tests") {
   ]
 }
 
+fuchsia_component_manifest("manifest") {
+  manifest = "meta/power_broker.cml"
+  component_name = "power-broker"
+}
+
+fuchsia_structured_config_rust_lib("broker_config") {
+  cm_label = ":manifest"
+}
+
 rustc_binary("bin") {
   output_name = "power-broker"
   edition = "2024"
@@ -33,6 +42,8 @@ rustc_binary("bin") {
   configs += [ "//build/config/rust:bootfs" ]
 
   deps = [
+    ":broker_config",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
     "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
     "//sdk/rust/zx",
     "//src/lib/async-utils",
@@ -72,8 +83,7 @@ rustc_binary("bin") {
 }
 
 fuchsia_component("component") {
-  component_name = "power-broker"
-  manifest = "meta/power_broker.cml"
+  cm_label = ":manifest"
   deps = [ ":bin" ]
 }
 

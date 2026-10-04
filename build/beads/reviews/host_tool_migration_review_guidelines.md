@@ -23,25 +23,25 @@ When reviewing a CL that migrates host tools from GN to Bazel:
 
 ### Rule 2.2: Target Compatibility (`target_compatible_with`)
 
-- **Standard Host Tools:** MUST set `target_compatible_with = HOST_CONSTRAINTS` (loaded from `@platforms//host:constraints.bzl`).
-- **IDK Host Tools:** MUST set `target_compatible_with = HOST_OS_CONSTRAINTS` (loaded from `@platforms//host:constraints.bzl` or `//build/bazel/platforms:constraints.bzl`).
+- **Host Tools, Tests, and Host-Only Libraries:** MUST set `target_compatible_with = HOST_OS_CONSTRAINTS` (loaded from `//build/bazel/platforms:constraints.bzl`). See [`target_compatible_with.md`](../references/target_compatible_with.md).
+- Do **NOT** use `HOST_CONSTRAINTS` (loaded from `@platforms//host:constraints.bzl`).
 
 **GOOD:**
 
 ```bazel
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
 
 package(default_applicable_licenses = ["//:license"])
 
 rustc_binary(
     name = "my_tool",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     ...
 )
 ```
 
-**BAD:** Missing `target_compatible_with` or omitting the `load` statement for `HOST_CONSTRAINTS`.
+**BAD:** Missing `target_compatible_with`, omitting the `load` statement for `HOST_OS_CONSTRAINTS`, or using `HOST_CONSTRAINTS`.
 
 ---
 

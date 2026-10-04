@@ -16,7 +16,7 @@ use crate::policy::{
     XpermsBitmap, XpermsKind, parse_policy_by_value,
 };
 use crate::sid_table::SidTable;
-use crate::sync::RwLock;
+use crate::sync::{LockDepRwLock, SeLinuxSecurityServerStateLock};
 use crate::{
     ClassPermission, FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions,
     FileSystemMountSids, InitialSid, KernelClass, KernelPermission, NullessByteStr, ObjectClass,
@@ -138,7 +138,7 @@ impl SecurityServerState {
 
 pub(crate) struct SecurityServerBackend {
     /// The mutable state of the security server.
-    state: RwLock<SecurityServerState>,
+    state: LockDepRwLock<SecurityServerState, SeLinuxSecurityServerStateLock>,
 
     /// True if the security server is enforcing, rather than permissive.
     /// Only modified with the `state` lock taken.
@@ -194,7 +194,7 @@ impl SecurityServer {
         }
 
         let backend = Arc::new(SecurityServerBackend {
-            state: RwLock::new(SecurityServerState {
+            state: LockDepRwLock::new(SecurityServerState {
                 active_policy: None,
                 booleans: SeLinuxBooleans::default(),
                 status_publisher: None,

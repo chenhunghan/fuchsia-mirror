@@ -36,6 +36,7 @@
 #include <fbl/mutex.h>
 #include <usb-endpoint/usb-endpoint-client.h>
 #include <usb-inspect/usb-inspect.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 #include <usb/usb.h>
@@ -87,9 +88,14 @@ class VsockUsb : public fdf::DriverBase2,
   // Unconfigured state.
   zx_status_t ConfigureEndpoints();
 
+  // Creates a new datagram socket pair, transitions state to Running, queues any available
+  // RX requests, and notifies the registered callback if present.
+  zx_status_t StartSocketSession();
+
   // Disables the device's endpoints, cancels any outstanding requests, and moves the device
   // into the Unconfigured state if it's not already there.
-  zx_status_t UnconfigureEndpoints();
+  zx_status_t UnconfigureEndpoints(bool disable_immediately = true);
+  zx_status_t DisableEndpoints();
 
   // Cancels all pending requests on bulk IN and OUT endpoints.
   void CancelAllEndpoints();
@@ -150,7 +156,7 @@ class VsockUsb : public fdf::DriverBase2,
         : socket_(std::move(socket)),
           read_waiter_(
               std::make_unique<async::WaitMethod<VsockUsb, &VsockUsb::HandleSocketReadable>>(
-                  owner, socket_.get(), ZX_SOCKET_READABLE)),
+                  owner, socket_.get(), ZX_SOCKET_READABLE | ZX_SOCKET_PEER_CLOSED)),
           write_waiter_(
               std::make_unique<async::WaitMethod<VsockUsb, &VsockUsb::HandleSocketWritable>>(
                   owner, socket_.get(), ZX_SOCKET_WRITABLE)),
@@ -227,6 +233,8 @@ class VsockUsb : public fdf::DriverBase2,
     }
     // Called when a socket is writable. Shouldn't happen.
     State Writable() && { return std::move(*this); }
+    bool IsFinished() const { return finished_; }
+
     // Called when shutdown has been successful.
     void FinishWithCallback() {
       if (finished_) {
@@ -404,31 +412,30 @@ class VsockUsb : public fdf::DriverBase2,
       .data_interface =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,  // set later
               .b_alternate_setting = 0,
               .b_num_endpoints = 2,
-              .b_interface_class = USB_CLASS_VENDOR,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
               .b_interface_sub_class =
-                  bind_fuchsia_google_platform_usb::BIND_USB_SUBCLASS_VSOCK_BRIDGE,
-              .b_interface_protocol =
-                  bind_fuchsia_google_platform_usb::BIND_USB_PROTOCOL_VSOCK_BRIDGE,
+                  fidl::ToUnderlying(fdescriptor::VendorSubclass::kVsockBridge),
+              .b_interface_protocol = fidl::ToUnderlying(fdescriptor::VsockProtocol::kVsockBridge),
               .i_interface = 0,
           },
       .out_ep =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = 0,  // set later
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(kMaxPacketSize),
               .b_interval = 0,
           },
       .in_ep = {
           .b_length = sizeof(usb_endpoint_descriptor_t),
-          .b_descriptor_type = USB_DT_ENDPOINT,
+          .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
           .b_endpoint_address = 0,  // set later
-          .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+          .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
           .w_max_packet_size = htole16(kMaxPacketSize),
           .b_interval = 0,
       }};
@@ -438,6 +445,12 @@ class VsockUsb : public fdf::DriverBase2,
   // lifecycle (which resets to Unconfigured when a client socket disconnects while hardware
   // endpoints remain configured).
   bool endpoints_configured_ = false;
+  bool bulk_out_cancelled_ = false;
+  bool bulk_in_cancelled_ = false;
+  std::optional<SetConfiguredCompleter::Async> unconfigure_completer_;
+
+  void CheckUnconfigureComplete();
+
   async_dispatcher_t* dispatcher_ = fdf::Dispatcher::GetCurrent()->async_dispatcher();
 };
 

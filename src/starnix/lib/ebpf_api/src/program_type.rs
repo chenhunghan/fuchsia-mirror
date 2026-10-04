@@ -74,14 +74,12 @@ use linux_uapi::{
     bpf_prog_type_BPF_PROG_TYPE_SYSCALL, bpf_prog_type_BPF_PROG_TYPE_TRACEPOINT,
     bpf_prog_type_BPF_PROG_TYPE_TRACING, bpf_prog_type_BPF_PROG_TYPE_UNSPEC,
     bpf_prog_type_BPF_PROG_TYPE_XDP, bpf_sock, bpf_sock_addr, bpf_sockopt, bpf_user_pt_regs_t,
-    fuse_bpf_arg, fuse_bpf_args, fuse_entry_bpf_out, fuse_entry_out, seccomp_data, xdp_md,
+    seccomp_data, xdp_md,
 };
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::{Arc, LazyLock};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
-
-pub const BPF_PROG_TYPE_FUSE: u32 = 0x77777777;
 
 #[derive(Clone, Default, Debug)]
 pub struct BpfTypeFilter(Vec<ProgramType>);
@@ -249,7 +247,6 @@ static BPF_HELPERS_DEFINITIONS: LazyLock<Vec<(BpfTypeFilter, HelperDefinition)>>
                     ProgramType::CgroupSock,
                     ProgramType::CgroupSockAddr,
                     ProgramType::CgroupSockopt,
-                    ProgramType::Fuse,
                     ProgramType::Kprobe,
                     ProgramType::Tracepoint,
                 ]
@@ -269,7 +266,6 @@ static BPF_HELPERS_DEFINITIONS: LazyLock<Vec<(BpfTypeFilter, HelperDefinition)>>
                     ProgramType::CgroupSock,
                     ProgramType::CgroupSockAddr,
                     ProgramType::CgroupSockopt,
-                    ProgramType::Fuse,
                     ProgramType::Kprobe,
                     ProgramType::Tracepoint,
                 ]
@@ -808,7 +804,7 @@ static BPF_HELPERS_DEFINITIONS: LazyLock<Vec<(BpfTypeFilter, HelperDefinition)>>
     });
 
 /// A type of a struct that may be passed to eBPF programs.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StructId {
     SkBuff = 1,
     XdpMd = 2,
@@ -816,7 +812,6 @@ pub enum StructId {
     BpfSock = 4,
     BpfSockOpt = 5,
     BpfSockAddr = 6,
-    BpfFuse = 7,
 }
 
 impl StructId {
@@ -834,7 +829,6 @@ impl From<StructId> for febpf::StructId {
             StructId::BpfSock => febpf::StructId::BpfSock,
             StructId::BpfSockOpt => febpf::StructId::BpfSockOpt,
             StructId::BpfSockAddr => febpf::StructId::BpfSockAddr,
-            StructId::BpfFuse => febpf::StructId::BpfFuse,
         }
     }
 }
@@ -855,8 +849,6 @@ impl TryFrom<&MemoryId> for StructId {
             Ok(StructId::BpfSockOpt)
         } else if *value == StructId::BpfSockAddr.as_memory_id() {
             Ok(StructId::BpfSockAddr)
-        } else if *value == StructId::BpfFuse.as_memory_id() {
-            Ok(StructId::BpfFuse)
         } else {
             Err(())
         }
@@ -872,7 +864,6 @@ impl From<febpf::StructId> for StructId {
             febpf::StructId::BpfSock => StructId::BpfSock,
             febpf::StructId::BpfSockOpt => StructId::BpfSockOpt,
             febpf::StructId::BpfSockAddr => StructId::BpfSockAddr,
-            febpf::StructId::BpfFuse => StructId::BpfFuse,
             febpf::StructId::__SourceBreaking { unknown_ordinal } => {
                 panic!("Invalid struct id: {}", unknown_ordinal)
             }
@@ -1165,27 +1156,6 @@ pub static BPF_SOCK_ADDR_INET6_TYPE: LazyLock<Type> = LazyLock::new(|| {
 pub static BPF_SOCK_ADDR_INET6_ARGS: LazyLock<Vec<Type>> =
     LazyLock::new(|| vec![BPF_SOCK_ADDR_INET6_TYPE.clone()]);
 
-static BPF_FUSE_ID: MemoryId = StructId::BpfFuse.as_memory_id();
-static BPF_FUSE_TYPE: LazyLock<Type> = LazyLock::new(|| {
-    ptr_to_struct_type(
-        BPF_FUSE_ID.clone(),
-        vec![
-            scalar_field(0, offset_of!(fuse_bpf_args, out_args)),
-            ptr_to_mem_field::<fuse_entry_out>(
-                offset_of!(fuse_bpf_args, out_args) + offset_of!(fuse_bpf_arg, value),
-                MemoryId::new(),
-            ),
-            ptr_to_mem_field::<fuse_entry_bpf_out>(
-                offset_of!(fuse_bpf_args, out_args)
-                    + std::mem::size_of::<fuse_bpf_arg>()
-                    + offset_of!(fuse_bpf_arg, value),
-                MemoryId::new(),
-            ),
-        ],
-    )
-});
-static BPF_FUSE_ARGS: LazyLock<Vec<Type>> = LazyLock::new(|| vec![BPF_FUSE_TYPE.clone()]);
-
 #[repr(C)]
 #[derive(Copy, Clone, IntoBytes, Immutable, KnownLayout, FromBytes)]
 struct TraceEntry {
@@ -1259,8 +1229,6 @@ pub enum ProgramType {
     Tracing,
     Unspec,
     Xdp,
-    /// Custom id for Fuse
-    Fuse,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
@@ -1314,7 +1282,6 @@ impl TryFrom<u32> for ProgramType {
             bpf_prog_type_BPF_PROG_TYPE_TRACING => Ok(Self::Tracing),
             bpf_prog_type_BPF_PROG_TYPE_UNSPEC => Ok(Self::Unspec),
             bpf_prog_type_BPF_PROG_TYPE_XDP => Ok(Self::Xdp),
-            BPF_PROG_TYPE_FUSE => Ok(Self::Fuse),
             program_type @ _ => Err(EbpfApiError::InvalidProgramType(program_type)),
         }
     }
@@ -1358,7 +1325,6 @@ impl From<ProgramType> for u32 {
             ProgramType::Tracing => bpf_prog_type_BPF_PROG_TYPE_TRACING,
             ProgramType::Unspec => bpf_prog_type_BPF_PROG_TYPE_UNSPEC,
             ProgramType::Xdp => bpf_prog_type_BPF_PROG_TYPE_XDP,
-            ProgramType::Fuse => BPF_PROG_TYPE_FUSE,
         }
     }
 }
@@ -1422,8 +1388,6 @@ impl ProgramType {
 
                 _ => return Err(EbpfApiError::InvalidExpectedAttachType(expected_attach_type)),
             },
-
-            Self::Fuse => &BPF_FUSE_ARGS,
 
             Self::CgroupDevice
             | Self::CgroupSysctl
@@ -1850,3 +1814,27 @@ pub const SOCKET_FILTER_CBPF_CONFIG: CbpfConfig = CbpfConfig {
     len: CbpfLenInstruction::ContextField { offset: offset_of!(__sk_buff, len) as i16 },
     allow_msh: true,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_invalid_program_type() {
+        assert_eq!(
+            ProgramType::try_from(0x77777777),
+            Err(EbpfApiError::InvalidProgramType(0x77777777))
+        );
+        assert_eq!(
+            ProgramType::try_from(u32::MAX),
+            Err(EbpfApiError::InvalidProgramType(u32::MAX))
+        );
+    }
+
+    #[test]
+    fn test_invalid_struct_id() {
+        assert_eq!(StructId::try_from(&MemoryId::from_raw(0)), Err(()));
+        assert_eq!(StructId::try_from(&MemoryId::from_raw(7)), Err(()));
+        assert_eq!(StructId::try_from(&MemoryId::from_raw(u64::MAX)), Err(()));
+    }
+}

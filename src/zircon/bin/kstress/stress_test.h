@@ -14,7 +14,9 @@
 #include <memory>
 #include <random>
 
+#include <fbl/auto_lock.h>
 #include <fbl/macros.h>
+#include <fbl/mutex.h>
 #include <fbl/vector.h>
 
 class StressTest {
@@ -87,6 +89,8 @@ class StressTest {
 
   using Rng = std::mt19937_64;
   Rng RngGen() {
+    // |rand_gen_| is shared by all test threads, which may call RngGen() concurrently.
+    fbl::AutoLock lock(&rand_gen_lock_);
     // Seed a new random generator from our initially seeded one.
     Rng rng;
     std::seed_seq seed{rand_gen_(), rand_gen_(), rand_gen_(), rand_gen_(),
@@ -99,7 +103,8 @@ class StressTest {
   // global list of all the stress tests, registered at app start
   static fbl::Vector<StressTest*> tests_;
 
-  Rng rand_gen_;
+  fbl::Mutex rand_gen_lock_;
+  Rng rand_gen_ __TA_GUARDED(rand_gen_lock_);
   bool verbose_{false};
   zx_info_kmem_stats_t kmem_stats_{};
   uint32_t num_cpus_{};

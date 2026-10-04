@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "tools/fidl/fidlc/src/diagnostics.h"
 #include "tools/fidl/fidlc/src/flat_ast.h"
 #include "tools/fidl/fidlc/src/properties.h"
 #include "tools/fidl/fidlc/tests/test_library.h"
@@ -751,6 +752,19 @@ TEST(TypesTests, GoodExperimentalPointerWithFlag) {
   TestLibrary library("library example; alias T = experimental_pointer<uint32>;");
   library.EnableFlag(ExperimentalFlag::kZxCTypes);
   ASSERT_COMPILED(library);
+}
+
+TEST(TypesTests, BadNonZeroPrimitive) {
+  TestLibrary library;
+  library.AddFile("bad/fi-0224.test.fidl");
+  library.ExpectFail(ErrCannotBeNonZero, "float32");
+  ASSERT_COMPILER_DIAGNOSTICS(library);
+}
+
+TEST(TypesTests, BadNonZeroOptionalPrimitive) {
+  TestLibrary library("library example; alias foo = int32:<nonzero, optional>;");
+  library.ExpectFail(ErrTooManyConstraints, "int32", 1, 2);
+  ASSERT_COMPILER_DIAGNOSTICS(library);
 }
 
 }  // namespace

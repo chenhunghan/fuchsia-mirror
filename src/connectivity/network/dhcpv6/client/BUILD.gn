@@ -39,7 +39,6 @@ network_unified_binary("dhcpv6_client") {
     "//third_party/rust_crates:thiserror",
   ]
   test_deps = [
-    "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
     "//src/connectivity/lib/net-declare",
     "//third_party/rust_crates:test-case",
   ]
@@ -80,7 +79,7 @@ fuchsia_test_with_expectations_package("dhcpv6-client-test-with-err-logs") {
   deps = [
     # The DHCPv6 client creates sockets so it depends on an implementation of
     # `fuchsia.posix.socket.Provider`.
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
   ]
 }
 
@@ -91,7 +90,7 @@ fuchsia_test_with_expectations_package("dhcpv6-client-test-no-err-logs") {
   deps = [
     # The DHCPv6 client creates sockets so it depends on an implementation of
     # `fuchsia.posix.socket.Provider`.
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
   ]
 }
 

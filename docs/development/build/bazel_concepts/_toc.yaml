@@ -8,6 +8,10 @@
 toc:
 - title: "Project layout and organization"
   path: /docs/development/build/bazel_concepts/project_layout.md
+- title: "Labels"
+  path: /docs/development/build/bazel_concepts/labels.md
+- title: "Extension (.bzl) files"
+  path: /docs/development/build/bazel_concepts/bzl_files.md
 - title: "Build outputs"
   path: /docs/development/build/bazel_concepts/build_outputs.md
 - title: "Build configurations"

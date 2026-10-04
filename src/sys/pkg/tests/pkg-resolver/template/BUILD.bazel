@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "lib",
+    srcs = ["regenerate-metadata.go"],
+    importpath = "go.fuchsia.dev/fuchsia/src/sys/pkg/tests/pkg-resolver/template",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/golibs:github.com/theupdateframework/go-tuf",
+        "//third_party/golibs:github.com/theupdateframework/go-tuf/data",  # @bazel2gn:skip
+        "//third_party/golibs:github.com/theupdateframework/go-tuf/pkg/keys",  # @bazel2gn:skip
+    ],
+)
+
+go_binary_host_tool(
+    name = "regenerate-metadata",
+    testonly = True,
+    embed = [":lib"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//third_party/golibs:github.com/theupdateframework/go-tuf"],
+)

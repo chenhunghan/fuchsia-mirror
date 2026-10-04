@@ -26,12 +26,14 @@ use http_uri_ext::HttpUriExt as _;
 use include_str_from_working_dir::include_str_from_working_dir_env;
 use log::{error, info, warn};
 use std::collections::HashSet;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use update_package::manifest::OtaManifest;
 
 mod config;
+mod crash_report;
 mod environment;
 mod genutil;
 mod history;
@@ -270,6 +272,7 @@ pub trait Updater {
 pub struct RealUpdater {
     history: Arc<Mutex<UpdateHistory>>,
     structured_config: system_updater_config::Config,
+    crash_reporter: crash_report::CrashReporter,
 }
 
 impl RealUpdater {
@@ -277,7 +280,7 @@ impl RealUpdater {
         history: Arc<Mutex<UpdateHistory>>,
         structured_config: system_updater_config::Config,
     ) -> Self {
-        Self { history, structured_config }
+        Self { history, structured_config, crash_reporter: crash_report::CrashReporter::new() }
     }
 }
 
@@ -307,6 +310,9 @@ impl Updater for RealUpdater {
                 }
             })
             .collect();
+        let excessive_update_duration =
+            NonZeroU32::new(self.structured_config.excessive_update_duration_seconds)
+                .map(|d| Duration::from_secs(d.get().into()));
         let (attempt_id, attempt) = update(
             config,
             env,
@@ -316,7 +322,9 @@ impl Updater for RealUpdater {
             self.structured_config.concurrent_blob_fetches.into(),
             self.structured_config.verify_existing_blobs,
             manifest_public_keys,
+            excessive_update_duration,
             cancel_receiver,
+            self.crash_reporter.clone(),
         )
         .await;
         (attempt_id, Box::pin(attempt))
@@ -341,7 +349,9 @@ async fn update(
     concurrent_blob_fetches: usize,
     verify_existing_blobs: bool,
     manifest_public_keys: Vec<ring::signature::UnparsedPublicKey<Vec<u8>>>,
+    excessive_update_duration: Option<Duration>,
     mut cancel_receiver: oneshot::Receiver<()>,
+    crash_reporter: crash_report::CrashReporter,
 ) -> (String, impl FusedStream<Item = fupdate_installer_ext::State>) {
     let attempt_fut = history.lock().start_update_attempt(
         fupdate_installer_ext::Options {
@@ -415,18 +425,39 @@ async fn update(
         };
 
         let status_code = metrics::result_to_status_code(attempt_res.as_ref().map(|_| ()));
+        // TODO(https://fxbug.dev/568366644): account for suspend duration.
+        let update_duration = config.start_time_mono.elapsed();
         let attempt_res = match attempt_res {
-            Ok(ok) => Some(ok),
-            Err(e) => {
-                if let AttemptError::UpdateCanceled = e {
-                    co.yield_(fupdate_installer_ext::State::Canceled).await;
+            Ok(ok) => {
+                if let Some(threshold) = excessive_update_duration
+                    && update_duration > threshold
+                {
+                    warn!(
+                        "system update duration ({}s) exceeded threshold ({}s), filing crash report",
+                        update_duration.as_secs(),
+                        threshold.as_secs()
+                    );
+                    crash_reporter.excessive_update_duration();
                 }
-                error!("system update failed: {:#}", anyhow!(e));
+                Some(ok)
+            }
+            Err(e) => {
+                use crate::update::AttemptError::*;
+                match e {
+                    Prepare(_) | Stage(_) | Fetch(_) | Commit(_) | CancelSenderDropped(_) => {
+                        error!("system update failed: {:#}", anyhow!(e));
+                        crash_reporter.installation_error();
+                    }
+                    UpdateCanceled => {
+                        co.yield_(fupdate_installer_ext::State::Canceled).await;
+                        info!("system update canceled");
+                    }
+                }
                 None
             }
         };
 
-        info!("system update attempt completed, logging metrics");
+        info!("system update attempt completed in {}s, logging metrics", update_duration.as_secs());
         cobalt.log_ota_result_attempt(
             config.initiator,
             history.lock().attempts_for(&source_version, &target_version) + 1,
@@ -437,7 +468,7 @@ async fn update(
             config.initiator,
             phase,
             status_code,
-            config.start_time_mono.elapsed(),
+            update_duration,
         );
         drop(cobalt);
 
@@ -1315,9 +1346,11 @@ impl PackagelessAttempt<'_> {
             None
         };
         let manifest_bytes =
-            fetch_url(&update_url, manifest_range, self.config.manifest_headers.clone())
-                .await
-                .map_err(PrepareError::FetchUrl)?;
+            fuchsia_backoff::retry_or_last_error(ManifestFetchBackoff::default(), || {
+                fetch_url(&update_url, manifest_range, self.config.manifest_headers.clone())
+            })
+            .await
+            .map_err(PrepareError::FetchUrl)?;
         let manifest_size = manifest_bytes.len() as u64;
 
         let manifest = update_package::signed_manifest::parse_and_verify(
@@ -1956,6 +1989,60 @@ async fn replace_retained_blobs(
         error!("error serving {} protocol: {:#}", fpkg::RetainedBlobsMarker::DEBUG_NAME, anyhow!(e))
     });
     replace_resp.await.context("calling RetainedBlobs.Replace")
+}
+
+fn is_transient_fetch_error(err: &fetch_url::errors::FetchUrlError) -> bool {
+    use fetch_url::errors::FetchUrlError::*;
+    match err {
+        LoaderFetchError(_)
+        | ReadFromSocketError(_)
+        | SizeReadMismatch(_, _)
+        | UrlReadBodyError
+        | NoStatusResponse => true,
+        UnexpectedHttpStatusCode(_)
+        | FidlHttpServiceConnectionError(_)
+        | LoaderFIDLError(_)
+        | DuplicateRangeHeader => false,
+    }
+}
+
+#[derive(Default)]
+struct ManifestFetchBackoff {
+    retries: u32,
+}
+
+impl fuchsia_backoff::Backoff<fetch_url::errors::FetchUrlError> for ManifestFetchBackoff {
+    fn next_backoff(&mut self, err: &fetch_url::errors::FetchUrlError) -> Option<Duration> {
+        const MAX_MANIFEST_FETCH_RETRIES: u32 = 2;
+        if self.retries < MAX_MANIFEST_FETCH_RETRIES && is_transient_fetch_error(err) {
+            let delay = 1 << self.retries;
+            self.retries += 1;
+            warn!(
+                "failed to fetch manifest (attempt {}/{}), retrying in {delay}s: {}",
+                self.retries,
+                MAX_MANIFEST_FETCH_RETRIES + 1,
+                stringify_error(err)
+            );
+            Some(Duration::from_secs(delay))
+        } else {
+            None
+        }
+    }
+}
+
+// Replicates `format!("{:#}", anyhow!(err))` but without consuming `err` or converting it into an
+// `anyhow::Error`, so that the original, un-type-erased error can be propagated.
+// Normally errors should either be propagated XOR logged, but in this case `fuchsia_backoff`
+// doesn't know in advance whether to retry or not, so we only get a reference to the error and
+// can't convert it into an anyhow::Error.
+fn stringify_error(mut err: &dyn std::error::Error) -> String {
+    let mut result = err.to_string();
+    while let Some(source) = err.source() {
+        use std::fmt::Write as _;
+        let _ = write!(result, ": {source}");
+        err = source;
+    }
+    result
 }
 
 #[cfg(test)]

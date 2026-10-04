@@ -87,8 +87,9 @@ zx_status_t DeviceState::InitializeEndpointContext(const UsbXhci& hci, uint8_t s
   if (hub_info) {
     speed = static_cast<uint8_t>(hub_info->speed);
     // TODO(https://fxbug.dev/42109653): USB 3.1 support. Section 6.2.2
-    if (((speed == USB_SPEED_LOW) || (speed == USB_SPEED_FULL)) &&
-        (hub_info->hub_speed == USB_SPEED_HIGH)) {
+    if (((speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kLow) ||
+         (speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kFull)) &&
+        (hub_info->hub_speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh)) {
       hub_info->tt_info.emplace(
           tt_info_t{.tt_slot_id = hub_info->hub_state->GetSlot(), .tt_port_number = port_id});
     }
@@ -99,15 +100,15 @@ zx_status_t DeviceState::InitializeEndpointContext(const UsbXhci& hci, uint8_t s
   } else {
     speed = hci.GetPortSpeed(port_id);
   }
-  switch (speed) {
-    case USB_SPEED_SUPER:
+  switch (static_cast<fuchsia_hardware_usb_descriptor::UsbSpeed>(speed)) {
+    case fuchsia_hardware_usb_descriptor::UsbSpeed::kSuper:
       mps = 512;
       break;
-    case USB_SPEED_FULL:
-    case USB_SPEED_HIGH:
+    case fuchsia_hardware_usb_descriptor::UsbSpeed::kFull:
+    case fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh:
       mps = 64;
       break;
-    case USB_SPEED_LOW:
+    case fuchsia_hardware_usb_descriptor::UsbSpeed::kLow:
     default:
       mps = 8;
       break;

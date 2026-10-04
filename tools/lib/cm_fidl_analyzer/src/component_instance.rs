@@ -11,9 +11,8 @@ use crate::component_sandbox::{
 use async_trait::async_trait;
 use capability_source::{BuiltinCapabilities, NamespaceCapabilities};
 use cm_config::RuntimeConfig;
-use cm_rust::offer::OfferDecl;
-use cm_rust::{CapabilityDecl, CollectionDecl, ComponentDecl, ExposeDecl, UseDecl};
-use cm_types::{Name, Url};
+use cm_rust::ComponentDecl;
+use cm_types::Url;
 use config_encoder::ConfigFields;
 use fuchsia_sync::{Mutex, RwLock};
 use moniker::{BorrowedChildName, ChildName, Moniker};
@@ -22,8 +21,8 @@ use routing::bedrock::program_output_dict::build_program_output_dictionary;
 use routing::bedrock::sandbox_construction::{ComponentSandbox, build_component_sandbox};
 use routing::bedrock::structured_dict::ComponentInput;
 use routing::component_instance::{
-    ComponentInstanceInterface, ExtendedInstanceInterface, ResolvedInstanceInterface,
-    TopInstanceInterface, WeakExtendedInstanceInterface,
+    ComponentInstanceInterface, ExtendedInstanceInterface, TopInstanceInterface,
+    WeakExtendedInstanceInterface,
 };
 use routing::error::{ComponentInstanceError, ErrorReporter, RouteRequestErrorInfo};
 use routing::policy::GlobalPolicyChecker;
@@ -210,15 +209,6 @@ impl ComponentInstanceForAnalyzer {
         &self.moniker
     }
 
-    // A (nearly) no-op sync function used to implement the async trait method `lock_resolved_instance`
-    // for `ComponentInstanceInterface`.
-    pub(crate) fn resolve<'a>(
-        self: &'a Arc<Self>,
-    ) -> Result<Box<dyn ResolvedInstanceInterface<Component = Self> + 'a>, ComponentInstanceError>
-    {
-        Ok(Box::new(&**self))
-    }
-
     pub fn config_fields(&self) -> Option<&ConfigFields> {
         self.config.as_ref()
     }
@@ -259,68 +249,27 @@ impl ComponentInstanceInterface for ComponentInstanceForAnalyzer {
         &self.component_id_index
     }
 
-    // The trait definition requires this function to be async, but `ComponentInstanceForAnalyzer`'s
-    // implementation must not await. This method is called by `route_capability`, which must
-    // return immediately for `ComponentInstanceForAnalyzer` (see
-    // `ComponentModelForAnalyzer::route_capability_sync()`).
-    //
-    // TODO(https://fxbug.dev/42168300): Remove this comment when Scrutiny's `DataController` can make async
-    // function calls.
-    async fn lock_resolved_state<'a>(
-        self: &'a Arc<Self>,
-    ) -> Result<
-        Box<dyn ResolvedInstanceInterface<Component = ComponentInstanceForAnalyzer> + 'a>,
-        ComponentInstanceError,
-    > {
-        self.resolve()
-    }
-
     async fn component_sandbox(
         self: &Arc<Self>,
     ) -> Result<ComponentSandbox, ComponentInstanceError> {
         Ok(self.sandbox.lock().clone())
     }
-}
 
-#[async_trait]
-impl ResolvedInstanceInterface for ComponentInstanceForAnalyzer {
-    type Component = Self;
-
-    fn try_uses(&self) -> Option<Box<[UseDecl]>> {
-        Some(self.decl.uses.clone())
+    async fn get_child_maybe_resolve(
+        self: &Arc<Self>,
+        moniker: &BorrowedChildName,
+    ) -> Result<Option<Arc<Self>>, ComponentInstanceError> {
+        Ok(self.children.read().get(moniker).map(Arc::clone))
     }
 
-    fn try_exposes(&self) -> Option<Box<[ExposeDecl]>> {
-        Some(self.decl.exposes.clone())
-    }
-
-    fn try_offers(&self) -> Option<Box<[OfferDecl]>> {
-        Some(self.decl.offers.clone())
-    }
-
-    fn try_capabilities(&self) -> Option<Box<[CapabilityDecl]>> {
-        Some(self.decl.capabilities.clone())
-    }
-
-    fn try_collections(&self) -> Option<Box<[CollectionDecl]>> {
-        Some(self.decl.collections.clone())
-    }
-
-    fn get_child(&self, moniker: &BorrowedChildName) -> Option<Arc<Self>> {
-        self.children.read().get(moniker).map(Arc::clone)
-    }
-
-    // This is a static model with no notion of a collection.
-    fn children_in_collection(&self, _collection: &Name) -> Vec<(ChildName, Arc<Self>)> {
-        vec![]
-    }
-
-    async fn address(&self) -> Result<ComponentAddress, ResolverError> {
+    async fn address_maybe_resolve(self: &Arc<Self>) -> Result<ComponentAddress, ResolverError> {
         Ok(ComponentAddress::from_absolute_url(&"none://not_used".parse().unwrap()).unwrap())
     }
 
-    fn context_to_resolve_children(&self) -> Option<ComponentResolutionContext> {
-        None
+    async fn context_to_resolve_children(
+        self: &Arc<Self>,
+    ) -> Result<Option<ComponentResolutionContext>, ComponentInstanceError> {
+        Ok(None)
     }
 }
 
@@ -357,12 +306,12 @@ mod tests {
     use cm_rust_testing::ComponentDeclBuilder;
     use futures::FutureExt;
 
-    // Spot-checks that `ComponentInstanceForAnalyzer`'s implementation of the `ComponentInstanceInterface`
-    // trait method `lock_resolved_state()` returns immediately. In addition, updates to that method should
+    // Spot-checks that `ComponentInstanceForAnalyzer`'s implementation of `ComponentInstanceInterface`
+    // trait methods return immediately. In addition, updates to those methods should
     // be reviewed to make sure that this property holds; otherwise, `ComponentModelForAnalyzer`'s sync
     // methods may panic.
     #[test]
-    fn lock_resolved_state_is_sync() {
+    fn component_instance_interface_methods_are_sync() {
         let decl = ComponentDeclBuilder::new().build();
         let url = "base://some_url";
 
@@ -377,6 +326,8 @@ mod tests {
             Arc::new(DynamicDictionaryConfig::default()),
         );
 
-        assert!(instance.lock_resolved_state().now_or_never().is_some())
+        assert!(instance.component_sandbox().now_or_never().is_some());
+        assert!(instance.address_maybe_resolve().now_or_never().is_some());
+        assert!(instance.context_to_resolve_children().now_or_never().is_some());
     }
 }

@@ -19,6 +19,7 @@
 
 #include <usb-endpoint/usb-endpoint-client.h>
 #include <usb-inspect/usb-inspect.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 #include <usb/usb.h>
@@ -149,41 +150,43 @@ class UsbFastbootFunction
       .fastboot_intf =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,  // set later
               .b_alternate_setting = 0,
               .b_num_endpoints = 2,
-              .b_interface_class = USB_CLASS_VENDOR,
-              .b_interface_sub_class = USB_SUBCLASS_FASTBOOT,
-              .b_interface_protocol = USB_PROTOCOL_FASTBOOT,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
+              .b_interface_sub_class =
+                  fidl::ToUnderlying(fdescriptor::VendorSubclass::kAdbFastboot),
+              .b_interface_protocol =
+                  fidl::ToUnderlying(fdescriptor::AdbFastbootProtocol::kFastboot),
               .i_interface = 0,
           },
       .bulk_out_ep =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = 0,  // set later during AllocEp
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(uint16_t{kPacketSize}),
               .b_interval = 0,
           },
       .bulk_in_ep =
           {
               .b_length = sizeof(usb_endpoint_descriptor_t),
-              .b_descriptor_type = USB_DT_ENDPOINT,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
               .b_endpoint_address = 0,  // set later during AllocEp
-              .bm_attributes = static_cast<uint8_t>(fdescriptor::EndpointType::kBulk),
+              .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
               .w_max_packet_size = htole16(uint16_t{kPacketSize}),
               .b_interval = 0,
           },
       .placeholder_intf =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
-              .b_descriptor_type = USB_DT_INTERFACE,
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
               .b_interface_number = 0,
               .b_alternate_setting = 0,
               .b_num_endpoints = 0,
-              .b_interface_class = USB_CLASS_VENDOR,
+              .b_interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kVendor),
               .b_interface_sub_class = 0,
               .b_interface_protocol = 0,
               .i_interface = 0,

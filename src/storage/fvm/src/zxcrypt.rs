@@ -63,7 +63,8 @@ impl Key {
         let key = fidl_fuchsia_fxfs::WrappedKey::Zxcrypt(
             data[..std::mem::size_of::<ZxcryptHeaderAndKey>()].to_vec(),
         );
-        let unwrapped_key = crypt.unwrap_key(0, &key).await?.map_err(zx::Status::err_from_raw)?;
+        let (unwrapped_key, _) =
+            crypt.unwrap_key(0, &key).await?.map_err(zx::Status::err_from_raw)?;
 
         Ok(Self {
             data_cipher: Aes256::new_from_slice(&unwrapped_key[..32]).unwrap(),

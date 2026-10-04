@@ -10,6 +10,7 @@ use diagnostics_reader::{ArchiveReader, InspectArchiveReader};
 use fidl::endpoints::Proxy;
 use fidl_fuchsia_diagnostics as fdiagnostics;
 use fidl_fuchsia_diagnostics_persistence as fpersistence;
+use fidl_fuchsia_hardware_power_statecontrol as fpower;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_power_battery as fbattery;
 use fidl_fuchsia_update as fupdate;
@@ -135,6 +136,23 @@ pub async fn main(_args: CommandLine) -> Result<(), Error> {
         });
     }
 
+    if config.enable_shutdown_snapshot {
+        if let Ok(shutdown_watcher_register) =
+            connect_to_protocol::<fpower::ShutdownWatcherRegisterMarker>()
+        {
+            let collector_shutdown = collector.clone();
+            scope.spawn(async move {
+                if let Err(e) =
+                    listen_for_shutdown(shutdown_watcher_register, collector_shutdown).await
+                {
+                    warn!(e:?; "Shutdown watcher task terminated");
+                }
+            });
+        }
+    } else {
+        info!("Shutdown snapshot trigger disabled by configuration");
+    }
+
     fuchsia_inspect::component::health().set_ok();
     scope.await;
 
@@ -184,6 +202,30 @@ async fn listen_for_low_battery(
 
                 responder.send()?;
             }
+        }
+    }
+    Ok(())
+}
+
+async fn listen_for_shutdown(
+    shutdown_watcher_register: fpower::ShutdownWatcherRegisterProxy,
+    collector: Arc<Mutex<SnapshotCollector>>,
+) -> Result<(), Error> {
+    let (watcher_client, mut request_stream) =
+        fidl::endpoints::create_request_stream::<fpower::ShutdownWatcherMarker>();
+    shutdown_watcher_register.register_watcher(watcher_client).await?;
+
+    while let Some(request) = request_stream.try_next().await? {
+        match request {
+            fpower::ShutdownWatcherRequest::OnShutdown { options: _, responder } => {
+                info!("Shutdown initiated, collecting active snapshot");
+                if let Err(e) = collector.lock().await.collect_active_snapshot().await {
+                    error!(e:?; "Error collecting active snapshot on shutdown");
+                }
+                let _ = responder.send();
+                break;
+            }
+            fpower::ShutdownWatcherRequest::_UnknownMethod { .. } => {}
         }
     }
     Ok(())

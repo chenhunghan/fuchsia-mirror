@@ -6,12 +6,13 @@
 import argparse
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from fuchsia.tools.fuchsia_task_lib import Terminal
 
 
-def run(*command) -> None:
+def run(*command: str | Path) -> None:
     try:
         # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
         # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE
@@ -30,13 +31,13 @@ def run(*command) -> None:
         raise e
 
 
-def parse_args() -> None:
+def parse_args() -> argparse.Namespace:
     """Parses arguments."""
     parser = argparse.ArgumentParser()
 
-    def path_arg(type="file"):
-        def arg(path):
-            path = Path(path)
+    def path_arg(type: str = "file") -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             if (
                 type == "file"
                 and not path.is_file()
@@ -76,7 +77,7 @@ def parse_args() -> None:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     # Parse arguments.
     args = parse_args()
 
@@ -84,7 +85,7 @@ def main():
         print(Terminal.warn("No debug symbols to register."))
 
     for build_id_dir, _build_dir in zip(args.build_id_dirs, args.build_dirs):
-        build_dir_args = []
+        build_dir_args: list[str | Path] = []
         build_dir = Path(os.getenv(_build_dir, _build_dir)).resolve()
         if build_dir.is_file():
             build_dir = build_dir.parent

@@ -30,7 +30,6 @@
 #include "src/devices/bin/driver_manager/bind/bind_result_tracker.h"
 #include "src/devices/bin/driver_manager/bootup_tracker.h"
 #include "src/devices/bin/driver_manager/controller_allowlist_passthrough.h"
-#include "src/devices/bin/driver_manager/node_property_conversion.h"
 #include "src/devices/bin/driver_manager/resource.h"
 #include "src/devices/bin/driver_manager/shutdown/node_removal_tracker.h"
 #include "src/devices/lib/log/log.h"
@@ -175,8 +174,7 @@ namespace {
 bool ShouldExcludeService(std::string_view service_name) {
   if (service_name == "fuchsia.driver.compat.Service" ||
       service_name == "fuchsia.hardware.power.PowerTokenService" ||
-      service_name == "fuchsia.hardware.interrupt.ControllerRegistryService" ||
-      service_name == "fuchsia.hardware.goldfish.ControlService") {
+      service_name == "fuchsia.hardware.interrupt.ControllerRegistryService") {
     return true;
   }
   if (service_name.find("Metadata") != std::string_view::npos) {
@@ -1304,28 +1302,6 @@ void Node::AddChildHelper(fuchsia_driver_framework::NodeAddArgs args,
     properties = arg_properties.value();
   }
 
-  const auto& arg_deprecated_properties = args.properties();
-  if (arg_deprecated_properties.has_value()) {
-    if (arg_properties.has_value()) {
-      fdf_log::error(
-          "Failed to add Node '{}'. Found values for both properties and properties2 are set. Only one of the fields can be set.",
-          name);
-      callback(fit::as_error(fdf::NodeError::kUnsupportedArgs));
-      return;
-    }
-
-    properties.reserve(arg_deprecated_properties->size());
-    for (auto& property : arg_deprecated_properties.value()) {
-      if (property.key().Which() == fuchsia_driver_framework::NodePropertyKey::Tag::kIntValue) {
-        fdf_log::error(
-            "Failed to add Node '{}'. Found integer-based key {} which is no longer supported.",
-            name, property.key().int_value().value());
-        callback(fit::as_error(fdf::NodeError::kUnsupportedArgs));
-        return;
-      }
-      properties.emplace_back(ToProperty2(property));
-    }
-  }
   if (args.driver_host()) {
     child->driver_host_name_for_colocation_ = args.driver_host().value();
   }
@@ -1587,14 +1563,7 @@ void Node::AddChild(fuchsia_driver_framework::NodeAddArgs args,
     return;
   }
 
-  // Verify the properties.
-  if (args.properties().has_value() && args.properties2().has_value()) {
-    fdf_log::error("Failed to add Node, both properties and properties2 fields were set");
-    callback(fit::as_error(fdf::NodeError::kUnsupportedArgs));
-    return;
-  }
-
-  // Only check for unique property keys for properties2 since properties is deprecated.
+  // Check for unique property keys.
   if (args.properties2().has_value()) {
     std::unordered_set<std::string> property_keys;
     for (auto& property : args.properties2().value()) {

@@ -463,21 +463,6 @@ mod tests {
             (
                 "fuchsia-boot:///root#meta/root.cm",
                 json!({
-                    "capabilities": [
-                        {
-                            "protocol": "protocol",
-                            "path": "/protocol",
-                        },
-                    ],
-                    "offer": [
-                        {
-                            "protocol": [
-                                "protocol",
-                            ],
-                            "from": "self",
-                            "to": "#my-resolver"
-                        },
-                    ],
                     "children": [
                         {
                             "name": "logger",
@@ -495,7 +480,7 @@ mod tests {
                             "name": "myenv",
                             "extends": "realm",
                             "resolvers": [ {
-                                "resolver": "my-resolver",
+                                "resolver": "my_resolver",
                                 "from": "#my-resolver",
                                 "scheme": "fuchsia-pkg",
                             },
@@ -522,21 +507,14 @@ mod tests {
                     },
                     "capabilities": [
                         {
-                            "resolver": "my-resolver",
+                            "resolver": "my_resolver",
                             "path": "/svc/fuchsia.component.resolution.Resolver",
                         },
                         { "protocol": "fuchsia.component.resolution.Resolver" },
                     ],
-                    "use": [
-                        {
-                            "protocol": [
-                                "protocol",
-                            ],
-                        },
-                    ],
                     "expose": [
                         {
-                            "resolver": "my-resolver",
+                            "resolver": "my_resolver",
                             "from": "self",
                         },
                         {
@@ -553,7 +531,7 @@ mod tests {
             ComponentResolverRequest {
                 scheme: "fuchsia-pkg".into(),
                 moniker: "/my-resolver".into(),
-                protocol: "protocol".into(),
+                resolver: "my_resolver".into(),
             },
         )?;
         assert_eq!(
@@ -578,19 +556,8 @@ mod tests {
                     },
                     "capabilities": [
                         {
-                            "protocol": "protocol",
-                            "path": "/protocol",
-                        },
-                        {
-                            "resolver": "my-resolver",
+                            "resolver": "my_resolver",
                             "path": "/svc/fuchsia.component.resolution.Resolver",
-                        },
-                    ],
-                    "use": [
-                        {
-                            "protocol": [
-                                "protocol",
-                            ],
                         },
                     ],
                     "children": [
@@ -606,7 +573,7 @@ mod tests {
                             "extends": "realm",
                             "resolvers": [
                                 {
-                                    "resolver": "my-resolver",
+                                    "resolver": "my_resolver",
                                     "scheme": "fuchsia-pkg",
                                     "from": "self",
                                 }
@@ -631,7 +598,7 @@ mod tests {
             ComponentResolverRequest {
                 scheme: "fuchsia-pkg".into(),
                 moniker: ".".into(),
-                protocol: "protocol".into(),
+                resolver: "my_resolver".into(),
             },
         )?;
         assert_eq!(
@@ -656,26 +623,15 @@ mod tests {
                     },
                     "capabilities": [
                         {
-                            "protocol": "protocol",
-                            "path": "/protocol",
-                        },
-                        {
-                            "resolver": "my-resolver",
+                            "resolver": "my_resolver",
                             "path": "/svc/fuchsia.component.resolution.Resolver",
                         },
                     ],
                     "offer": [
                         {
-                            "resolver": "my-resolver",
+                            "resolver": "my_resolver",
                             "from": "self",
                             "to": "#logger"
-                        },
-                    ],
-                    "use": [
-                        {
-                            "protocol": [
-                                "protocol",
-                            ],
                         },
                     ],
                     "children": [
@@ -703,7 +659,7 @@ mod tests {
                             "extends": "none",
                             "resolvers": [
                                 {
-                                    "resolver": "my-resolver",
+                                    "resolver": "my_resolver",
                                     "from": "parent",
                                     "scheme": "fuchsia-pkg",
                                 },
@@ -729,7 +685,7 @@ mod tests {
             ComponentResolverRequest {
                 scheme: "fuchsia-pkg".into(),
                 moniker: ".".into(),
-                protocol: "protocol".into(),
+                resolver: "my_resolver".into(),
             },
         )?;
         assert_eq!(
@@ -737,6 +693,112 @@ mod tests {
             ComponentResolverResponse {
                 deps: HashSet::from(["core_dep".into()]),
                 monikers: vec!["logger/log-child".into()],
+            },
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_component_resolvers_multiple_resolvers_same_source() -> Result<()> {
+        let model = cmls_to_model(vec![
+            (
+                "fuchsia-boot:///root#meta/root.cm",
+                json!({
+                    "children": [
+                        {
+                            "name": "child-a",
+                            "url": "test-scheme://fuchsia.com/child#meta/child.cm",
+                            "environment": "#env-a",
+                        },
+                        {
+                            "name": "child-b",
+                            "url": "test-scheme://fuchsia.com/child#meta/child.cm",
+                            "environment": "#env-b",
+                        },
+                        {
+                            "name": "child-resolver",
+                            "url": "fuchsia-boot:///resolver#meta/resolver.cm",
+                        },
+                    ],
+                    "environments": [
+                        {
+                            "name": "env-a",
+                            "extends": "realm",
+                            "resolvers": [
+                                {
+                                    "resolver": "resolver_a",
+                                    "from": "#child-resolver",
+                                    "scheme": "test-scheme",
+                                },
+                            ],
+                        },
+                        {
+                            "name": "env-b",
+                            "extends": "realm",
+                            "resolvers": [
+                                {
+                                    "resolver": "resolver_b",
+                                    "from": "#child-resolver",
+                                    "scheme": "test-scheme",
+                                },
+                            ],
+                        },
+                    ]
+                }),
+            ),
+            (
+                "test-scheme://fuchsia.com/child#meta/child.cm",
+                json!({
+                    "program": {
+                        "runner": "elf",
+                        "binary": "bin/child",
+                    },
+                }),
+            ),
+            (
+                "fuchsia-boot:///resolver#meta/resolver.cm",
+                json!({
+                    "program": {
+                        "runner": "elf",
+                        "binary": "bin/resolver",
+                    },
+                    "capabilities": [
+                        {
+                            "resolver": "resolver_a",
+                            "path": "/svc/fuchsia.component.resolution.Resolver-a",
+                        },
+                        {
+                            "resolver": "resolver_b",
+                            "path": "/svc/fuchsia.component.resolution.Resolver-b",
+                        },
+                    ],
+                    "expose": [
+                        {
+                            "resolver": "resolver_a",
+                            "from": "self",
+                        },
+                        {
+                            "resolver": "resolver_b",
+                            "from": "self",
+                        },
+                    ],
+                }),
+            ),
+        ])?;
+
+        let response = ComponentResolversController::get_monikers(
+            model.clone(),
+            ComponentResolverRequest {
+                scheme: "test-scheme".into(),
+                moniker: "/child-resolver".into(),
+                resolver: "resolver_b".into(),
+            },
+        )?;
+        assert_eq!(
+            response,
+            ComponentResolverResponse {
+                deps: HashSet::from(["core_dep".into()]),
+                monikers: vec!["child-b".into()],
             },
         );
         Ok(())
@@ -825,21 +887,6 @@ mod tests {
                             "url": "fuchsia-pkg://fuchsia.com/custom-resolver#meta/custom-resolver.cm",
                         },
                     ],
-                    "capabilities": [
-                        {
-                            "protocol": "fuchsia.test.SpecialProtocol",
-                            "path": "/fake-for-test",
-                        },
-                    ],
-                    "offer": [
-                        {
-                            "protocol": [
-                                "fuchsia.test.SpecialProtocol",
-                            ],
-                            "from": "self",
-                            "to": "#custom-resolver"
-                        },
-                    ],
                     "environments": [
                         {
                             "name": "custom-resolver-env",
@@ -891,13 +938,6 @@ mod tests {
                         },
                         { "protocol": "fuchsia.component.resolution.Resolver" },
                     ],
-                    "use": [
-                        {
-                            "protocol": [
-                                "fuchsia.test.SpecialProtocol",
-                            ],
-                        },
-                    ],
                     "expose": [
                         {
                             "resolver": "custom-resolver",
@@ -919,7 +959,7 @@ mod tests {
             ComponentResolverRequest {
                 scheme: "fuchsia-pkg".into(),
                 moniker: "core/custom-resolver".into(),
-                protocol: "fuchsia.test.SpecialProtocol".into(),
+                resolver: "custom-resolver".into(),
             },
         )?;
         assert_eq!(

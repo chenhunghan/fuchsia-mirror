@@ -21,17 +21,9 @@ use object_constants_rs::{
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_EVENT_SIGNALED, ZX_EVENTPAIR_PEER_CLOSED, ZX_OBJ_TYPE_EVENTPAIR, ZX_RIGHT_DUPLICATE,
-    ZX_RIGHT_INSPECT, ZX_RIGHT_SIGNAL, ZX_RIGHT_SIGNAL_PEER, ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT,
-    ZX_USER_SIGNAL_ALL, zx_rights_t,
+    ZX_DEFAULT_EVENTPAIR_RIGHTS, ZX_EVENT_SIGNALED, ZX_EVENTPAIR_PEER_CLOSED,
+    ZX_OBJ_TYPE_EVENTPAIR, ZX_USER_SIGNAL_ALL, zx_rights_t,
 };
-
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_SIGNAL
-    | ZX_RIGHT_SIGNAL_PEER;
 
 pub const ALLOWED_SIGNALS: u32 = ZX_USER_SIGNAL_ALL | ZX_EVENT_SIGNALED;
 
@@ -81,7 +73,7 @@ impl_peered_dispatcher_facade_with_state!(
 
 impl EventPairDispatcher {
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_EVENTPAIR_RIGHTS
     }
 
     /// Creates a new EventPairDispatcher pair and returns their kernel handles and rights.
@@ -106,7 +98,7 @@ impl EventPairDispatcher {
         handle0.dispatcher().init_peer(handle1.dispatcher().clone());
         handle1.dispatcher().init_peer(handle0.dispatcher().clone());
 
-        Ok((handle0, handle1, DEFAULT_RIGHTS))
+        Ok((handle0, handle1, ZX_DEFAULT_EVENTPAIR_RIGHTS))
     }
 
     fn on_zero_handles_locked(&self, _token: &ksync::LockToken<'_, PeerHolderMuClass<Self>>) {

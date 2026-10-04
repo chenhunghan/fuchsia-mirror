@@ -5,16 +5,17 @@
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parses arguments."""
     parser = argparse.ArgumentParser()
 
-    def path_arg():
-        def arg(path):
-            path = Path(path)
+    def path_arg() -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             if path.is_dir():
                 parser.error(f'Path "{path}" is a directory')
             return path
@@ -38,7 +39,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     try:
         with open(args.config_file, "r") as f:

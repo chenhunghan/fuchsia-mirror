@@ -7,6 +7,7 @@
     include: [ "driver_component/driver.shard.cml" ],
     program: {
         binary: "driver/goodix-gt6853-rust.so",
+        default_dispatcher_scheduler_role: "fuchsia.ui.input.drivers.goodix-gt6853.device",
     },
     use: [
         {

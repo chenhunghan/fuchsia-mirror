@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ebpf_loader",
+    testonly = True,
+    srcs = [
+        "src/lib.rs",
+        "src/loader.rs",
+    ],
+    edition = "2024",
+    # `ebpf_loader` is `testonly = True`, so GN does not apply
+    # `clippy_warn_production` to it; use the test-flavored Starnix lint config
+    # in Bazel to match GN's lint set.
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:num-derive",
+    ],
+    test_deps = [
+        "//src/starnix/lib/ebpf_api",
+    ],
+    visibility = [
+        "//src/connectivity/network/testing/ebpf_test_util:__pkg__",
+        "//src/starnix/tests/ebpf_bench:__pkg__",
+        "//src/starnix/tests/syscalls/rust:__pkg__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//src/starnix/lib/ebpf",
+        "//src/starnix/lib/linux_uapi",
+        "//src/starnix/lib/starnix_ext",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

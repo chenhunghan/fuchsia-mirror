@@ -93,7 +93,7 @@ zx::result<> BlockDevice::Start(fdf::DriverContext context) {
   }
 
   zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> node_result =
-      AddChild("ftl", fuchsia_driver_framework::NodePropertyVector{},
+      AddChild("ftl", std::vector<fuchsia_driver_framework::NodeProperty2>{},
                std::vector{fdf::MakeOffer2<fuchsia_hardware_block_volume::Service>()});
   if (node_result.is_error()) {
     FDF_LOG(ERROR, "Failed to add child node: %s", node_result.status_string());

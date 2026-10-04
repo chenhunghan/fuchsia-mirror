@@ -18,6 +18,7 @@ battery_manager_deps = [
   ":battery-manager-config",
   "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
   "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
+  "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
   "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
   "//sdk/fidl/fuchsia.power.battery.test:fuchsia.power.battery.test_rust",
   "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",

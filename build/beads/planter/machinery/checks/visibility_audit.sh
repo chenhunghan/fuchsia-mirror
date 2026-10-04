@@ -33,23 +33,36 @@ import sys
 workdir = os.path.abspath(sys.argv[1])
 target_dir = sys.argv[2].strip().strip("/")
 
+EXCLUDED_GLOBAL_VIS_PREFIXES = (
+    "bundles/assembly/",
+    "build/bazel/",
+    "build/bazel2gn/",
+    "build/images/",
+    "build/config/rust/lints/",
+)
+
 candidate_files = set()
 if target_dir:
     rel_bazel = os.path.join(target_dir, "BUILD.bazel")
     if os.path.isfile(os.path.join(workdir, rel_bazel)):
         candidate_files.add(rel_bazel)
 
+change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
 git_cmds = [
-    ["git", "-C", workdir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
-    ["git", "-C", workdir, "diff", "--name-only", "HEAD", "--", "*BUILD.bazel"],
+    ["git", "-C", workdir, "diff", "--name-only", change_base, "--", "*BUILD.bazel"],
     ["git", "-C", workdir, "diff", "--cached", "--name-only", "--", "*BUILD.bazel"],
+    ["git", "-C", workdir, "ls-files", "--others", "--exclude-standard", "--", "*BUILD.bazel"],
 ]
 for cmd in git_cmds:
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
         for line in out.splitlines():
             line = line.strip()
-            if line.endswith("BUILD.bazel") and os.path.isfile(os.path.join(workdir, line)):
+            if (
+                line.endswith("BUILD.bazel")
+                and not line.startswith(EXCLUDED_GLOBAL_VIS_PREFIXES)
+                and os.path.isfile(os.path.join(workdir, line))
+            ):
                 candidate_files.add(line)
     except Exception:
         pass
@@ -101,6 +114,9 @@ def recommend_narrow_visibility(rdep_pkgs, pkg_path):
     if len(pkgs) <= 5:
         result = list(vendor_entries)
         for p in pkgs:
+            if p == "bundles/assembly":
+                result.append("//bundles/assembly:__subpackages__")
+                continue
             if any(p != other and p.startswith(other + "/") for other in pkgs if len(other.split("/")) >= 3):
                 continue
             has_child = any(other != p and other.startswith(p + "/") for other in pkgs)
@@ -124,7 +140,10 @@ def recommend_narrow_visibility(rdep_pkgs, pkg_path):
         parts_d3 = d3.split("/")
         if len(parts_d3) < 3:
             for p in group:
-                result.add(f"//{p}:__pkg__")
+                if p == "bundles/assembly":
+                    result.add("//bundles/assembly:__subpackages__")
+                else:
+                    result.add(f"//{p}:__pkg__")
             continue
 
         split_group = [g.split("/") for g in group]
@@ -259,7 +278,7 @@ for fpath in sorted(matched_files):
     except Exception:
         pass
 
-def compute_package_rdeps(pkg_path, bazel_targets, alias_map):
+def compute_package_rdeps(pkg_path, bazel_targets, package_targets, alias_map, fidl_targets=None):
     default_target = os.path.basename(pkg_path)
     gn_file = os.path.join(workdir, pkg_path, "BUILD.gn")
     gn_only_targets = {"verify_bazel2gn", "tests", "benchmarks"}
@@ -267,7 +286,7 @@ def compute_package_rdeps(pkg_path, bazel_targets, alias_map):
         try:
             with open(gn_file, "r", encoding="utf-8", errors="ignore") as f:
                 gn_src = f.read()
-            above_sentinel = gn_src.split("BAZEL2GN SENTINEL")[0] if "BAZEL2GN SENTINEL" in gn_src else ""
+            above_sentinel = gn_src.split("BAZEL2GN SENTINEL")[0] if "BAZEL2GN SENTINEL" in gn_src else gn_src
             for m in re.finditer(r'^\s*[a-zA-Z0-9_]+\(\s*"([^"]+)"\s*\)', above_sentinel, flags=re.MULTILINE):
                 t = m.group(1)
                 if t not in bazel_targets:
@@ -323,13 +342,30 @@ def compute_package_rdeps(pkg_path, bazel_targets, alias_map):
             if sub in gn_only_targets and sub not in bazel_targets:
                 gn_only_ref_packages.add(caller_pkg)
                 continue
+            is_pkg_target = sub in package_targets or (
+                sub == default_target and len(bazel_targets) == 1 and bazel_targets[0] in package_targets
+            )
+            if is_pkg_target and rel.endswith((".gn", ".gni")) and not caller_pkg.startswith(("bundles/assembly", "build/images")):
+                gn_only_ref_packages.add(caller_pkg)
+                continue
+            norm_caller = (
+                "bundles/assembly"
+                if (caller_pkg == "bundles/assembly" or caller_pkg.startswith("bundles/assembly/"))
+                else caller_pkg
+            )
             if caller_pkg.startswith("build/") and (rel.endswith(".bzl") or rel.endswith(".gni")) and "verification" not in os.path.basename(rel):
                 has_macro_injected_rdeps = True
-            true_rdep_packages.add(caller_pkg)
+            true_rdep_packages.add(norm_caller)
             if sub in per_target_rdeps:
-                per_target_rdeps[sub].add(caller_pkg)
+                per_target_rdeps[sub].add(norm_caller)
             elif sub == default_target and len(bazel_targets) == 1:
-                per_target_rdeps[bazel_targets[0]].add(caller_pkg)
+                per_target_rdeps[bazel_targets[0]].add(norm_caller)
+            else:
+                # GN fidl() callers depend on generated binding sub-targets
+                # (<name>_rust, <name>_cpp, <name>_hlcpp, ...) of the fidl_library.
+                owners = [t for t in (fidl_targets or ()) if sub.startswith(t + "_")]
+                if owners:
+                    per_target_rdeps[max(owners, key=len)].add(norm_caller)
 
     for alias_name, actual_name in alias_map.items():
         if alias_name in per_target_rdeps and actual_name in per_target_rdeps:
@@ -368,10 +404,16 @@ for rel_path in sorted(candidate_files):
         tree = ast.parse(src, filename=rel_path)
     except Exception:
         continue
+    # Generated files (e.g. crate_universe's third_party/rust_crates/vendor/*/BUILD.bazel)
+    # get their visibility from the generator; fix the generator input instead.
+    if re.search(r"^#\s*[@]generated\b", "\n".join(src.splitlines()[:10]), flags=re.MULTILINE):
+        continue
 
     preexisting_vis = get_preexisting_vis_strings(rel_path)
     var_table = {}
     bazel_targets = []
+    package_targets = set()
+    fidl_targets = set()
     alias_map = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -395,11 +437,15 @@ for rel_path in sorted(candidate_files):
                     actual = kw.value.value
             if tname:
                 bazel_targets.append(tname)
+                if func in ("fx_package", "fuchsia_package"):
+                    package_targets.add(tname)
+                if func == "fidl_library":
+                    fidl_targets.add(tname)
                 if func == "alias" and actual and actual.startswith(":"):
                     alias_map[tname] = actual[1:]
 
     true_rdeps, per_target_rdeps, vis_only_pkgs, gn_only_pkgs, has_macro_injected_rdeps = compute_package_rdeps(
-        pkg_path, bazel_targets, alias_map
+        pkg_path, bazel_targets, package_targets, alias_map, fidl_targets
     )
 
     has_pkg_default_vis = False
@@ -426,6 +472,19 @@ for rel_path in sorted(candidate_files):
                         "message": "Do not set package-level 'default_visibility' in package(...). Declare 'visibility' explicitly on individual targets.",
                         "remediation": f"Remove default_visibility from package() and set target-level visibility = {json.dumps(rec_pkg)} on targets with external callers."
                     })
+            continue
+
+        if func_name == "exports_files":
+            if not any(kw.arg == "visibility" for kw in node.keywords) and len(node.args) < 2:
+                findings.append({
+                    "source": "visibility_audit",
+                    "category": "exports_files_missing_visibility",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": node.lineno,
+                    "message": "exports_files() omits 'visibility' (Bazel then exports the files publicly).",
+                    "remediation": "Add visibility = [...] to exports_files(), scoped as narrowly as practical to the packages that consume the files (e.g. [\"//<consumer_pkg>:__pkg__\"], or an area rollup like \"//<area>:__subpackages__\" for many consumers), per the determining_bazel_visibility skill."
+                })
             continue
 
         target_name = None
@@ -667,7 +726,7 @@ for rel_path in sorted(candidate_files):
                             })
                             continue
 
-                    if depth >= 3:
+                    if depth >= 3 and not prefix.startswith(("build/bazel/", "build/images/", "bundles/")):
                         split_cov = [r.split("/") for r in covered_rdeps]
                         min_len = min(len(s) for s in split_cov)
                         lca_len = 0

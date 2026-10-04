@@ -64,6 +64,7 @@ test("usb-wrapper-test-bin") {
     "//src/devices/testing/fake-bti",
     "//src/devices/usb/lib/usb",
     "//src/devices/usb/lib/usb:hid",
+    "//src/devices/usb/testing/descriptor-builder",
     "//src/lib/ddk",
     "//src/lib/ddktl",
     "//zircon/system/ulib/fbl",

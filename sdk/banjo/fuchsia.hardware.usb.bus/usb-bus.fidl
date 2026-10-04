@@ -24,7 +24,7 @@ closed protocol UsbBus {
         desc fuchsia.hardware.usb.descriptor.UsbHubDescriptor;
         multi_tt bool;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Informs the USB bus that a new device has been added.
     strict DeviceAdded(struct {
@@ -33,7 +33,7 @@ closed protocol UsbBus {
         port uint32;
         speed UsbSpeed;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Informs the USB bus that a device has been removed.
     strict DeviceRemoved(struct {
@@ -41,7 +41,7 @@ closed protocol UsbBus {
         hub_device uint64;
         port uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Used by USB hub driver to register its USB hub protocol with the USB bus driver.
     strict SetHubInterface(resource struct {
@@ -49,7 +49,7 @@ closed protocol UsbBus {
         usb_device uint64;
         hub client_end:fuchsia.hardware.usb.hub.UsbHubInterface;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Queues a USB request with the host stack.
     strict RequestQueue(resource struct {
@@ -70,13 +70,13 @@ closed protocol UsbBusInterface {
         hub_id uint32;
         speed UsbSpeed;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Notifies the USB bus driver that a device has been removed.
     strict RemoveDevice(struct {
         device_id uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Used by the HCI controller to reset a port on a USB hub.
     strict ResetPort(struct {
@@ -84,12 +84,12 @@ closed protocol UsbBusInterface {
         port uint32;
         enumerating bool;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Used by the HCI controller to reinitialize a device after it has been reset.
     strict ReinitializeDevice(struct {
         device_id uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };

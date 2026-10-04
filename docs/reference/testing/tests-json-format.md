@@ -241,6 +241,11 @@ test` not to run test cases in parallel for tests that have crosstalk.
 Setting this value to `1` disables parallel test case execution,
 while a number `> 1` forces parallel test case execution if supported
 by the individual test runner.
+- `realm` - (Optional) The non-hermetic test realm moniker to run the test
+component in (e.g. `"/core/testing/starnix-tests"`). Used by `test_list_tool`
+for Bazel device tests (`fx_test`) that specify `test_type`; GN device tests
+instead look up the realm moniker in `test_components.json` via
+`component_label`.
 
 ### Examples
 

@@ -37,7 +37,6 @@ from daemon.handlers import (
 )
 from daemon.state import Process, Thread
 from ffx_cmd.lib import FfxCmd
-from pydantic import ValidationError
 from pydap.client import READER_STOPPED_EVENT
 from pydap.models import InitializeArguments, PauseArguments
 from shared.protocol import (
@@ -53,7 +52,6 @@ from zxdb_dap import (
     ZxdbDetachArguments,
     ZxdbPauseArguments,
 )
-from zxdb_dap.models import AsyncBacktraceUpdateBody
 
 logger = logging.getLogger(__name__)
 
@@ -663,19 +661,6 @@ class Daemon:
             for p in self.processes.values():
                 p.resume()
 
-    def _handle_async_backtrace_update(self, body: dict[str, Any]) -> None:
-        """Handles zxdb.updateAsyncBacktrace events to cache async task trees."""
-        try:
-            update = AsyncBacktraceUpdateBody.model_validate(body)
-        except (ValidationError, TypeError, ValueError):
-            return
-
-        # TODO(https://fxbug.dev/490431008): Support multi-executor
-        # processes and unify per-thread async task trees in zxdb.
-        proc = self.get_or_create_process(update.process_id)
-        if not proc.async_backtrace:
-            proc.async_backtrace = update.tasks
-
     # TODO(https://fxbug.dev/545555364): Support event validation in this _process_events function.
     async def _process_events(self) -> None:
         allowed_events = {
@@ -740,8 +725,6 @@ class Daemon:
                                 process_id=process_id,
                                 is_stopped=is_stopped,
                             )
-                case "zxdb.updateAsyncBacktrace":
-                    self._handle_async_backtrace_update(body)
                 case "process":
                     pid = body.get("systemProcessId")
                     name = str(body.get("name") or "")

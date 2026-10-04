@@ -35,6 +35,8 @@
 #include "src/devices/usb/drivers/usb-peripheral/usb-function.h"
 #include "src/devices/usb/drivers/usb-peripheral/usb_peripheral_config.h"
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 /*
     THEORY OF OPERATION
 
@@ -58,7 +60,7 @@
     it is now possible to build the configuration descriptor.
     Once we get to this point, UsbPeripheral.functions_bound_ is set to true.
 
-    If the role is set to USB_MODE_PERIPHERAL and functions_bound_ is true,
+    If the role is set to UsbMode::kPeripheral and functions_bound_ is true,
     then we are ready to start USB in peripheral role.
     At this point, we create DDK devices for our list of functions.
     When the function drivers bind to these functions, they register an interface of type
@@ -66,7 +68,7 @@
     Once all of the function drivers have registered themselves this way,
     UsbPeripheral.functions_registered_ is set to true.
 
-    if the usb mode is set to USB_MODE_PERIPHERAL and functions_registered_ is true,
+    if the usb mode is set to UsbMode::kPeripheral and functions_registered_ is true,
     we are now finally ready to operate in the peripheral role.
 
     Teardown of the peripheral role:
@@ -246,12 +248,12 @@ class UsbPeripheral : public fdf::DriverBase2,
     return pending_set_configuration_.has_value();
   }
 
-  usb_mode_t SnapshotUsbMode() const {
+  fdescriptor::UsbMode SnapshotUsbMode() const {
     fbl::AutoLock lock(&lock_);
     return cur_usb_mode_;
   }
 
-  void SetUsbMode(usb_mode_t mode) {
+  void SetUsbMode(fdescriptor::UsbMode mode) {
     fbl::AutoLock lock(&lock_);
     cur_usb_mode_ = mode;
     dci_inspect_.UpdateUsbMode(mode);
@@ -326,8 +328,7 @@ class UsbPeripheral : public fdf::DriverBase2,
 
   // For the purposes of banjo->FIDL migration. Once banjo is ripped out of the driver, the logic
   // here can be folded into the FIDL endpoint implementation and calling code.
-  void CommonControl(const fuchsia_hardware_usb_descriptor::wire::UsbSetup& setup,
-                     cpp20::span<uint8_t> write_buffer,
+  void CommonControl(const fdescriptor::wire::UsbSetup& setup, cpp20::span<uint8_t> write_buffer,
                      fit::callback<void(zx::result<std::vector<uint8_t>>)> completer);
   zx_status_t InitializeDci(fidl::ClientEnd<fuchsia_hardware_usb_dci::UsbDci> dci_client_end);
 
@@ -367,32 +368,33 @@ class UsbPeripheral : public fdf::DriverBase2,
   //    based on reported endpoint capabilities (AllocEndpointBestFitLocked).
   // 3. If DCI does not support GetHardwareInfo (legacy), falls back to static sequential
   //    allocation (AllocEndpointLegacyLocked).
-  zx_status_t AllocEndpointLocked(size_t function_index,
-                                  fuchsia_hardware_usb_descriptor::EndpointDirection direction,
+  zx_status_t AllocEndpointLocked(size_t function_index, fdescriptor::EndpointDirection direction,
                                   fuchsia_hardware_usb_endpoint::wire::EndpointInfo ep_info,
                                   uint32_t max_packet_size, uint8_t* out_address)
       __TA_REQUIRES(lock_);
 
   // Allocates an endpoint by calling the DCI driver's AllocEndpoint FIDL method.
   // Used when DCI supports dynamic endpoint sizing.
-  zx_status_t AllocEndpointDynamicLocked(
-      size_t function_index, fuchsia_hardware_usb_descriptor::EndpointDirection direction,
-      fuchsia_hardware_usb_endpoint::wire::EndpointInfo ep_info, uint32_t max_packet_size,
-      uint8_t* out_address) __TA_REQUIRES(lock_);
+  zx_status_t AllocEndpointDynamicLocked(size_t function_index,
+                                         fdescriptor::EndpointDirection direction,
+                                         fuchsia_hardware_usb_endpoint::wire::EndpointInfo ep_info,
+                                         uint32_t max_packet_size, uint8_t* out_address)
+      __TA_REQUIRES(lock_);
 
   // Allocates an endpoint by choosing the best fit from the static list of endpoints
   // reported by the DCI driver via GetHardwareInfo.
   // Used when DCI does not support dynamic sizing but provides hardware info.
-  zx_status_t AllocEndpointBestFitLocked(
-      size_t function_index, fuchsia_hardware_usb_descriptor::EndpointDirection direction,
-      fuchsia_hardware_usb_endpoint::wire::EndpointInfo ep_info, uint32_t max_packet_size,
-      uint8_t* out_address) __TA_REQUIRES(lock_);
+  zx_status_t AllocEndpointBestFitLocked(size_t function_index,
+                                         fdescriptor::EndpointDirection direction,
+                                         fuchsia_hardware_usb_endpoint::wire::EndpointInfo ep_info,
+                                         uint32_t max_packet_size, uint8_t* out_address)
+      __TA_REQUIRES(lock_);
 
   // Legacy sequential allocation. Assigns the next available endpoint number.
   // Used when DCI does not support GetHardwareInfo.
-  zx_status_t AllocEndpointLegacyLocked(
-      size_t function_index, fuchsia_hardware_usb_descriptor::EndpointDirection direction,
-      uint8_t* out_address) __TA_REQUIRES(lock_);
+  zx_status_t AllocEndpointLegacyLocked(size_t function_index,
+                                        fdescriptor::EndpointDirection direction,
+                                        uint8_t* out_address) __TA_REQUIRES(lock_);
   zx_status_t AllocStringDescLocked(std::optional<size_t> function_index, std::string desc,
                                     uint8_t* out_index) __TA_REQUIRES(lock_);
   void FreeEndpointInternalLocked(uint8_t index, std::string_view context) __TA_REQUIRES(lock_);
@@ -407,7 +409,8 @@ class UsbPeripheral : public fdf::DriverBase2,
 
   void Connect(fidl::ServerEnd<fuchsia_hardware_usb_peripheral::Device> request) {
     TRACE_DURATION("usb-peripheral", __func__);
-    bindings_.AddBinding(dispatcher(), std::move(request), this, fidl::kIgnoreBindingClosure);
+    bindings_.AddBinding(driver_dispatcher()->async_dispatcher(), std::move(request), this,
+                         fidl::kIgnoreBindingClosure);
   }
 
   // `UsbFunction` wrapped in `shared_ptr` because `UsbFunction` instance may be
@@ -418,8 +421,7 @@ class UsbPeripheral : public fdf::DriverBase2,
 
   fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci_;
   struct DciSupportedEndpointInfo {
-    fuchsia_hardware_usb_descriptor::wire::EndpointType endpoint_type =
-        fuchsia_hardware_usb_descriptor::wire::EndpointType::kBulk;
+    fdescriptor::wire::EndpointType endpoint_type = fdescriptor::wire::EndpointType::kBulk;
     uint16_t max_packet_size_limit = 0;
     uint64_t min_lead_time = 0;
   };
@@ -442,9 +444,9 @@ class UsbPeripheral : public fdf::DriverBase2,
   // mutable to allow locking in const methods (e.g. state())
   mutable fbl::Mutex lock_;
   // Current USB mode.
-  usb_mode_t cur_usb_mode_ __TA_GUARDED(lock_) = USB_MODE_NONE;
+  fdescriptor::UsbMode cur_usb_mode_ __TA_GUARDED(lock_) = fdescriptor::UsbMode::kNone;
   // Our parent's USB mode. Should not change after being set.
-  usb_mode_t parent_usb_mode_ __TA_GUARDED(lock_) = USB_MODE_NONE;
+  fdescriptor::UsbMode parent_usb_mode_ __TA_GUARDED(lock_) = fdescriptor::UsbMode::kNone;
   // True if we have added child devices for our functions.
   bool function_devs_added_ __TA_GUARDED(lock_) = false;
   // True if fuchsia_hardware_usb_dci::SetInterface performed in Init().
@@ -453,10 +455,10 @@ class UsbPeripheral : public fdf::DriverBase2,
   bool connected_ __TA_GUARDED(lock_) = false;
   // True if we are under the Stop() codepath.
   bool stopping_driver_ __TA_GUARDED(lock_) = false;
-  // Current configuration number selected via USB_REQ_SET_CONFIGURATION
+  // Current configuration number selected via StandardRequest::SET_CONFIGURATION
   // (will be 0 or 1 since we currently do not support multiple configurations).
   // 0 indicates that the device is unconfigured and should not accept USB requests
-  // other than USB_REQ_SET_CONFIGURATION or requests targetting descriptors
+  // other than StandardRequest::SET_CONFIGURATION or requests targeting descriptors
   uint8_t configuration_ = 0;
   // USB connection speed.
   usb_speed_t speed_ = 0;
@@ -481,7 +483,6 @@ class UsbPeripheral : public fdf::DriverBase2,
   UsbDciInterfaceServer intf_srv_{this};
 
   std::optional<async::Executor> executor_;
-  fpromise::scope scope_;
 
   fidl::ServerBindingGroup<fuchsia_hardware_usb_peripheral::Device> bindings_;
   fdf::OwnedChildNode child_;
@@ -510,6 +511,9 @@ class UsbPeripheral : public fdf::DriverBase2,
   };
   std::optional<PendingSetConfiguration> pending_set_configuration_ __TA_GUARDED(lock_);
   bool clearing_functions_ __TA_GUARDED(lock_) = false;
+
+  // Must be last so promises bound to this scope are destroyed before other members.
+  fpromise::scope scope_;
 };
 
 }  // namespace usb_peripheral

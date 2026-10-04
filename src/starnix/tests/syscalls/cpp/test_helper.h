@@ -148,7 +148,7 @@ class SignalMaskHelper {
   void waitForSignal(int signal);
 
   // Blocks the execution until the specified signal is received or timed out.
-  int timedWaitForSignal(int signal, time_t msec);
+  int timedWaitForSignal(int signal, time_t msec, siginfo_t *siginfo = nullptr);
 
   // Sets the signal mask of the process with _sigmaskCopy.
   void restoreSigmask();
@@ -529,6 +529,9 @@ testing::AssertionResult WaitUntilBlocked(pid_t target, bool ignore_tracer);
 
 // Wait until the target process indicates a zombie (Z) state.
 testing::AssertionResult WaitUntilZombie(pid_t target);
+
+// Extracts the task state (R, S, T, Z, etc.) from the contents of /proc/<pid>/task/<tid>/stat.
+std::optional<std::string_view> GetTaskState(std::string_view stat);
 
 // Loop until the target task's process state in /proc/<pid>/task/<tid>/stat satisfies the given
 // predicate function. The string passed to the predicate is the task state (R, S, T, Z, etc.).

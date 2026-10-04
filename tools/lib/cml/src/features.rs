@@ -61,10 +61,6 @@ pub enum Feature {
 
     // Restrict test types in facet. This helps us to only restrict this in-tree.
     RestrictTestTypeInFacet,
-
-    // Allows customizing when the framework opens a capability when a consumer
-    // component requests to connect to the capability.
-    DeliveryType,
 }
 
 impl FromStr for Feature {
@@ -80,7 +76,6 @@ impl FromStr for Feature {
                 Ok(Feature::EnableAllowNonHermeticPackagesFeature)
             }
             "restrict_test_type_in_facets" => Ok(Feature::RestrictTestTypeInFacet),
-            "delivery_type" => Ok(Feature::DeliveryType),
             _ => Err(format!("unrecognized feature \"{}\"", s)),
         }
     }
@@ -98,7 +93,6 @@ impl fmt::Display for Feature {
                 "enable_allow_non_hermetic_packages_feature"
             }
             Feature::RestrictTestTypeInFacet => "restrict_test_type_in_facets",
-            Feature::DeliveryType => "delivery_type",
         })
     }
 }

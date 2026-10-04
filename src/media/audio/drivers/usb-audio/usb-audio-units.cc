@@ -12,8 +12,11 @@
 #include <utility>
 
 #include <fbl/algorithm.h>
+#include <usb/descriptors.h>
 
 #include "debug-logging.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace audio {
 namespace usb {
@@ -53,20 +56,20 @@ fbl::RefPtr<AudioUnit> AudioUnit::Create(const DescriptorListMemory::Iterator& i
   // This should already have been verified by the code calling us.
   ZX_DEBUG_ASSERT(hdr != nullptr);
 
-  switch (hdr->bDescriptorSubtype) {
-    case USB_AUDIO_AC_INPUT_TERMINAL:
+  switch (static_cast<fdescriptor::AudioAcDescriptorSubtype>(hdr->bDescriptorSubtype)) {
+    case fdescriptor::AudioAcDescriptorSubtype::kInputTerminal:
       return InputTerminal::Create(iter, iid);
-    case USB_AUDIO_AC_OUTPUT_TERMINAL:
+    case fdescriptor::AudioAcDescriptorSubtype::kOutputTerminal:
       return OutputTerminal::Create(iter, iid);
-    case USB_AUDIO_AC_MIXER_UNIT:
+    case fdescriptor::AudioAcDescriptorSubtype::kMixerUnit:
       return MixerUnit::Create(iter, iid);
-    case USB_AUDIO_AC_SELECTOR_UNIT:
+    case fdescriptor::AudioAcDescriptorSubtype::kSelectorUnit:
       return SelectorUnit::Create(iter, iid);
-    case USB_AUDIO_AC_FEATURE_UNIT:
+    case fdescriptor::AudioAcDescriptorSubtype::kFeatureUnit:
       return FeatureUnit::Create(iter, iid);
-    case USB_AUDIO_AC_PROCESSING_UNIT:
+    case fdescriptor::AudioAcDescriptorSubtype::kProcessingUnit:
       return ProcessingUnit::Create(iter, iid);
-    case USB_AUDIO_AC_EXTENSION_UNIT:
+    case fdescriptor::AudioAcDescriptorSubtype::kExtensionUnit:
       return ExtensionUnit::Create(iter, iid);
     default:
       GLOBAL_LOG(WARNING, "Unrecognized audio control descriptor (type %u) @ offset %zu",
@@ -82,8 +85,7 @@ zx_status_t AudioUnit::CtrlReq(const usb_protocol_t& proto, uint8_t code, uint16
   }
 
   // For audio class specific control codes, get control codes all have their MSB set.
-  uint8_t req_type = (code & 0x80) ? USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE
-                                   : USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE;
+  uint8_t req_type = (code & 0x80) ? kClassInterfaceIn : kClassInterfaceOut;
 
   // TODO(johngro) : See about fixing the use of const in the C API for the
   // USB bus protocol.  There is no good reason why a usb_protocol structure
@@ -107,15 +109,13 @@ zx_status_t AudioUnit::CtrlReq(const usb_protocol_t& proto, uint8_t code, uint16
   constexpr uint64_t kRelativeTimeout = ZX_MSEC(500);
   size_t done = 0;
   zx_status_t status;
-  if ((req_type & USB_DIR_MASK) == USB_DIR_OUT) {
-    status =
-        usb_control_out(proto_ptr, req_type, code, val, index(),
-                        zx_deadline_after(kRelativeTimeout), reinterpret_cast<uint8_t*>(data), len);
+  if (usb_request_is_out(req_type)) {
+    status = usb_control_out(proto_ptr, req_type, code, val, index(), kRelativeTimeout,
+                             reinterpret_cast<uint8_t*>(data), len);
     done = len;
   } else {
-    status =
-        usb_control_in(proto_ptr, req_type, code, val, index(), zx_deadline_after(kRelativeTimeout),
-                       reinterpret_cast<uint8_t*>(data), len, &done);
+    status = usb_control_in(proto_ptr, req_type, code, val, index(), kRelativeTimeout,
+                            reinterpret_cast<uint8_t*>(data), len, &done);
   }
   if ((status == ZX_OK) && (done != len)) {
     status = ZX_ERR_BUFFER_TOO_SMALL;
@@ -242,7 +242,7 @@ zx_status_t SelectorUnit::Select(const usb_protocol_t& proto, uint8_t upstream_i
   }
 
   // Now go ahead and set the value;
-  return CtrlReq(proto, USB_AUDIO_SET_CUR, 0, &ndx);
+  return CtrlReq(proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kSetCur), 0, &ndx);
 }
 
 fbl::RefPtr<FeatureUnit> FeatureUnit::Create(const DescriptorListMemory::Iterator& iter,
@@ -350,8 +350,9 @@ zx_status_t FeatureUnit::Probe(const usb_protocol_t& proto) {
   //    are doing so in a way which mimics a master control knob only.  So, if
   //    we have these controls at the per-channel level, it is important that
   //    they be they be identical for each of the individual channels.
-  constexpr uint32_t kUniformControls =
-      USB_AUDIO_FU_BMA_MUTE | USB_AUDIO_FU_BMA_VOLUME | USB_AUDIO_FU_BMA_AUTOMATIC_GAIN;
+  constexpr uint32_t kUniformControls = fdescriptor::kAudioFuBmaMute |
+                                        fdescriptor::kAudioFuBmaVolume |
+                                        fdescriptor::kAudioFuBmaAutomaticGain;
   ZX_DEBUG_ASSERT(features_.size() > 0);  // Create should have checked this already
   if (((features_[0].supported_ & ch_feat_union & kUniformControls) != 0) ||  // Check #1
       ((ch_feat_union ^ ch_feat_intersection) & kUniformControls)) {          // Check #2
@@ -379,17 +380,23 @@ zx_status_t FeatureUnit::Probe(const usb_protocol_t& proto) {
 
       uint8_t ch = static_cast<uint8_t>(i);
 
-      res = FeatCtrlReq(proto, USB_AUDIO_GET_MIN, USB_AUDIO_VOLUME_CONTROL, ch, &f.vol_min_);
+      res = FeatCtrlReq(proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kGetMin),
+                        static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+                        ch, &f.vol_min_);
       if (res != ZX_OK) {
         return res;
       }
 
-      res = FeatCtrlReq(proto, USB_AUDIO_GET_MAX, USB_AUDIO_VOLUME_CONTROL, ch, &f.vol_max_);
+      res = FeatCtrlReq(proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kGetMax),
+                        static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+                        ch, &f.vol_max_);
       if (res != ZX_OK) {
         return res;
       }
 
-      res = FeatCtrlReq(proto, USB_AUDIO_GET_RES, USB_AUDIO_VOLUME_CONTROL, ch, &f.vol_res_);
+      res = FeatCtrlReq(proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kGetRes),
+                        static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+                        ch, &f.vol_res_);
       if (res != ZX_OK) {
         return res;
       }
@@ -434,21 +441,26 @@ zx_status_t FeatureUnit::Probe(const usb_protocol_t& proto) {
     // Fetch the current volume setting from the appropriate source, then
     // make certain that all channels are set to the same if there is no
     // master control knob.
-    bool master_control = (master_feat_ & USB_AUDIO_FU_BMA_VOLUME);
+    bool master_control = (master_feat_ & fdescriptor::kAudioFuBmaVolume);
     uint8_t ch = master_control ? 0 : 1;
-    res = FeatCtrlReq(proto, USB_AUDIO_GET_CUR, USB_AUDIO_VOLUME_CONTROL, ch, &vol_cur_);
+    res = FeatCtrlReq(proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kGetCur),
+                      static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+                      ch, &vol_cur_);
     if (res != ZX_OK) {
       return res;
     }
 
     if (!master_control) {
-      SetFeature(proto, USB_AUDIO_VOLUME_CONTROL, vol_cur_);
+      SetFeature(proto, static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+                 vol_cur_);
     }
   }
 
   // If we have mute controls, figure out the current setting.
   if (has_mute()) {
-    res = FeatCtrlReq(proto, USB_AUDIO_GET_CUR, USB_AUDIO_MUTE_CONTROL, 0, &mute_cur_);
+    res = FeatCtrlReq(proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kGetCur),
+                      static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kMute), 0,
+                      &mute_cur_);
     if (res != ZX_OK) {
       return res;
     }
@@ -456,7 +468,10 @@ zx_status_t FeatureUnit::Probe(const usb_protocol_t& proto) {
 
   // If we have agc controls, figure out the current setting.
   if (has_agc()) {
-    res = FeatCtrlReq(proto, USB_AUDIO_GET_CUR, USB_AUDIO_AUTOMATIC_GAIN_CONTROL, 0, &agc_cur_);
+    res = FeatCtrlReq(
+        proto, static_cast<uint8_t>(fdescriptor::AudioRequest::kGetCur),
+        static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kAutomaticGain), 0,
+        &agc_cur_);
     if (res != ZX_OK) {
       return res;
     }
@@ -522,7 +537,8 @@ float FeatureUnit::SetVol(const usb_protocol_t& proto, float db) {
   // volume control to simulate mute to the best of our abilities; we will
   // restore vol_cur_ when the unit finally becomes un-muted.
   if (!(mute_cur_ && !has_mute())) {
-    SetFeature(proto, USB_AUDIO_VOLUME_CONTROL, vol_cur_);
+    SetFeature(proto, static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+               vol_cur_);
   }
 
   return vol_cur_ * kDbPerTick;
@@ -534,12 +550,14 @@ bool FeatureUnit::SetMute(const usb_protocol_t& proto, bool mute) {
   // If we have an explicit mute control, use that.  Otherwise, do the best we
   // can using the volume control (if present).
   if (has_mute()) {
-    SetFeature(proto, USB_AUDIO_MUTE_CONTROL, mute_cur_);
+    SetFeature(proto, static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kMute),
+               mute_cur_);
   } else {
     // Section 5.2.2.4.3.2 of the USB Audio 1.0 spec defines int16::min as
     // -inf dB for the purpose of setting gain.
     int16_t tgt = mute ? std::numeric_limits<int16_t>::min() : vol_cur_;
-    SetFeature(proto, USB_AUDIO_VOLUME_CONTROL, tgt);
+    SetFeature(proto, static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kVolume),
+               tgt);
   }
 
   return !!mute_cur_;
@@ -548,7 +566,9 @@ bool FeatureUnit::SetMute(const usb_protocol_t& proto, bool mute) {
 bool FeatureUnit::SetAgc(const usb_protocol_t& proto, bool agc) {
   if (has_agc()) {
     agc_cur_ = agc;
-    SetFeature(proto, USB_AUDIO_AUTOMATIC_GAIN_CONTROL, static_cast<uint8_t>(agc));
+    SetFeature(proto,
+               static_cast<uint8_t>(fdescriptor::AudioFeatureUnitControlSelector::kAutomaticGain),
+               static_cast<uint8_t>(agc));
   }
   return !!agc_cur_;
 }

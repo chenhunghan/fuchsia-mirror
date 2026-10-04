@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+from typing import Iterable
 
 # All other paths are relative to here (main changes to this directory on startup).
 ROOT_PATH = os.path.join(os.path.dirname(__file__), "..", "..")
@@ -53,7 +54,7 @@ FUCHSIA_API_LEVEL_HEAD = 4292870144
 
 
 class Bindgen:
-    def __init__(self):
+    def __init__(self) -> None:
         # Clang: Compilation target (`--target`)
         self.clang_target = "x86_64-unknown-linux-gnu"
         # Use the given PREFIX before raw types instead of ::std::os::raw.
@@ -69,63 +70,67 @@ class Bindgen:
         # Whether size_t must be converted to usize
         self.size_t_is_usize = True
         # Mark types as an an opaque blob of bytes with a size and alignment.
-        self.opaque_types = []
+        self.opaque_types: list[str] = []
         # Clang: Include directories (`-I`)
-        self.include_dirs = []
+        self.include_dirs: list[str] = []
         # Generate implementations for standard traits when not auto-derivable (`--impl-foo`)
-        self.std_impls = []
+        self.std_impls: list[str] = []
         # Standard derivations (`--with-derive-foo`)
-        self.std_derives = []
+        self.std_derives: list[str] = []
         # Add extra traits to derive on generated structs/unions.
         # Only applies to `pub struct`/`pub union` that already have a #[derive()] line.
-        self.auto_derive_traits = []
+        self.auto_derive_traits: list[
+            tuple[re.Pattern[str], Iterable[str]]
+        ] = []
         # Pairs of (regex, str) replacements to apply to generated output.
-        self.replacements = BASE_REPLACEMENTS
+        self.replacements: list[tuple[re.Pattern[str], str]] = BASE_REPLACEMENTS
         # Do not generate bindings for given functions or methods.
         self.ignore_functions = False
         # Allowlist all the free-standing functions matching regexes.
         # Other non-allowlisted functions will not be generated.
-        self.function_allowlist = []
+        self.function_allowlist: list[str] = []
         # Allowlist all the free-standing variables matching regexes.
         # Other non-allowlisted variables will not be generated.
-        self.var_allowlist = []
+        self.var_allowlist: list[str] = []
         # Allowlist all the free-standing types matching regexes.
         # Other non-allowlisted types will not be generated.
-        self.type_allowlist = []
+        self.type_allowlist: list[str] = []
         # Mark functions as hidden, to omit them from generated code.
-        self.function_blocklist = []
+        self.function_blocklist: list[str] = []
         # Mark variables as hidden, to omit them from generated code.
-        self.var_blocklist = []
+        self.var_blocklist: list[str] = []
         # Mark types as hidden, to omit them from generated code.
-        self.type_blocklist = []
+        self.type_blocklist: list[str] = []
         # Avoid deriving/implementing Debug for types matching regexes.
-        self.no_debug_types = []
+        self.no_debug_types: list[str] = []
         # Avoid deriving/implementing Copy for types matching regexes.
-        self.no_copy_types = []
+        self.no_copy_types: list[str] = []
         # Avoid deriving/implementing Default for types matching regexes.
-        self.no_default_types = []
+        self.no_default_types: list[str] = []
         # Use types from Rust core instead of std.
         self.use_core = False
         # Whether to wrap unsafe operations in unsafe blocks.
         self.wrap_unsafe_ops = True
         # Additional flags to pass directly to bindgen.
-        self.additional_bindgen_flags = []
+        self.additional_bindgen_flags: list[str] = []
         # Clang: Enable standard #include directories for the C++ standard library
         self.enable_stdlib_include_dirs = True
         # Clang: Define `__Fuchsia_API_level__`.
         self.fuchsia_api_level = ""
         # Clang: Additional command line flags to pass to clang.
-        self.additional_clang_flags = []
+        self.additional_clang_flags: list[str] = []
 
-    def set_auto_derive_traits(self, traits_map):
+    def set_auto_derive_traits(
+        self, traits_map: Iterable[tuple[str, Iterable[str]]]
+    ) -> None:
         self.auto_derive_traits = [(re.compile(x[0]), x[1]) for x in traits_map]
 
-    def set_replacements(self, replacements):
+    def set_replacements(self, replacements: Iterable[tuple[str, str]]) -> None:
         self.replacements = [
             (re.compile(x[0]), x[1]) for x in replacements
         ] + BASE_REPLACEMENTS
 
-    def run_bindgen(self, input_file, output_file):
+    def run_bindgen(self, input_file: str, output_file: str) -> None:
         # Bindgen arguments.
         raw_lines = self.notice_header
         raw_lines += f"// LINT.IfChange\n\n"
@@ -217,8 +222,7 @@ class Bindgen:
 
             depfile_contents = depfile.read().decode("utf-8")
             # The colon delimits the output file from all the input files.
-            all_input_files = depfile_contents.split(": ")[1]
-            all_input_files = all_input_files.split(" ")
+            all_input_files = depfile_contents.split(": ")[1].split(" ")
             fuchsia_input_files = []
             for path in all_input_files:
                 if not path.startswith("/"):
@@ -239,7 +243,7 @@ class Bindgen:
         with open(output_file, "a") as f:
             f.write(f"\n// LINT.ThenChange({ifttt_matcher})\n")
 
-    def get_auto_derive_traits(self, line):
+    def get_auto_derive_traits(self, line: str) -> set[str] | None:
         """Returns true if the given line defines a Rust structure with a name
         matching any of the types we need to add FromBytes."""
         if not (
@@ -253,7 +257,7 @@ class Bindgen:
             return None
         type_name = split[2]
 
-        results = set()
+        results: set[str] = set()
         for t, traits in self.auto_derive_traits:
             if t.match(type_name):
                 results.update(traits)
@@ -262,10 +266,10 @@ class Bindgen:
         else:
             return results
 
-    def post_process_rust_file(self, rust_file_name):
+    def post_process_rust_file(self, rust_file_name: str) -> None:
         with open(rust_file_name, "r+") as source_file:
             input_lines = source_file.readlines()
-            output_lines = []
+            output_lines: list[str] = []
             for line in input_lines:
                 extra_traits = self.get_auto_derive_traits(line)
                 if extra_traits:
@@ -289,7 +293,7 @@ class Bindgen:
             source_file.truncate()
             source_file.write(text)
 
-    def run(self, input_file, rust_file):
+    def run(self, input_file: str, rust_file: str) -> None:
         os.chdir(ROOT_PATH)
 
         self.run_bindgen(input_file, rust_file)

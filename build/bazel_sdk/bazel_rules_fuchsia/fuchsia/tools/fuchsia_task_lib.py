@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from abc import abstractmethod
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property, reduce, total_ordering
@@ -26,39 +27,51 @@ class TaskExecutionException(Exception):
 
 
 class Terminal:
+    @staticmethod
     def if_no_color(text: str, if_colored: str = "") -> str:
         return if_colored if Terminal.supports_color() else text
 
+    @staticmethod
     def bold(text: str) -> str:
         return Terminal._style(text, 1)
 
+    @staticmethod
     def underline(text: str) -> str:
         return Terminal._style(text, 4)
 
+    @staticmethod
     def red(text: str) -> str:
         return Terminal._style(text, 91)
 
+    @staticmethod
     def green(text: str) -> str:
         return Terminal._style(text, 92)
 
+    @staticmethod
     def yellow(text: str) -> str:
         return Terminal._style(text, 93)
 
+    @staticmethod
     def purple(text: str) -> str:
         return Terminal._style(text, 95)
 
+    @staticmethod
     def cyan(text: str) -> str:
         return Terminal._style(text, 96)
 
+    @staticmethod
     def info(printable: Any, prefix: str = "Info") -> str:
         return f"{Terminal.bold(f'{prefix}:')} {printable}"
 
+    @staticmethod
     def warn(printable: Any, prefix: str = "Warning") -> str:
         return f"{Terminal.yellow(f'{prefix}:')} {printable}"
 
+    @staticmethod
     def error(printable: Any, prefix: str = "Error") -> str:
         return f"{Terminal.red(f'{prefix}:')} {printable}"
 
+    @staticmethod
     def supports_color() -> bool:
         return (
             sys.stdout.isatty()
@@ -66,6 +79,7 @@ class Terminal:
             and not os.environ.get("NO_COLOR")
         )
 
+    @staticmethod
     def _style(text: str, escape_code: int) -> str:
         if Terminal.supports_color():
             return f"\033[{escape_code}m{text}\033[0m"
@@ -77,7 +91,7 @@ class Terminal:
 
 
 @total_ordering
-class ArgumentScope(tuple, Enum):
+class ArgumentScope(tuple[str, ...], Enum):
     # Captures arguments that are passed directly to the current task:
     # 1. via command line: `bazel run :workflow -- 'TASK_MNEMONIC=--foo --bar'`
     # 2. via build rule: `arguments = ["--foo", "--bar"]`
@@ -96,10 +110,10 @@ class ArgumentScope(tuple, Enum):
     # Captures GLOBAL and META arguments.
     ALL = (*GLOBAL, *META)
 
-    def __lt__(self, other: "ArgumentScope") -> bool:
+    def __lt__(self, other: "ArgumentScope") -> bool:  # type: ignore[override]
         return len(self.value) < len(other.value)
 
-    def __eq__(self, other: "ArgumentScope") -> bool:
+    def __eq__(self, other: "ArgumentScope") -> bool:  # type: ignore[override]
         return self.value == other.value
 
     def __hash__(self) -> Any:
@@ -127,7 +141,7 @@ class ScopedArgumentParser:
         return ArgumentScope[self.parse_args().default_argument_scope.upper()]
 
     def __init__(self, *argparse_args: Any, **argparse_kwargs: Any) -> None:
-        self._scoped_parsers = {}
+        self._scoped_parsers: dict[ArgumentScope, argparse.ArgumentParser] = {}
         self._argparse_init_args = argparse_args
         self._argparse_init_kwargs = argparse_kwargs
         self.add_argument(
@@ -143,17 +157,20 @@ class ScopedArgumentParser:
 
     def _get_parser(self, scope: ArgumentScope) -> argparse.ArgumentParser:
         if scope not in self._scoped_parsers:
-            self._scoped_parsers[scope] = argparse.ArgumentParser(
+            # mypy can't tell that the forwarded positional args won't collide
+            # with the `add_help` keyword argument.
+            parser = argparse.ArgumentParser(  # type: ignore[misc]
                 *self._argparse_init_args,
                 add_help=False,
                 **self._argparse_init_kwargs,
             )
+            self._scoped_parsers[scope] = parser
         return self._scoped_parsers[scope]
 
     def add_argument(
         self,
         *argparse_args: Any,
-        scope: ArgumentScope = None,
+        scope: ArgumentScope | None = None,
         **argparse_kwargs: Any,
     ) -> Any:
         return self._get_parser(
@@ -164,11 +181,13 @@ class ScopedArgumentParser:
         self, *argparse_args: Any, **argparse_kwargs: Any
     ) -> argparse.Namespace:
         # TODO(chandarren): Handle `--help`.
+        # mypy can't tell that the forwarded positional args won't collide
+        # with the `args` keyword argument.
         return argparse.Namespace(
             **reduce(
                 lambda smaller_ns, larger_ns: {**vars(larger_ns), **smaller_ns},
                 [
-                    parser.parse_known_args(
+                    parser.parse_known_args(  # type: ignore[call-overload]
                         *argparse_args,
                         args=self.get_arguments(scope),
                         **argparse_kwargs,
@@ -181,23 +200,28 @@ class ScopedArgumentParser:
 
     def parse_known_args(
         self, *argparse_args: Any, **argparse_kwargs: Any
-    ) -> argparse.Namespace:
+    ) -> tuple[argparse.Namespace, list[str]]:
+        namespace = self.parse_args(*argparse_args, **argparse_kwargs)
+        global_parser = self._scoped_parsers[ArgumentScope.GLOBAL]
         return (
-            self.parse_args(*argparse_args, **argparse_kwargs),
-            self._scoped_parsers[ArgumentScope.GLOBAL].parse_known_args(
+            namespace,
+            # See parse_args() for why the ignore is needed.
+            global_parser.parse_known_args(  # type: ignore[call-overload]
                 *argparse_args,
                 args=self.get_arguments(ArgumentScope.GLOBAL),
                 **argparse_kwargs,
             )[1],
         )
 
-    def path_arg(self, type="file"):
-        def arg(path):
-            path = Path(path)
+    def path_arg(self, type: str | None = "file") -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             if path.is_file() != (type == "file") or path.is_dir() != (
                 type == "directory"
             ):
-                super(self).error(f'Path "{path}" is not a {type}!')
+                raise argparse.ArgumentTypeError(
+                    f'Path "{path}" is not a {type}!'
+                )
             return path
 
         return arg
@@ -227,7 +251,7 @@ class FuchsiaTask:
         self._workflow_state = workflow_state
 
     @contextmanager
-    def apply_environment(self) -> None:
+    def apply_environment(self) -> Iterator[None]:
         original_environ = os.environ.copy()
         try:
             os.environ.update(
@@ -259,7 +283,12 @@ class FuchsiaTask:
         return ScopedArgumentParser.get_arguments(scope)
 
     @classmethod
-    def main(cls, *, task_name: str = None, is_final_task: bool = None) -> None:
+    def main(
+        cls,
+        *,
+        task_name: str | None = None,
+        is_final_task: bool | None = None,
+    ) -> None:
         parser = ScopedArgumentParser()
         parser.add_argument(
             "--workflow_task_name",

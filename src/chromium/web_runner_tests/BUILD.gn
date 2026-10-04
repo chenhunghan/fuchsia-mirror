@@ -76,7 +76,7 @@ fuchsia_test_package("web_runner_tests") {
     # TODO(https://fxbug.dev/42070261): These should be provided by the Product
     # configurations on which these tests run rather than as deps.
     "//src/chromium:web_context_provider_for_test",
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
     "//src/developer/build_info/testing:fake-build-info-component",
     "//src/media/testing/mock_profile_provider",
     "//src/sys/stash:stash_secure_v2",

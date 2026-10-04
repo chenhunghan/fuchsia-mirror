@@ -6,6 +6,7 @@
 #define SRC_UI_LIB_ESCHER_FLIB_FENCE_QUEUE_H_
 
 #include <lib/fit/function.h>
+#include <lib/zx/handle.h>
 
 #include <deque>
 #include <memory>
@@ -23,12 +24,17 @@ namespace escher {
 // Must be managed by a std::shared_ptr.
 class FenceQueue final : public std::enable_shared_from_this<FenceQueue> {
  public:
-  void QueueTask(fit::function<void()> task, std::vector<zx::event> fences);
+  void QueueTask(fit::function<void()> task, std::vector<zx::handle> fences);
 
  private:
   void ProcessQueue();
 
-  std::deque<std::pair</*task*/ fit::function<void()>, /*fences*/ std::vector<zx::event>>> queue_;
+  struct QueueItem {
+    fit::function<void()> task;
+    std::vector<zx::handle> fences;
+  };
+
+  std::deque<QueueItem> queue_;
   std::optional<escher::FenceSetListener> fence_listener_ = std::nullopt;
 };
 

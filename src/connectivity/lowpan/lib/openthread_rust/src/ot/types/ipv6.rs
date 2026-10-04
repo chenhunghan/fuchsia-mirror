@@ -590,7 +590,7 @@ pub enum NetifIdentifier {
 
 impl From<otNetifIdentifier> for NetifIdentifier {
     fn from(x: otNetifIdentifier) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x).unwrap_or_else(|| panic!("Unknown otNetifIdentifier value: {x}"))
     }
 }
@@ -689,7 +689,7 @@ pub enum BorderRoutingDhcp6PdState {
 
 impl From<otBorderRoutingDhcp6PdState> for BorderRoutingDhcp6PdState {
     fn from(x: otBorderRoutingDhcp6PdState) -> Self {
-        use num::FromPrimitive;
+        use num_traits::FromPrimitive;
         Self::from_u32(x)
             .unwrap_or_else(|| panic!("Unknown otBorderRoutingDhcp6PdState value: {x}"))
     }

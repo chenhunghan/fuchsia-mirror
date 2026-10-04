@@ -56,7 +56,7 @@ closed protocol NetworkManager {
         name string:MAX_NAME_LENGTH;
         config NetworkConfig;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         net client_end:<Network, optional>;
     });
     /// Gets a handle to a network.
@@ -96,7 +96,7 @@ closed protocol EndpointManager {
         name string:MAX_NAME_LENGTH;
         config EndpointConfig;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         endpoint client_end:<Endpoint, optional>;
     });
     /// Gets a handle to an endpoint.
@@ -144,19 +144,19 @@ closed protocol Network {
     strict SetConfig(struct {
         config NetworkConfig;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Attaches endpoint with given name to network.
     strict AttachEndpoint(struct {
         name string:MAX_NAME_LENGTH;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Removes endpoint with given name from network.
     strict RemoveEndpoint(struct {
         name string:MAX_NAME_LENGTH;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Injects a fake endpoint.
     strict CreateFakeEndpoint(resource struct {
@@ -171,7 +171,7 @@ closed protocol Network {
     strict StartCapture(struct {
         name string:MAX_NAME_LENGTH;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Stops capturing packets. This function is guaranteed to succeed.
@@ -269,7 +269,7 @@ closed protocol NetworkContext {
     strict Setup(struct {
         networks vector<NetworkSetup>:MAX;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         setup_handle client_end:<SetupHandle, optional>;
     });
 };

@@ -482,6 +482,12 @@ async fn update_attributes_directory_with_sufficient_rights() {
         selinux_context: supported_attrs
             .contains(fio::NodeAttributesQuery::SELINUX_CONTEXT)
             .then_some(fio::SelinuxContext::Data(vec![7u8; 10])),
+        encryption_policy: supported_attrs
+            .contains(fio::NodeAttributesQuery::ENCRYPTION_POLICY)
+            .then_some(fio::FscryptPolicy {
+                key_identifier: [0; 16],
+                flags: fio::FscryptPolicyFlags::PAD_16 | fio::FscryptPolicyFlags::IV_INO_LBLK_64,
+            }),
         ..Default::default()
     };
 

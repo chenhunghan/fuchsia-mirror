@@ -2,9 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/go/go_library.gni")
-import("//build/go/go_test.gni")
-import("//build/testing/test_spec.gni")
+import("//build/testing/host_test.gni")
 import("//tools/devshell/test_runner/host_script_test_data_impl.gni")
 
 # Templates for defining host tests that are based which require
@@ -102,34 +100,33 @@ template("host_script_test_data") {
 #
 #   Standard GN parameters: data_deps
 template("host_script_test") {
-  forward_variables_from(invoker,
-                         [
-                           "test_script",
-                           "test_root",
-                           "data_deps",
-                         ])
-  assert(defined(test_script), "test_script is required.")
+  assert(defined(invoker.test_script), "test_script is required.")
 
   # Only build this for host targets
   if (!is_linux) {
-    not_needed([
-                 "test_script",
-                 "data_deps",
-                 "test_root",
-               ])
-
+    not_needed(invoker, "*")
     group(target_name) {
     }
   } else {
-    # Wrapper for running test. This runs the test_script in the test_root
-    # directory.
-    go_test(target_name) {
-      embed = [ "//tools/devshell/test_runner:host_runner_test_lib" ]
+    host_test(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "data_deps",
+                               "deps",
+                               "environments",
+                               "test_root",
+                               "test_script",
+                               "visibility",
+                             ])
+      binary_path = "${root_out_dir}/host_runner"
       args = [ "-testscript=${test_script}" ]
       if (defined(test_root)) {
         args += [ "--testroot=${test_root}" ]
       }
-      non_go_deps = data_deps
+      if (!defined(deps)) {
+        deps = []
+      }
+      deps += [ "//tools/devshell/test_runner:host_runner" ]
     }
   }
 }

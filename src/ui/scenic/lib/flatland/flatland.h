@@ -569,6 +569,16 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   // Image resources, keyed by the never-reused GlobalImageId.  See ImageObject.
   std::pmr::unordered_map<allocation::GlobalImageId, ImageObject> image_objects_;
 
+  // Release fences of image bindings removed since the last `Present()`, which are
+  // added to that Present's release set. Delivering them with Present N is safe
+  // because Scenic waits on all acquire fences on the CPU prior to compositing.
+  // Since Present N only reaches the screen once its new images are ready, when
+  // `ReleaseFenceManager` signals Present N's release set, the superseded binding
+  // is guaranteed to be off-screen and no longer in use. A binding removed before
+  // it was ever displayed waits for that same retire: conservative by at most one
+  // frame, never early.
+  std::vector<SignalFence> unbound_release_fences_;
+
   // TODO(https://fxbug.dev/523371761): public for tests.  Later, revisit whether any can be
   // made private (if so, they'll be reordered in the file).
   // Consider using `friend class FlatlandTest`.
@@ -598,6 +608,7 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   std::vector<allocation::GlobalImageId> CleanupFlatland2StateForTest(
       const std::vector<TransformHandle>& dead_handles);
   void SetLayerImageForTest(LayerHandle handle, allocation::GlobalImageId image);
+  void UnbindLayerImageForTest(LayerHandle handle);
   void SetLayerSolidColorForTest(LayerHandle handle);
   LayerObject* GetLayerObjectForTest(LayerHandle handle);
   const ImageObject* GetImageObjectForTest(allocation::GlobalImageId global_id) const;

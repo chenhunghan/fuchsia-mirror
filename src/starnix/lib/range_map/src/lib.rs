@@ -1471,10 +1471,9 @@ where
     /// Searches the map for a range that contains the given key.
     ///
     /// If such a range is found, returns a cursor to that entry, the range, and the value.
-    fn get_cursor_key_value(&mut self, key: &K) -> Option<(Cursor, Range<K>, V)> {
+    fn get_cursor_key_value(&self, key: &K) -> Option<(Cursor, &Range<K>, &V)> {
         let cursor = self.find(key, CursorPosition::Left);
-        self.get_if_contains_key(key, cursor)
-            .map(|(range, value)| (cursor, range.clone(), value.clone()))
+        self.get_if_contains_key(key, cursor).map(|(range, value)| (cursor, range, value))
     }
 
     /// Find a gap that is at least as large as the given gap and is less than the given upper bound.
@@ -1495,9 +1494,10 @@ where
             return removed_values;
         }
 
-        if let Some((cursor, old_range, v)) = self.get_cursor_key_value(&range.start) {
+        if let Some((cursor, old_range, _)) = self.get_cursor_key_value(&range.start) {
+            let old_range = old_range.clone();
             // Remove that range from the map.
-            removed_values.push(self.remove_at(cursor).expect("entry should exist"));
+            let v = self.remove_at(cursor).expect("entry should exist");
 
             // If the removed range extends after the end of the given range,
             // re-insert the part of the old range that extends beyond the end
@@ -1510,27 +1510,32 @@ where
             // range, re-insert the part of the old range that extends before
             // the start of the given range.
             if old_range.start < range.start {
-                self.insert_range_internal(old_range.start..range.start, v);
+                self.insert_range_internal(old_range.start..range.start, v.clone());
             }
+
+            removed_values.push(v);
 
             // Notice that we can end up splitting the old range into two
             // separate ranges if the old range extends both beyond the given
             // range and before the given range.
         }
 
-        if let Some((cursor, old_range, v)) = self.get_cursor_key_value(&range.end) {
+        if let Some((cursor, old_range, _)) = self.get_cursor_key_value(&range.end) {
             // If the old range starts before the removed range, we need to trim the old range.
             // TODO: Optimize with replace once available.
             if old_range.start < range.end {
+                let old_range_end = old_range.end;
                 // Remove that range from the map.
-                removed_values.push(self.remove_at(cursor).expect("entry should exist"));
+                let v = self.remove_at(cursor).expect("entry should exist");
 
                 // If the removed range extends after the end of the given range,
                 // re-insert the part of the old range that extends beyond the end
                 // of the given range.
-                if old_range.end > range.end {
-                    self.insert_range_internal(range.end..old_range.end, v);
+                if old_range_end > range.end {
+                    self.insert_range_internal(range.end..old_range_end, v.clone());
                 }
+
+                removed_values.push(v);
             }
         }
 
@@ -1628,7 +1633,7 @@ where
         // Check for a range directly after. If it exists, we can look it up by exact start value
         // of range.end.
         if let Some((cursor, next_range, next_value)) = self.get_cursor_key_value(&range.end) {
-            if next_range.start == range.end && value == next_value {
+            if next_range.start == range.end && value == *next_value {
                 range.end = next_range.end;
 
                 // Don't include these values in the "removed" values. The new value is equal to
@@ -1771,10 +1776,9 @@ where
 
                 // Check if the mutated value is equal to neighbors, and merge if needed.
                 let mut needs_merge = false;
-                let value = self.node.get_key_value(cursor).map(|(_, v)| v.clone());
-                if let Some(value) = value {
+                if let Some((_, value)) = self.node.get_key_value(cursor) {
                     if let Some((prev_range, prev_value)) = self.range(..range.start).next_back() {
-                        if prev_range.end == range.start && value == *prev_value {
+                        if prev_range.end == range.start && value == prev_value {
                             needs_merge = true;
                         }
                     }

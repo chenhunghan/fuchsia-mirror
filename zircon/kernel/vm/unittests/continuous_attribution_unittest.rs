@@ -6,8 +6,6 @@
 #[cfg(ktest)]
 #[unittest::suite(name = "continuous_attribution_rust")]
 mod tests {
-    use crate::vm::attribution;
-    use crate::vm::compression::CompressorGuard;
     use crate::vm::continuous_attribution_tracker::{
         ContinuousAttributionTracker, StubContinuousAttributionTracker,
     };
@@ -576,7 +574,7 @@ mod tests {
         // Returning early here would discard any failure recorded above, so only skip the part of
         // the test that needs a compressor.
         if let Some(compression) = pmm::node().get_page_compression() {
-            stack_pin_init!(let compressor = CompressorGuard::new(compression));
+            stack_pin_init!(let compressor = compression.acquire_compressor());
             assert_ok!(compressor.as_mut().get().arm());
 
             // SAFETY: `page` is the page committed at offset 0 of `vmo`.
@@ -851,7 +849,7 @@ mod tests {
                 return true;
             };
 
-            stack_pin_init!(let compressor = CompressorGuard::new(compression));
+            stack_pin_init!(let compressor = compression.acquire_compressor());
             assert_ok!(compressor.as_mut().get().arm());
 
             // SAFETY: `page` is the page at offset 0 of `hidden_parent`.
@@ -878,7 +876,7 @@ mod tests {
             // populated slots count should eventually agree here that there are zero populated
             // slots and zero populated bytes.
             expect_eq!(1u32, child_cow.debug_get_populated_slots_count());
-            expect_eq!(0u64, attribution::total_bytes(&child.get_attributed_memory()));
+            expect_eq!(0usize, child.get_attributed_memory().total_bytes());
 
             // Let's drop |vmo| to trigger the hidden parent to merge into |child|. That will allow
             // |child| to have no parent while still having a spurious parent content marker.
@@ -1128,7 +1126,7 @@ mod tests {
             vmo_cow.debug_get_parent().expect("bidirectional clone has a hidden parent");
 
         expect_eq!(1u32, hidden_parent.debug_get_populated_slots_count());
-        expect_eq!(PAGE_SIZE, attribution::total_bytes(&vmo.get_attributed_memory()));
+        expect_eq!(PAGE_SIZE_USIZE, vmo.get_attributed_memory().total_bytes());
 
         let page = hidden_parent.debug_get_page(0).expect("hidden parent has a page at offset 0");
         assert_true!(hidden_parent.dedup_zero_page(page, 0));
@@ -1136,6 +1134,6 @@ mod tests {
         // Note the disconnect between the continuously tracked populated slots count and
         // GetAttributedMemory.
         expect_eq!(1u32, vmo_cow.debug_get_populated_slots_count());
-        expect_eq!(0u64, attribution::total_bytes(&vmo.get_attributed_memory()));
+        expect_eq!(0usize, vmo.get_attributed_memory().total_bytes());
     }
 }

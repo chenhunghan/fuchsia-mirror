@@ -6,8 +6,8 @@
 
 import collections.abc
 import unittest
-from collections.abc import Sequence
-from typing import Any, Iterable
+from collections.abc import Collection, Sequence
+from typing import Any
 
 from reporting import metrics
 from trace_processing import trace_model, trace_time
@@ -28,7 +28,7 @@ class PowerMetricsTest(unittest.TestCase):
 
     def construct_trace_processes(
         self,
-        loadgen_tids: Iterable[int],
+        loadgen_tids: Collection[int],
         power_events_stop_at: trace_time.TimePoint | None = None,
     ) -> Sequence[trace_model.Process]:
         """Builds a fake trace model.

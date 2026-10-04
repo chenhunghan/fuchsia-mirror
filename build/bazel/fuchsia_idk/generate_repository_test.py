@@ -279,6 +279,15 @@ alias(
 """,
         )
 
+        os.utime(build_bazel, (1000, 1000))
+        self.out_idk.write_all()
+        self.assertEqual(build_bazel.stat().st_mtime, 1000)
+
+        package_info.add_alias("bar", "bar_actual")
+        self.out_idk.write_all()
+        self.assertNotEqual(build_bazel.stat().st_mtime, 1000)
+        self.assertIn('name = "bar"', build_bazel.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

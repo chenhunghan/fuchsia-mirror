@@ -7,7 +7,7 @@ import("//build/rust/rustc_library.gni")
 
 rustc_library("sorted-vec-map") {
   edition = "2024"
-  with_unit_tests = true
+  with_unit_tests = "both"
 
   sources = [
     "src/lib.rs",

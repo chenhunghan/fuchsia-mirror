@@ -50,7 +50,10 @@ source_set("usb") {
 source_set("descriptors") {
   public = [ "include/usb/descriptors.h" ]
   public_configs = [ ":includes" ]
-  public_deps = [ "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_cpp" ]
+  public_deps = [
+    "//sdk/banjo/fuchsia.hardware.usb:fuchsia.hardware.usb_banjo_c",
+    "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_cpp",
+  ]
 }
 
 config("enable_dfv2_compat_logging") {
@@ -171,16 +174,13 @@ source_set("usb-header") {
 source_set("audio") {
   public = [ "include/usb/audio.h" ]
   public_configs = [ ":includes" ]
+  public_deps = [ ":descriptors" ]
 }
 
 source_set("video") {
   public = [ "include/usb/video.h" ]
   public_configs = [ ":includes" ]
-}
-
-source_set("dfu") {
-  public = [ "include/usb/dfu.h" ]
-  public_configs = [ ":includes" ]
+  public_deps = [ ":descriptors" ]
 }
 
 source_set("ums") {
@@ -191,11 +191,13 @@ source_set("ums") {
 source_set("hid") {
   public = [ "include/usb/hid.h" ]
   public_configs = [ ":includes" ]
+  public_deps = [ ":descriptors" ]
 }
 
 source_set("cdc") {
   public = [ "include/usb/cdc.h" ]
   public_configs = [ ":includes" ]
+  public_deps = [ ":descriptors" ]
 }
 
 source_set("peripheral") {

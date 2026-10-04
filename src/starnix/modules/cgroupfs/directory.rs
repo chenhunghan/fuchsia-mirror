@@ -312,18 +312,12 @@ impl FsNodeOps for CgroupDirectoryHandle {
         node: &FsNode,
         _current_task: &CurrentTask,
         name: &FsStr,
-        _mode: FileMode,
+        mode: FileMode,
         owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
         let dir_nodes = self.dir_nodes()?;
         let cgroup = self.cgroup()?.new_child(name)?;
-        let directory = CgroupDirectory::new(
-            Arc::downgrade(&cgroup) as Weak<dyn CgroupOps>,
-            &node.fs(),
-            &dir_nodes,
-            owner.clone(),
-        );
-        let child = dir_nodes.add_node(&cgroup, directory, &node.fs(), owner);
+        let child = dir_nodes.add_node(&cgroup, &node.fs(), mode, owner);
 
         node.update_info(|info| {
             info.link_count += 1;

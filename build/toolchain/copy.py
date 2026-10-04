@@ -10,7 +10,7 @@ import shutil
 import sys
 
 
-def main():
+def main() -> int:
     if len(sys.argv) != 3:
         print("usage: copy.py source dest", file=sys.stderr)
         return 1
@@ -30,7 +30,8 @@ def main():
             os.unlink(dest)
 
     shutil.copy2(source, dest)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

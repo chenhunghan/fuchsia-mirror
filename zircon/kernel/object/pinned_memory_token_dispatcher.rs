@@ -11,7 +11,7 @@ use fbl::{Canary, RefPtr};
 use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
-use zx_types::{ZX_OBJ_TYPE_PMT, ZX_RIGHT_INSPECT, zx_rights_t};
+use zx_types::{ZX_DEFAULT_PMT_RIGHTS, ZX_OBJ_TYPE_PMT, zx_rights_t};
 
 use super::KernelHandle;
 use super::bus_transaction_initiator_dispatcher::BusTransactionInitiatorDispatcher;
@@ -23,9 +23,6 @@ use crate::vm::pinned_vm_object::PinnedVmObject;
 use object_constants_rs as object_constants;
 
 const LOCAL_TRACE: u32 = 0;
-
-/// Default rights assigned to a newly created PinnedMemoryTokenDispatcher handle.
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_INSPECT;
 
 zr::static_assert_size_and_align!(
     PinnedMemoryTokenDispatcherState,
@@ -104,7 +101,7 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 impl PinnedMemoryTokenDispatcher {
     /// Returns the default rights for a PinnedMemoryTokenDispatcher handle.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_PMT_RIGHTS
     }
 
     /// Creates a new `PinnedMemoryTokenDispatcher` representing pinned pages in `pinned_vmo`.
@@ -145,7 +142,7 @@ impl PinnedMemoryTokenDispatcher {
 
         handle.dispatcher().state().set_pmt(pmt);
 
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_PMT_RIGHTS))
     }
 
     /// Unpins and unmaps the memory which was managed by this PMT.

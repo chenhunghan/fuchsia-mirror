@@ -14,8 +14,7 @@ use futures::task::Context;
 use std::fmt;
 use std::pin::Pin;
 use std::task::Poll;
-use zx::{self as zx, AsHandleRef};
-use zx_status_ext::StatusExt;
+use zx::{self as zx, AsHandleRef, StatusExt};
 
 /// An I/O object representing a `Socket`.
 pub struct Socket(RWHandle<zx::Socket, SocketRWHandleSpec>);

@@ -90,6 +90,33 @@ impl<T: Recyclable> Drop for UniquePtr<T> {
 unsafe impl<T: Recyclable + Send> Send for UniquePtr<T> {}
 unsafe impl<T: Recyclable + Sync> Sync for UniquePtr<T> {}
 
+/// Declares a zero-sized facade struct for an opaque `ktl::unique_ptr`-owned C++ object and
+/// implements `Recyclable` for it so it can be held by `fbl::UniquePtr`.
+#[macro_export]
+macro_rules! impl_opaque_unique_facade {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident,
+        $destroy_fn:path $(,)?
+    ) => {
+        $(#[$meta])*
+        #[repr(C)]
+        $vis struct $name {
+            _facade: $crate::OpaqueFacade,
+        }
+
+        // SAFETY: `$name` represents a C++ heap-allocated object destroyed by `$destroy_fn`.
+        unsafe impl $crate::Recyclable for $name {
+            unsafe fn recycle(ptr: core::ptr::NonNull<Self>) {
+                // SAFETY: `ptr` is the unique owning pointer being dropped by `UniquePtr`.
+                unsafe {
+                    $destroy_fn(ptr.as_ptr() as *mut Self);
+                }
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -182,7 +182,7 @@ impl<Impl: UnsafeMmio, Owner: Borrow<Impl>> MmioRegion<Impl, Owner> {
     /// # Safety
     /// - For the lifetime of this MmioRegion or any split off from it the given range must only be
     ///   accessed through this MmioRegion or a region split off from it.
-    unsafe fn new_unchecked(owner: Owner, bounds: Range<usize>) -> Self {
+    pub unsafe fn new_unchecked(owner: Owner, bounds: Range<usize>) -> Self {
         Self { owner, bounds, phantom: PhantomData }
     }
 

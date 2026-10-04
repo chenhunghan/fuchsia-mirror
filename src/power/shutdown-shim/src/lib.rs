@@ -418,7 +418,6 @@ impl<D: Directory + AsRefDirectory> collaborative_reboot::RebootActuator for Pro
         let reasons = reasons
             .into_iter()
             .map(|reason| match reason {
-                CollaborativeRebootReason::NetstackMigration => ShutdownReason::NetstackMigration,
                 CollaborativeRebootReason::SystemUpdate => ShutdownReason::SystemUpdate,
             })
             .collect();

@@ -205,6 +205,26 @@ cc_test_executable("node_shutdown_test") {
   ]
 }
 
+cc_test_executable("shutdown_manager_test") {
+  testonly = true
+  sources = [ "shutdown_manager_test.cc" ]
+
+  deps = [
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/async_patterns/testing/cpp",
+    "//sdk/lib/driver/fake-resource/cpp",
+    "//src/devices/bin/driver_manager:driver_runner",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+}
+
+fuchsia_unittest_component("shutdown-manager-test") {
+  deps = [ ":shutdown_manager_test" ]
+}
+
 fuchsia_test_package("driver-runner-tests") {
   test_specs = {
     log_settings = {
@@ -220,6 +240,7 @@ fuchsia_test_package("driver-runner-tests") {
     ":driver-runner-test",
     ":node-removal-tracker-test",
     ":node-shutdown-test",
+    ":shutdown-manager-test",
     ":node-test",
     ":pending-node-manager-test",
   ]

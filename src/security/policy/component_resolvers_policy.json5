@@ -1,11 +1,10 @@
 [
-    // Products that wish to limit the use of /core/full-resolver (and therefore
-    // /core/pkg-resolver) for resolving components should use a custom instance of this allowlist
-    // with an entry like:
+    // Products that wish to limit the use of /bootstrap/pkg-cache's full_resolver for resolving
+    // components should use a custom instance of this allowlist with an entry like:
     //{
     //    scheme: "fuchsia-pkg",
-    //    moniker: "/core/full-resolver",
-    //    protocol: "fuchsia.pkg.PackageResolver",
+    //    moniker: "/bootstrap/pkg-cache",
+    //    resolver: "full_resolver",
     //    components: [
     //    ],
     //},

@@ -8,7 +8,6 @@ using fuchsia.url;
 /// The type of Fuchsia package that a driver component is inside of.
 /// More details about the various package categories are available at:
 /// https://fuchsia.dev/fuchsia-src/concepts/packages/package#types_of_packages
-@available(added=16)
 type DriverPackageType = flexible enum : uint8 {
     /// BOOT packages are inside the Zircon boot image.
     BOOT = 0;
@@ -22,14 +21,12 @@ type DriverPackageType = flexible enum : uint8 {
 };
 
 /// Device categories as provided in the driver's component manifest.
-@available(added=16)
 type DeviceCategory = table {
     1: category string:MAX;
     2: subcategory string:MAX;
 };
 
 /// General information for a driver, used with both composite and normal drivers.
-@available(added=16)
 type DriverInfo = table {
     /// URL of the driver component.
     1: url string:fuchsia.url.MAX_URL_LENGTH;
@@ -63,14 +60,12 @@ type DriverInfo = table {
     8: driver_framework_version uint8;
 
     /// Whether the driver is disabled. If true, this driver is not chosen to bind to nodes.
-    @available(added=17)
     9: is_disabled bool;
 
     // TODO(b/303084353): Add the merkle root when the type is available in the sdk.
 };
 
 /// Information for a composite driver.
-@available(added=16)
 type CompositeDriverInfo = table {
     /// The name of the composite as specified in the driver's composite bind rules.
     1: composite_name string:MAX;
@@ -80,7 +75,6 @@ type CompositeDriverInfo = table {
 };
 
 /// Information for a composite driver that has matched with a composite.
-@available(added=16)
 type CompositeDriverMatch = table {
     /// Information for the composite driver that has matched.
     1: composite_driver CompositeDriverInfo;
@@ -95,7 +89,6 @@ type CompositeDriverMatch = table {
 };
 
 /// Information for a composite that is defined by a composite node spec.
-@available(added=16)
 type CompositeInfo = table {
     /// The spec information that this composite node spec was created with.
     1: spec CompositeNodeSpec;
@@ -106,7 +99,6 @@ type CompositeInfo = table {
 };
 
 /// A parent to a composite that is defined by a composite node spec.
-@available(added=16)
 type CompositeParent = table {
     /// Information about the composite that this is a parent of.
     1: composite CompositeInfo;

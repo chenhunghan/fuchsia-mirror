@@ -2,25 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use fdf_component::DriverError;
 use fidl_next::{Request, Responder};
+use fidl_next_fuchsia_hardware_clock as fclock;
 use fidl_next_fuchsia_hardware_gpio as fgpio;
+use fidl_next_fuchsia_hardware_pin as fpin;
+use fidl_next_fuchsia_hardware_powerdomain as fpowerdomain;
+use fidl_next_fuchsia_hardware_reset as freset;
+use fidl_next_fuchsia_hardware_sharedmemory as fsharedmemory;
+use fidl_next_fuchsia_hardware_sharedmemory::natural::SharedVmoRight;
 use fidl_next_fuchsia_hardware_spiimpl::{
     self, SpiImplExchangeVectorResponse, SpiImplReceiveVectorResponse,
     SpiImplUnregisterVmoResponse, spi_impl as fspi_impl,
 };
+use fidl_next_fuchsia_mem as fmem;
 use log::{debug, error, warn};
 use mmio::Register;
 use mmio::region::MmioRegion;
 use mmio::vmo::VmoMemory;
+use std::collections::HashMap;
 use std::time::Duration;
-pub(crate) mod registers;
-use registers::DwSpiRegsBlock;
 use zx::Status;
 
-use fidl_next_fuchsia_hardware_sharedmemory as fsharedmemory;
-use fidl_next_fuchsia_hardware_sharedmemory::natural::SharedVmoRight;
-use fidl_next_fuchsia_mem as fmem;
-use std::collections::HashMap;
+pub(crate) mod registers;
+use registers::DwSpiRegsBlock;
 
 const FIFO_SIZE: usize = 256;
 
@@ -29,10 +34,25 @@ pub struct RegisteredVmo {
     pub rights: SharedVmoRight,
 }
 
+pub struct DwSpiResources {
+    pub powerdomain: fidl_next::Client<fpowerdomain::Domain>,
+    pub clock_bus: fidl_next::Client<fclock::Clock>,
+    pub clock_regs: fidl_next::Client<fclock::Clock>,
+    pub reset: fidl_next::Client<freset::Reset>,
+    pub pin_states: Vec<fidl_next::Client<fpin::PinStates>>,
+}
+
+#[derive(Debug)]
+pub struct DwSpiTiming {
+    pub max_bus_clock_hz: u64,
+    pub rx_sample_delay_ns: u64,
+}
+
 pub struct DwSpiDevice {
     mmio: DwSpiRegsBlock<MmioRegion<VmoMemory>>,
     cs_gpio: Option<fidl_next::Client<fgpio::Gpio>>,
     interrupt: zx::Interrupt,
+    resources: DwSpiResources,
     registered_vmos: HashMap<u32, RegisteredVmo>,
     loopback_registered_vmos: HashMap<u32, RegisteredVmo>,
 }
@@ -42,22 +62,81 @@ impl DwSpiDevice {
         mmio: MmioRegion<VmoMemory>,
         cs_gpio: Option<fidl_next::Client<fgpio::Gpio>>,
         interrupt: zx::Interrupt,
+        resources: DwSpiResources,
     ) -> Self {
         DwSpiDevice {
             mmio: DwSpiRegsBlock { mmio },
             cs_gpio,
             interrupt,
+            resources,
             registered_vmos: HashMap::new(),
             loopback_registered_vmos: HashMap::new(),
         }
     }
 
-    fn set_baud_rate(
-        &mut self,
-        parent_clock_hz: u64,
-        max_bus_clock_hz: u64,
-        rx_sample_delay_ns: u64,
-    ) -> Result<(), Status> {
+    async fn select_pin_states(&self, state: &str) -> Result<(), DriverError> {
+        for pin_state in &self.resources.pin_states {
+            match pin_state.select_state(state).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(s)) => {
+                    let status = s.err().unwrap_or(Status::INTERNAL);
+                    error!("Failed to select pin state {state}: {status}");
+                    return Err(status.into());
+                }
+                // Pin states are optional, so ignore transport errors.
+                Err(e) => {
+                    debug!("Failed to select pin state {state}: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn init(&mut self, timing: DwSpiTiming) -> Result<(), DriverError> {
+        self.resources.powerdomain.enable().await?.map_err(|s| {
+            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
+                .context("Failed to enable power domain")
+        })?;
+
+        self.resources.clock_bus.enable().await?.map_err(|s| {
+            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
+                .context("Failed to enable bus clock")
+        })?;
+
+        let parent_clock_hz = self
+            .resources
+            .clock_bus
+            .get_rate()
+            .await
+            .map_err(|_| Status::INTERNAL)
+            .and_then(|res| res.map_err(|_| Status::INTERNAL))
+            .inspect_err(|e| {
+                error!("Failed to get bus clock rate: {e:?}");
+            })
+            .unwrap_or(fclock::ClockGetRateResponse { hz: 0 })
+            .hz;
+
+        self.resources.clock_regs.enable().await?.map_err(|s| {
+            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
+                .context("Failed to enable registers clock")
+        })?;
+
+        self.resources.reset.toggle().await?.map_err(|s| {
+            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
+                .context("Failed to toggle reset")
+        })?;
+
+        self.init_registers(timing, parent_clock_hz)?;
+
+        self.select_pin_states("default").await?;
+
+        Ok(())
+    }
+
+    fn get_sckdv_rsd(timing: DwSpiTiming, parent_clock_hz: u64) -> Result<(u32, u32), Status> {
+        let max_bus_clock_hz = timing.max_bus_clock_hz;
+        let rx_sample_delay_ns = timing.rx_sample_delay_ns;
+
         // Round the divider up to avoid overclocking.
         let Some(numerator) = parent_clock_hz.checked_add(max_bus_clock_hz - 1) else {
             error!(
@@ -76,12 +155,6 @@ impl DwSpiDevice {
 
         // The divider must be even.
         let divider = if divider % 2 == 0 { divider } else { divider + 1 };
-
-        self.mmio.baudr_mut().write({
-            let mut baudr = registers::Baudr::from_raw(0);
-            baudr.set_sckdv(divider as u32);
-            baudr
-        });
 
         // Convert the RX delay from nanoseconds to parent clock cycles.
         let Some(numerator) = rx_sample_delay_ns.checked_mul(parent_clock_hz) else {
@@ -102,21 +175,10 @@ impl DwSpiDevice {
             return Err(Status::INVALID_ARGS);
         }
 
-        self.mmio.rx_sample_dly_mut().write({
-            let mut rx_sample_dly = registers::RxSampleDly::from_raw(0);
-            rx_sample_dly.set_rsd(rx_sample_delay_clocks as u32);
-            rx_sample_dly
-        });
-
-        Ok(())
+        Ok((divider as u32, rx_sample_delay_clocks as u32))
     }
 
-    pub fn init_registers(
-        &mut self,
-        parent_clock_hz: u64,
-        max_bus_clock_hz: u64,
-        rx_sample_delay_ns: u64,
-    ) -> Result<(), Status> {
+    fn init_registers(&mut self, timing: DwSpiTiming, parent_clock_hz: u64) -> Result<(), Status> {
         self.mmio.ssi_enr_mut().write(registers::SsiEnr::from_raw(0));
 
         self.mmio.ctrlr0_mut().write({
@@ -128,8 +190,18 @@ impl DwSpiDevice {
             ctrlr0
         });
 
-        if max_bus_clock_hz > 0 {
-            self.set_baud_rate(parent_clock_hz, max_bus_clock_hz, rx_sample_delay_ns)?;
+        if timing.max_bus_clock_hz > 0 {
+            let (sckdv, rsd) = Self::get_sckdv_rsd(timing, parent_clock_hz)?;
+            self.mmio.baudr_mut().write({
+                let mut baudr = registers::Baudr::from_raw(0);
+                baudr.set_sckdv(sckdv);
+                baudr
+            });
+            self.mmio.rx_sample_dly_mut().write({
+                let mut rx_sample_dly = registers::RxSampleDly::from_raw(0);
+                rx_sample_dly.set_rsd(rsd);
+                rx_sample_dly
+            });
         } else {
             warn!("Max bus clock rate reported to be zero, skipping baud rate initialization");
         }
@@ -620,85 +692,55 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mmio::vmo::VmoMapping;
-    use zx::Vmo;
 
     #[test]
     fn test_set_baud_rate_and_delay() {
-        let vmo = Vmo::create(0x100).expect("Failed to create VMO");
-        let mmio = VmoMapping::map(0, 0x100, vmo).expect("Failed to map VMO");
-        let irq = zx::Interrupt::from(
-            zx::VirtualInterrupt::create_virtual()
-                .expect("Failed to create virtual interrupt")
-                .into_handle(),
-        );
-        let mut device = DwSpiDevice::new(mmio, None, irq);
+        let (sckdv, rsd) = DwSpiDevice::get_sckdv_rsd(
+            DwSpiTiming { max_bus_clock_hz: 20_000_000, rx_sample_delay_ns: 25 },
+            200_000_000,
+        )
+        .unwrap();
 
-        device.set_baud_rate(200_000_000, 20_000_000, 25).unwrap();
-
-        assert_eq!(device.mmio.baudr().read().sckdv(), 10);
-        assert_eq!(device.mmio.rx_sample_dly().read().rsd(), 5);
+        assert_eq!(sckdv, 10);
+        assert_eq!(rsd, 5);
     }
 
     #[test]
     fn test_set_baud_rate_too_slow() {
-        let vmo = Vmo::create(0x100).expect("Failed to create VMO");
-        let mmio = VmoMapping::map(0, 0x100, vmo).expect("Failed to map VMO");
-        let irq = zx::Interrupt::from(
-            zx::VirtualInterrupt::create_virtual()
-                .expect("Failed to create virtual interrupt")
-                .into_handle(),
+        let result = DwSpiDevice::get_sckdv_rsd(
+            DwSpiTiming { max_bus_clock_hz: 2_000, rx_sample_delay_ns: 0 },
+            200_000_000,
         );
-        let mut device = DwSpiDevice::new(mmio, None, irq);
-
-        let result = device.set_baud_rate(200_000_000, 2_000, 0);
         assert_eq!(result.unwrap_err(), Status::INVALID_ARGS);
     }
 
     #[test]
     fn test_set_baud_divider_rounded_up() {
-        let vmo = Vmo::create(0x100).expect("Failed to create VMO");
-        let mmio = VmoMapping::map(0, 0x100, vmo).expect("Failed to map VMO");
-        let irq = zx::Interrupt::from(
-            zx::VirtualInterrupt::create_virtual()
-                .expect("Failed to create virtual interrupt")
-                .into_handle(),
-        );
-        let mut device = DwSpiDevice::new(mmio, None, irq);
+        let (sckdv, rsd) = DwSpiDevice::get_sckdv_rsd(
+            DwSpiTiming { max_bus_clock_hz: 3_600_000, rx_sample_delay_ns: 0 },
+            200_000_000,
+        )
+        .unwrap();
 
-        device.set_baud_rate(200_000_000, 3_600_000, 0).unwrap();
-
-        assert_eq!(device.mmio.baudr().read().sckdv(), 56); // Divider rounded up to 56.
-        assert_eq!(device.mmio.rx_sample_dly().read().rsd(), 0);
+        assert_eq!(sckdv, 56); // Divider rounded up to 56.
+        assert_eq!(rsd, 0);
     }
 
     #[test]
     fn test_set_baud_rate_invalid_delay_remainder() {
-        let vmo = Vmo::create(0x100).expect("Failed to create VMO");
-        let mmio = VmoMapping::map(0, 0x100, vmo).expect("Failed to map VMO");
-        let irq = zx::Interrupt::from(
-            zx::VirtualInterrupt::create_virtual()
-                .expect("Failed to create virtual interrupt")
-                .into_handle(),
+        let result = DwSpiDevice::get_sckdv_rsd(
+            DwSpiTiming { max_bus_clock_hz: 20_000_000, rx_sample_delay_ns: 28 },
+            200_000_000,
         );
-        let mut device = DwSpiDevice::new(mmio, None, irq);
-
-        let result = device.set_baud_rate(200_000_000, 20_000_000, 28);
         assert_eq!(result.unwrap_err(), Status::INVALID_ARGS);
     }
 
     #[test]
     fn test_set_baud_rate_invalid_delay_too_large() {
-        let vmo = Vmo::create(0x100).expect("Failed to create VMO");
-        let mmio = VmoMapping::map(0, 0x100, vmo).expect("Failed to map VMO");
-        let irq = zx::Interrupt::from(
-            zx::VirtualInterrupt::create_virtual()
-                .expect("Failed to create virtual interrupt")
-                .into_handle(),
+        let result = DwSpiDevice::get_sckdv_rsd(
+            DwSpiTiming { max_bus_clock_hz: 20_000_000, rx_sample_delay_ns: 5000 },
+            200_000_000,
         );
-        let mut device = DwSpiDevice::new(mmio, None, irq);
-
-        let result = device.set_baud_rate(200_000_000, 20_000_000, 5000);
         assert_eq!(result.unwrap_err(), Status::INVALID_ARGS);
     }
 }

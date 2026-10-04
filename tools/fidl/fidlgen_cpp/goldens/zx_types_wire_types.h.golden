@@ -34,6 +34,10 @@ using StatusEnum = ::test_zxtypes::StatusEnum;
 
 using StatusEnumAlias = ::test_zxtypes::StatusEnumAlias;
 
+using ResultEnum = ::test_zxtypes::ResultEnum;
+
+using ResultEnumAlias = ::test_zxtypes::ResultEnumAlias;
+
 struct StatusStruct;
 
 struct StatusStructAlias;
@@ -46,9 +50,25 @@ struct StatusProtocolBRequest;
 
 struct StatusProtocolBResponse;
 
+struct ResultStruct;
+
+struct ResultStructAlias;
+
+struct ResultProtocolARequest;
+
+struct ResultProtocolAResponse;
+
+struct ResultProtocolBRequest;
+
+struct ResultProtocolBResponse;
+
 class StatusTable;
 
 class StatusTableAlias;
+
+class ResultTable;
+
+class ResultTableAlias;
 
 class StatusUnion;
 
@@ -58,14 +78,24 @@ class StatusProtocolAResult;
 
 class StatusProtocolBResult;
 
+class ResultUnion;
+
+class ResultUnionAlias;
+
+class ResultProtocolAResult;
+
+class ResultProtocolBResult;
+
 using StatusAlias = int32_t;
+
+using ResultAlias = int32_t;
 
 struct StatusProtocolARequest {
   int32_t arg = {};
 };
 
 struct StatusProtocolAResponse {
-  int32_t result = {};
+  int32_t status = {};
 };
 
 struct StatusProtocolBRequest {
@@ -73,6 +103,22 @@ struct StatusProtocolBRequest {
 };
 
 struct StatusProtocolBResponse {
+  int32_t status = {};
+};
+
+struct ResultProtocolARequest {
+  int32_t arg = {};
+};
+
+struct ResultProtocolAResponse {
+  int32_t result = {};
+};
+
+struct ResultProtocolBRequest {
+  int32_t arg = {};
+};
+
+struct ResultProtocolBResponse {
   int32_t result = {};
 };
 }  // namespace wire
@@ -539,6 +585,468 @@ class ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::StatusTableAlias> f
   using Base::Base;
   WireTableExternalBuilder(::fidl::WireTableFrame<::test_zxtypes::wire::StatusTableAlias>* frame);
 };
+
+template <>
+class ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>;
+template <>
+class ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable>;
+
+template <>
+struct ::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable> final {
+ public:
+  WireTableFrame() = default;
+  // In its intended usage, WireTableFrame will be referenced by an ObjectView.
+  // If the ObjectView is assigned before a move or copy, then it will reference
+  // the old invalid object. Because this is unsafe, copies are disallowed and
+  // moves are only allowed by friend classes that operate safely.
+  WireTableFrame(const WireTableFrame&) = delete;
+  WireTableFrame& operator=(const WireTableFrame&) = delete;
+
+ private:
+  WireTableFrame(WireTableFrame&&) noexcept = default;
+  WireTableFrame& operator=(WireTableFrame&&) noexcept = default;
+
+  bool HasUnknownData() const;
+  uint64_t ComputeMaxOrdinal() const;
+  ::fidl::Envelope<int32_t> result_;
+  ::fidl::Envelope<::fidl::Array<int32_t, 10>> result_array_;
+  ::fidl::Envelope<::fidl::VectorView<int32_t>> result_vector_;
+
+  friend class ::test_zxtypes::wire::ResultTable;
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>>;
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable>>;
+};
+
+namespace test_zxtypes {
+namespace wire {
+
+class ResultTable {
+ public:
+  ResultTable() = default;
+  ResultTable(const ResultTable& other) noexcept = default;
+  ResultTable& operator=(const ResultTable& other) noexcept = default;
+  ResultTable(ResultTable&& other) noexcept = default;
+  ResultTable& operator=(ResultTable&& other) noexcept = default;
+
+  ~ResultTable() = default;
+
+  // Returns whether no field is set.
+  bool IsEmpty() const;
+
+  // Returns whether the table references unknown fields.
+  bool HasUnknownData() const;
+
+  // Return a builder that by defaults allocates of an arena.
+  static ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable> Builder(::fidl::AnyArena& arena);
+
+  // Return a builder that relies on explicitly allocating |fidl::ObjectView|s.
+  static ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable> ExternalBuilder(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable>> frame);
+
+  [[nodiscard]] int32_t& result() const;
+  [[nodiscard]] bool has_result() const;
+
+  [[nodiscard]] ::fidl::Array<int32_t, 10>& result_array() const;
+  [[nodiscard]] bool has_result_array() const;
+
+  [[nodiscard]] ::fidl::VectorView<int32_t>& result_vector() const;
+  [[nodiscard]] bool has_result_vector() const;
+#if defined(FIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES) || false
+ public:
+#else   // !defined(FIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES)
+ private:
+#endif  // FIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES
+
+  ResultTable& set_result(int32_t elem);
+
+  ResultTable& clear_result();
+  ResultTable& set_result_array(::fidl::ObjectView<::fidl::Array<int32_t, 10>> elem);
+  ResultTable& set_result_array(std::nullptr_t);
+  template <typename... Args>
+  ResultTable& set_result_array(::fidl::AnyArena& allocator, Args&&... args) {
+    return set_result_array(
+        ::fidl::ObjectView<::fidl::Array<int32_t, 10>>(allocator, std::forward<Args>(args)...));
+  }
+
+  ResultTable& clear_result_array();
+  ResultTable& set_result_vector(::fidl::ObjectView<::fidl::VectorView<int32_t>> elem);
+  ResultTable& set_result_vector(std::nullptr_t);
+  template <typename... Args>
+  ResultTable& set_result_vector(::fidl::AnyArena& allocator, Args&&... args) {
+    return set_result_vector(
+        ::fidl::ObjectView<::fidl::VectorView<int32_t>>(allocator, std::forward<Args>(args)...));
+  }
+
+  ResultTable& clear_result_vector();
+
+  explicit ResultTable(::fidl::AnyArena& allocator);
+  // This constructor allows a user controlled allocation (not using a Arena).
+  // It should only be used when performance is key.
+  // As soon as the frame is given to the table, it must not be used directly or for another table.
+  explicit ResultTable(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable>>&& frame);
+
+  void Allocate(::fidl::AnyArena& allocator);
+  void Init(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable>>&& frame_ptr);
+
+ private:
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>>;
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable>>;
+
+  uint64_t max_ordinal_ = 0;
+  ::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable>> frame_ptr_;
+};
+}  // namespace wire
+}  // namespace test_zxtypes
+
+template <typename BuilderImpl>
+class ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, BuilderImpl> {
+ protected:
+  // |Wrapper_Ignore_Me_| wraps a |fidl::ObjectView<T>| and reduces its
+  // priority in overload resolution. When the user writes `{}` as the
+  // setter argument, that would default construct the field instead of
+  // constructing a NULL object view.
+  template <typename U>
+  struct Wrapper_Ignore_Me_ {
+    Wrapper_Ignore_Me_(U v) : value(v) {}
+    U value;
+  };
+
+ public:
+  // Build and return the table. The builder should not be used after this.
+  ::test_zxtypes::wire::ResultTable Build();
+  [[nodiscard]] bool has_result() const;
+
+  // Clears the result field.
+  //
+  // This method should be used sparingly, such as only during tests, as it has
+  // O(number_of_fields) complexity.
+  void clear_result();
+
+  // Getter for result.
+  //
+
+  [[nodiscard]] int32_t& result() const;
+
+  // Setter for result.
+  //
+
+  BuilderImpl& result(int32_t elem);
+  [[nodiscard]] bool has_result_array() const;
+
+  // Clears the result_array field.
+  //
+  // This method should be used sparingly, such as only during tests, as it has
+  // O(number_of_fields) complexity.
+  void clear_result_array();
+
+  // Getter for result_array.
+  //
+
+  [[nodiscard]] ::fidl::Array<int32_t, 10>& result_array() const;
+
+  // Setter for result_array.
+  //
+
+  BuilderImpl& result_array(Wrapper_Ignore_Me_<::fidl::ObjectView<::fidl::Array<int32_t, 10>>> elem);
+  [[nodiscard]] bool has_result_vector() const;
+
+  // Clears the result_vector field.
+  //
+  // This method should be used sparingly, such as only during tests, as it has
+  // O(number_of_fields) complexity.
+  void clear_result_vector();
+
+  // Getter for result_vector.
+  //
+
+  [[nodiscard]] ::fidl::VectorView<int32_t>& result_vector() const;
+
+  // Setter for result_vector.
+  //
+
+  BuilderImpl& result_vector(Wrapper_Ignore_Me_<::fidl::ObjectView<::fidl::VectorView<int32_t>>> elem);
+
+ protected:
+  WireTableBaseBuilder(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable>>&& frame);
+
+ private:
+  ::test_zxtypes::wire::ResultTable table_;
+};
+
+template <>
+class ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable> final : public ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>> {
+  using Base = ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>>;
+
+ public:
+  using Base::result_array;
+
+  template <
+      typename First = ::fidl::Array<int32_t, 10>,
+      typename... Args,
+      std::enable_if_t<!std::is_same_v<cpp20::remove_cvref_t<First>, fidl::ObjectView<::fidl::Array<int32_t, 10>>>, int> = 0>
+  ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>& result_array(First&& first, Args&&... args_) {
+    fidl::ObjectView<::fidl::Array<int32_t, 10>> view_(arena_.get(), std::forward<First>(first), std::forward<Args>(args_)...);
+    result_array(Base::Wrapper_Ignore_Me_<fidl::ObjectView<::fidl::Array<int32_t, 10>>>(view_));
+    return *this;
+  }
+  using Base::result_vector;
+
+  template <
+      typename First = ::fidl::VectorView<int32_t>,
+      typename... Args,
+      std::enable_if_t<!std::is_same_v<cpp20::remove_cvref_t<First>, fidl::ObjectView<::fidl::VectorView<int32_t>>>, int> = 0>
+  ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTable>& result_vector(First&& first, Args&&... args_) {
+    fidl::ObjectView<::fidl::VectorView<int32_t>> view_(arena_.get(), std::forward<First>(first), std::forward<Args>(args_)...);
+    result_vector(Base::Wrapper_Ignore_Me_<fidl::ObjectView<::fidl::VectorView<int32_t>>>(view_));
+    return *this;
+  }
+
+ private:
+  friend class ::test_zxtypes::wire::ResultTable;
+  WireTableBuilder(::fidl::AnyArena& arena);
+
+  [[maybe_unused]] std::reference_wrapper<::fidl::AnyArena> arena_;
+};
+
+template <>
+class ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable> final : public ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable>> {
+  using Base = ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTable, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTable>>;
+
+ private:
+  friend class ::test_zxtypes::wire::ResultTable;
+  using Base::Base;
+  WireTableExternalBuilder(::fidl::WireTableFrame<::test_zxtypes::wire::ResultTable>* frame);
+};
+
+template <>
+class ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>;
+template <>
+class ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias>;
+
+template <>
+struct ::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias> final {
+ public:
+  WireTableFrame() = default;
+  // In its intended usage, WireTableFrame will be referenced by an ObjectView.
+  // If the ObjectView is assigned before a move or copy, then it will reference
+  // the old invalid object. Because this is unsafe, copies are disallowed and
+  // moves are only allowed by friend classes that operate safely.
+  WireTableFrame(const WireTableFrame&) = delete;
+  WireTableFrame& operator=(const WireTableFrame&) = delete;
+
+ private:
+  WireTableFrame(WireTableFrame&&) noexcept = default;
+  WireTableFrame& operator=(WireTableFrame&&) noexcept = default;
+
+  bool HasUnknownData() const;
+  uint64_t ComputeMaxOrdinal() const;
+  ::fidl::Envelope<int32_t> result_;
+  ::fidl::Envelope<::fidl::Array<int32_t, 10>> result_array_;
+  ::fidl::Envelope<::fidl::VectorView<int32_t>> result_vector_;
+
+  friend class ::test_zxtypes::wire::ResultTableAlias;
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>>;
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias>>;
+};
+
+namespace test_zxtypes {
+namespace wire {
+
+class ResultTableAlias {
+ public:
+  ResultTableAlias() = default;
+  ResultTableAlias(const ResultTableAlias& other) noexcept = default;
+  ResultTableAlias& operator=(const ResultTableAlias& other) noexcept = default;
+  ResultTableAlias(ResultTableAlias&& other) noexcept = default;
+  ResultTableAlias& operator=(ResultTableAlias&& other) noexcept = default;
+
+  ~ResultTableAlias() = default;
+
+  // Returns whether no field is set.
+  bool IsEmpty() const;
+
+  // Returns whether the table references unknown fields.
+  bool HasUnknownData() const;
+
+  // Return a builder that by defaults allocates of an arena.
+  static ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias> Builder(::fidl::AnyArena& arena);
+
+  // Return a builder that relies on explicitly allocating |fidl::ObjectView|s.
+  static ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias> ExternalBuilder(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias>> frame);
+
+  [[nodiscard]] int32_t& result() const;
+  [[nodiscard]] bool has_result() const;
+
+  [[nodiscard]] ::fidl::Array<int32_t, 10>& result_array() const;
+  [[nodiscard]] bool has_result_array() const;
+
+  [[nodiscard]] ::fidl::VectorView<int32_t>& result_vector() const;
+  [[nodiscard]] bool has_result_vector() const;
+#if defined(FIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES) || false
+ public:
+#else   // !defined(FIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES)
+ private:
+#endif  // FIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES
+
+  ResultTableAlias& set_result(int32_t elem);
+
+  ResultTableAlias& clear_result();
+  ResultTableAlias& set_result_array(::fidl::ObjectView<::fidl::Array<int32_t, 10>> elem);
+  ResultTableAlias& set_result_array(std::nullptr_t);
+  template <typename... Args>
+  ResultTableAlias& set_result_array(::fidl::AnyArena& allocator, Args&&... args) {
+    return set_result_array(
+        ::fidl::ObjectView<::fidl::Array<int32_t, 10>>(allocator, std::forward<Args>(args)...));
+  }
+
+  ResultTableAlias& clear_result_array();
+  ResultTableAlias& set_result_vector(::fidl::ObjectView<::fidl::VectorView<int32_t>> elem);
+  ResultTableAlias& set_result_vector(std::nullptr_t);
+  template <typename... Args>
+  ResultTableAlias& set_result_vector(::fidl::AnyArena& allocator, Args&&... args) {
+    return set_result_vector(
+        ::fidl::ObjectView<::fidl::VectorView<int32_t>>(allocator, std::forward<Args>(args)...));
+  }
+
+  ResultTableAlias& clear_result_vector();
+
+  explicit ResultTableAlias(::fidl::AnyArena& allocator);
+  // This constructor allows a user controlled allocation (not using a Arena).
+  // It should only be used when performance is key.
+  // As soon as the frame is given to the table, it must not be used directly or for another table.
+  explicit ResultTableAlias(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias>>&& frame);
+
+  void Allocate(::fidl::AnyArena& allocator);
+  void Init(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias>>&& frame_ptr);
+
+ private:
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>>;
+  friend ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias>>;
+
+  uint64_t max_ordinal_ = 0;
+  ::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias>> frame_ptr_;
+};
+}  // namespace wire
+}  // namespace test_zxtypes
+
+template <typename BuilderImpl>
+class ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, BuilderImpl> {
+ protected:
+  // |Wrapper_Ignore_Me_| wraps a |fidl::ObjectView<T>| and reduces its
+  // priority in overload resolution. When the user writes `{}` as the
+  // setter argument, that would default construct the field instead of
+  // constructing a NULL object view.
+  template <typename U>
+  struct Wrapper_Ignore_Me_ {
+    Wrapper_Ignore_Me_(U v) : value(v) {}
+    U value;
+  };
+
+ public:
+  // Build and return the table. The builder should not be used after this.
+  ::test_zxtypes::wire::ResultTableAlias Build();
+  [[nodiscard]] bool has_result() const;
+
+  // Clears the result field.
+  //
+  // This method should be used sparingly, such as only during tests, as it has
+  // O(number_of_fields) complexity.
+  void clear_result();
+
+  // Getter for result.
+  //
+
+  [[nodiscard]] int32_t& result() const;
+
+  // Setter for result.
+  //
+
+  BuilderImpl& result(int32_t elem);
+  [[nodiscard]] bool has_result_array() const;
+
+  // Clears the result_array field.
+  //
+  // This method should be used sparingly, such as only during tests, as it has
+  // O(number_of_fields) complexity.
+  void clear_result_array();
+
+  // Getter for result_array.
+  //
+
+  [[nodiscard]] ::fidl::Array<int32_t, 10>& result_array() const;
+
+  // Setter for result_array.
+  //
+
+  BuilderImpl& result_array(Wrapper_Ignore_Me_<::fidl::ObjectView<::fidl::Array<int32_t, 10>>> elem);
+  [[nodiscard]] bool has_result_vector() const;
+
+  // Clears the result_vector field.
+  //
+  // This method should be used sparingly, such as only during tests, as it has
+  // O(number_of_fields) complexity.
+  void clear_result_vector();
+
+  // Getter for result_vector.
+  //
+
+  [[nodiscard]] ::fidl::VectorView<int32_t>& result_vector() const;
+
+  // Setter for result_vector.
+  //
+
+  BuilderImpl& result_vector(Wrapper_Ignore_Me_<::fidl::ObjectView<::fidl::VectorView<int32_t>>> elem);
+
+ protected:
+  WireTableBaseBuilder(::fidl::ObjectView<::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias>>&& frame);
+
+ private:
+  ::test_zxtypes::wire::ResultTableAlias table_;
+};
+
+template <>
+class ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias> final : public ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>> {
+  using Base = ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>>;
+
+ public:
+  using Base::result_array;
+
+  template <
+      typename First = ::fidl::Array<int32_t, 10>,
+      typename... Args,
+      std::enable_if_t<!std::is_same_v<cpp20::remove_cvref_t<First>, fidl::ObjectView<::fidl::Array<int32_t, 10>>>, int> = 0>
+  ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>& result_array(First&& first, Args&&... args_) {
+    fidl::ObjectView<::fidl::Array<int32_t, 10>> view_(arena_.get(), std::forward<First>(first), std::forward<Args>(args_)...);
+    result_array(Base::Wrapper_Ignore_Me_<fidl::ObjectView<::fidl::Array<int32_t, 10>>>(view_));
+    return *this;
+  }
+  using Base::result_vector;
+
+  template <
+      typename First = ::fidl::VectorView<int32_t>,
+      typename... Args,
+      std::enable_if_t<!std::is_same_v<cpp20::remove_cvref_t<First>, fidl::ObjectView<::fidl::VectorView<int32_t>>>, int> = 0>
+  ::fidl::WireTableBuilder<::test_zxtypes::wire::ResultTableAlias>& result_vector(First&& first, Args&&... args_) {
+    fidl::ObjectView<::fidl::VectorView<int32_t>> view_(arena_.get(), std::forward<First>(first), std::forward<Args>(args_)...);
+    result_vector(Base::Wrapper_Ignore_Me_<fidl::ObjectView<::fidl::VectorView<int32_t>>>(view_));
+    return *this;
+  }
+
+ private:
+  friend class ::test_zxtypes::wire::ResultTableAlias;
+  WireTableBuilder(::fidl::AnyArena& arena);
+
+  [[maybe_unused]] std::reference_wrapper<::fidl::AnyArena> arena_;
+};
+
+template <>
+class ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias> final : public ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias>> {
+  using Base = ::fidl::internal::WireTableBaseBuilder<::test_zxtypes::wire::ResultTableAlias, ::fidl::WireTableExternalBuilder<::test_zxtypes::wire::ResultTableAlias>>;
+
+ private:
+  friend class ::test_zxtypes::wire::ResultTableAlias;
+  using Base::Base;
+  WireTableExternalBuilder(::fidl::WireTableFrame<::test_zxtypes::wire::ResultTableAlias>* frame);
+};
 namespace test_zxtypes {
 namespace wire {
 
@@ -806,6 +1314,270 @@ class StatusProtocolBResult {
   ::fidl::UntypedEnvelope envelope_;
 };
 
+class ResultUnion {
+ public:
+  ResultUnion();
+
+  ResultUnion(const ResultUnion&) = default;
+  ResultUnion& operator=(const ResultUnion&) = default;
+  ResultUnion(ResultUnion&&) = default;
+  ResultUnion& operator=(ResultUnion&&) = default;
+
+  enum class Tag : fidl_xunion_tag_t {
+    kResult = 1,        // 0x1
+    kResultArray = 2,   // 0x2
+    kResultVector = 3,  // 0x3
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+  };
+  bool IsUnknown() const {
+    return Which() == ::test_zxtypes::wire::ResultUnion::Tag::_do_not_handle_this__write_a_default_case_instead;
+  }
+
+  bool has_invalid_tag() const;
+
+  bool is_result() const;
+
+  static ResultUnion WithResult(int32_t val);
+
+  int32_t& result();
+
+  const int32_t& result() const;
+
+  bool is_result_array() const;
+
+  static ResultUnion WithResultArray(::fidl::ObjectView<::fidl::Array<int32_t, 10>> val);
+
+  template <typename... Args>
+  static ResultUnion WithResultArray(::fidl::AnyArena& allocator, Args&&... args) {
+    return WithResultArray(::fidl::ObjectView<::fidl::Array<int32_t, 10>>(allocator,
+                                                                          std::forward<Args>(args)...));
+  }
+
+  ::fidl::Array<int32_t, 10>& result_array();
+
+  const ::fidl::Array<int32_t, 10>& result_array() const;
+
+  bool is_result_vector() const;
+
+  static ResultUnion WithResultVector(::fidl::ObjectView<::fidl::VectorView<int32_t>> val);
+
+  template <typename... Args>
+  static ResultUnion WithResultVector(::fidl::AnyArena& allocator, Args&&... args) {
+    return WithResultVector(::fidl::ObjectView<::fidl::VectorView<int32_t>>(allocator,
+                                                                            std::forward<Args>(args)...));
+  }
+
+  ::fidl::VectorView<int32_t>& result_vector();
+
+  const ::fidl::VectorView<int32_t>& result_vector() const;
+
+  ::test_zxtypes::wire::ResultUnion::Tag Which() const;
+
+ private:
+  enum class Ordinal : fidl_xunion_tag_t {
+    Invalid = 0,
+    kResult = 1,        // 0x1
+    kResultArray = 2,   // 0x2
+    kResultVector = 3,  // 0x3
+  };
+
+  static void SizeAndOffsetAssertionHelper();
+  ::test_zxtypes::wire::ResultUnion::Ordinal ordinal_;
+  FIDL_ALIGNDECL
+  ::fidl::UntypedEnvelope envelope_;
+};
+
+class ResultUnionAlias {
+ public:
+  ResultUnionAlias();
+
+  ResultUnionAlias(const ResultUnionAlias&) = default;
+  ResultUnionAlias& operator=(const ResultUnionAlias&) = default;
+  ResultUnionAlias(ResultUnionAlias&&) = default;
+  ResultUnionAlias& operator=(ResultUnionAlias&&) = default;
+
+  enum class Tag : fidl_xunion_tag_t {
+    kResult = 1,        // 0x1
+    kResultArray = 2,   // 0x2
+    kResultVector = 3,  // 0x3
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+  };
+  bool IsUnknown() const {
+    return Which() == ::test_zxtypes::wire::ResultUnionAlias::Tag::_do_not_handle_this__write_a_default_case_instead;
+  }
+
+  bool has_invalid_tag() const;
+
+  bool is_result() const;
+
+  static ResultUnionAlias WithResult(int32_t val);
+
+  int32_t& result();
+
+  const int32_t& result() const;
+
+  bool is_result_array() const;
+
+  static ResultUnionAlias WithResultArray(::fidl::ObjectView<::fidl::Array<int32_t, 10>> val);
+
+  template <typename... Args>
+  static ResultUnionAlias WithResultArray(::fidl::AnyArena& allocator, Args&&... args) {
+    return WithResultArray(::fidl::ObjectView<::fidl::Array<int32_t, 10>>(allocator,
+                                                                          std::forward<Args>(args)...));
+  }
+
+  ::fidl::Array<int32_t, 10>& result_array();
+
+  const ::fidl::Array<int32_t, 10>& result_array() const;
+
+  bool is_result_vector() const;
+
+  static ResultUnionAlias WithResultVector(::fidl::ObjectView<::fidl::VectorView<int32_t>> val);
+
+  template <typename... Args>
+  static ResultUnionAlias WithResultVector(::fidl::AnyArena& allocator, Args&&... args) {
+    return WithResultVector(::fidl::ObjectView<::fidl::VectorView<int32_t>>(allocator,
+                                                                            std::forward<Args>(args)...));
+  }
+
+  ::fidl::VectorView<int32_t>& result_vector();
+
+  const ::fidl::VectorView<int32_t>& result_vector() const;
+
+  ::test_zxtypes::wire::ResultUnionAlias::Tag Which() const;
+
+ private:
+  enum class Ordinal : fidl_xunion_tag_t {
+    Invalid = 0,
+    kResult = 1,        // 0x1
+    kResultArray = 2,   // 0x2
+    kResultVector = 3,  // 0x3
+  };
+
+  static void SizeAndOffsetAssertionHelper();
+  ::test_zxtypes::wire::ResultUnionAlias::Ordinal ordinal_;
+  FIDL_ALIGNDECL
+  ::fidl::UntypedEnvelope envelope_;
+};
+
+class ResultProtocolAResult {
+ public:
+  using Response = test_zxtypes::wire::ResultProtocolAResponse;
+
+  ResultProtocolAResult();
+
+  ResultProtocolAResult(const ResultProtocolAResult&) = default;
+  ResultProtocolAResult& operator=(const ResultProtocolAResult&) = default;
+  ResultProtocolAResult(ResultProtocolAResult&&) = default;
+  ResultProtocolAResult& operator=(ResultProtocolAResult&&) = default;
+
+  enum class Tag : fidl_xunion_tag_t {
+    kResponse = 1,      // 0x1
+    kErr = 2,           // 0x2
+    kFrameworkErr = 3,  // 0x3
+  };
+
+  bool has_invalid_tag() const;
+
+  bool is_response() const;
+
+  static ResultProtocolAResult WithResponse(::test_zxtypes::wire::ResultProtocolAResponse val);
+
+  ::test_zxtypes::wire::ResultProtocolAResponse& response();
+
+  const ::test_zxtypes::wire::ResultProtocolAResponse& response() const;
+
+  bool is_err() const;
+
+  static ResultProtocolAResult WithErr(int32_t val);
+
+  int32_t& err();
+
+  const int32_t& err() const;
+
+  bool is_framework_err() const;
+
+  static ResultProtocolAResult WithFrameworkErr(::fidl::internal::FrameworkErr val);
+
+  ::fidl::internal::FrameworkErr& framework_err();
+
+  const ::fidl::internal::FrameworkErr& framework_err() const;
+
+  ::test_zxtypes::wire::ResultProtocolAResult::Tag Which() const;
+
+ private:
+  enum class Ordinal : fidl_xunion_tag_t {
+    Invalid = 0,
+    kResponse = 1,      // 0x1
+    kErr = 2,           // 0x2
+    kFrameworkErr = 3,  // 0x3
+  };
+
+  static void SizeAndOffsetAssertionHelper();
+  ::test_zxtypes::wire::ResultProtocolAResult::Ordinal ordinal_;
+  FIDL_ALIGNDECL
+  ::fidl::UntypedEnvelope envelope_;
+};
+
+class ResultProtocolBResult {
+ public:
+  using Response = test_zxtypes::wire::ResultProtocolBResponse;
+
+  ResultProtocolBResult();
+
+  ResultProtocolBResult(const ResultProtocolBResult&) = default;
+  ResultProtocolBResult& operator=(const ResultProtocolBResult&) = default;
+  ResultProtocolBResult(ResultProtocolBResult&&) = default;
+  ResultProtocolBResult& operator=(ResultProtocolBResult&&) = default;
+
+  enum class Tag : fidl_xunion_tag_t {
+    kResponse = 1,      // 0x1
+    kErr = 2,           // 0x2
+    kFrameworkErr = 3,  // 0x3
+  };
+
+  bool has_invalid_tag() const;
+
+  bool is_response() const;
+
+  static ResultProtocolBResult WithResponse(::test_zxtypes::wire::ResultProtocolBResponse val);
+
+  ::test_zxtypes::wire::ResultProtocolBResponse& response();
+
+  const ::test_zxtypes::wire::ResultProtocolBResponse& response() const;
+
+  bool is_err() const;
+
+  static ResultProtocolBResult WithErr(int32_t val);
+
+  int32_t& err();
+
+  const int32_t& err() const;
+
+  bool is_framework_err() const;
+
+  static ResultProtocolBResult WithFrameworkErr(::fidl::internal::FrameworkErr val);
+
+  ::fidl::internal::FrameworkErr& framework_err();
+
+  const ::fidl::internal::FrameworkErr& framework_err() const;
+
+  ::test_zxtypes::wire::ResultProtocolBResult::Tag Which() const;
+
+ private:
+  enum class Ordinal : fidl_xunion_tag_t {
+    Invalid = 0,
+    kResponse = 1,      // 0x1
+    kErr = 2,           // 0x2
+    kFrameworkErr = 3,  // 0x3
+  };
+
+  static void SizeAndOffsetAssertionHelper();
+  ::test_zxtypes::wire::ResultProtocolBResult::Ordinal ordinal_;
+  FIDL_ALIGNDECL
+  ::fidl::UntypedEnvelope envelope_;
+};
+
 struct StatusStruct {
   int32_t status = {};
 
@@ -820,6 +1592,22 @@ struct StatusStructAlias {
   ::fidl::Array<int32_t, 10> status_array = {};
 
   ::fidl::VectorView<int32_t> status_vector = {};
+};
+
+struct ResultStruct {
+  int32_t result = {};
+
+  ::fidl::Array<int32_t, 10> result_array = {};
+
+  ::fidl::VectorView<int32_t> result_vector = {};
+};
+
+struct ResultStructAlias {
+  int32_t result = {};
+
+  ::fidl::Array<int32_t, 10> result_array = {};
+
+  ::fidl::VectorView<int32_t> result_vector = {};
 };
 
 }  // namespace wire
@@ -841,6 +1629,24 @@ struct internal::WireCodingTraits<::test_zxtypes::wire::StatusEnumAlias, ::fidl:
   static constexpr bool kIsMemcpyCompatible = true;
 
   static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::StatusEnumAlias* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <bool IsRecursive>
+struct internal::WireCodingTraits<::test_zxtypes::wire::ResultEnum, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = sizeof(int32_t);
+  static constexpr bool kIsMemcpyCompatible = true;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultEnum* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <bool IsRecursive>
+struct internal::WireCodingTraits<::test_zxtypes::wire::ResultEnumAlias, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = sizeof(int32_t);
+  static constexpr bool kIsMemcpyCompatible = true;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultEnumAlias* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
   static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
 };
 
@@ -1037,6 +1843,198 @@ struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBR
 };
 
 template <>
+struct TypeTraits<::test_zxtypes::wire::ResultStruct> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 1;
+  static constexpr uint32_t kPrimarySize = 64;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 4294967295;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultStruct> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultStruct> : public std::true_type {};
+template <>
+struct IsStruct<::test_zxtypes::wire::ResultStruct> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultStruct, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = 64;
+  static constexpr auto kMembers = std::make_tuple(::fidl::internal::WireStructMemberCodingInfo<int32_t, fidl::internal::WireCodingConstraintEmpty, IsRecursive>(), ::fidl::internal::WireStructMemberCodingInfo<::fidl::Array<int32_t, 10>, fidl::internal::WireCodingConstraintEmpty, IsRecursive>(), ::fidl::internal::WireStructMemberCodingInfo<::fidl::VectorView<int32_t>, fidl::internal::WireCodingConstraintVector<fidl::internal::WireCodingConstraintEmpty, false>, IsRecursive>());
+  static constexpr bool kHasPadding = true;
+  using Base = WireStructCodingTraitsBase<::test_zxtypes::wire::ResultStruct, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>;
+  static constexpr bool kIsMemcpyCompatible = Base::kIsMemcpyCompatible;
+
+  static void Encode(
+      internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultStruct* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(
+      internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultStructAlias> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 1;
+  static constexpr uint32_t kPrimarySize = 64;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 4294967295;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultStructAlias> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultStructAlias> : public std::true_type {};
+template <>
+struct IsStruct<::test_zxtypes::wire::ResultStructAlias> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultStructAlias, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = 64;
+  static constexpr auto kMembers = std::make_tuple(::fidl::internal::WireStructMemberCodingInfo<int32_t, fidl::internal::WireCodingConstraintEmpty, IsRecursive>(), ::fidl::internal::WireStructMemberCodingInfo<::fidl::Array<int32_t, 10>, fidl::internal::WireCodingConstraintEmpty, IsRecursive>(), ::fidl::internal::WireStructMemberCodingInfo<::fidl::VectorView<int32_t>, fidl::internal::WireCodingConstraintVector<fidl::internal::WireCodingConstraintEmpty, false>, IsRecursive>());
+  static constexpr bool kHasPadding = true;
+  using Base = WireStructCodingTraitsBase<::test_zxtypes::wire::ResultStructAlias, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>;
+  static constexpr bool kIsMemcpyCompatible = Base::kIsMemcpyCompatible;
+
+  static void Encode(
+      internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultStructAlias* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(
+      internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultProtocolARequest> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 0;
+  static constexpr uint32_t kPrimarySize = 4;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 0;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = false;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultProtocolARequest> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultProtocolARequest> : public std::true_type {};
+template <>
+struct IsStruct<::test_zxtypes::wire::ResultProtocolARequest> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolARequest, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = 4;
+  static constexpr auto kMembers = std::make_tuple(::fidl::internal::WireStructMemberCodingInfo<int32_t, fidl::internal::WireCodingConstraintEmpty, IsRecursive>());
+  static constexpr bool kHasPadding = false;
+  using Base = WireStructCodingTraitsBase<::test_zxtypes::wire::ResultProtocolARequest, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>;
+  static constexpr bool kIsMemcpyCompatible = Base::kIsMemcpyCompatible;
+
+  static void Encode(
+      internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultProtocolARequest* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(
+      internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultProtocolAResponse> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 0;
+  static constexpr uint32_t kPrimarySize = 4;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 0;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = false;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultProtocolAResponse> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultProtocolAResponse> : public std::true_type {};
+template <>
+struct IsStruct<::test_zxtypes::wire::ResultProtocolAResponse> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResponse, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = 4;
+  static constexpr auto kMembers = std::make_tuple(::fidl::internal::WireStructMemberCodingInfo<int32_t, fidl::internal::WireCodingConstraintEmpty, IsRecursive>());
+  static constexpr bool kHasPadding = false;
+  using Base = WireStructCodingTraitsBase<::test_zxtypes::wire::ResultProtocolAResponse, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>;
+  static constexpr bool kIsMemcpyCompatible = Base::kIsMemcpyCompatible;
+
+  static void Encode(
+      internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultProtocolAResponse* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(
+      internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultProtocolBRequest> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 0;
+  static constexpr uint32_t kPrimarySize = 4;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 0;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = false;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultProtocolBRequest> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultProtocolBRequest> : public std::true_type {};
+template <>
+struct IsStruct<::test_zxtypes::wire::ResultProtocolBRequest> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBRequest, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = 4;
+  static constexpr auto kMembers = std::make_tuple(::fidl::internal::WireStructMemberCodingInfo<int32_t, fidl::internal::WireCodingConstraintEmpty, IsRecursive>());
+  static constexpr bool kHasPadding = false;
+  using Base = WireStructCodingTraitsBase<::test_zxtypes::wire::ResultProtocolBRequest, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>;
+  static constexpr bool kIsMemcpyCompatible = Base::kIsMemcpyCompatible;
+
+  static void Encode(
+      internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultProtocolBRequest* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(
+      internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultProtocolBResponse> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 0;
+  static constexpr uint32_t kPrimarySize = 4;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 0;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = false;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultProtocolBResponse> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultProtocolBResponse> : public std::true_type {};
+template <>
+struct IsStruct<::test_zxtypes::wire::ResultProtocolBResponse> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResponse, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive> {
+  static constexpr size_t kInlineSize = 4;
+  static constexpr auto kMembers = std::make_tuple(::fidl::internal::WireStructMemberCodingInfo<int32_t, fidl::internal::WireCodingConstraintEmpty, IsRecursive>());
+  static constexpr bool kHasPadding = false;
+  using Base = WireStructCodingTraitsBase<::test_zxtypes::wire::ResultProtocolBResponse, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>;
+  static constexpr bool kIsMemcpyCompatible = Base::kIsMemcpyCompatible;
+
+  static void Encode(
+      internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultProtocolBResponse* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(
+      internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
 struct TypeTraits<::test_zxtypes::wire::StatusTable> {
   static constexpr uint32_t kMaxNumHandles = 0;
   static constexpr uint32_t kMaxDepth = 3;
@@ -1091,6 +2089,64 @@ struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusTableAlias
   static constexpr bool kIsMemcpyCompatible = false;
 
   static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::StatusTableAlias* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultTable> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 3;
+  static constexpr uint32_t kPrimarySize = 16;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 4294967295;
+  static constexpr bool kHasFlexibleEnvelope = true;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultTable> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultTable> : public std::true_type {};
+template <>
+struct IsTable<::test_zxtypes::wire::ResultTable> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultTable, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : ::fidl::internal::WireTableCodingTraitsBase<IsRecursive> {
+  using Base = ::fidl::internal::WireTableCodingTraitsBase<IsRecursive>;
+  static constexpr size_t kInlineSize = 16;
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultTable* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultTableAlias> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 3;
+  static constexpr uint32_t kPrimarySize = 16;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 4294967295;
+  static constexpr bool kHasFlexibleEnvelope = true;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultTableAlias> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultTableAlias> : public std::true_type {};
+template <>
+struct IsTable<::test_zxtypes::wire::ResultTableAlias> : public std::true_type {};
+
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultTableAlias, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : ::fidl::internal::WireTableCodingTraitsBase<IsRecursive> {
+  using Base = ::fidl::internal::WireTableCodingTraitsBase<IsRecursive>;
+  static constexpr size_t kInlineSize = 16;
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultTableAlias* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
   static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
 };
 
@@ -1225,6 +2281,138 @@ struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBR
 template <bool IsRecursive>
 struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResult, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
     : public ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResult, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultUnion> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 2;
+  static constexpr uint32_t kPrimarySize = 16;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 4294967295;
+  static constexpr bool kHasFlexibleEnvelope = true;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultUnion> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultUnion> : public std::true_type {};
+template <>
+struct IsUnion<::test_zxtypes::wire::ResultUnion> : public std::true_type {};
+
+template <typename Constraint, bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, Constraint, IsRecursive> {
+  static constexpr size_t kInlineSize = 16;
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultUnion* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+// Top-level union.
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : public ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultUnionAlias> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 2;
+  static constexpr uint32_t kPrimarySize = 16;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 4294967295;
+  static constexpr bool kHasFlexibleEnvelope = true;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultUnionAlias> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultUnionAlias> : public std::true_type {};
+template <>
+struct IsUnion<::test_zxtypes::wire::ResultUnionAlias> : public std::true_type {};
+
+template <typename Constraint, bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, Constraint, IsRecursive> {
+  static constexpr size_t kInlineSize = 16;
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultUnionAlias* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+// Top-level union.
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : public ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultProtocolAResult> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 1;
+  static constexpr uint32_t kPrimarySize = 16;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 0;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultProtocolAResult> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultProtocolAResult> : public std::true_type {};
+template <>
+struct IsUnion<::test_zxtypes::wire::ResultProtocolAResult> : public std::true_type {};
+
+template <typename Constraint, bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResult, Constraint, IsRecursive> {
+  static constexpr size_t kInlineSize = 16;
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultProtocolAResult* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+// Top-level union.
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResult, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : public ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResult, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
+
+template <>
+struct TypeTraits<::test_zxtypes::wire::ResultProtocolBResult> {
+  static constexpr uint32_t kMaxNumHandles = 0;
+  static constexpr uint32_t kMaxDepth = 1;
+  static constexpr uint32_t kPrimarySize = 16;
+  [[maybe_unused]]
+  static constexpr uint32_t kMaxOutOfLine = 0;
+  static constexpr bool kHasFlexibleEnvelope = false;
+  static constexpr bool kHasPointer = true;
+};
+
+template <>
+struct IsFidlType<::test_zxtypes::wire::ResultProtocolBResult> : public std::true_type {};
+template <>
+struct IsWire<::test_zxtypes::wire::ResultProtocolBResult> : public std::true_type {};
+template <>
+struct IsUnion<::test_zxtypes::wire::ResultProtocolBResult> : public std::true_type {};
+
+template <typename Constraint, bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResult, Constraint, IsRecursive> {
+  static constexpr size_t kInlineSize = 16;
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(internal::WireEncoder* encoder, ::test_zxtypes::wire::ResultProtocolBResult* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+
+  static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+};
+
+// Top-level union.
+template <bool IsRecursive>
+struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResult, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : public ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResult, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
 
 #pragma clang diagnostic pop
 

@@ -233,7 +233,7 @@ Fuchsia style guidelines.
 Make a local commit after a logical chunk of work. You do not necessarily need a
 commit for every individual driver if you are migrating multiple similar
 drivers, but each commit should represent a coherent state. Follow the Git
-commit message guidelines in `GEMINI.md` or the project style guide.
+commit message guidelines in `AGENTS.md` or the project style guide.
 
 ## Common Pitfalls
 

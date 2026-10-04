@@ -10,15 +10,6 @@
         },
     ],
     expose: [
-        {
-            protocol: [
-                "fuchsia.net.stackmigrationdeprecated.Control",
-                "fuchsia.net.stackmigrationdeprecated.State",
-            ],
-            from: "void",
-            availability: "optional",
-        },
-
         // TODO(https://fxbug.dev/324494668): remove this when Netstack2 is gone.
         {
             directory: "diagnostics",

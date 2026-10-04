@@ -17,7 +17,7 @@ rustc_binary("writer-bin") {
     "//src/lib/diagnostics/inspect/rust",
     "//src/lib/diagnostics/inspect/rust/bench/utils:fuchsia_inspect_bench_utils",
     "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:num",
+    "//third_party/rust_crates:num-traits",
     "//third_party/rust_crates:paste",
     "//third_party/rust_crates:rand",
   ]

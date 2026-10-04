@@ -1,0 +1,28 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+library fuchsia.diagnostics;
+
+@available(added=HEAD)
+type PowerEvent = flexible enum {
+    /// Boost started
+    BOOST_START = 1;
+    /// Boost ended
+    BOOST_END = 2;
+};
+
+@available(added=HEAD)
+type SystemActivityEvent = flexible union {
+    1: power_event PowerEvent;
+};
+
+@discoverable(server="platform")
+@available(added=HEAD)
+open protocol SystemActivityMonitor {
+    /// Blocks until a system activity event (e.g. CPU boost starting or ending)
+    /// occurs, returning the event.
+    flexible GetNextEvent() -> (struct {
+        event SystemActivityEvent;
+    });
+};

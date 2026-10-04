@@ -9,7 +9,7 @@ import os
 import subprocess
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--zbi", help="Path to the zbi tool", required=True)
     parser.add_argument(

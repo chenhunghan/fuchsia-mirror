@@ -65,7 +65,7 @@ zr::static_assert!(size_of::<LruAction>() == size_of::<bindings::PageQueues_LruA
 
 /// Helper struct to group queue length counts returned by [`PageQueues::queue_counts`].
 #[repr(C)]
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Counts {
     pub reclaim: [usize; NUM_RECLAIM],
     pub reclaim_isolate: usize,
@@ -1367,5 +1367,849 @@ impl PageQueues {
         let raw = unsafe { bindings::cpp_page_queues_debug_get_mru_thread(self.as_raw()) };
         // SAFETY: If non-null, `raw` points to a live kernel thread.
         unsafe { ThreadPtr::from_raw(raw.cast()) }
+    }
+}
+
+#[cfg(ktest)]
+#[unittest::suite(name = "page_queues_rust")]
+/// PageQueues unit tests.
+mod tests {
+    use super::{ActiveInactiveCounts, Counts, NUM_RECLAIM, PageQueues};
+    use crate::platform_rs::timer::DurationMono;
+    use crate::vm::page::{VmPage, VmPageObjectState, VmPagePtr, VmPageUnion};
+    use crate::vm::page_state::VmPageState;
+    use crate::vm::page_state::bindings::vm_page_state;
+    use crate::vm::vm_object_paged::VmObjectPaged;
+    use crate::vm_unittests::test_helper::make_uncommitted_pager_vmo;
+    use fbl::DoublyLinkedListContainable;
+    use page::SIZE as PAGE_SIZE_USIZE;
+    use unittest::{assert_true, expect_eq, expect_false, expect_true, unwrap_ok, unwrap_some};
+    use zx_types::ZX_TIME_INFINITE;
+
+    const PAGE_SIZE: u64 = PAGE_SIZE_USIZE as u64;
+
+    fn initialize_test_page(page: &mut VmPage) -> VmPagePtr {
+        debug_assert!(!page.get_node().in_container());
+        // Pages are constructed in the FREE state
+        debug_assert!(page.is_free());
+        // SAFETY: We hold a mutable reference to page and so have exclusive ownership.
+        unsafe {
+            page.set_state(VmPageState(vm_page_state::OBJECT));
+            *page.state_union.get() =
+                VmPageUnion { object: core::mem::ManuallyDrop::new(VmPageObjectState::default()) };
+            VmPagePtr::from_raw(core::ptr::from_ref(page).cast_mut()).unwrap()
+        }
+    }
+
+    /// Tests adding and removing pages from page queues.
+    #[test]
+    fn pq_add_remove() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        // Pretend we have an allocated page
+        let mut test_page = VmPage::default();
+        let test_page_ptr = initialize_test_page(&mut test_page);
+
+        // Need a VMO to claim our pages are in
+        let vmo = unwrap_ok!(VmObjectPaged::create(0, 0, PAGE_SIZE));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Put the page in each queue and make sure it shows up
+        // SAFETY: `test_page_ptr` is a valid test page and `cow` is valid.
+        unsafe { pq.set_wired(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { wired: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in the wired queue.
+        unsafe { pq.remove(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is an initialized test page in OBJECT state.
+        expect_false!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        // SAFETY: `test_page_ptr` is an initialized test page in OBJECT state.
+        expect_false!(unsafe { pq.debug_page_is_anonymous(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts::default());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_anonymous(test_page_ptr, &cow, 0, false) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_anonymous(test_page_ptr) });
+        if pq.reclaim_is_only_pager_backed() {
+            expect_true!(pq.queue_counts() == Counts { anonymous: 1, ..Default::default() });
+        } else {
+            let mut reclaim = [0; NUM_RECLAIM];
+            reclaim[0] = 1;
+            expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+        }
+
+        // SAFETY: `test_page_ptr` is in an anonymous queue.
+        unsafe { pq.remove(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is an initialized test page in OBJECT state.
+        expect_false!(unsafe { pq.debug_page_is_anonymous(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts::default());
+
+        // Need a pager VMO to claim our page is in.
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(1, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 1;
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in the reclaim queue.
+        unsafe { pq.remove(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is an initialized test page in OBJECT state.
+        expect_false!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        expect_true!(pq.queue_counts() == Counts::default());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_pager_backed_dirty(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { pager_backed_dirty: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in the pager backed dirty queue.
+        unsafe { pq.remove(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is an initialized test page in OBJECT state.
+        expect_false!(unsafe { pq.debug_page_is_pager_backed_dirty(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts::default());
+    }
+
+    /// Tests moving pages between different page queues.
+    #[test]
+    fn pq_move_queues() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        // Pretend we have an allocated page
+        let mut test_page = VmPage::default();
+        let test_page_ptr = initialize_test_page(&mut test_page);
+
+        // Need a VMO to claim our pages are in
+        let vmo = unwrap_ok!(VmObjectPaged::create(0, 0, PAGE_SIZE));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Move the page between queues.
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_wired(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { wired: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_anonymous(test_page_ptr, false) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_false!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_anonymous(test_page_ptr) });
+        if pq.reclaim_is_only_pager_backed() {
+            expect_true!(pq.queue_counts() == Counts { anonymous: 1, ..Default::default() });
+        } else {
+            let mut reclaim = [0; NUM_RECLAIM];
+            reclaim[0] = 1;
+            expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+        }
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.remove(test_page_ptr) };
+
+        // Now try some pager backed queues.
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(1, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 1;
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_pager_backed_dirty(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { pager_backed_dirty: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_reclaim(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_reclaim_dont_need(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_false!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { reclaim_isolate: 1, ..Default::default() });
+
+        // Verify that the DontNeed page is first in line for eviction.
+        let backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        expect_true!(backlink.as_ref().is_some_and(|b| b.page == test_page_ptr));
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_wired(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_false!(unsafe { pq.debug_page_is_reclaim_isolate(test_page_ptr) });
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_false!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { wired: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in the wired queue.
+        unsafe { pq.remove(test_page_ptr) };
+        expect_true!(pq.queue_counts() == Counts::default());
+    }
+
+    /// Tests moving a page to the queue it is already in.
+    #[test]
+    fn pq_move_self_queue() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        // Pretend we have an allocated page
+        let mut test_page = VmPage::default();
+        let test_page_ptr = initialize_test_page(&mut test_page);
+
+        // Need a VMO to claim our pages are in
+        let vmo = unwrap_ok!(VmObjectPaged::create(0, 0, PAGE_SIZE));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Move the page into the queue it is already in.
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_wired(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { wired: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_wired(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { wired: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in the wired queue.
+        unsafe { pq.remove(test_page_ptr) };
+        expect_true!(pq.queue_counts() == Counts::default());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_anonymous(test_page_ptr, &cow, 0, false) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_anonymous(test_page_ptr) });
+        if pq.reclaim_is_only_pager_backed() {
+            expect_true!(pq.queue_counts() == Counts { anonymous: 1, ..Default::default() });
+        } else {
+            let mut reclaim = [0; NUM_RECLAIM];
+            reclaim[0] = 1;
+            expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+        }
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_anonymous(test_page_ptr, false) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_anonymous(test_page_ptr) });
+        if pq.reclaim_is_only_pager_backed() {
+            expect_true!(pq.queue_counts() == Counts { anonymous: 1, ..Default::default() });
+        } else {
+            let mut reclaim = [0; NUM_RECLAIM];
+            reclaim[0] = 1;
+            expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+        }
+
+        // SAFETY: `test_page_ptr` is in an anonymous queue.
+        unsafe { pq.remove(test_page_ptr) };
+        expect_true!(pq.queue_counts() == Counts::default());
+
+        // Now try some pager backed queues.
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(1, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 1;
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_reclaim(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(test_page_ptr) }.is_some());
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.remove(test_page_ptr) };
+        expect_true!(pq.queue_counts() == Counts::default());
+
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_pager_backed_dirty(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { pager_backed_dirty: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_pager_backed_dirty(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(test_page_ptr) });
+        expect_true!(pq.queue_counts() == Counts { pager_backed_dirty: 1, ..Default::default() });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.remove(test_page_ptr) };
+        expect_true!(pq.queue_counts() == Counts::default());
+    }
+
+    /// Tests gradual rotation and aging of reclaim queues.
+    #[test]
+    fn pq_rotate_queue() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        pq.set_active_ratio_multiplier(0);
+        pq.start_threads(DurationMono::from_nanos(0), DurationMono::from_nanos(ZX_TIME_INFINITE));
+
+        // Pretend we have a few allocated pages.
+        let mut wired_page = VmPage::default();
+        let wired_page_ptr = initialize_test_page(&mut wired_page);
+        let mut clean_pager_page = VmPage::default();
+        let clean_pager_page_ptr = initialize_test_page(&mut clean_pager_page);
+        let mut dirty_pager_page = VmPage::default();
+        let dirty_pager_page_ptr = initialize_test_page(&mut dirty_pager_page);
+
+        // Need a VMO to claim our pages are in.
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(1, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Put the pages in and validate initial state.
+        // SAFETY: test pages are valid and not in a queue.
+        unsafe {
+            pq.set_wired(wired_page_ptr, &cow, 0);
+            pq.set_reclaim(clean_pager_page_ptr, &cow, 0);
+            pq.set_pager_backed_dirty(dirty_pager_page_ptr, &cow, 0);
+        }
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(wired_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(dirty_pager_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        let queue = unsafe { pq.debug_page_is_reclaim(clean_pager_page_ptr) };
+        expect_true!(queue.is_some());
+        expect_eq!(queue.unwrap(), 0);
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 1, inactive: 0 }
+        );
+
+        // Gradually rotate the queue.
+        pq.rotate_reclaim_queues();
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(wired_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(dirty_pager_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        let queue = unsafe { pq.debug_page_is_reclaim(clean_pager_page_ptr) };
+        expect_true!(queue.is_some());
+        expect_eq!(queue.unwrap(), 1);
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[1] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 1, inactive: 0 }
+        );
+
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[2] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 1 }
+        );
+
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[3] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 1 }
+        );
+
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[4] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[5] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[6] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+
+        pq.rotate_reclaim_queues();
+        // Further rotations might cause the page to be visible in the same queue, or the isolate,
+        // depending on whether the lru processing already ran in preparation of the next aging event.
+        let mut counts_last = Counts { pager_backed_dirty: 1, wired: 1, ..Default::default() };
+        counts_last.reclaim[NUM_RECLAIM - 1] = 1;
+        let counts_isolate =
+            Counts { reclaim_isolate: 1, pager_backed_dirty: 1, wired: 1, ..Default::default() };
+        let counts = pq.queue_counts();
+        expect_true!(counts == counts_last || counts == counts_isolate);
+
+        // Further rotations should not move the page.
+        pq.rotate_reclaim_queues();
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(wired_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(dirty_pager_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(clean_pager_page_ptr) });
+        let counts = pq.queue_counts();
+        expect_true!(counts == counts_isolate);
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 1 }
+        );
+
+        // Moving the page should bring it back to the first queue.
+        // SAFETY: `clean_pager_page_ptr` is in a page queue.
+        unsafe { pq.move_to_reclaim(clean_pager_page_ptr) };
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_wired(wired_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_pager_backed_dirty(dirty_pager_page_ptr) });
+        // SAFETY: test pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(clean_pager_page_ptr) }.is_some());
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 1, inactive: 0 }
+        );
+
+        // Just double check two rotations.
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[1] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 1, inactive: 0 }
+        );
+        pq.rotate_reclaim_queues();
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[2] = 1;
+        expect_true!(
+            pq.queue_counts()
+                == Counts { reclaim, pager_backed_dirty: 1, wired: 1, ..Default::default() }
+        );
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 1 }
+        );
+
+        // SAFETY: pages are in page queues.
+        unsafe {
+            pq.remove(wired_page_ptr);
+            pq.remove(clean_pager_page_ptr);
+            pq.remove(dirty_pager_page_ptr);
+        }
+    }
+
+    /// Tests moving pages to the don't need queue and access reactivation.
+    #[test]
+    fn pq_toggle_dont_need_queue() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        pq.set_active_ratio_multiplier(0);
+        pq.start_threads(DurationMono::from_nanos(0), DurationMono::from_nanos(ZX_TIME_INFINITE));
+
+        // Pretend we have a couple of allocated pager-backed pages.
+        let mut page1 = VmPage::default();
+        let page1_ptr = initialize_test_page(&mut page1);
+        let mut page2 = VmPage::default();
+        let page2_ptr = initialize_test_page(&mut page2);
+
+        // Need a VMO to claim our pager backed pages are in.
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(2, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Put the pages in and validate initial state.
+        // SAFETY: `page1_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(page1_ptr, &cow, 0) };
+        // SAFETY: `page1_ptr` is attached to a VM object.
+        let queue = unsafe { pq.debug_page_is_reclaim(page1_ptr) };
+        expect_true!(queue.is_some());
+        expect_eq!(queue.unwrap(), 0);
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 1;
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 1, inactive: 0 }
+        );
+        // SAFETY: `page2_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(page2_ptr, &cow, 0) };
+        // SAFETY: `page2_ptr` is attached to a VM object.
+        let queue = unsafe { pq.debug_page_is_reclaim(page2_ptr) };
+        expect_true!(queue.is_some());
+        expect_eq!(queue.unwrap(), 0);
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[0] = 2;
+        expect_true!(pq.queue_counts() == Counts { reclaim, ..Default::default() });
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 2, inactive: 0 }
+        );
+
+        // Move the pages to the DontNeed queue.
+        // SAFETY: pages are in a page queue.
+        unsafe {
+            pq.move_to_reclaim_dont_need(page1_ptr);
+            pq.move_to_reclaim_dont_need(page2_ptr);
+        }
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(page1_ptr) });
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(page2_ptr) });
+        expect_true!(pq.queue_counts() == Counts { reclaim_isolate: 2, ..Default::default() });
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 2 }
+        );
+
+        // Rotate the queues. This should also process the DontNeed queue.
+        pq.rotate_reclaim_queues();
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(page1_ptr) });
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(page2_ptr) });
+        expect_true!(pq.queue_counts() == Counts { reclaim_isolate: 2, ..Default::default() });
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 2 }
+        );
+
+        // Simulate access for one of the pages. Then rotate the queues again. This should move the
+        // accessed page1 out of the DontNeed queue to MRU+1 (as we've rotated the queues after access).
+        // SAFETY: pages are in a paqe queue
+        unsafe {
+            pq.mark_accessed(page1_ptr);
+        }
+        pq.rotate_reclaim_queues();
+        // SAFETY: pages are attached to a VM object.
+        let queue = unsafe { pq.debug_page_is_reclaim(page1_ptr) };
+        expect_true!(queue.is_some());
+        expect_eq!(queue.unwrap(), 1);
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(page2_ptr) });
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[1] = 1;
+        expect_true!(
+            pq.queue_counts() == Counts { reclaim, reclaim_isolate: 1, ..Default::default() }
+        );
+        // Two active queues by default, so page1 is still considered active.
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 1, inactive: 1 }
+        );
+
+        // Rotate the queues again. The page accessed above should move to the next pager-backed queue.
+        pq.rotate_reclaim_queues();
+        // SAFETY: pages are attached to a VM object.
+        let queue = unsafe { pq.debug_page_is_reclaim(page1_ptr) };
+        expect_true!(queue.is_some());
+        expect_eq!(queue.unwrap(), 2);
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(page2_ptr) });
+        let mut reclaim = [0; NUM_RECLAIM];
+        reclaim[2] = 1;
+        expect_true!(
+            pq.queue_counts() == Counts { reclaim, reclaim_isolate: 1, ..Default::default() }
+        );
+        // page1 has now moved on past the two active queues, so it now counts as inactive.
+        expect_true!(
+            pq.get_active_inactive_counts() == ActiveInactiveCounts { active: 0, inactive: 2 }
+        );
+
+        // SAFETY: pages are in page queues.
+        unsafe {
+            pq.remove(page1_ptr);
+            pq.remove(page2_ptr);
+        }
+    }
+
+    /// Tests FIFO ordering of pages aged in the same generation.
+    #[test]
+    fn pq_single_queue_fifo_order() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        let mut old_page = VmPage::default();
+        let old_page_ptr = initialize_test_page(&mut old_page);
+        let mut new_page = VmPage::default();
+        let new_page_ptr = initialize_test_page(&mut new_page);
+
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(2, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // SAFETY: pages are valid and not in a queue.
+        unsafe {
+            pq.set_reclaim(old_page_ptr, &cow, 0);
+            pq.set_reclaim(new_page_ptr, &cow, 1);
+        }
+
+        // SAFETY: pages are attached to a VM object.
+        let (queue_a, queue_b) = unsafe {
+            (pq.debug_page_is_reclaim(old_page_ptr), pq.debug_page_is_reclaim(new_page_ptr))
+        };
+        expect_true!(queue_a.is_some());
+        expect_true!(queue_b.is_some());
+        expect_eq!(queue_a.unwrap(), queue_b.unwrap()); // Verify they are in the same queue (same generation)
+
+        // Age pages until they reach the LRU queue.
+        for _ in 0..NUM_RECLAIM - 1 {
+            pq.rotate_reclaim_queues();
+        }
+
+        // Peek the isolate list using the public peek_isolate method.
+        // We expect pages to be processed in age order (oldest first, i.e., old_page before new_page).
+        // Since they are added to the tail of the isolate list, the oldest page (old_page) should be at
+        // the head of the isolate list.
+        let backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(backlink.is_some());
+        expect_eq!(backlink.as_ref().unwrap().page.as_raw(), old_page_ptr.as_raw());
+
+        // SAFETY: `old_page_ptr` is in a page queue.
+        unsafe { pq.remove(old_page_ptr) };
+        let next_backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(next_backlink.is_some());
+        expect_eq!(next_backlink.as_ref().unwrap().page.as_raw(), new_page_ptr.as_raw());
+
+        // SAFETY: `new_page_ptr` is in a page queue.
+        unsafe { pq.remove(new_page_ptr) };
+    }
+
+    /// Tests FIFO ordering of pages aged across multiple generations.
+    #[test]
+    fn pq_multiple_queues_fifo_order() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        pq.set_active_ratio_multiplier(0);
+        pq.start_threads(DurationMono::from_nanos(0), DurationMono::from_nanos(ZX_TIME_INFINITE));
+
+        let mut old_page = VmPage::default();
+        let old_page_ptr = initialize_test_page(&mut old_page);
+        let mut new_page = VmPage::default();
+        let new_page_ptr = initialize_test_page(&mut new_page);
+
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(2, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Set up old_page and rotate once to push it to the next queue.
+        // SAFETY: `old_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(old_page_ptr, &cow, 0) };
+        // SAFETY: `old_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(old_page_ptr) }.is_some());
+        pq.rotate_reclaim_queues();
+
+        // Set up new_page.
+        // SAFETY: `new_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(new_page_ptr, &cow, 1) };
+        // SAFETY: `new_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(new_page_ptr) }.is_some());
+
+        // Rotate queues until both pages reach the isolate queue. Since new_page is one
+        // generation behind old_page, waiting for new_page ensures old_page is already there.
+        let mut rotations = 0;
+        // SAFETY: `new_page_ptr` is attached to a VM object.
+        while unsafe { !pq.debug_page_is_reclaim_isolate(new_page_ptr) } && rotations < 20 {
+            pq.rotate_reclaim_queues();
+            rotations += 1;
+        }
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(old_page_ptr) });
+        // SAFETY: pages are attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(new_page_ptr) });
+
+        // Peek the isolate queue. Since old_page was aged first (older bucket), it should
+        // be peeked first (FIFO ordering at the bucket level).
+        let backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(backlink.is_some());
+        expect_eq!(backlink.as_ref().unwrap().page.as_raw(), old_page_ptr.as_raw());
+
+        // Remove old_page to verify that the next page peeked is new_page.
+        // SAFETY: `old_page_ptr` is in a page queue.
+        unsafe { pq.remove(old_page_ptr) };
+        let next_backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(next_backlink.is_some());
+        expect_eq!(next_backlink.as_ref().unwrap().page.as_raw(), new_page_ptr.as_raw());
+
+        // SAFETY: `new_page_ptr` is in a page queue.
+        unsafe { pq.remove(new_page_ptr) };
+    }
+
+    /// Tests FIFO ordering of pages marked don't need in the isolate queue.
+    #[test]
+    fn pq_isolate_dont_need_fifo_order() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        let mut old_page = VmPage::default();
+        let old_page_ptr = initialize_test_page(&mut old_page);
+        let mut new_page = VmPage::default();
+        let new_page_ptr = initialize_test_page(&mut new_page);
+
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(2, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Set up both pages and mark them "Don't Need".
+        // old_page is marked first, then new_page. Use different offsets to represent distinct pages.
+        // SAFETY: `old_page_ptr` is valid and not in a queue.
+        unsafe {
+            pq.set_reclaim(old_page_ptr, &cow, 0);
+            pq.move_to_reclaim_dont_need(old_page_ptr);
+        }
+        // SAFETY: `old_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(old_page_ptr) });
+
+        // SAFETY: `new_page_ptr` is valid and not in a queue.
+        unsafe {
+            pq.set_reclaim(new_page_ptr, &cow, 1);
+            pq.move_to_reclaim_dont_need(new_page_ptr);
+        }
+        // SAFETY: `new_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(new_page_ptr) });
+
+        // Peek the isolate queue. It should return old_page first (FIFO for Don't Need).
+        let backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(backlink.is_some());
+        expect_eq!(backlink.as_ref().unwrap().page.as_raw(), old_page_ptr.as_raw());
+
+        // Remove old_page to verify that the next page peeked is new_page.
+        // SAFETY: `old_page_ptr` is in a page queue.
+        unsafe { pq.remove(old_page_ptr) };
+        let next_backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(next_backlink.is_some());
+        expect_eq!(next_backlink.as_ref().unwrap().page.as_raw(), new_page_ptr.as_raw());
+
+        // SAFETY: `new_page_ptr` is in a page queue.
+        unsafe { pq.remove(new_page_ptr) };
+    }
+
+    /// Tests eviction priority of don't need pages over standard aged pages.
+    #[test]
+    fn pq_isolate_queues_priority() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        pq.set_active_ratio_multiplier(0);
+        pq.start_threads(DurationMono::from_nanos(0), DurationMono::from_nanos(ZX_TIME_INFINITE));
+
+        let mut aged_page = VmPage::default();
+        let aged_page_ptr = initialize_test_page(&mut aged_page);
+        let mut dont_need_page = VmPage::default();
+        let dont_need_page_ptr = initialize_test_page(&mut dont_need_page);
+
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(2, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Set up the first page and rotate queues until it reaches the isolate queue.
+        // Aged pages are placed in the standard isolate queue (isolate_queues[1]).
+        // SAFETY: `aged_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(aged_page_ptr, &cow, 0) };
+        // SAFETY: `aged_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim(aged_page_ptr) }.is_some());
+
+        let mut rotations = 0;
+        // SAFETY: `aged_page_ptr` is attached to a VM object.
+        while unsafe { !pq.debug_page_is_reclaim_isolate(aged_page_ptr) } && rotations < 20 {
+            pq.rotate_reclaim_queues();
+            rotations += 1;
+        }
+        // SAFETY: `aged_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(aged_page_ptr) });
+
+        // Set up the second page and mark it "Don't Need".
+        // "Don't Need" pages are placed in the high-priority isolate queue (isolate_queues[0]).
+        // SAFETY: `dont_need_page_ptr` is valid and not in a queue.
+        unsafe {
+            pq.set_reclaim(dont_need_page_ptr, &cow, 0);
+            pq.move_to_reclaim_dont_need(dont_need_page_ptr);
+        }
+        // SAFETY: `dont_need_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { pq.debug_page_is_reclaim_isolate(dont_need_page_ptr) });
+
+        // Peek the isolate queue. peek_isolate checks the high-priority queue (index 0)
+        // before the standard queue (index 1). Thus, the "Don't Need" page is returned first,
+        // verifying it is prioritized for eviction over the aged page.
+        let backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(backlink.is_some());
+        expect_eq!(backlink.as_ref().unwrap().page.as_raw(), dont_need_page_ptr.as_raw());
+
+        // Remove the high-priority "Don't Need" page to verify that the next page
+        // peeked from the isolate queue is the standard aged page.
+        // SAFETY: `dont_need_page_ptr` is in a page queue.
+        unsafe { pq.remove(dont_need_page_ptr) };
+        let next_backlink = pq.peek_isolate(NUM_RECLAIM - 1);
+        assert_true!(next_backlink.is_some());
+        expect_eq!(next_backlink.as_ref().unwrap().page.as_raw(), aged_page_ptr.as_raw());
+
+        // SAFETY: `aged_page_ptr` is in a page queue.
+        unsafe { pq.remove(aged_page_ptr) };
+    }
+
+    /// Tests whether a page is considered reclaimable in different queues.
+    #[test]
+    fn pq_is_page_reclaimable() {
+        pin_init::stack_pin_init!(let pq = PageQueues::init());
+
+        let mut test_page = VmPage::default();
+        let test_page_ptr = initialize_test_page(&mut test_page);
+
+        let vmo = unwrap_ok!(make_uncommitted_pager_vmo(1, false, false));
+        let cow = unwrap_some!(vmo.debug_get_cow_pages());
+
+        // Only pages in the isolate queue should be considered reclaimable.
+        // SAFETY: `test_page_ptr` is valid and not in a queue.
+        unsafe { pq.set_reclaim(test_page_ptr, &cow, 0) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_false!(unsafe { PageQueues::is_page_reclaimable(test_page_ptr) });
+
+        // Moving the page to the "Don't Need" queue should move to isolate.
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_reclaim_dont_need(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_true!(unsafe { PageQueues::is_page_reclaimable(test_page_ptr) });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.move_to_reclaim(test_page_ptr) };
+        // SAFETY: `test_page_ptr` is attached to a VM object.
+        expect_false!(unsafe { PageQueues::is_page_reclaimable(test_page_ptr) });
+
+        // SAFETY: `test_page_ptr` is in a page queue.
+        unsafe { pq.remove(test_page_ptr) };
     }
 }

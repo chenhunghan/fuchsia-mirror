@@ -177,6 +177,7 @@
             config: [
                 "fuchsia.system-updater.ConcurrentBlobFetches",
                 "fuchsia.system-updater.ConcurrentPackageResolves",
+                "fuchsia.system-updater.ExcessiveUpdateDurationSeconds",
                 "fuchsia.system-updater.VerifyExistingBlobs",
             ],
             from: "void",

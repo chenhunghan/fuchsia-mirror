@@ -5,16 +5,20 @@
 #ifndef SRC_CONNECTIVITY_ETHERNET_DRIVERS_USB_CDC_ECM_USB_CDC_ECM_H_
 #define SRC_CONNECTIVITY_ETHERNET_DRIVERS_USB_CDC_ECM_USB_CDC_ECM_H_
 
+#include <fidl/fuchsia.driver.framework/cpp/fidl.h>
 #include <fuchsia/hardware/ethernet/cpp/banjo.h>
 #include <fuchsia/hardware/usb/c/banjo.h>
 #include <fuchsia/hardware/usb/request/c/banjo.h>
+#include <lib/async/cpp/wait.h>
+#include <lib/driver/compat/cpp/banjo_server.h>
+#include <lib/driver/compat/cpp/device_server.h>
+#include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/operation/ethernet.h>
 #include <lib/zircon-internal/thread_annotations.h>
+#include <lib/zx/event.h>
 #include <zircon/compiler.h>
 
-#include <ddktl/device.h>
 #include <fbl/mutex.h>
-#include <src/lib/listnode/listnode.h>
 #include <usb/usb.h>
 
 #include "src/connectivity/ethernet/drivers/usb-cdc-ecm/usb-cdc-ecm-lib.h"
@@ -22,22 +26,14 @@
 
 namespace usb_cdc_ecm {
 
-class UsbCdcEcm;
-
-using UsbCdcEcmType = ::ddk::Device<UsbCdcEcm, ddk::Initializable, ddk::Unbindable>;
-
-class UsbCdcEcm : public UsbCdcEcmType,
-                  public ddk::EthernetImplProtocol<UsbCdcEcm, ddk::base_protocol> {
+class UsbCdcEcm : public fdf::DriverBase2, public ddk::EthernetImplProtocol<UsbCdcEcm> {
  public:
-  explicit UsbCdcEcm(zx_device_t* parent, const usb::UsbDevice& usb)
-      : UsbCdcEcmType(parent), usb_(usb) {}
-  ~UsbCdcEcm();
+  UsbCdcEcm() : fdf::DriverBase2("usb-cdc-ecm") {}
+  ~UsbCdcEcm() override = default;
 
-  void DdkInit(ddk::InitTxn txn);
-  zx_status_t Init();
-  static zx_status_t Bind(void* ctx, zx_device_t* dev);
-  void DdkRelease();
-  void DdkUnbind(ddk::UnbindTxn txn);
+  // fdf::DriverBase2 implementation.
+  zx::result<> Start(fdf::DriverContext context) override;
+  void Stop(fdf::StopCompleter completer) override;
 
   // ZX_PROTOCOL_ETHERNET_IMPL ops.
   zx_status_t EthernetImplQuery(uint32_t options, ethernet_info_t* info);
@@ -50,18 +46,26 @@ class UsbCdcEcm : public UsbCdcEcmType,
   void EthernetImplGetBti(zx::bti* bti) { bti->reset(); }
 
  private:
-  // Function invoked by the interrupt thread created by DdkInit.
-  // The context of type EcmCtx is passed to it. The thread checks the usb request queue and acts on
-  // it. Returns the status of the response of the usb requests queue if its not ZX_OK. An interrupt
-  // handler is invoked otherwise.
-  int InterruptThread();
+  // Name of the child node this driver publishes the EthernetImpl protocol on.
+  static constexpr std::string_view kChildNodeName = "usb-cdc-ecm";
+
+  // Parses the USB descriptors, allocates the transfer buffers and starts the interrupt handler
+  // thread. Invoked from Start().
+  zx_status_t Init();
+
+  // The scheduled interrupt task re-schedules itself unless canceled or other terminal error.
+  void ScheduleInterruptTask(async_dispatcher_t* dispatcher);
+  void TaskHandler(async_dispatcher_t* dispatcher, async::WaitBase* wait, zx_status_t status,
+                   const zx_packet_signal_t* signal);
+  zx::event int_event_;
+  async::WaitMethod<UsbCdcEcm, &UsbCdcEcm::TaskHandler> int_wait_{this};
 
   // Interrupt handler function invoked by the interrupt handler thread. It receives the usb_request
   // it has to work on. If the response is less than the size of (usb_cdc_notification_t) the
   // interrupt is ignored.
   void HandleInterrupt(usb::Request<void>& request);
 
-  void InterruptComplete(usb_request_t* request) { sync_completion_signal(&completion_); }
+  void InterruptComplete(usb_request_t* request) { int_event_.signal(0, ZX_USER_SIGNAL_0); }
 
   zx_status_t SetPacketFilterMode(uint16_t mode, bool on);
 
@@ -75,6 +79,12 @@ class UsbCdcEcm : public UsbCdcEcmType,
   void UpdateOnlineStatus(bool is_online);
 
   usb::UsbDevice usb_;
+
+  // Serves the fuchsia.driver.compat/Device protocol so that the child node can retrieve the
+  // EthernetImpl banjo protocol below.
+  compat::DeviceServer device_server_;
+  compat::BanjoServer banjo_server_{ZX_PROTOCOL_ETHERNET_IMPL, this, &ethernet_impl_protocol_ops_};
+  fidl::ClientEnd<fuchsia_driver_framework::NodeController> child_;
 
   // Ethernet lock -- must be acquired after tx_mutex_ when both locks are held.
   fbl::Mutex ethernet_mutex_;
@@ -93,8 +103,6 @@ class UsbCdcEcm : public UsbCdcEcmType,
   std::optional<EcmEndpoint> int_endpoint_;
   std::optional<usb::Request<void>> interrupt_request_;
   sync_completion_t completion_;
-  thrd_t int_thread_;
-  std::atomic_bool int_thread_created_ = false;
 
   // Send context
   // TX lock -- Must be acquired before ethernet_mutex when both locks are held.
@@ -112,6 +120,7 @@ class UsbCdcEcm : public UsbCdcEcmType,
   usb::RequestPool<void> rx_request_pool_ TA_GUARDED(mutex_);
   uint64_t rx_endpoint_delay_;  // wait time between 2 recv requests
   uint16_t rx_packet_filter_;
+  uint8_t comm_intf_num_ = 0;
 };
 
 }  // namespace usb_cdc_ecm

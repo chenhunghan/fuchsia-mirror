@@ -73,6 +73,12 @@ class LintingTreeCallbacks {
   void OnMethod(fit::function<void(const RawProtocolMethod&)> callback) {
     method_callbacks_.push_back(std::move(callback));
   }
+  void OnEnterMethodError(fit::function<void()> callback) {
+    enter_method_error_callbacks_.push_back(std::move(callback));
+  }
+  void OnExitMethodError(fit::function<void()> callback) {
+    exit_method_error_callbacks_.push_back(std::move(callback));
+  }
   void OnEvent(fit::function<void(const RawProtocolMethod&)> callback) {
     event_callbacks_.push_back(std::move(callback));
   }
@@ -134,6 +140,8 @@ class LintingTreeCallbacks {
   std::vector<fit::function<void(const RawProtocolDeclaration&)>>
       exit_protocol_declaration_callbacks_;
   std::vector<fit::function<void(const RawProtocolMethod&)>> method_callbacks_;
+  std::vector<fit::function<void()>> enter_method_error_callbacks_;
+  std::vector<fit::function<void()>> exit_method_error_callbacks_;
   std::vector<fit::function<void(const RawProtocolMethod&)>> event_callbacks_;
 
   std::vector<fit::function<void(const RawAttribute&)>> attribute_callbacks_;

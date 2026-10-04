@@ -186,7 +186,7 @@ closed(removed=31) open(added=31) protocol Registry {
         @available(added=11)
         name string:fuchsia.tracing.MAX_PROVIDER_NAME_LENGTH;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         started bool;
     });
 

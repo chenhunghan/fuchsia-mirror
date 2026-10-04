@@ -11,6 +11,8 @@ FuchsiaComponentInfo = provider(
         "moniker": "The moniker to run the non-driver, non-test, non-session component in",
         "is_driver": "True if this is a driver",
         "is_test": "True if this is a test component",
+        "test_realm": "The realm moniker to run the test component in, or None if the test is hermetic " +
+                      "(runs in the default hermetic test realm). Not set when `is_test` is False",
         "run_tag": "A tag used to identify the component when put in a package to be later used by the run command",
     },
 )

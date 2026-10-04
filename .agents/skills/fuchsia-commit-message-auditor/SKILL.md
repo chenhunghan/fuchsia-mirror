@@ -1,9 +1,11 @@
 ---
 name: fuchsia-commit-message-auditor
 description: >
-  Audits and formats commit messages and staged diffs for Fuchsia against
-  style guides, formatting limits, and diff hygiene. Use when asked to audit,
-  review, write, amend, or update commit messages, or before creating a CL.
+  Audits, validates, and formats Fuchsia Git commit messages against the
+  Fuchsia commit message style guide (50-char subject, imperative mood,
+  72-char wrap, Bug:, Test:, Change-Id: footers). Use when writing, editing,
+  or auditing commit messages. Do NOT use for reviewing code logic or diffs
+  (use /review instead).
 ---
 
 # Commit message auditor and diff matcher

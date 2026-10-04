@@ -11,9 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <usb/descriptors.h>
 #include <usb/usb-request.h>
 
 #include "src/devices/usb/drivers/usb-composite/usb-composite.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_composite {
 
@@ -32,7 +35,7 @@ zx::result<fidl::ClientEnd<fuchsia_io::Directory>> UsbInterface::Create(
   auto* device_desc = composite->device_descriptor();
   uint8_t usb_class, usb_subclass, usb_protocol;
 
-  if (interface_desc->b_interface_class == 0) {
+  if (interface_desc->b_interface_class == fdescriptor::UsbClass::kPerInterface) {
     usb_class = device_desc->b_device_class;
     usb_subclass = device_desc->b_device_sub_class;
     usb_protocol = device_desc->b_device_protocol;
@@ -387,8 +390,9 @@ zx_status_t UsbInterface::SetAltSetting(uint8_t interface_id, uint8_t alt_settin
     return status;
   }
 
-  return UsbControlOut(USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, USB_REQ_SET_INTERFACE,
-                       alt_setting, interface_id, ZX_TIME_INFINITE, nullptr, 0);
+  return UsbControlOut(kStandardInterfaceOut,
+                       fidl::ToUnderlying(fdescriptor::StandardRequest::kSetInterface), alt_setting,
+                       interface_id, ZX_TIME_INFINITE, nullptr, 0);
 }
 
 }  // namespace usb_composite

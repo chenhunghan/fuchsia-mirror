@@ -12,7 +12,9 @@
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
+#include <vm/anonymous_page_request.h>
 
+#include "vm/discardable_vmo_tracker.h"
 #include "vm/vm_cow_pages.h"
 
 __BEGIN_CDECLS
@@ -22,6 +24,9 @@ typedef zx_status_t (*cpp_vm_cow_pages_lookup_readable_fn)(void* ctx, uint64_t o
 
 zx_status_t cpp_vm_cow_pages_replace_page_with_loaned(VmCowPages* cow, vm_page_t* before_page,
                                                       uint64_t offset);
+zx_status_t cpp_vm_cow_pages_replace_page(VmCowPages* cow, vm_page_t* before_page, uint64_t offset,
+                                          bool with_loaned, vm_page_t** after_page,
+                                          AnonymousPageRequest* page_request);
 void* cpp_vm_cow_pages_get_ref_counted(const VmCowPages* cow);
 void cpp_vm_cow_pages_free(VmCowPages* cow);
 void cpp_vm_cow_pages_initialize_page_cache(uint32_t level);
@@ -32,6 +37,7 @@ zx_status_t cpp_vm_cow_pages_evict_loaned_page(VmCowPages* cow, vm_page_t* page,
 vm_page_t* cpp_vm_cow_pages_debug_get_page(const VmCowPages* cow, uint64_t offset);
 bool cpp_vm_cow_pages_debug_is_empty(const VmCowPages* cow, uint64_t offset);
 bool cpp_vm_cow_pages_debug_is_high_memory_priority(const VmCowPages* cow);
+bool cpp_vm_cow_pages_lock_is_held(const VmCowPages* cow);
 DiscardableVmoTracker* cpp_vm_cow_pages_debug_get_discardable_tracker(const VmCowPages* cow);
 bool cpp_vm_cow_pages_reclaim_page(VmCowPages* cow, vm_page_t* page, uint64_t offset,
                                    VmCowPages::EvictionAction eviction_action,
@@ -52,12 +58,18 @@ zx_status_t cpp_vm_cow_pages_zero_pages_locked(VmCowPages* cow, VmCowRange range
                                                VmCowPages::DeferredOps* deferred,
                                                MultiPageRequest* page_request,
                                                uint64_t* out_zeroed_bytes);
+zx_status_t cpp_vm_cow_pages_supply_pages_locked(VmCowPages* cow, VmCowRange range,
+                                                 VmPageSpliceList* pages, SupplyOptions options,
+                                                 VmCowPages::DeferredOps* deferred,
+                                                 MultiPageRequest* page_request);
 uint32_t cpp_vm_cow_pages_debug_get_populated_slots_count(const VmCowPages* cow);
 bool cpp_vm_cow_pages_debug_is_parent_content(const VmCowPages* cow, uint64_t offset);
 bool cpp_vm_cow_pages_can_borrow(const VmCowPages* cow);
 bool cpp_vm_cow_pages_can_evict(const VmCowPages* cow);
 bool cpp_vm_cow_pages_is_discardable(const VmCowPages* cow);
 VmCowPages* cpp_vm_cow_pages_upgrade_from_raw(VmCowPages* cow);
+void cpp_vm_cow_pages_debug_get_discardable_page_counts(
+    const VmCowPages* cow, VmCowPages::DiscardablePageCounts* out_counts);
 
 void cpp_priority_changer_construct(ffi::Uninitialized<PriorityChanger>* out, VmCowPages* cow,
                                     int64_t delta);

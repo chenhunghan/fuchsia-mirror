@@ -122,10 +122,7 @@ fn make_node_details(node: fdd::NodeInfo) -> NodeDetails {
         .unwrap_or_else(|| vec![])
         .into_iter()
         .map(|p| {
-            let key = match p.key {
-                fdf::NodePropertyKey::IntValue(i) => format!("{}", i),
-                fdf::NodePropertyKey::StringValue(s) => format!("{}", s),
-            };
+            let key = p.key;
             let value = match p.value {
                 fdf::NodePropertyValue::IntValue(i) => format!("{}", i),
                 fdf::NodePropertyValue::StringValue(s) => {
@@ -263,10 +260,7 @@ fn print_table(node: fdd::NodeInfo, with_style: bool, writer: &mut dyn Write) ->
         .unwrap_or_else(|| vec![])
         .into_iter()
         .map(|p| {
-            let key = match p.key {
-                fdf::NodePropertyKey::IntValue(i) => format!("{}", i),
-                fdf::NodePropertyKey::StringValue(s) => format!("{}", s),
-            };
+            let key = p.key;
             let value = match p.value {
                 fdf::NodePropertyValue::IntValue(i) => format!("{}", i),
                 fdf::NodePropertyValue::StringValue(s) => {

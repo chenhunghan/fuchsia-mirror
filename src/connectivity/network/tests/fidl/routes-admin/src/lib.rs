@@ -20,14 +20,11 @@ use fidl_fuchsia_net_routes as fnet_routes;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
 use fidl_fuchsia_net_routes_ext::admin::FidlRouteAdminIpExt;
 use fidl_fuchsia_net_routes_ext::{self as fnet_routes_ext, FidlRouteIpExt, RouteAction};
-use fidl_fuchsia_net_stack as fnet_stack;
 use fuchsia_async::TimeoutExt as _;
 use futures::StreamExt;
 use futures::future::FutureExt as _;
 use itertools::Itertools;
-use net_declare::{
-    fidl_ip_v4, fidl_ip_v4_with_prefix, fidl_ip_v6, fidl_ip_v6_with_prefix, fidl_subnet,
-};
+use net_declare::{fidl_ip_v4, fidl_ip_v4_with_prefix, fidl_ip_v6, fidl_ip_v6_with_prefix};
 use net_types::ip::{GenericOverIp, Ip, IpInvariant, Ipv4, Ipv6};
 use netstack_testing_common::ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT;
 use netstack_testing_common::realms::{Netstack3, TestSandboxExt};
@@ -38,11 +35,6 @@ use test_case::{test_case, test_matrix};
 
 const METRIC_TRACKS_INTERFACE: fnet_routes::SpecifiedMetric =
     fnet_routes::SpecifiedMetric::InheritedFromInterface(fnet_routes::Empty);
-
-enum SystemRouteProtocol {
-    NetRootRoutes,
-    NetStack,
-}
 
 enum RouteSet {
     Global,
@@ -419,11 +411,11 @@ async fn validates_route_v6(
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
-#[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
+#[test_case(RouteSet::Global; "Global Route Set")]
+#[test_case(RouteSet::User; "User Route Set")]
 async fn add_route_twice_with_same_set<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
-    system_route_protocol: SystemRouteProtocol,
+    route_set_type: RouteSet,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup {
@@ -444,12 +436,10 @@ async fn add_route_twice_with_same_set<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
             .await
             .expect("collect routes should succeed");
 
-    let proxy = match system_route_protocol {
-        SystemRouteProtocol::NetRootRoutes => {
-            fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
-                .expect("new global route set")
-        }
-        SystemRouteProtocol::NetStack => {
+    let proxy = match route_set_type {
+        RouteSet::Global => fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
+            .expect("new global route set"),
+        RouteSet::User => {
             fnet_routes_ext::admin::new_route_set::<I>(&route_table).expect("new route set")
         }
     };
@@ -615,15 +605,16 @@ async fn add_route_with_multiple_route_sets<I: FidlRouteAdminIpExt + FidlRouteIp
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
-#[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
-async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
-    name: &str,
-    system_route_protocol: SystemRouteProtocol,
-) {
+async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let TestSetup { realm, network: _network, interface, route_table, global_route_table, state } =
-        TestSetup::<I>::new(&sandbox, name).await;
+    let TestSetup {
+        realm: _realm,
+        network: _network,
+        interface,
+        route_table,
+        global_route_table,
+        state,
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -645,40 +636,26 @@ async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
 
     let route_to_add = test_route::<I>(&interface, METRIC_TRACKS_INTERFACE);
 
-    // Add a "system route".
-    match system_route_protocol {
-        SystemRouteProtocol::NetRootRoutes => {
-            let proxy = fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
-                .expect("new global route set");
+    // Add a "system route" over the global route set.
+    let proxy = fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
+        .expect("new global route set");
 
-            let grant = interface.get_authorization().await.expect("getting grant should succeed");
-            let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
-            fnet_routes_ext::admin::authenticate_for_interface::<I>(&proxy, proof)
-                .await
-                .expect("no FIDL error")
-                .expect("authentication should succeed");
+    let grant = interface.get_authorization().await.expect("getting grant should succeed");
+    let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
+    fnet_routes_ext::admin::authenticate_for_interface::<I>(&proxy, proof)
+        .await
+        .expect("no FIDL error")
+        .expect("authentication should succeed");
 
-            assert!(
-                fnet_routes_ext::admin::add_route::<I>(
-                    &proxy,
-                    &route_to_add.try_into().expect("convert to FIDL")
-                )
-                .await
-                .expect("no FIDL error")
-                .expect("add route")
-            );
-        }
-        SystemRouteProtocol::NetStack => {
-            let fuchsia_net_stack = realm
-                .connect_to_protocol::<fnet_stack::StackMarker>()
-                .expect("connect to fuchsia.net.stack.Stack");
-            fuchsia_net_stack
-                .add_forwarding_entry(&route_to_add.try_into().expect("convert to ForwardingEntry"))
-                .await
-                .expect("should not have FIDL error")
-                .expect("should succeed");
-        }
-    }
+    assert!(
+        fnet_routes_ext::admin::add_route::<I>(
+            &proxy,
+            &route_to_add.try_into().expect("convert to FIDL")
+        )
+        .await
+        .expect("no FIDL error")
+        .expect("add route")
+    );
 
     fnet_routes_ext::wait_for_routes::<I, _, _>(&mut routes_stream, &mut routes, |routes| {
         routes.iter().any(|installed_route| &installed_route.route == &route_to_add)
@@ -731,15 +708,16 @@ async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
-#[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
-async fn system_removes_route_from_route_set<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
-    name: &str,
-    system_route_protocol: SystemRouteProtocol,
-) {
+async fn system_removes_route_from_route_set<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let TestSetup { realm, network: _network, interface, route_table, global_route_table, state } =
-        TestSetup::<I>::new(&sandbox, name).await;
+    let TestSetup {
+        realm: _realm,
+        network: _network,
+        interface,
+        route_table,
+        global_route_table,
+        state,
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -778,40 +756,26 @@ async fn system_removes_route_from_route_set<I: FidlRouteAdminIpExt + FidlRouteI
     .await
     .expect("should succeed");
 
-    // Have the "system" remove that route out from under the RouteSet.
-    match system_route_protocol {
-        SystemRouteProtocol::NetRootRoutes => {
-            let proxy = fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
-                .expect("new global route set");
+    // Have the "system" remove that route out from under the RouteSet via the global route set.
+    let proxy = fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
+        .expect("new global route set");
 
-            let grant = interface.get_authorization().await.expect("getting grant should succeed");
-            let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
-            fnet_routes_ext::admin::authenticate_for_interface::<I>(&proxy, proof)
-                .await
-                .expect("no FIDL error")
-                .expect("authentication should succeed");
+    let grant = interface.get_authorization().await.expect("getting grant should succeed");
+    let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
+    fnet_routes_ext::admin::authenticate_for_interface::<I>(&proxy, proof)
+        .await
+        .expect("no FIDL error")
+        .expect("authentication should succeed");
 
-            assert!(
-                fnet_routes_ext::admin::remove_route::<I>(
-                    &proxy,
-                    &route_to_add.try_into().expect("convert to FIDL")
-                )
-                .await
-                .expect("no FIDL error")
-                .expect("add route")
-            );
-        }
-        SystemRouteProtocol::NetStack => {
-            let fuchsia_net_stack = realm
-                .connect_to_protocol::<fnet_stack::StackMarker>()
-                .expect("connect to fuchsia.net.stack.Stack");
-            fuchsia_net_stack
-                .del_forwarding_entry(&route_to_add.try_into().expect("convert to ForwardingEntry"))
-                .await
-                .expect("should not have FIDL error")
-                .expect("should succeed");
-        }
-    }
+    assert!(
+        fnet_routes_ext::admin::remove_route::<I>(
+            &proxy,
+            &route_to_add.try_into().expect("convert to FIDL")
+        )
+        .await
+        .expect("no FIDL error")
+        .expect("add route")
+    );
 
     // The route should disappear.
     fnet_routes_ext::wait_for_routes::<I, _, _>(&mut routes_stream, &mut routes, |routes| {
@@ -838,11 +802,8 @@ async fn system_removes_route_from_route_set<I: FidlRouteAdminIpExt + FidlRouteI
 // from this file.
 #[netstack_test]
 #[variant(I, Ip)]
-#[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
-#[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
 async fn root_route_apis_can_remove_loopback_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
-    system_route_protocol: SystemRouteProtocol,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup {
@@ -883,61 +844,44 @@ async fn root_route_apis_can_remove_loopback_route<I: FidlRouteAdminIpExt + Fidl
         Itertools::exactly_one(routes.iter().filter(|route| is_loopback_route(*route)))
             .expect("should have exactly one loopback route");
 
-    // Remove the loopback route.
-    match system_route_protocol {
-        SystemRouteProtocol::NetRootRoutes => {
-            let proxy = fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
-                .expect("new global route set");
+    // Remove the loopback route via the global route set.
+    let proxy = fnet_routes_ext::admin::new_global_route_set::<I>(&global_route_table)
+        .expect("new global route set");
 
-            let iface_id = if let RouteAction::Forward(target) = loopback_route.route.action {
-                target.outbound_interface
-            } else {
-                panic!("could not determine interface for route");
-            };
+    let iface_id = if let RouteAction::Forward(target) = loopback_route.route.action {
+        target.outbound_interface
+    } else {
+        panic!("could not determine interface for route");
+    };
 
-            let root_interfaces = realm
-                .connect_to_protocol::<fidl_fuchsia_net_root::InterfacesMarker>()
-                .expect("connect to protocol");
-            let (interface_control, interface_control_server_end) =
-                fidl_fuchsia_net_interfaces_ext::admin::Control::create_endpoints()
-                    .expect("create proxy");
-            root_interfaces
-                .get_admin(iface_id, interface_control_server_end)
-                .expect("create root interfaces connection");
+    let root_interfaces = realm
+        .connect_to_protocol::<fidl_fuchsia_net_root::InterfacesMarker>()
+        .expect("connect to protocol");
+    let (interface_control, interface_control_server_end) =
+        fidl_fuchsia_net_interfaces_ext::admin::Control::create_endpoints().expect("create proxy");
+    root_interfaces
+        .get_admin(iface_id, interface_control_server_end)
+        .expect("create root interfaces connection");
 
-            let grant = interface_control
-                .get_authorization_for_interface()
-                .await
-                .expect("getting grant should succeed");
-            let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
-            fnet_routes_ext::admin::authenticate_for_interface::<I>(&proxy, proof)
-                .await
-                .expect("no FIDL error")
-                .expect("authentication should succeed");
+    let grant = interface_control
+        .get_authorization_for_interface()
+        .await
+        .expect("getting grant should succeed");
+    let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
+    fnet_routes_ext::admin::authenticate_for_interface::<I>(&proxy, proof)
+        .await
+        .expect("no FIDL error")
+        .expect("authentication should succeed");
 
-            assert!(
-                fnet_routes_ext::admin::remove_route::<I>(
-                    &proxy,
-                    &loopback_route.route.try_into().expect("convert to FIDL")
-                )
-                .await
-                .expect("should not have FIDL error")
-                .expect("should succeed")
-            );
-        }
-        SystemRouteProtocol::NetStack => {
-            let fuchsia_net_stack = realm
-                .connect_to_protocol::<fnet_stack::StackMarker>()
-                .expect("connect to fuchsia.net.stack.Stack");
-            fuchsia_net_stack
-                .del_forwarding_entry(
-                    &loopback_route.route.try_into().expect("convert to ForwardingEntry"),
-                )
-                .await
-                .expect("should not have FIDL error")
-                .expect("should succeed");
-        }
-    }
+    assert!(
+        fnet_routes_ext::admin::remove_route::<I>(
+            &proxy,
+            &loopback_route.route.try_into().expect("convert to FIDL")
+        )
+        .await
+        .expect("should not have FIDL error")
+        .expect("should succeed")
+    );
 
     // Loopback route should disappear.
     fnet_routes_ext::wait_for_routes::<I, _, _>(&mut routes_stream, &mut routes, |routes| {
@@ -1875,94 +1819,6 @@ async fn concurrent_route_table_and_route_set_removal<I: FidlRouteAdminIpExt + F
         // panics, we need to make the test run longer than 5 seconds (100ms * 55 = 5.5s).
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-}
-
-#[netstack_test]
-async fn del_forwarding_entry_matches_device(name: &str) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
-    let network = sandbox.create_network(name).await.expect("create network");
-    let if_1 = realm.join_network(&network, "ep1").await.expect("join network");
-    let if_2 = realm.join_network(&network, "ep2").await.expect("join network");
-
-    let state =
-        realm.connect_to_protocol::<fnet_routes::StateV6Marker>().expect("connect to routes State");
-
-    let routes_stream =
-        fnet_routes_ext::event_stream_from_state::<Ipv6>(&state).expect("should succeed");
-    let mut routes_stream = pin!(routes_stream);
-
-    let routes = fnet_routes_ext::collect_routes_until_idle::<Ipv6, HashSet<_>>(&mut routes_stream)
-        .await
-        .expect("collect routes should succeed");
-
-    let ll_route_actions = routes
-        .iter()
-        .filter_map(
-            |fnet_routes_ext::InstalledRoute {
-                 route: fnet_routes_ext::Route { destination, action, properties: _ },
-                 effective_properties: _,
-                 table_id: _,
-             }| {
-                (*destination == net_declare::net_subnet_v6!("fe80::/64")).then_some(*action)
-            },
-        )
-        .collect::<HashSet<_>>();
-
-    assert_eq!(
-        ll_route_actions,
-        [if_1.id(), if_2.id()]
-            .into_iter()
-            .map(|device| {
-                fnet_routes_ext::RouteAction::Forward(fnet_routes_ext::RouteTarget {
-                    outbound_interface: device,
-                    next_hop: None,
-                })
-            })
-            .collect::<HashSet<_>>()
-    );
-
-    let stack = realm
-        .connect_to_protocol::<fnet_stack::StackMarker>()
-        .expect("connect to fuchsia.net.stack.Stack");
-    stack
-        .del_forwarding_entry(&fnet_stack::ForwardingEntry {
-            subnet: fidl_subnet!("fe80::/64"),
-            device_id: if_1.id(),
-            next_hop: None,
-            metric: 0,
-        })
-        .await
-        .expect("should not have FIDL error")
-        .expect("should succeed");
-
-    let routes_stream =
-        fnet_routes_ext::event_stream_from_state::<Ipv6>(&state).expect("should succeed");
-    let mut routes_stream = pin!(routes_stream);
-
-    let routes = fnet_routes_ext::collect_routes_until_idle::<Ipv6, HashSet<_>>(&mut routes_stream)
-        .await
-        .expect("collect routes should succeed");
-
-    let ll_route_action = Itertools::exactly_one(routes.iter().filter_map(
-        |fnet_routes_ext::InstalledRoute {
-             route: fnet_routes_ext::Route { destination, action, properties: _ },
-             effective_properties: _,
-             table_id: _,
-         }| {
-            (*destination == net_declare::net_subnet_v6!("fe80::/64")).then_some(*action)
-        },
-    ))
-    .expect("there should only be one LL addr");
-
-    // The ll route for if_1 should be removed but the one for if_2 should still exist.
-    assert_eq!(
-        ll_route_action,
-        fnet_routes_ext::RouteAction::Forward(fnet_routes_ext::RouteTarget {
-            outbound_interface: if_2.id(),
-            next_hop: None,
-        })
-    );
 }
 
 #[netstack_test]

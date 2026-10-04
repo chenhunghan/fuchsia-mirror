@@ -90,7 +90,7 @@ closed protocol Control {
     }) -> (struct {
         formats vector<VideoFormat>;
         total_format_count uint32;
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Sent by the client to indicate desired stream characteristics.

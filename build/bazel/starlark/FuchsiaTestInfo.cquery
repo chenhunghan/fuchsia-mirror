@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# A starlark input file for bazel cquery that prints one line of output
+# that contains a JSON-encoded FuchsiaTestInfo
+#
+# All paths are relative to the Bazel execroot.
+#
+# Example use:
+#   bazel cquery <config-options>                              \
+#         --output=starlark --starlark:file=/path/to/this/file \
+#         'tests(//build/bazel/rules/packages/tests:example_test)'
+#
+def format(target):
+    p = providers(target)
+    if not p:
+        return json.encode({
+            "error": "missing_fuchsia_test_info",
+            "label": str(target.label),
+        })
+    test_info = p.get("//build/bazel/rules/testing:fx_test.bzl%FuchsiaTestInfo")
+    if not test_info:
+        return json.encode({
+            "error": "missing_fuchsia_test_info",
+            "label": str(target.label),
+        })
+    result = {
+        # LINT.IfChange(cquery_output_schema)
+        "label": str(test_info.test_label),
+        # The path below is relative to the Bazel execroot, and must be converted
+        # by the caller into a path relative to the Ninja build directory.
+        "package_manifest_execroot_path": test_info.package_manifest.path,
+        "os": test_info.os,
+        "cpu": test_info.cpu,
+        "environments": test_info.environments,
+        "build_only": test_info.build_only,
+        "max_log_severity": test_info.max_log_severity,
+        "test_components": [
+            {
+                "component_name": component.component_name,
+                "package_url": component.package_url,
+                "realm": component.realm,
+            }
+            for component in test_info.test_components
+        ],
+        # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:device_cquery_output_schema)
+    }
+    return json.encode(result)

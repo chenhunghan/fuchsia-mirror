@@ -138,6 +138,7 @@ mod tests {
                 os: "".into(),
                 package_url: None,
                 component_label: None,
+                realm: None,
                 package_label: None,
                 package_manifests: None,
                 log_settings: None,

@@ -8,7 +8,7 @@ import os
 import subprocess
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         "Execute a python script as an action with a custom environment"
     )

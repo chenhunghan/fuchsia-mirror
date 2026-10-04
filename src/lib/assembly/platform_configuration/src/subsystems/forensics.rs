@@ -21,6 +21,7 @@ const FEEDBACK_CONFIG_FILENAME: &str = "feedback_config.json";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DiskSizedParams {
+    persisted_logs_total_size_kib: u64,
     report_cache_size_kib: u64,
     report_tmp_size_kib: u64,
     snapshot_storage_size_mib: i64,
@@ -28,6 +29,7 @@ struct DiskSizedParams {
 
 // Even on disk-constrained devices, we want to store a few reports in /cache if possible.
 const SMALL_DISK: DiskSizedParams = DiskSizedParams {
+    persisted_logs_total_size_kib: 512,
     report_cache_size_kib: 512,
     report_tmp_size_kib: 4608,
     // -1 indicates that snapshots should not be persisted to disk.
@@ -35,14 +37,17 @@ const SMALL_DISK: DiskSizedParams = DiskSizedParams {
 };
 
 const MEDIUM_DISK: DiskSizedParams = DiskSizedParams {
+    persisted_logs_total_size_kib: 512,
     report_cache_size_kib: 10240,
     report_tmp_size_kib: 10240,
     snapshot_storage_size_mib: 10,
 };
 
+// Reports are fairly small so there's little reason to store more than 10 MiB.
 const LARGE_DISK: DiskSizedParams = DiskSizedParams {
-    report_cache_size_kib: 25600,
-    report_tmp_size_kib: 25600,
+    persisted_logs_total_size_kib: 2048,
+    report_cache_size_kib: 10240,
+    report_tmp_size_kib: 10240,
     snapshot_storage_size_mib: 25,
 };
 
@@ -110,6 +115,7 @@ impl DefineSubsystemConfiguration<(&ForensicsConfig, &PlatformSessionConfig)>
             };
 
             let feedback_config = FeedbackInternalConfig {
+                persisted_logs_total_size_kib: disk_sized_params.persisted_logs_total_size_kib,
                 report_persistence_max_cache_size_kib: disk_sized_params.report_cache_size_kib,
                 report_persistence_max_tmp_size_kib: disk_sized_params.report_tmp_size_kib,
                 snapshot_persistence_max_cache_size_mib: disk_sized_params
@@ -251,6 +257,9 @@ enum CrashReportUploadPolicy {
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 struct FeedbackInternalConfig {
+    // The total size of the disk-backed system log buffer under /cache.
+    pub persisted_logs_total_size_kib: u64,
+
     // The non-snapshot portions of reports, like annotations and the minidump, are stored on disk
     // under /cache if upload fails. Once full, reports will continue to be stored in memory-backed
     // /tmp. These values MUST be greater than 0.
@@ -612,6 +621,7 @@ mod test {
         let config =
             get_feedback_config(BuildType::Eng, ForensicsConfig::default(), Default::default());
 
+        assert_eq!(config.persisted_logs_total_size_kib, SMALL_DISK.persisted_logs_total_size_kib);
         assert_eq!(config.report_persistence_max_cache_size_kib, SMALL_DISK.report_cache_size_kib);
         assert_eq!(config.report_persistence_max_tmp_size_kib, SMALL_DISK.report_tmp_size_kib);
         assert_eq!(
@@ -632,6 +642,7 @@ mod test {
         };
         let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
 
+        assert_eq!(config.persisted_logs_total_size_kib, SMALL_DISK.persisted_logs_total_size_kib);
         assert_eq!(config.report_persistence_max_cache_size_kib, SMALL_DISK.report_cache_size_kib);
         assert_eq!(config.report_persistence_max_tmp_size_kib, SMALL_DISK.report_tmp_size_kib);
         assert_eq!(
@@ -652,6 +663,7 @@ mod test {
         };
         let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
 
+        assert_eq!(config.persisted_logs_total_size_kib, MEDIUM_DISK.persisted_logs_total_size_kib);
         assert_eq!(config.report_persistence_max_cache_size_kib, MEDIUM_DISK.report_cache_size_kib);
         assert_eq!(config.report_persistence_max_tmp_size_kib, MEDIUM_DISK.report_tmp_size_kib);
         assert_eq!(
@@ -672,6 +684,7 @@ mod test {
         };
         let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
 
+        assert_eq!(config.persisted_logs_total_size_kib, LARGE_DISK.persisted_logs_total_size_kib);
         assert_eq!(config.report_persistence_max_cache_size_kib, LARGE_DISK.report_cache_size_kib);
         assert_eq!(config.report_persistence_max_tmp_size_kib, LARGE_DISK.report_tmp_size_kib);
         assert_eq!(

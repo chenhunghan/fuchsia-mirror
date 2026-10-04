@@ -6,7 +6,6 @@ use anyhow::{Context, Result, anyhow};
 use capability_source::CapabilitySource;
 use cm_fidl_analyzer::component_instance::ComponentInstanceForAnalyzer;
 use cm_fidl_analyzer::{BreadthFirstModelWalker, ComponentInstanceVisitor, ComponentModelWalker};
-use cm_rust::UseDecl;
 use futures::FutureExt;
 use moniker::ExtendedMoniker;
 use routing::bedrock::request_metadata::resolver_metadata;
@@ -23,7 +22,7 @@ use std::sync::Arc;
 ///
 /// A DataController which returns a list of absolute monikers of all
 /// components that, in their environment, contain a resolver with the
-///  given moniker for a scheme with access to a protocol.
+/// given moniker and capability name for a scheme.
 #[derive(Default)]
 pub struct ComponentResolversController {}
 
@@ -34,8 +33,8 @@ pub struct ComponentResolverRequest {
     pub scheme: String,
     /// Absolute moniker of the `resolver`
     pub moniker: String,
-    /// Filter the results to components resolved with a `resolver` with access to a protocol
-    pub protocol: String,
+    /// Capability name of the `resolver`
+    pub resolver: String,
 }
 
 /// The response schema.
@@ -49,7 +48,7 @@ pub struct ComponentResolverResponse {
 
 /// Walks the tree for the absolute monikers of all components that,
 /// in their environment, contain a resolver with the given moniker
-/// for a scheme with access to a protocol.  `monikers` contains the
+/// and capability name for a scheme. `monikers` contains the
 /// components which match the `request` parameters.
 struct ComponentResolversVisitor {
     request: ComponentResolverRequest,
@@ -103,21 +102,12 @@ impl ComponentResolversVisitor {
                     ));
                 }
             };
-            let resolver_source = instance
-                .find_absolute(&resolver_source_moniker)
-                .now_or_never()
-                .expect("now or never did not return a result")
-                .expect("failed to walk to other component instance");
             let moniker = moniker::Moniker::parse_str(&self.request.moniker)?;
+            let resolver =
+                cm_types::Name::new(&self.request.resolver).context("invalid resolver")?;
 
-            if resolver_source.moniker() == &moniker {
-                for use_decl in &resolver_source.decl_for_testing().uses {
-                    if let UseDecl::Protocol(name) = use_decl {
-                        if name.source_name == self.request.protocol {
-                            self.monikers.push(instance.moniker().to_string());
-                        }
-                    }
-                }
+            if resolver_source_moniker == moniker && source.source_name() == Some(&resolver) {
+                self.monikers.push(instance.moniker().to_string());
             }
         }
 

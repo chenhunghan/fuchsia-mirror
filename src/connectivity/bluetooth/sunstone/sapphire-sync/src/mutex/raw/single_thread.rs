@@ -4,7 +4,7 @@
 
 use core::cell::Cell;
 
-use crate::mutex::raw::RawMutex;
+use crate::mutex::raw::{ConstInit, RawMutex};
 
 /// A zero-cost mutex implementation for single-threaded execution contexts.
 ///
@@ -51,6 +51,9 @@ impl Mutex {
     pub const fn new() -> Self {
         Self { borrowed: Cell::new(false) }
     }
+}
+impl ConstInit for Mutex {
+    const INIT: Self = Self::new();
 }
 // SAFETY: `SingleThreadMutex` uses `Cell<bool>` to ensure mutual exclusion on a single thread.
 // It is not `Sync`, preventing multithreaded data races.

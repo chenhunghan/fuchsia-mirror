@@ -21,7 +21,7 @@ type StreamType = strict enum : uint8 {
 closed protocol IspStreamShutdownCallback {
     // This is called by the ISP after completing all cleanup of a stream.
     strict ShutdownComplete(struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -30,19 +30,19 @@ closed protocol IspStreamShutdownCallback {
 closed protocol OutputStream {
     // Starts the streaming of frames.
     strict Start() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Stops the streaming of frames.
     strict Stop() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Unlocks the specified frame, allowing the driver to reuse the memory.
     strict ReleaseFrame(struct {
         buffer_id uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Shutdown the stream and release all resources that are no longer needed.
@@ -50,7 +50,7 @@ closed protocol OutputStream {
     strict Shutdown(resource struct {
         shutdown_callback client_end:IspStreamShutdownCallback;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };
 
@@ -74,7 +74,7 @@ closed protocol Isp {
         type StreamType;
         frame_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelFrameCallback;
     }) -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         st client_end:OutputStream;
     });
 
@@ -88,7 +88,7 @@ closed protocol Isp {
         min_frame_rate fuchsia.hardware.camera.FrameRate;
         max_frame_rate fuchsia.hardware.camera.FrameRate;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Changes the vendor-defined test pattern mode and sets any associated data.
@@ -101,13 +101,13 @@ closed protocol Isp {
         mode uint8;
         data vector<uint8>:MAX;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Sets the ISP driver's idea of default sensor mode.
     strict SetDefaultSensorMode(struct {
         mode uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

@@ -140,6 +140,14 @@ void PartitionDevice::SendReply(block_server::RequestId request, zx::result<> st
   }
 }
 
+zx::result<zx::eventpair> PartitionDevice::RegisterKeySlot(uint8_t hw_slot) {
+  fbl::AutoLock lock(&lock_);
+  if (!block_server_) {
+    return zx::error(ZX_ERR_BAD_STATE);
+  }
+  return block_server_->RegisterKeySlot(hw_slot);
+}
+
 void PartitionDevice::Get(GetCompleter::Sync& completer) {
   zx::event token = sdmmc_parent_->parent()->node_token();
   if (token.is_valid()) {

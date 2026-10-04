@@ -10,13 +10,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 
 # `bazel test` incorrectly handles stdout, so logging to stderr will keep our
 # log statements in order w.r.t test/subprocess output.
 # See https://github.com/bazelbuild/bazel/issues/7388.
-def log(*kwargs):
+def log(*kwargs: object) -> None:
     print(*kwargs, file=sys.stderr)
 
 
@@ -24,9 +25,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Separates relevant arguments from unknown arguments."""
     parser = argparse.ArgumentParser()
 
-    def path_arg(type="file"):
-        def arg(path):
-            path = Path(path)
+    def path_arg(type: str = "file") -> Callable[[str], Path]:
+        def arg(path_str: str) -> Path:
+            path = Path(path_str)
             assert (
                 type == "file"
                 and path.is_file()
@@ -105,7 +106,7 @@ def run_lacewing_test(
     *test_args: str,
 ) -> int:
     # Run the test.
-    command = [
+    command: list[str | Path] = [
         test_binary.resolve(),
         "-c",
         mobly_config,
@@ -138,8 +139,8 @@ def main() -> int:
 
     # Run the lacewing test.
     result = run_lacewing_test(
-        test_binary=args.test_binary.resolve(),
-        mobly_config=mobly_config,
+        args.test_binary.resolve(),
+        mobly_config,
         *forward_args,
     )
 

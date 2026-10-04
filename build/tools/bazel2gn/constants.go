@@ -26,6 +26,10 @@ const clearAnnotation = "# @bazel2gn:clear"
 // skipAnnotation is a comment annotation that indicates the statement should be skipped.
 const skipAnnotation = "# @bazel2gn:skip"
 
+// noGNEquivalent is the value in bazelRuleToGNTemplate for Bazel rules that
+// have no GN counterpart, so bazel2gn skips them instead of failing.
+const noGNEquivalent = "__NO_GN_EQUIVALENT__"
+
 // pathOverwriteAnnotationPrefix is a comment annotation prefix that indicates a path should be
 // overwritten in GN. In this case bazel2gn will ignore the value set in the BUILD.bazel file
 // and use the value specified in the annotation in the BUILD.gn file instead. The value specified
@@ -77,6 +81,7 @@ var bazelRuleToGNTemplate = map[string]string{
 	"rust_binary":      "rustc_binary",
 	"rust_library":     "rustc_library",
 	"rustc_binary":     "rustc_binary",
+	"rustc_dylib":      "rustc_dylib",
 	"rustc_library":    "rustc_library",
 	"rustc_proc_macro": "rustc_macro",
 	"rustc_test":       "rustc_test",
@@ -126,7 +131,17 @@ var bazelRuleToGNTemplate = map[string]string{
 	"stamp_group":         "group",
 
 	// `exports_files()` is a concept specific to Bazel, so there is no need to convert it.
-	"exports_files": "__NO_GN_EQUIVALENT__",
+	"exports_files": noGNEquivalent,
+
+	// Bazel-only Fuchsia component, package, and test rules. Any GN wrapper
+	// targets (such as `bazel_fuchsia_package()` or `bazel_test_suite()`) are
+	// maintained by hand above the bazel2gn sentinel in BUILD.gn.
+	"fx_component":          noGNEquivalent,
+	"fx_component_manifest": noGNEquivalent,
+	"fx_package":            noGNEquivalent,
+	"fx_packaged_binary":    noGNEquivalent,
+	"fx_test":               noGNEquivalent,
+	"fx_test_component":     noGNEquivalent,
 }
 
 // attrsToOmitByRules stores a mapping from known Bazel rules to attributes to
@@ -210,6 +225,12 @@ var rustCommonAttrMap = map[string]string{
 	"rustc_flags":          "rustflags",
 	"crate_root":           "source_root",
 	"rustc_env":            "rustenv",
+	// The `build_flags` attribute on `rustc_*()` targets lists `build_flags()`
+	// target labels, which use the same labels as their corresponding GN
+	// `config()` targets (converted to `configs += [...]` in GN; note that
+	// `build_flags()` definitions themselves are hand-ported rather than
+	// converted by bazel2gn).
+	"build_flags": "configs",
 }
 
 // rustBinAttrMap maps from attribute name in Bazel Rust binary rules to GN parameter names.
@@ -319,6 +340,7 @@ var attrMapsByRules = map[string]map[string]string{
 	"rust_library":     rustCommonAttrMap,
 	"rust_proc_macro":  rustCommonAttrMap,
 	"rustc_binary":     rustBinAttrMap,
+	"rustc_dylib":      rustCommonAttrMap,
 	"rustc_library":    rustCommonAttrMap,
 	"rustc_proc_macro": rustCommonAttrMap,
 	"rustc_test":       rustCommonAttrMap,
@@ -425,6 +447,10 @@ var coptToConfig = map[string]string{
 	":ring-config": ":ring-config",
 	"//build/config/fuchsia:no_cpp_standard_library": "//build/config/fuchsia:no_cpp_standard_library",
 	"//build/config:all_source":                      "//build/config:all_source",
+
+	// The following are Bazel build_flags() targets, which have GN config()
+	// equivalents with the same label.
+	"//build/config/rust:bootfs": "//build/config/rust:bootfs",
 }
 
 // attrGNAssignmentOps maps from GN attribute names to the assignment operators to use in GN.

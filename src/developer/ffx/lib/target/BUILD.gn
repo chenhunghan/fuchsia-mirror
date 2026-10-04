@@ -34,6 +34,7 @@ rustc_library("lib") {
     "//src/developer/ffx/lib/ssh:lib",
     "//src/developer/ffx/lib/target_errors:lib",
     "//src/developer/ffx/lib/timeout:lib",
+    "//src/developer/ffx/lib/uart_driver_api:lib",
     "//src/developer/ffx/lib/usb_driver_api:lib",
     "//src/lib/analytics/rust:lib",
     "//src/lib/fdomain/client",
@@ -77,6 +78,7 @@ rustc_library("lib") {
     "src/resolve.rs",
     "src/ssh_connector.rs",
     "src/target_connector.rs",
+    "src/uart_connector.rs",
     "src/usb_connector.rs",
     "src/vsock_connector.rs",
   ]

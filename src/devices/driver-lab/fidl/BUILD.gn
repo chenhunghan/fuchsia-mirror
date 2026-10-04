@@ -1,0 +1,12 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/fidl/fidl.gni")
+
+# Engineering-only wire contract for the driver-lab driver. Local to the
+# driver for now; graduates to an internal-category SDK library once the
+# contract stabilizes.
+fidl("fuchsia.driver.lab") {
+  sources = [ "driver_lab.fidl" ]
+}

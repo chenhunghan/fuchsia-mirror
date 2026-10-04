@@ -100,7 +100,7 @@ closed protocol Session {
         vmos vector<VmoId>:MAX_DATA_VMOS;
     }) -> (struct {
         successful uint8;
-        status zx.Status;
+        status zx.Result;
     });
     /// Tells the device that the client will no longer use the VMO for Tx,
     /// if the VMO is also unused for Rx, the device is free to release it
@@ -118,7 +118,7 @@ closed protocol Session {
         vmos vector<VmoId>:MAX_DATA_VMOS;
     }) -> (struct {
         successful uint8;
-        status zx.Status;
+        status zx.Result;
     });
 };
 

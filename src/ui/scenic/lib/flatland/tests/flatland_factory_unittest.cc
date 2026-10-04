@@ -33,7 +33,7 @@ class FlatlandFactoryTest : public LoggingEventLoop, public ::testing::Test {
     ::testing::Test::SetUp();
 
     mock_flatland_presenter_ = std::make_shared<::testing::StrictMock<MockFlatlandPresenter>>();
-    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _)).Times(::testing::AtLeast(0));
+    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _, _)).Times(::testing::AtLeast(0));
 
     const display::WireDisplayId kDisplayId = {.value = 1};
     static constexpr uint32_t kMaxDisplayLayersCount = 2;

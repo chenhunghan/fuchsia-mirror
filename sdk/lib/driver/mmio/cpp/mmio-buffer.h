@@ -144,14 +144,19 @@ class MmioView;
 
 // MmioBuffer is wrapper around mmio_block_t.
 class MmioBuffer {
+  friend MmioBuffer SetMmioBufferOps(MmioBuffer&& buffer, const MmioBufferOps* ops,
+                                     const void* ctx);
+
  public:
   // DISALLOW_COPY_AND_ASSIGN_ALLOW_MOVE
   MmioBuffer(const MmioBuffer&) = delete;
   MmioBuffer& operator=(const MmioBuffer&) = delete;
 
-  MmioBuffer(mmio_buffer_t mmio, const MmioBufferOps* ops = &internal::kDefaultOps,
+  static const MmioBufferOps* GetDefaultOps() { return &internal::kDefaultOps; }
+
+  MmioBuffer(mmio_buffer_t mmio, const MmioBufferOps* ops = GetDefaultOps(),
              const void* ctx = nullptr)
-      : mmio_(mmio), ops_(ops), ctx_(ctx) {
+      : mmio_(mmio), ops_(ops ? ops : GetDefaultOps()), ctx_(ctx) {
     ZX_ASSERT(mmio_.vaddr != nullptr);
   }
 
@@ -160,7 +165,10 @@ class MmioBuffer {
   MmioBuffer(MmioBuffer&& other) { transfer(std::move(other)); }
 
   MmioBuffer& operator=(MmioBuffer&& other) {
-    transfer(std::move(other));
+    if (this != &other) {
+      reset();
+      transfer(std::move(other));
+    }
     return *this;
   }
 
@@ -367,6 +375,18 @@ class MmioBuffer {
     memset(&other.mmio_, 0, sizeof(other.mmio_));
   }
 };
+
+// Returns the MmioBuffer with its mapping retained but using the provided MmioBufferOps and
+// context. Use this to mock out or observe MmioBuffer IO operations. A null |ops| selects the
+// default ops. Meant for owning buffers; passing an MmioView slices it into a non-owning
+// MmioBuffer.
+inline MmioBuffer SetMmioBufferOps(MmioBuffer&& buffer,
+                                   const MmioBufferOps* ops = MmioBuffer::GetDefaultOps(),
+                                   const void* ctx = nullptr) {
+  buffer.ops_ = ops ? ops : MmioBuffer::GetDefaultOps();
+  buffer.ctx_ = ctx;
+  return std::move(buffer);
+}
 
 }  // namespace fdf
 

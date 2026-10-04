@@ -607,6 +607,22 @@ async fn on_terminate_exit_triggers_reboot() {
     );
 
     assert!(test.model.top_instance().has_reboot_task());
+
+    // While the reboot is in progress, restarts are disabled on the resolved component so
+    // that capability accesses during shutdown cannot restart it.
+    assert_matches!(
+        component.ensure_started(&StartReason::Debug).await.map_err(|e| e.kind().clone()),
+        Err(ActionErrorKind::StartError { err: StartActionError::InstanceShutDown { .. } })
+    );
+    {
+        let state = component.lock_state().await;
+        assert!(
+            matches!(&*state, InstanceState::Resolved(resolved) if resolved.restarts_disabled),
+            "Expected critical component to be in InstanceState::Resolved \
+            with restarts_disabled, got: {:?}",
+            *state
+        );
+    }
 }
 
 #[fuchsia::test]

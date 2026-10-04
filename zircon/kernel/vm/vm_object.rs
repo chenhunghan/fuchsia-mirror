@@ -548,10 +548,13 @@ impl VmObject {
 
     /// Returns the number of physical bytes currently attributed to this VMO.
     pub fn get_attributed_memory(&self) -> AttributionCounts {
-        let mut counts = core::mem::MaybeUninit::uninit();
+        let mut counts = core::mem::MaybeUninit::<AttributionCounts>::uninit();
         // SAFETY: `self.as_raw()` points to a live `VmObject`, and `counts` is valid for writing.
         unsafe {
-            bindings::cpp_vm_object_get_attributed_memory(self.as_raw(), counts.as_mut_ptr());
+            bindings::cpp_vm_object_get_attributed_memory(
+                self.as_raw(),
+                counts.as_mut_ptr().cast(),
+            );
         }
         // SAFETY: `cpp_vm_object_get_attributed_memory` certainly wrote out the attribution counts.
         unsafe { counts.assume_init() }
@@ -559,12 +562,12 @@ impl VmObject {
 
     /// Returns the memory attributed to the reference owner.
     pub fn get_attributed_memory_in_reference_owner(&self) -> AttributionCounts {
-        let mut counts = core::mem::MaybeUninit::uninit();
+        let mut counts = core::mem::MaybeUninit::<AttributionCounts>::uninit();
         // SAFETY: `self.as_raw()` points to a live `VmObject`, and `counts` is valid for writing.
         unsafe {
             bindings::cpp_vm_object_get_attributed_memory_in_reference_owner(
                 self.as_raw(),
-                counts.as_mut_ptr(),
+                counts.as_mut_ptr().cast(),
             );
         }
         // SAFETY: `cpp_vm_object_get_attributed_memory_in_reference_owner` certainly wrote out the
@@ -575,14 +578,14 @@ impl VmObject {
     /// Returns the number of physical bytes currently attributed to a range of this VMO.
     /// The range is `[offset, offset + len)`.
     pub fn get_attributed_memory_in_range(&self, offset: u64, len: u64) -> AttributionCounts {
-        let mut counts = core::mem::MaybeUninit::uninit();
+        let mut counts = core::mem::MaybeUninit::<AttributionCounts>::uninit();
         // SAFETY: `self.as_raw()` points to a live `VmObject`, and `counts` is valid for writing.
         unsafe {
             bindings::cpp_vm_object_get_attributed_memory_in_range(
                 self.as_raw(),
                 offset,
                 len,
-                counts.as_mut_ptr(),
+                counts.as_mut_ptr().cast(),
             );
         }
         // SAFETY: `cpp_vm_object_get_attributed_memory_in_range` certainly wrote out the

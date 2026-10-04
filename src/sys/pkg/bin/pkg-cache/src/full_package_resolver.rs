@@ -5,6 +5,7 @@
 use crate::upgradable_packages::UpgradablePackages;
 use anyhow::{Context as _, anyhow};
 use fidl::endpoints::ServerEnd;
+use fidl_connector::Connect as _;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_ext as fpkg_ext;
@@ -34,7 +35,7 @@ const INSPECT_RECENT_RESOLVE_COUNT: usize = 50;
 pub(crate) struct Resolver {
     base_resolver: Arc<crate::base_package_resolver::Resolver>,
     upgradable_packages: Option<Arc<UpgradablePackages>>,
-    tuf_authority: fpkg::AuthorityProxy,
+    tuf_authority: fidl_connector::ServiceReconnector<fpkg::AuthorityMarker>,
     cache_index: Arc<crate::CacheIndex>,
     package_fetcher: crate::package_fetcher::PackageFetcher,
     authenticator: context_authenticator::ContextAuthenticator,
@@ -53,7 +54,7 @@ impl Resolver {
     pub(crate) fn new(
         base_resolver: Arc<crate::base_package_resolver::Resolver>,
         upgradable_packages: Option<Arc<UpgradablePackages>>,
-        tuf_authority: fpkg::AuthorityProxy,
+        tuf_authority: fidl_connector::ServiceReconnector<fpkg::AuthorityMarker>,
         cache_index: Arc<crate::CacheIndex>,
         package_fetcher: crate::package_fetcher::PackageFetcher,
         authenticator: context_authenticator::ContextAuthenticator,
@@ -311,6 +312,8 @@ impl Resolver {
 
         let (tuf_err, deprecated_fallback) = match self
             .tuf_authority
+            .connect()
+            .map_err(Error::ConnectToAuthority)?
             .lookup(&fpkg::PackageUrl { url: url.as_unpinned().to_string() })
             .await
             .map_err(Error::AuthorityFidl)?
@@ -533,6 +536,9 @@ pub(crate) enum Error {
     #[error("upgradable packages must not be pinned")]
     PinnedUpgradablePackage,
 
+    #[error("connecting to authority")]
+    ConnectToAuthority(#[source] anyhow::Error),
+
     #[error("authority call failed")]
     AuthorityFidl(#[source] fidl::Error),
 
@@ -592,6 +598,7 @@ impl From<&Error> for fidl_fuchsia_component_resolution::ResolverError {
             ContextWithAbsoluteUrl => Err::InvalidArgs,
             BaseResolver(e) => e.into(),
             PinnedUpgradablePackage => Err::InvalidArgs,
+            ConnectToAuthority(_) => Err::Io,
             AuthorityFidl(_) => Err::Io,
             Authority(e) => authority_to_component_resolve_err(e),
             InvalidBlobDirUri(_) => Err::Internal,
@@ -631,6 +638,7 @@ impl From<&Error> for fpkg::ResolveError {
             ContextWithAbsoluteUrl => Err::InvalidContext,
             BaseResolver(e) => e.into(),
             PinnedUpgradablePackage => Err::InvalidUrl,
+            ConnectToAuthority(_) => Err::Io,
             AuthorityFidl(_) => Err::Io,
             Authority(e) => fpkg_ext::errors::authority_to_resolve_err(e),
             InvalidBlobDirUri(_) => Err::Internal,

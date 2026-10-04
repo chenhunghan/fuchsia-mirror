@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 _SCRIPT_DIR = os.path.dirname(__file__)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Tool for extracting the latest commit date and hash from integration.git"
     )
@@ -87,15 +87,17 @@ def main():
     write_file_if_changed(args.date_file, latest_commit_date.isoformat())
     write_file_if_changed(args.commit_hash_file, latest_commit_hash)
 
+    return 0
 
-def write_file_if_changed(path: str, contents: str):
+
+def write_file_if_changed(path: str, contents: str) -> None:
     if path:
         if contents_changed(path, contents):
             with open(path, "w") as file:
                 file.write(contents)
 
 
-def contents_changed(path: str, contents: str):
+def contents_changed(path: str, contents: str) -> bool:
     try:
         with open(path, "r") as file:
             existing_contents = file.read()

@@ -14,6 +14,8 @@
 #include <usb/usb-request.h>
 #include <usb/usb.h>
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace camera::usb_video {
 
 // Only keep the first 11 bits of the USB SOF (Start of Frame) values.
@@ -175,7 +177,7 @@ void VideoFrame::ParseHeaderTimestamps(usb_request_t* req) {
 
   // PTS should stay the same for payloads of the same frame,
   // but it's probably not a critical error if they're different.
-  if (header.bmHeaderInfo & USB_VIDEO_VS_PAYLOAD_HEADER_PTS) {
+  if (header.bmHeaderInfo & fdescriptor::kVideoVsPayloadHeaderPts) {
     uint32_t new_pts = header.dwPresentationTime;
 
     // Use the first seen PTS value.
@@ -187,7 +189,7 @@ void VideoFrame::ParseHeaderTimestamps(usb_request_t* req) {
     }
   }
 
-  if (header.bmHeaderInfo & USB_VIDEO_VS_PAYLOAD_HEADER_SCR) {
+  if (header.bmHeaderInfo & fdescriptor::kVideoVsPayloadHeaderScr) {
     uint32_t new_stc = header.scrSourceTimeClock;
     uint16_t new_sof = header.scrSourceClockSOFCounter;
 

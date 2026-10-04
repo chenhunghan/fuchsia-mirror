@@ -8,23 +8,13 @@
 
 #include "tools/fidl/fidlc/src/diagnostics.h"
 #include "tools/fidl/fidlc/src/flat_ast.h"
+#include "tools/fidl/fidlc/src/properties.h"
 #include "tools/fidl/fidlc/src/type_resolver.h"
 
 namespace fidlc {
 
 // ZX_HANDLE_SAME_RIGHTS
 const HandleRightsValue HandleType::kSameRights = HandleRightsValue(0x80000000);
-
-bool RejectOptionalConstraints::OnUnexpectedConstraint(
-    TypeResolver* resolver, Reporter* reporter, std::optional<SourceSpan> params_span,
-    const Name& layout_name, Resource* resource, size_t num_constraints,
-    const std::vector<std::unique_ptr<Constant>>& params, size_t param_index) const {
-  if (params.size() == 1 && resolver->ResolveAsOptional(params[0].get())) {
-    return reporter->Fail(ErrCannotBeOptional, params[0]->span, layout_name);
-  }
-  return ConstraintsBase::OnUnexpectedConstraint(resolver, reporter, params_span, layout_name,
-                                                 resource, num_constraints, params, param_index);
-}
 
 bool ArrayConstraints::OnUnexpectedConstraint(TypeResolver* resolver, Reporter* reporter,
                                               std::optional<SourceSpan> params_span,
@@ -285,13 +275,68 @@ uint32_t PrimitiveType::SubtypeSize(PrimitiveSubtype subtype) {
   }
 }
 
+bool PrimitiveConstraints::OnUnexpectedConstraint(
+    TypeResolver* resolver, Reporter* reporter, std::optional<SourceSpan> params_span,
+    const Name& layout_name, Resource* resource, size_t num_constraints,
+    const std::vector<std::unique_ptr<Constant>>& params, size_t param_index) const {
+  if (params.size() == 1 && resolver->ResolveAsOptional(params[0].get())) {
+    return reporter->Fail(ErrCannotBeOptional, params[0]->span, layout_name);
+  }
+  return ConstraintsBase::OnUnexpectedConstraint(resolver, reporter, params_span, layout_name,
+                                                 resource, num_constraints, params, param_index);
+}
+
 bool PrimitiveType::ApplyConstraints(TypeResolver* resolver, Reporter* reporter,
                                      const TypeConstraints& constraints, const Reference& layout,
                                      std::unique_ptr<Type>* out_type,
                                      LayoutInvocation* out_params) const {
+  const auto& layout_name = layout.resolved().name();
+
+  Constraints c;
   if (!ResolveAndMergeConstraints(resolver, reporter, constraints.span, layout.resolved().name(),
-                                  nullptr, constraints.items, nullptr)) {
+                                  nullptr, constraints.items, &c, out_params)) {
     return false;
+  }
+
+  auto is_nonzero = c.HasConstraint<ConstraintKind::kZeroability>();
+
+  switch (subtype) {
+    // These subtypes have no allowed constraints
+    //
+    // Bools wouldn't make sense to restrict to nonzero (as this would leave
+    // only `true` as a valid value). But some of these could potentially
+    // support the non-zero constraint (Zircon integers, float32, float64). They
+    // do not support this constraint because:
+    //
+    // - Zircon types are experimental and exist because they have a very
+    //   specific ABI. We don't want to support constraints for these types
+    //   because non-zero versions of these types don't exist in the C calling
+    //   convention.
+    // - IEEE floating point types are complicated, and complicated for good
+    //   reasons. Besides having two representations for zero (positive zero and
+    //   negative zero), it's less useful to say "this is not zero" when the
+    //   true value can be almost arbitrarily small (1.4e-45 for float32, 5e-324
+    //   for float64).
+    case PrimitiveSubtype::kBool:
+    case PrimitiveSubtype::kZxUchar:
+    case PrimitiveSubtype::kZxUsize64:
+    case PrimitiveSubtype::kZxUintptr64:
+    case PrimitiveSubtype::kFloat32:
+    case PrimitiveSubtype::kFloat64:
+      if (is_nonzero) {
+        return reporter->Fail(ErrCannotBeNonZero, constraints.span.value(), layout_name);
+      }
+      break;
+    // These subtypes may be non-zero
+    case PrimitiveSubtype::kInt8:
+    case PrimitiveSubtype::kInt16:
+    case PrimitiveSubtype::kInt32:
+    case PrimitiveSubtype::kInt64:
+    case PrimitiveSubtype::kUint8:
+    case PrimitiveSubtype::kUint16:
+    case PrimitiveSubtype::kUint32:
+    case PrimitiveSubtype::kUint64:
+      break;
   }
 
   if ((subtype == PrimitiveSubtype::kZxUsize64 || subtype == PrimitiveSubtype::kZxUintptr64 ||
@@ -300,7 +345,7 @@ bool PrimitiveType::ApplyConstraints(TypeResolver* resolver, Reporter* reporter,
     return reporter->Fail(ErrExperimentalZxCTypesDisallowed, layout.span(),
                           layout.resolved().name());
   }
-  *out_type = std::make_unique<PrimitiveType>(name, subtype);
+  *out_type = std::make_unique<PrimitiveType>(name, subtype, c);
   return true;
 }
 

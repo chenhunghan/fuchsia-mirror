@@ -1382,7 +1382,7 @@ For more details on building capability routes, see [Connect components][doc-con
 [glossary.component-url]: /docs/glossary/README.md#component-url
 [glossary.fuchsia-pkg-url]: /docs/glossary/README.md#fuchsia-pkg-url
 [glossary.gn]: /docs/glossary/README.md#gn
-[glossary.package]: /docs/glossary/README.md#fuchsia-package
+[glossary.package]: /docs/glossary/README.md#package
 [gn-get-target-outputs]: https://gn.googlesource.com/gn/+/HEAD/docs/reference.md#func_get_target_outputs
 [provide-data]: /docs/development/components/data.md
 [rustc-binary]: /build/rust/rustc_binary.gni

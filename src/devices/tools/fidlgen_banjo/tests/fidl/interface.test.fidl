@@ -39,14 +39,14 @@ closed protocol CookieMaker {
         token uint64;
         time zx.Time;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Synchronously deliver a cookie.
     /// Must be called only after Bake finishes.
     strict Deliver(struct {
         token uint64;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 };
 

@@ -3,24 +3,8 @@
 // found in the LICENSE file.
 
 use anyhow::Result;
-use bind::compiler::symbol_table::get_deprecated_key_identifier;
 use flex_fuchsia_driver_framework as fdf;
 use std::io::Write;
-
-pub fn node_property_key_to_string(key: &fdf::NodePropertyKey) -> String {
-    match key {
-        fdf::NodePropertyKey::IntValue(int_key) => {
-            let deprecated_key = get_deprecated_key_identifier(*int_key);
-            match deprecated_key {
-                Some(value) => value,
-                None => format!("{:#08x}", int_key),
-            }
-        }
-        fdf::NodePropertyKey::StringValue(str_key) => {
-            format!("\"{}\"", str_key)
-        }
-    }
-}
 
 pub fn node_property_value_to_string(value: &fdf::NodePropertyValue) -> String {
     match value {
@@ -68,24 +52,6 @@ pub fn colorized(string: &str, color: ansi_term::Colour, with_style: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[fuchsia::test]
-    fn test_node_property_key_to_string() {
-        assert_eq!(
-            "fuchsia.BIND_PROTOCOL".to_string(),
-            node_property_key_to_string(&fdf::NodePropertyKey::IntValue(0x0001))
-        );
-
-        assert_eq!(
-            "0x000bbb".to_string(),
-            node_property_key_to_string(&fdf::NodePropertyKey::IntValue(0x0BBB))
-        );
-
-        assert_eq!(
-            "0xffffffff".to_string(),
-            node_property_key_to_string(&fdf::NodePropertyKey::IntValue(0xFFFFFFFF))
-        );
-    }
 
     #[fuchsia::test]
     fn test_node_property_value_to_string() {

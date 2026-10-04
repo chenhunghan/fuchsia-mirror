@@ -17,7 +17,7 @@ _FUCHSIA_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
 _SCRIPT_NAME = os.path.relpath(os.path.abspath(__file__), _FUCHSIA_DIR)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--fuchsia-dir", help="Specify alternate Fuchsia root path."

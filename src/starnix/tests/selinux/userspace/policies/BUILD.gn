@@ -151,6 +151,10 @@ userspace_policy("socket_policy") {
   sources = [ "socket_policy.conf" ]
 }
 
+userspace_policy("sysfs_policy") {
+  sources = [ "sysfs_policy.conf" ]
+}
+
 userspace_policy("syslog_policy") {
   sources = [ "syslog_policy.conf" ]
 }
@@ -211,6 +215,7 @@ group("policies") {
     ":sched_policy",
     ":selinuxfs_policy",
     ":socket_policy",
+    ":sysfs_policy",
     ":syslog_policy",
     ":task_policy",
     ":timerslack_policy",

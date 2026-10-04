@@ -10,6 +10,8 @@ from pydantic import Field, model_serializer
 from .dap_types import (
     Breakpoint,
     DapBaseModel,
+    DataBreakpoint,
+    DataBreakpointAccessType,
     Scope,
     Source,
     SourceBreakpoint,
@@ -425,3 +427,87 @@ class SetBreakpointsResponse(Response):
     """
 
     body: SetBreakpointsResponseBody
+
+
+class DataBreakpointInfoArguments(DapBaseModel):
+    """Arguments for `dataBreakpointInfo` request.
+
+    Attributes:
+        name: The name of the variable's child to obtain data breakpoint
+            information for. If `variables_reference` isn't specified, this can
+            be an expression, or an address if `as_address` is also True.
+        variables_reference: Reference to the variable container if the data
+            breakpoint is requested for a child of the container.
+        frame_id: When `name` is an expression, evaluate it in the scope of
+            this stack frame.
+        bytes_count: If specified, return information for the range of memory
+            extending `bytes_count` number of bytes from the address or
+            variable. Serialized as `bytes` on the wire.
+        as_address: If True, `name` is a memory address.
+        mode: The mode of the desired breakpoint.
+    """
+
+    name: str
+    variables_reference: int | None = None
+    frame_id: int | None = None
+    bytes_count: int | None = Field(default=None, alias="bytes")
+    as_address: bool | None = None
+    mode: str | None = None
+
+
+class DataBreakpointInfoResponseBody(DapBaseModel):
+    """Body of response to `dataBreakpointInfo` request.
+
+    Attributes:
+        data_id: An identifier for the data on which a data breakpoint can be
+            registered with the `setDataBreakpoints` request, or None if no
+            data breakpoint is available.
+        description: UI string that describes on what data the breakpoint is
+            set on or why a data breakpoint is not available.
+        access_types: Attribute lists the available access types for a potential
+            data breakpoint.
+        can_persist: Attribute indicates that a potential data breakpoint could
+            be persisted across sessions.
+    """
+
+    data_id: str | None
+    description: str
+    access_types: list[DataBreakpointAccessType] | None = None
+    can_persist: bool | None = None
+
+
+class DataBreakpointInfoResponse(Response):
+    """Response to `dataBreakpointInfo` request.
+
+    Attributes:
+        body: The dataBreakpointInfo response body.
+    """
+
+    body: DataBreakpointInfoResponseBody
+
+
+class SetDataBreakpointsArguments(DapBaseModel):
+    """Arguments for `setDataBreakpoints` request.
+
+    Attributes:
+        breakpoints: The contents of this array replaces all existing data
+            breakpoints. An empty array clears all data breakpoints.
+    """
+
+    breakpoints: list[DataBreakpoint]
+
+
+class SetDataBreakpointsResponseBody(DapBaseModel):
+    """Body of response to `setDataBreakpoints` request."""
+
+    breakpoints: list[Breakpoint]
+
+
+class SetDataBreakpointsResponse(Response):
+    """Response to `setDataBreakpoints` request.
+
+    Attributes:
+        body: The setDataBreakpoints response body.
+    """
+
+    body: SetDataBreakpointsResponseBody

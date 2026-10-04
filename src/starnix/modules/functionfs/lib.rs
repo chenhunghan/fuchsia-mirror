@@ -7,6 +7,7 @@
 use fidl::endpoints::SynchronousProxy;
 use fidl_fuchsia_hardware_adb as fadb;
 use fuchsia_async as fasync;
+use fuchsia_inspect as inspect;
 use futures_util::StreamExt;
 use starnix_core::power::{create_proxy_for_wake_events_counter_zero, mark_proxy_message_handled};
 use starnix_core::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, WaitQueue, Waiter};
@@ -30,9 +31,11 @@ use starnix_uapi::{
     usb_functionfs_event_type_FUNCTIONFS_BIND, usb_functionfs_event_type_FUNCTIONFS_DISABLE,
     usb_functionfs_event_type_FUNCTIONFS_ENABLE, usb_functionfs_event_type_FUNCTIONFS_UNBIND,
 };
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use zerocopy::IntoBytes;
 
 // The node identifiers of different nodes in FunctionFS.
@@ -83,6 +86,112 @@ struct WriteCommand {
     pending: Arc<PendingResult<usize>>,
 }
 
+const MAX_INSPECT_EVENTS: usize = 32;
+
+#[derive(Clone)]
+struct EventRecord {
+    id: usize,
+    timestamp: zx::BootInstant,
+    event: Cow<'static, str>,
+}
+
+#[derive(Default)]
+struct FunctionFsStats {
+    ep1_total_bytes_read: AtomicU64,
+    ep1_read_count: AtomicU64,
+    ep1_read_errors: AtomicU64,
+    ep1_buffer_overflow_errors: AtomicU64,
+
+    ep2_total_bytes_written: AtomicU64,
+    ep2_write_count: AtomicU64,
+    ep2_write_errors: AtomicU64,
+}
+
+fn create_lazy_inspect_node(
+    parent: &inspect::Node,
+    state: &Arc<LockDepMutex<FunctionFsState, FunctionFsStateLock>>,
+    stats: &Arc<FunctionFsStats>,
+) -> inspect::LazyNode {
+    let state_weak = Arc::downgrade(state);
+    let stats_weak = Arc::downgrade(stats);
+    parent.create_lazy_child("usb-functionfs", move || {
+        let state_weak = state_weak.clone();
+        let stats_weak = stats_weak.clone();
+        Box::pin(async move {
+            let inspector = inspect::Inspector::default();
+            let root = inspector.root();
+
+            if let Some(state_arc) = state_weak.upgrade() {
+                let (
+                    is_online,
+                    num_control_file_objects,
+                    event_queue_depth,
+                    has_input_output_endpoints,
+                    control_resets,
+                    events,
+                ) = {
+                    let state = state_arc.lock();
+                    (
+                        state.is_online,
+                        state.num_control_file_objects as u64,
+                        state.event_queue.len() as u64,
+                        state.has_input_output_endpoints,
+                        state.control_resets,
+                        state.event_history.iter().cloned().collect::<Vec<_>>(),
+                    )
+                };
+
+                root.record_bool("is_online", is_online);
+                root.record_uint("num_control_file_objects", num_control_file_objects);
+                root.record_uint("event_queue_depth", event_queue_depth);
+                root.record_bool("has_input_output_endpoints", has_input_output_endpoints);
+                root.record_uint("control_resets", control_resets);
+
+                root.record_child("event_history", |history_node| {
+                    for record in events {
+                        history_node.record_child(record.id.to_string(), |entry_node| {
+                            entry_node.record_int("@time", record.timestamp.into_nanos());
+                            entry_node.record_string("event", record.event.as_ref());
+                        });
+                    }
+                });
+            }
+
+            if let Some(stats) = stats_weak.upgrade() {
+                root.record_child("ep1_bulk_out", |ep1_node| {
+                    ep1_node.record_uint(
+                        "total_bytes_read",
+                        stats.ep1_total_bytes_read.load(Ordering::Relaxed),
+                    );
+                    ep1_node
+                        .record_uint("read_count", stats.ep1_read_count.load(Ordering::Relaxed));
+                    ep1_node
+                        .record_uint("read_errors", stats.ep1_read_errors.load(Ordering::Relaxed));
+                    ep1_node.record_uint(
+                        "buffer_overflow_errors",
+                        stats.ep1_buffer_overflow_errors.load(Ordering::Relaxed),
+                    );
+                });
+
+                root.record_child("ep2_bulk_in", |ep2_node| {
+                    ep2_node.record_uint(
+                        "total_bytes_written",
+                        stats.ep2_total_bytes_written.load(Ordering::Relaxed),
+                    );
+                    ep2_node
+                        .record_uint("write_count", stats.ep2_write_count.load(Ordering::Relaxed));
+                    ep2_node.record_uint(
+                        "write_errors",
+                        stats.ep2_write_errors.load(Ordering::Relaxed),
+                    );
+                });
+            }
+
+            Ok(inspector)
+        })
+    })
+}
+
 /// Handle all of the ADB messages in an async context.
 /// We receive commands from the main thread and then proxy them into the ADB channel.
 /// We want to hold the wakelock until we have at least one outstanding read, because we
@@ -97,6 +206,7 @@ async fn handle_adb(
     read_commands: async_channel::Receiver<ReadCommand>,
     write_commands: async_channel::Receiver<WriteCommand>,
     state: Arc<LockDepMutex<FunctionFsState, FunctionFsStateLock>>,
+    stats: Arc<FunctionFsStats>,
 ) {
     /// Handle all of the events coming from the ADB device.
     ///
@@ -123,6 +233,13 @@ async fn handle_adb(
             state_locked
                 .event_queue
                 .push_back(usb_functionfs_event { type_: event as u8, ..Default::default() });
+            #[allow(non_upper_case_globals)]
+            let name = match event {
+                usb_functionfs_event_type_FUNCTIONFS_BIND => "BIND",
+                usb_functionfs_event_type_FUNCTIONFS_UNBIND => "UNBIND",
+                _ => "UNKNOWN",
+            };
+            state_locked.record_event(name);
             state_locked.waiters.notify_fd_events(FdEvents::POLLIN);
         };
 
@@ -142,6 +259,7 @@ async fn handle_adb(
                     } as u8,
                     ..Default::default()
                 });
+                state_locked.record_event(if is_online { "ENABLE" } else { "DISABLE" });
                 state_locked.waiters.notify_fd_events(FdEvents::POLLIN);
                 state_locked.waiters.notify_all();
             }
@@ -181,6 +299,7 @@ async fn handle_adb(
         proxy: &fadb::UsbAdbImpl_Proxy,
         timeouts_sender: async_channel::Sender<zx::MonotonicInstant>,
         commands: async_channel::Receiver<ReadCommand>,
+        stats: &FunctionFsStats,
     ) {
         let timeouts_sender = &timeouts_sender;
         commands
@@ -204,6 +323,7 @@ async fn handle_adb(
                             log_info!("Receive failed due to connection shutdown: {err}");
                         } else {
                             log_warn!("Failed to call UsbAdbImpl.Receive: {err}");
+                            stats.ep1_read_errors.fetch_add(1, Ordering::Relaxed);
                         }
                         error!(EINVAL)
                     }
@@ -216,12 +336,19 @@ async fn handle_adb(
                             log_info!("Receive failed due to connection shutdown: {status}");
                         } else {
                             log_warn!("Failed to receive data from adb driver: {status}");
+                            stats.ep1_read_errors.fetch_add(1, Ordering::Relaxed);
                         }
                         // TODO(b/536021189): Fix POSIX error mapping. We should return ESHUTDOWN
                         // on endpoint disable.
                         error!(EINVAL)
                     }
-                    Ok(Ok(payload)) => Ok(payload),
+                    Ok(Ok(payload)) => {
+                        stats
+                            .ep1_total_bytes_read
+                            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+                        stats.ep1_read_count.fetch_add(1, Ordering::Relaxed);
+                        Ok(payload)
+                    }
                 };
 
                 pending.set_result(response);
@@ -234,6 +361,7 @@ async fn handle_adb(
         proxy: &fadb::UsbAdbImpl_Proxy,
         timeouts_sender: async_channel::Sender<zx::MonotonicInstant>,
         commands: async_channel::Receiver<WriteCommand>,
+        stats: &FunctionFsStats,
     ) {
         let timeouts_sender = &timeouts_sender;
         commands
@@ -244,6 +372,7 @@ async fn handle_adb(
                             log_info!("QueueTx failed due to connection shutdown: {err}");
                         } else {
                             log_warn!("Failed to call UsbAdbImpl.QueueTx: {err}");
+                            stats.ep2_write_errors.fetch_add(1, Ordering::Relaxed);
                         }
                         error!(EINVAL)
                     }
@@ -256,10 +385,17 @@ async fn handle_adb(
                             log_info!("QueueTx failed due to connection shutdown: {status}");
                         } else {
                             log_warn!("Failed to queue data to adb driver: {status}");
+                            stats.ep2_write_errors.fetch_add(1, Ordering::Relaxed);
                         }
                         error!(EINVAL)
                     }
-                    Ok(Ok(_)) => Ok(data.len()),
+                    Ok(Ok(_)) => {
+                        stats
+                            .ep2_total_bytes_written
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
+                        stats.ep2_write_count.fetch_add(1, Ordering::Relaxed);
+                        Ok(data.len())
+                    }
                 };
 
                 // Don't decrement the message counter immediately. We use the
@@ -278,8 +414,8 @@ async fn handle_adb(
     let (timeouts_sender, timeouts_receiver) = async_channel::unbounded();
     let event_future = handle_events(proxy.take_event_stream(), &message_counter, state);
     let write_commands_future =
-        handle_write_commands(&proxy, timeouts_sender.clone(), write_commands);
-    let read_commands_future = handle_read_commands(&proxy, timeouts_sender, read_commands);
+        handle_write_commands(&proxy, timeouts_sender.clone(), write_commands, &stats);
+    let read_commands_future = handle_read_commands(&proxy, timeouts_sender, read_commands, &stats);
     let timeout_future = handle_idle_timeouts(timeouts_receiver, &message_counter);
     futures::join!(event_future, write_commands_future, read_commands_future, timeout_future);
 }
@@ -320,7 +456,11 @@ impl FunctionFs {
 
         let creds = FsCred { uid, gid };
         let info = FsNodeInfo::new(mode!(IFDIR, 0o777), creds);
-        fs.create_root_with_info(ROOT_NODE_ID, FunctionFsRootDir::default(), info);
+        fs.create_root_with_info(
+            ROOT_NODE_ID,
+            FunctionFsRootDir::new(&current_task.kernel().inspect_node),
+            info,
+        );
         Ok(fs)
     }
 }
@@ -349,6 +489,13 @@ struct FunctionFsState {
     // Whether the FunctionFS is currently online (host connected).
     is_online: bool,
 
+    // Number of times all control endpoints have closed and reset the filesystem.
+    control_resets: u64,
+
+    // Bounded ring buffer of lifecycle events exposed via lazy Inspect.
+    event_history: VecDeque<EventRecord>,
+    next_event_id: usize,
+
     adb_read_channel: Option<async_channel::Sender<ReadCommand>>,
     adb_write_channel: Option<async_channel::Sender<WriteCommand>>,
 
@@ -360,6 +507,21 @@ struct FunctionFsState {
     event_queue: VecDeque<usb_functionfs_event>,
 
     waiters: WaitQueue,
+}
+
+impl FunctionFsState {
+    fn record_event(&mut self, event: impl Into<Cow<'static, str>>) {
+        if self.event_history.len() == MAX_INSPECT_EVENTS {
+            self.event_history.pop_front();
+        }
+        let id = self.next_event_id;
+        self.next_event_id += 1;
+        self.event_history.push_back(EventRecord {
+            id,
+            timestamp: zx::BootInstant::get(),
+            event: event.into(),
+        });
+    }
 }
 
 pub enum AdbProxyMode {
@@ -413,9 +575,21 @@ fn connect_to_device(
 #[derive(Default)]
 struct FunctionFsRootDir {
     state: Arc<LockDepMutex<FunctionFsState, FunctionFsStateLock>>,
+    stats: Arc<FunctionFsStats>,
+    _inspect_node: inspect::LazyNode,
 }
 
 impl FunctionFsRootDir {
+    fn new(parent_inspect_node: &inspect::Node) -> Self {
+        let stats = Arc::new(FunctionFsStats::default());
+        let state = Arc::new(LockDepMutex::new(FunctionFsState {
+            event_history: VecDeque::with_capacity(MAX_INSPECT_EVENTS),
+            ..Default::default()
+        }));
+        let inspect_node = create_lazy_inspect_node(parent_inspect_node, &state, &stats);
+        Self { state, stats, _inspect_node: inspect_node }
+    }
+
     fn create_endpoints(&self, kernel: &Kernel) -> Result<(), Errno> {
         let mut state = self.state.lock();
 
@@ -437,7 +611,7 @@ impl FunctionFsRootDir {
         state.event_queue.clear();
 
         let state_copy = Arc::clone(&self.state);
-        // Spawn our future that will handle all of the ADB messages.
+        let stats_copy = Arc::clone(&self.stats);
         // Spawn our future that will handle all of the ADB messages.
         kernel.kthreads.spawn_future(
             move || async move {
@@ -450,6 +624,7 @@ impl FunctionFsRootDir {
                     read_command_receiver,
                     write_command_receiver,
                     state_copy,
+                    stats_copy,
                 )
                 .await
             },
@@ -457,6 +632,7 @@ impl FunctionFsRootDir {
         );
 
         state.has_input_output_endpoints = true;
+        state.record_event("ENDPOINTS_CREATED");
         Ok(())
     }
 
@@ -474,23 +650,37 @@ impl FunctionFsRootDir {
     fn on_control_opened(&self) {
         let mut state = self.state.lock();
         state.num_control_file_objects += 1;
+        state.record_event("CONTROL_OPENED");
     }
 
     fn on_control_closed(&self) {
         let mut state = self.state.lock();
         state.num_control_file_objects -= 1;
+        state.record_event("CONTROL_CLOSED");
         if state.num_control_file_objects == 0 {
             // When all control endpoints are closed, the filesystem resets to its initial state.
             if let Some(device_proxy) = state.device_proxy.as_ref() {
-                let _ = device_proxy
-                    .stop_adb(zx::MonotonicInstant::INFINITE)
-                    .map_err(|_| errno!(EINVAL));
+                match device_proxy.stop_adb(zx::MonotonicInstant::INFINITE) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(status)) => {
+                        log_warn!(
+                            "Failed to stop adb driver on control reset: {}",
+                            zx::Status::err_from_raw(status)
+                        );
+                    }
+                    Err(err) => {
+                        log_warn!("FIDL error calling StopAdb on control reset: {err}");
+                    }
+                }
             }
 
             state.has_input_output_endpoints = false;
             state.is_online = false;
             state.adb_read_channel = None;
             state.adb_write_channel = None;
+            state.event_queue.clear();
+            state.control_resets += 1;
+            state.record_event("CONTROL_RESET");
         }
     }
 
@@ -534,10 +724,23 @@ impl FunctionFsRootDir {
         let guard = pending.event.begin_wait();
 
         if let Some(channel) = self.state.lock().adb_write_channel.as_ref() {
-            channel
-                .send_blocking(WriteCommand { data, pending: pending.clone() })
-                .map_err(|_| errno!(EINVAL))?;
+            channel.send_blocking(WriteCommand { data, pending: pending.clone() }).map_err(
+                |err| {
+                    log_warn!(
+                        "FunctionFsRootDir::write (ep2 bulk IN) failed to send command for task {} (pid {}): {err}",
+                        current_task.command(),
+                        current_task.get_pid()
+                    );
+                    errno!(EINVAL)
+                },
+            )?;
         } else {
+            log_warn!(
+                "FunctionFsRootDir::write (ep2 bulk IN) called by task {} (pid {}) with {} bytes, but adb_write_channel is None (ENODEV)",
+                current_task.command(),
+                current_task.get_pid(),
+                bytes.len()
+            );
             return error!(ENODEV);
         }
 
@@ -553,10 +756,20 @@ impl FunctionFsRootDir {
         let pending = Arc::<PendingResult<Vec<u8>>>::default();
         let guard = pending.event.begin_wait();
         if let Some(channel) = self.state.lock().adb_read_channel.as_ref() {
-            channel
-                .send_blocking(ReadCommand { pending: pending.clone() })
-                .map_err(|_| errno!(EINVAL))?;
+            channel.send_blocking(ReadCommand { pending: pending.clone() }).map_err(|err| {
+                log_warn!(
+                    "FunctionFsRootDir::read (ep1 bulk OUT) failed to send command for task {} (pid {}): {err}",
+                    current_task.command(),
+                    current_task.get_pid()
+                );
+                errno!(EINVAL)
+            })?;
         } else {
+            log_warn!(
+                "FunctionFsRootDir::read (ep1 bulk OUT) called by task {} (pid {}), but adb_read_channel is None (ENODEV)",
+                current_task.command(),
+                current_task.get_pid()
+            );
             return error!(ENODEV);
         }
 
@@ -768,7 +981,14 @@ impl FileOps for FunctionFsInputEndpoint {
         _offset: usize,
         data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
-        let bytes = data.read_all()?;
+        let bytes = data.read_all().map_err(|err| {
+            log_warn!(
+                "FunctionFsInputEndpoint (ep2 bulk IN) input buffer read failed for task {} (pid {}): {err}",
+                current_task.command(),
+                current_task.get_pid()
+            );
+            err
+        })?;
         let rootdir = FunctionFsRootDir::from_file(file);
         rootdir.write(current_task, file, &bytes)
     }
@@ -808,10 +1028,25 @@ impl FileOps for FunctionFsOutputFileObject {
         if payload.len() > data.available() {
             // This means the data will only be partially written, with the rest discarded.
             // Instead of attempting this, we'll instead return error to the client.
+            log_warn!(
+                "FunctionFsOutputFileObject (ep1 bulk OUT) buffer overflow for task {} (pid {}): payload len {} > buffer avail {}",
+                current_task.command(),
+                current_task.get_pid(),
+                payload.len(),
+                data.available()
+            );
+            rootdir.stats.ep1_buffer_overflow_errors.fetch_add(1, Ordering::Relaxed);
             return error!(EINVAL);
         }
 
-        data.write(&payload)
+        data.write(&payload).map_err(|err| {
+            log_warn!(
+                "FunctionFsOutputFileObject (ep1 bulk OUT) output buffer write failed for task {} (pid {}): {err}",
+                current_task.command(),
+                current_task.get_pid()
+            );
+            err
+        })
     }
 
     fn write(
@@ -822,5 +1057,386 @@ impl FileOps for FunctionFsOutputFileObject {
         _data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
         error!(EINVAL)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diagnostics_assertions::{AnyProperty, TreeAssertion, assert_data_tree};
+    use fidl::endpoints::RequestStream;
+    use std::pin::pin;
+
+    #[fuchsia::test]
+    async fn test_inspect_initial_hierarchy() {
+        let inspector = inspect::Inspector::default();
+        let _rootdir = FunctionFsRootDir::new(inspector.root());
+
+        assert_data_tree!(inspector, root: {
+            "usb-functionfs": {
+                is_online: false,
+                num_control_file_objects: 0u64,
+                event_queue_depth: 0u64,
+                has_input_output_endpoints: false,
+                control_resets: 0u64,
+                event_history: {},
+                ep1_bulk_out: {
+                    total_bytes_read: 0u64,
+                    read_count: 0u64,
+                    read_errors: 0u64,
+                    buffer_overflow_errors: 0u64,
+                },
+                ep2_bulk_in: {
+                    total_bytes_written: 0u64,
+                    write_count: 0u64,
+                    write_errors: 0u64,
+                },
+            }
+        });
+    }
+
+    #[fuchsia::test]
+    async fn test_control_endpoint_lifecycle_and_reset() {
+        let inspector = inspect::Inspector::default();
+        let rootdir = FunctionFsRootDir::new(inspector.root());
+
+        // Open two control file objects.
+        rootdir.on_control_opened();
+        rootdir.on_control_opened();
+
+        // Simulate active endpoints, online state, and a queued event before closing.
+        {
+            let mut state_locked = rootdir.state.lock();
+            state_locked.has_input_output_endpoints = true;
+            state_locked.is_online = true;
+            state_locked.event_queue.push_back(usb_functionfs_event::default());
+        }
+
+        assert_data_tree!(inspector, root: {
+            "usb-functionfs": contains {
+                num_control_file_objects: 2u64,
+                has_input_output_endpoints: true,
+                is_online: true,
+                event_queue_depth: 1u64,
+                control_resets: 0u64,
+                event_history: {
+                    "0": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_OPENED",
+                    },
+                    "1": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_OPENED",
+                    },
+                },
+            }
+        });
+
+        // Closing the first control file object decrements the count to 1 without resetting state.
+        rootdir.on_control_closed();
+        {
+            let state_locked = rootdir.state.lock();
+            assert_eq!(state_locked.num_control_file_objects, 1);
+            assert!(state_locked.has_input_output_endpoints);
+            assert!(state_locked.is_online);
+            assert_eq!(state_locked.event_queue.len(), 1);
+        }
+
+        assert_data_tree!(inspector, root: {
+            "usb-functionfs": contains {
+                num_control_file_objects: 1u64,
+                has_input_output_endpoints: true,
+                is_online: true,
+                event_queue_depth: 1u64,
+                control_resets: 0u64,
+                event_history: {
+                    "0": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_OPENED",
+                    },
+                    "1": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_OPENED",
+                    },
+                    "2": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_CLOSED",
+                    },
+                },
+            }
+        });
+
+        // Closing the last control file object resets state and logs CONTROL_RESET.
+        rootdir.on_control_closed();
+        {
+            let state_locked = rootdir.state.lock();
+            assert_eq!(state_locked.num_control_file_objects, 0);
+            assert!(!state_locked.has_input_output_endpoints);
+            assert!(!state_locked.is_online);
+            assert!(state_locked.event_queue.is_empty());
+        }
+
+        assert_data_tree!(inspector, root: {
+            "usb-functionfs": contains {
+                num_control_file_objects: 0u64,
+                has_input_output_endpoints: false,
+                is_online: false,
+                event_queue_depth: 0u64,
+                control_resets: 1u64,
+                event_history: {
+                    "0": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_OPENED",
+                    },
+                    "1": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_OPENED",
+                    },
+                    "2": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_CLOSED",
+                    },
+                    "3": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_CLOSED",
+                    },
+                    "4": {
+                        "@time": AnyProperty,
+                        event: "CONTROL_RESET",
+                    },
+                },
+            }
+        });
+    }
+
+    #[fuchsia::test]
+    async fn test_event_history_ring_buffer_eviction() {
+        let inspector = inspect::Inspector::default();
+        let rootdir = FunctionFsRootDir::new(inspector.root());
+
+        {
+            let mut state = rootdir.state.lock();
+            for i in 0..35 {
+                state.record_event(format!("event_{i}"));
+            }
+        }
+
+        let mut event_history_assertion = TreeAssertion::new("event_history", true);
+        for i in 3..35 {
+            let mut child = TreeAssertion::new(&i.to_string(), true);
+            child.add_property_assertion("@time", Arc::new(AnyProperty));
+            child.add_property_assertion("event", Arc::new(format!("event_{i}")));
+            event_history_assertion.add_child_assertion(child);
+        }
+
+        assert_data_tree!(inspector, root: {
+            "usb-functionfs": contains {
+                event_history_assertion,
+            }
+        });
+    }
+
+    #[fuchsia::test]
+    fn test_handle_adb_inspect_updates_and_error_filtering() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+
+        let mut test_fut = pin!(async {
+            let inspector = inspect::Inspector::default();
+            let rootdir = FunctionFsRootDir::new(inspector.root());
+
+            let (proxy, mut stream) =
+                fidl::endpoints::create_proxy_and_stream::<fadb::UsbAdbImpl_Marker>();
+            let (read_sender, read_receiver) = async_channel::unbounded();
+            let (write_sender, write_receiver) = async_channel::unbounded();
+
+            let adb_fut = handle_adb(
+                proxy,
+                None,
+                read_receiver,
+                write_receiver,
+                Arc::clone(&rootdir.state),
+                Arc::clone(&rootdir.stats),
+            );
+
+            let driver_fut = async move {
+                // Transition to ONLINE.
+                stream
+                    .control_handle()
+                    .send_on_status_changed(fadb::StatusFlags::ONLINE)
+                    .expect("send ONLINE status");
+
+                // 1. Successful Receive (4 bytes).
+                let read_ok = Arc::<PendingResult<Vec<u8>>>::default();
+                read_sender
+                    .send(ReadCommand { pending: read_ok.clone() })
+                    .await
+                    .expect("send read command");
+                match stream.next().await.expect("stream item").expect("fidl request") {
+                    fadb::UsbAdbImpl_Request::Receive { responder } => {
+                        responder.send(Ok(&[1, 2, 3, 4])).expect("send Receive Ok");
+                    }
+                    other => panic!("Unexpected request: {other:?}"),
+                }
+
+                // 2. Genuine driver error on Receive (ZX_ERR_IO) -> increments read_errors.
+                let read_io_err = Arc::<PendingResult<Vec<u8>>>::default();
+                read_sender
+                    .send(ReadCommand { pending: read_io_err.clone() })
+                    .await
+                    .expect("send read command");
+                match stream.next().await.expect("stream item").expect("fidl request") {
+                    fadb::UsbAdbImpl_Request::Receive { responder } => {
+                        responder
+                            .send(Err(zx::Status::IO.into_raw()))
+                            .expect("send Receive IO error");
+                    }
+                    other => panic!("Unexpected request: {other:?}"),
+                }
+
+                // 3. Expected shutdown errors on Receive -> must NOT increment read_errors.
+                for status in [zx::Status::BAD_STATE, zx::Status::CANCELED, zx::Status::PEER_CLOSED]
+                {
+                    let pending = Arc::<PendingResult<Vec<u8>>>::default();
+                    read_sender.send(ReadCommand { pending }).await.expect("send read command");
+                    match stream.next().await.expect("stream item").expect("fidl request") {
+                        fadb::UsbAdbImpl_Request::Receive { responder } => {
+                            responder
+                                .send(Err(status.into_raw()))
+                                .expect("send Receive shutdown error");
+                        }
+                        other => panic!("Unexpected request: {other:?}"),
+                    }
+                }
+
+                // 4. Successful QueueTx (5 bytes).
+                let write_ok = Arc::<PendingResult<usize>>::default();
+                write_sender
+                    .send(WriteCommand {
+                        data: vec![10, 20, 30, 40, 50],
+                        pending: write_ok.clone(),
+                    })
+                    .await
+                    .expect("send write command");
+                match stream.next().await.expect("stream item").expect("fidl request") {
+                    fadb::UsbAdbImpl_Request::QueueTx { data, responder } => {
+                        assert_eq!(data, vec![10, 20, 30, 40, 50]);
+                        responder.send(Ok(())).expect("send QueueTx Ok");
+                    }
+                    other => panic!("Unexpected request: {other:?}"),
+                }
+
+                // 5. Genuine driver error on QueueTx (ZX_ERR_IO) -> increments write_errors.
+                let write_io_err = Arc::<PendingResult<usize>>::default();
+                write_sender
+                    .send(WriteCommand { data: vec![1, 2], pending: write_io_err.clone() })
+                    .await
+                    .expect("send write command");
+                match stream.next().await.expect("stream item").expect("fidl request") {
+                    fadb::UsbAdbImpl_Request::QueueTx { responder, .. } => {
+                        responder
+                            .send(Err(zx::Status::IO.into_raw()))
+                            .expect("send QueueTx IO error");
+                    }
+                    other => panic!("Unexpected request: {other:?}"),
+                }
+
+                // 6. Expected shutdown errors on QueueTx -> must NOT increment write_errors.
+                for status in [zx::Status::BAD_STATE, zx::Status::CANCELED, zx::Status::PEER_CLOSED]
+                {
+                    let pending = Arc::<PendingResult<usize>>::default();
+                    write_sender
+                        .send(WriteCommand { data: vec![1], pending })
+                        .await
+                        .expect("send write command");
+                    match stream.next().await.expect("stream item").expect("fidl request") {
+                        fadb::UsbAdbImpl_Request::QueueTx { responder, .. } => {
+                            responder
+                                .send(Err(status.into_raw()))
+                                .expect("send QueueTx shutdown error");
+                        }
+                        other => panic!("Unexpected request: {other:?}"),
+                    }
+                }
+
+                // Transition to offline before closing the FIDL channel.
+                stream
+                    .control_handle()
+                    .send_on_status_changed(fadb::StatusFlags::empty())
+                    .expect("send offline status");
+
+                // Drop the FIDL request stream to close the server channel.
+                drop(stream);
+
+                // 7. Closed FIDL channel on Receive and QueueTx -> must NOT increment error counters.
+                let read_closed = Arc::<PendingResult<Vec<u8>>>::default();
+                read_sender
+                    .send(ReadCommand { pending: read_closed.clone() })
+                    .await
+                    .expect("send read command on closed channel");
+                let write_closed = Arc::<PendingResult<usize>>::default();
+                write_sender
+                    .send(WriteCommand { data: vec![9], pending: write_closed.clone() })
+                    .await
+                    .expect("send write command on closed channel");
+
+                drop(read_sender);
+                drop(write_sender);
+
+                (read_ok, read_io_err, write_ok, write_io_err, read_closed, write_closed)
+            };
+
+            let ((), (read_ok, read_io_err, write_ok, write_io_err, read_closed, write_closed)) =
+                futures::join!(adb_fut, driver_fut);
+
+            assert_eq!(read_ok.result.lock().take(), Some(Ok(vec![1, 2, 3, 4])));
+            assert_eq!(read_io_err.result.lock().take(), Some(error!(EINVAL)));
+            assert_eq!(write_ok.result.lock().take(), Some(Ok(5)));
+            assert_eq!(write_io_err.result.lock().take(), Some(error!(EINVAL)));
+            assert_eq!(read_closed.result.lock().take(), Some(error!(EINVAL)));
+            assert_eq!(write_closed.result.lock().take(), Some(error!(EINVAL)));
+
+            assert_data_tree!(inspector, root: {
+                "usb-functionfs": {
+                    is_online: false,
+                    num_control_file_objects: 0u64,
+                    event_queue_depth: 4u64,
+                    has_input_output_endpoints: false,
+                    control_resets: 0u64,
+                    event_history: {
+                        "0": {
+                            "@time": AnyProperty,
+                            event: "BIND",
+                        },
+                        "1": {
+                            "@time": AnyProperty,
+                            event: "ENABLE",
+                        },
+                        "2": {
+                            "@time": AnyProperty,
+                            event: "DISABLE",
+                        },
+                        "3": {
+                            "@time": AnyProperty,
+                            event: "UNBIND",
+                        },
+                    },
+                    ep1_bulk_out: {
+                        total_bytes_read: 4u64,
+                        read_count: 1u64,
+                        read_errors: 1u64,
+                        buffer_overflow_errors: 0u64,
+                    },
+                    ep2_bulk_in: {
+                        total_bytes_written: 5u64,
+                        write_count: 1u64,
+                        write_errors: 1u64,
+                    },
+                }
+            });
+        });
+
+        while exec.run_until_stalled(&mut test_fut).is_pending() {
+            assert!(exec.wake_next_timer().is_some(), "Executor stalled with no pending timers");
+        }
     }
 }

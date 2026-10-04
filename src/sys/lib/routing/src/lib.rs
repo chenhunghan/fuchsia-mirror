@@ -17,7 +17,7 @@ mod to_request;
 mod to_source;
 
 use crate::bedrock::request_metadata::directory_metadata;
-use crate::component_instance::{ComponentInstanceInterface, ResolvedInstanceInterface};
+use crate::component_instance::ComponentInstanceInterface;
 use crate::error::RoutingError;
 use capability_source::CapabilitySource;
 use cm_rust::{
@@ -217,9 +217,8 @@ pub async fn debug_route_storage_backing_directory<C: ComponentInstanceInterface
             let child_name = ChildName::parse(static_name)
                 .expect("invalid child name, this should be prevented by manifest validation");
             let child_component = component
-                .lock_resolved_state()
+                .get_child_maybe_resolve(&child_name)
                 .await?
-                .get_child(&child_name)
                 .expect("resolver registration references nonexistent static child, this should be prevented by manifest validation");
             let child_sandbox = child_component.component_sandbox().await?;
             child_sandbox.component_output.capabilities().clone()

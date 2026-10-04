@@ -51,7 +51,7 @@ mkdir -p "${DEST_DIR}"
 rm -rf "${DEST_DIR:?}"/*
 
 echo "Extracting archive"
-unzip -o -q "${SRC_FILE}" -d "${DEST_DIR}" || die "Could not unzip ${SRC_FILE}"
+unzip -DD -o -q "${SRC_FILE}" -d "${DEST_DIR}" || die "Could not unzip ${SRC_FILE}"
 [[ -f "${DEST_DIR}/${CHECK_FILE}" ]] ||
     die "Missing file from extracted archive: ${DEST_DIR}/${CHECK_FILE}"
 

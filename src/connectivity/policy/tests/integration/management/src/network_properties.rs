@@ -25,9 +25,7 @@ use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use log::info;
 use net_declare::fidl_ip_v6;
 use net_types::ip::{Ip, Ipv4};
-use netstack_testing_common::realms::{
-    self, Manager, ManagerConfig, Netstack3, NetstackExt, SocketProxyType,
-};
+use netstack_testing_common::realms::{self, Manager, ManagerConfig, Netstack3, SocketProxyType};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
     wait_for_component_stopped,
@@ -183,11 +181,7 @@ async fn test_track_socket_marks<M: Manager>(name: &str) {
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::Fake,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let (tx, mut rx) = mpsc::channel::<()>(1);
@@ -329,11 +323,7 @@ async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Er
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::Fake,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _test_network, _interface_state, realm, _sandbox| {
             async move {
                 async fn update_dns(
@@ -540,11 +530,7 @@ async fn test_network_token_correlation<M: Manager>(name: &str) -> Result<(), an
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::Fake,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let socket_proxy = realm
@@ -649,11 +635,7 @@ async fn test_network_registry_dns_propagation<M: Manager>(
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::None,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
@@ -781,11 +763,7 @@ async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) 
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::None,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
@@ -960,11 +938,7 @@ async fn test_network_registry_fuchsia_priority<M: Manager>(
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::Fake,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
@@ -1114,11 +1088,7 @@ async fn test_network_token_peer_closed_on_removal<M: Manager>(
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::Fake,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
@@ -1221,11 +1191,7 @@ async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::None,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let (tx, mut rx) = mpsc::channel::<()>(1);
@@ -1421,11 +1387,7 @@ async fn test_network_removal_reports_network_gone<M: Manager>(name: &str) {
     let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
-        NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
-            socket_proxy_type: SocketProxyType::Fake,
-            ..Default::default()
-        },
+        NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
@@ -1571,7 +1533,6 @@ async fn test_reachability_monitor_default_network_validation<M: Manager>(name: 
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             extra_known_service_providers: Vec::new(),
         },

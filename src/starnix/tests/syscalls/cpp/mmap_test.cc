@@ -242,6 +242,29 @@ TEST(MmapTest, CannotMmapNoexecAsExecutable) {
   }
 }
 
+TEST(MmapTest, CannotMmapNoexecAsPrivateWritableExecutable) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Test uses mount() but running without sysadmin. Skipping.";
+  }
+
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  test_helper::ScopedTempDir temp_dir;
+  SAFE_SYSCALL(mount(nullptr, temp_dir.path().c_str(), "tmpfs", MS_NOEXEC, nullptr));
+
+  std::string file_path = temp_dir.path() + "/executable_file";
+  close(SAFE_SYSCALL(creat(file_path.c_str(), 0755)));
+  fbl::unique_fd fd(open(file_path.c_str(), O_RDONLY));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  void* res =
+      mmap(nullptr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE, fd.get(), 0);
+  EXPECT_EQ(res, MAP_FAILED);
+  EXPECT_EQ(errno, EPERM);
+  if (res != MAP_FAILED) {
+    munmap(res, page_size);
+  }
+}
+
 TEST(MmapTest, CanMprotectNonExecMmapToExecutable) {
   if (!test_helper::HasSysAdmin()) {
     GTEST_SKIP() << "Test uses mount() but running without sysadmin. Skipping.";
@@ -1293,6 +1316,44 @@ TEST_F(MMapProcTest, MProtectAppliedPartially) {
   EXPECT_EQ(errno, EACCES);
   EXPECT_TRUE(perms_of_mapping_match(*first_mapping, "rw-p"));
   EXPECT_TRUE(perms_of_mapping_match(*third_mapping, "---p"));
+}
+
+TEST_F(MMapProcTest, PrivateFileMappingCanBeWritableAndExecutable) {
+  // A `MAP_PRIVATE` mapping of a regular file can be simultaneously writable and executable, even
+  // if the file descriptor is read-only. Writes through the mapping are visible in the mapping but
+  // are not carried through to the underlying file.
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  test_helper::ScopedTempDir tmp_dir;
+  std::string path = tmp_dir.path() + "/private_rwx_file";
+  {
+    fbl::unique_fd fd(open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0755));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+    std::vector<uint8_t> contents(page_size, 0xAA);
+    ASSERT_EQ(write(fd.get(), contents.data(), contents.size()), static_cast<ssize_t>(page_size));
+  }
+  fbl::unique_fd fd(open(path.c_str(), O_RDONLY));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  auto mapping = test_helper::ScopedMMap::MMap(
+      nullptr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE, fd.get(), 0);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+  uintptr_t addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+
+  std::string maps;
+  ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/maps", &maps));
+  auto mapping_report = test_helper::find_memory_mapping(addr, maps);
+  ASSERT_NE(mapping_report, std::nullopt);
+  EXPECT_EQ(mapping_report->perms, "rwxp");
+
+  volatile uint8_t* bytes = reinterpret_cast<volatile uint8_t*>(addr);
+  EXPECT_EQ(bytes[0], 0xAA);
+  bytes[0] = 0xBB;
+  EXPECT_EQ(bytes[0], 0xBB);
+
+  uint8_t file_byte = 0;
+  ASSERT_EQ(pread(fd.get(), &file_byte, 1, 0), 1);
+  EXPECT_EQ(file_byte, 0xAA);
 }
 
 class MMapAllProtectionsTest : public testing::TestWithParam<std::tuple<int, int>> {};

@@ -17,15 +17,20 @@ use zerocopy::FromBytes;
 use zx::Koid;
 
 // This tracks a VMO handle along with basic information about the handle.
+//
+// The VMO is held behind an `Arc` so that every `VmoAndBasicInfo` referring to the same VMO with
+// the same rights can share a single Zircon handle instead of each owning its own duplicate.
+// Sharing a handle this way is equivalent to duplicating it with `ZX_RIGHT_SAME_RIGHTS`: the
+// kernel object and the rights are identical, only the handle value differs.
 #[derive(Debug, RcuDroppable)]
 pub struct VmoAndBasicInfo {
-    vmo: zx::Vmo,
+    vmo: Arc<zx::Vmo>,
     info: OnceLock<(Koid, zx::Rights)>,
 }
 
 impl PartialEq for VmoAndBasicInfo {
     fn eq(&self, other: &Self) -> bool {
-        self.vmo == other.vmo
+        Arc::ptr_eq(&self.vmo, &other.vmo)
     }
 }
 
@@ -33,6 +38,12 @@ impl Eq for VmoAndBasicInfo {}
 
 impl From<zx::Vmo> for VmoAndBasicInfo {
     fn from(vmo: zx::Vmo) -> Self {
+        Self::from(Arc::new(vmo))
+    }
+}
+
+impl From<Arc<zx::Vmo>> for VmoAndBasicInfo {
+    fn from(vmo: Arc<zx::Vmo>) -> Self {
         Self { vmo, info: OnceLock::new() }
     }
 }
@@ -52,19 +63,56 @@ impl VmoAndBasicInfo {
     pub fn get_rights(&self) -> zx::Rights {
         self.get_info().1
     }
+
+    /// Returns another reference to this VMO holding `rights`.
+    ///
+    /// If `rights` are the rights this handle already holds, the existing handle is shared rather
+    /// than asking the kernel for a new one. Otherwise a rights-reduced duplicate is created.
+    fn share_or_duplicate(&self, rights: zx::Rights) -> Result<Self, zx::Status> {
+        if rights == zx::Rights::SAME_RIGHTS || rights == self.get_rights() {
+            // The cached info describes the kernel object and its rights, both of which are
+            // unchanged by sharing, so carry the cache over to avoid re-querying it.
+            return Ok(Self { vmo: Arc::clone(&self.vmo), info: self.info.clone() });
+        }
+        // Changing the rights does not change the koid and we know the target rights.
+        let koid = self.get_koid();
+        let vmo = Arc::new(self.vmo.duplicate_handle(rights)?);
+        let info = OnceLock::from((koid, rights));
+        Ok(Self { vmo, info })
+    }
+
+    /// Consumes `self` and returns an owned VMO handle with the same rights.
+    ///
+    /// If this was the last reference to the shared handle it is returned directly, otherwise a
+    /// duplicate is created.
+    fn into_owned_vmo(mut self) -> Result<zx::Vmo, zx::Status> {
+        self.debug_check_cached_info();
+        match Arc::get_mut(&mut self.vmo) {
+            Some(vmo) => {
+                // Move the valid zx::Vmo out of `self`, replacing it with an invalid
+                // pointer which will be dropped when `self` goes out of scope.
+                let owned_vmo = std::mem::replace(vmo, zx::NullableHandle::invalid().into());
+                Ok(owned_vmo)
+            }
+            None => self.vmo.duplicate_handle(zx::Rights::SAME_RIGHTS),
+        }
+    }
+
+    fn debug_check_cached_info(&self) {
+        #[cfg(debug_assertions)]
+        if let Some((koid, rights)) = self.info.get() {
+            if let Ok(info) = self.vmo.basic_info() {
+                debug_assert_eq!(*koid, info.koid, "Cached KOID mismatch");
+                debug_assert_eq!(*rights, info.rights, "Cached rights mismatch");
+            }
+        }
+    }
 }
 
 impl Drop for VmoAndBasicInfo {
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
-        {
-            if let Some((koid, rights)) = self.info.get() {
-                if let Ok(info) = self.vmo.basic_info() {
-                    debug_assert_eq!(*koid, info.koid, "Cached KOID mismatch");
-                    debug_assert_eq!(*rights, info.rights, "Cached rights mismatch");
-                }
-            }
-        }
+        self.debug_check_cached_info();
     }
 }
 
@@ -114,6 +162,12 @@ impl From<zx::Vmo> for MemoryObject {
     }
 }
 
+impl From<Arc<zx::Vmo>> for MemoryObject {
+    fn from(vmo: Arc<zx::Vmo>) -> Self {
+        Self::Vmo(VmoAndBasicInfo::from(vmo))
+    }
+}
+
 impl From<UtcClock> for MemoryObject {
     fn from(utc_clock: UtcClock) -> MemoryObject {
         let koid = utc_clock.koid().expect("koid should always be readable");
@@ -139,11 +193,9 @@ impl MemoryObject {
 
     pub fn into_vmo(self) -> Option<zx::Vmo> {
         match self {
-            Self::Vmo(info) => Some(
-                info.vmo
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("duplicate_handle failed in into_vmo"),
-            ),
+            Self::Vmo(info) => {
+                Some(info.into_owned_vmo().expect("duplicate_handle failed in into_vmo"))
+            }
             Self::RingBuf(_) | Self::MemoryMappedClock { .. } => None,
         }
     }
@@ -200,11 +252,8 @@ impl MemoryObject {
 
     pub fn duplicate_handle(&self, rights: zx::Rights) -> Result<Self, zx::Status> {
         match self {
-            Self::Vmo(info) => info.vmo.duplicate_handle(rights).map(Self::from),
-            Self::RingBuf(info) => info
-                .vmo
-                .duplicate_handle(rights)
-                .map(|vmo| Self::RingBuf(VmoAndBasicInfo::from(vmo))),
+            Self::Vmo(info) => info.share_or_duplicate(rights).map(Self::Vmo),
+            Self::RingBuf(info) => info.share_or_duplicate(rights).map(Self::RingBuf),
             Self::MemoryMappedClock { utc_clock, .. } => {
                 utc_clock.duplicate_handle(rights).map(|c| Self::from(c))
             }
@@ -328,7 +377,7 @@ impl MemoryObject {
 
     pub fn set_zx_name(&self, name: &[u8]) {
         match self {
-            Self::Vmo(info) | Self::RingBuf(info) => set_zx_name(&info.vmo, name),
+            Self::Vmo(info) | Self::RingBuf(info) => set_zx_name(&*info.vmo, name),
             Self::MemoryMappedClock { .. } => {
                 // The memory mapped clock is a singleton, so it does not
                 // seem appropriate to give it a zx name.
@@ -376,7 +425,9 @@ impl MemoryObject {
     pub fn replace_as_executable(self, vmex: &zx::Resource) -> Result<Self, zx::Status> {
         match self {
             Self::Vmo(info) => {
-                let vmo = info.vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+                // `zx_handle_replace` consumes the handle, so only duplicate it if it is still
+                // shared with another `MemoryObject`.
+                let vmo = info.into_owned_vmo()?;
                 let exec_vmo = vmo.replace_as_executable(vmex)?;
                 Ok(Self::from(exec_vmo))
             }

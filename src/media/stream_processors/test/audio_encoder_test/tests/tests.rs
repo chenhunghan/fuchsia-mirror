@@ -832,3 +832,165 @@ fn cvsd_stream_switching_with_close_test() -> Result<()> {
 fn cvsd_stream_switching_without_close_test() -> Result<()> {
     run_cvsd_stream_switching_test(false)
 }
+
+fn run_sbc_to_msbc_stream_switching_test(close_on_stop: bool) -> Result<()> {
+    with_large_stack(move || {
+        // Stream 1: 4-subband mono SBC (sets EncMaxShiftCounter to 184).
+        let sub_bands1 = SbcSubBands::SubBands4;
+        let block_count1 = SbcBlockCount::BlockCount8;
+        let settings1 = EncoderSettings::Sbc(SbcEncoderSettings {
+            allocation: SbcAllocation::AllocLoudness,
+            sub_bands: sub_bands1,
+            block_count: block_count1,
+            channel_mode: SbcChannelMode::Mono,
+            bit_pool: 59,
+        });
+
+        let pcm_format1 = PcmFormat {
+            pcm_mode: AudioPcmMode::Linear,
+            bits_per_sample: 16,
+            frames_per_second: 44100,
+            channel_map: vec![AudioChannelId::Cf],
+        };
+        let pcm_audio1 = PcmAudio::create_saw_wave(pcm_format1, TEST_PCM_FRAME_COUNT);
+        let input_framelength1 =
+            (sub_bands1.into_primitive() * block_count1.into_primitive()) as usize;
+
+        let stream1 = Rc::new(PcmAudioStream {
+            pcm_audio: pcm_audio1,
+            encoder_settings: settings1,
+            frames_per_packet: std::iter::repeat(input_framelength1),
+            timebase: None,
+        });
+
+        // Stream 2: mSBC (8 subbands, 15 blocks, requires EncMaxShiftCounter reset to 144).
+        let sub_bands2 = 8;
+        let block_count2 = 15;
+        let settings2 = EncoderSettings::Msbc(MSbcEncoderSettings::default());
+
+        let pcm_format2 = PcmFormat {
+            pcm_mode: AudioPcmMode::Linear,
+            bits_per_sample: 16,
+            frames_per_second: 16000,
+            channel_map: vec![AudioChannelId::Cf],
+        };
+        let pcm_audio2 = PcmAudio::create_saw_wave(pcm_format2, TEST_PCM_FRAME_COUNT);
+        let input_framelength2 = sub_bands2 * block_count2;
+
+        let stream2 = Rc::new(PcmAudioStream {
+            pcm_audio: pcm_audio2,
+            encoder_settings: settings2,
+            frames_per_packet: std::iter::repeat(input_framelength2),
+            timebase: None,
+        });
+
+        let mut executor = fasync::TestExecutor::new();
+        executor.run_singlethreaded(async {
+            let stream_processor =
+                EncoderFactory.connect_to_stream_processor(stream1.as_ref(), 1).await?;
+            let mut stream_runner = StreamRunner::new(stream_processor);
+
+            // Run stream 1, but stop after receiving 2 output packets.
+            let output1 = stream_runner
+                .run_stream(
+                    stream1,
+                    StreamOptions {
+                        queue_format_details: false,
+                        stop_after_n_output: Some(2),
+                        close_on_stop,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            assert_eq!(output_packets(&output1).count(), 2);
+
+            // Run stream 2 to completion on the same stream processor instance.
+            let output2 = stream_runner
+                .run_stream(
+                    stream2,
+                    StreamOptions {
+                        // Queue format details because stream 2 switches format from 44.1 kHz SBC
+                        // to 16 kHz mSBC.
+                        queue_format_details: true,
+                        close_on_stop,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            assert_eq!(output_packets(&output2).count(), 25);
+
+            let validator = BytesValidator {
+                output_file: None,
+                expected_digests: vec![ExpectedDigest::new(
+                    "Sbc: 16kHz/Loudness/Mono/bitpool 26/blocks 15/subbands 8",
+                    "bf96bd3b827a1317d8e707d3791d1a7d4b7f6a0d7f63f89831c5de1f1828b5ab",
+                )],
+            };
+            validator.validate(&output2).await?;
+
+            Ok(())
+        })
+    })
+}
+
+#[fuchsia::test]
+fn sbc_to_msbc_stream_switching_with_close_test() -> Result<()> {
+    run_sbc_to_msbc_stream_switching_test(true)
+}
+
+#[fuchsia::test]
+fn sbc_to_msbc_stream_switching_without_close_test() -> Result<()> {
+    run_sbc_to_msbc_stream_switching_test(false)
+}
+
+#[fuchsia::test]
+fn msbc_rejects_invalid_sample_rate_test() -> Result<()> {
+    with_large_stack(|| {
+        let sub_bands = 8;
+        let block_count = 15;
+        let settings = EncoderSettings::Msbc(MSbcEncoderSettings::default());
+
+        // 44.1 kHz is invalid for mSBC (which requires exactly 16000 Hz).
+        let pcm_format = PcmFormat {
+            pcm_mode: AudioPcmMode::Linear,
+            bits_per_sample: 16,
+            frames_per_second: 44100,
+            channel_map: vec![AudioChannelId::Cf],
+        };
+        let input_framelength = sub_bands * block_count;
+        let pcm_audio = PcmAudio::create_saw_wave(pcm_format, input_framelength);
+
+        let stream = Rc::new(PcmAudioStream {
+            pcm_audio,
+            encoder_settings: settings,
+            frames_per_packet: std::iter::repeat(input_framelength),
+            timebase: None,
+        });
+
+        let mut executor = fasync::TestExecutor::new();
+        executor.run_singlethreaded(async {
+            let stream_processor =
+                EncoderFactory.connect_to_stream_processor(stream.as_ref(), 1).await?;
+            let mut stream_runner = StreamRunner::new(stream_processor);
+
+            let output = stream_runner
+                .run_stream(
+                    stream,
+                    StreamOptions {
+                        queue_format_details: false,
+                        close_on_stop: false,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            // Because 44.1 kHz is invalid for mSBC, the codec reports a failure and closes the
+            // channel without emitting any output packets or EOS.
+            assert_eq!(output, vec![Output::CodecChannelClose]);
+
+            Ok(())
+        })
+    })
+}

@@ -5,6 +5,7 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_USB_BUS_USB_DEVICE_H_
 #define SRC_DEVICES_USB_DRIVERS_USB_BUS_USB_DEVICE_H_
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.device/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.hci/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb/cpp/fidl.h>
@@ -23,6 +24,7 @@
 #include <fbl/mutex.h>
 #include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 #include <usb/usb.h>
@@ -144,8 +146,40 @@ class UsbDevice : public UsbDeviceType,
   void SetHubInterface(const usb_hub_interface_protocol_t* hub_intf);
   zx_status_t HubResetPort(uint32_t port);
 
-  zx_status_t GetDescriptor(uint16_t type, uint16_t index, uint16_t language, void* data,
+  zx_status_t GetDescriptor(uint16_t type, uint8_t index, uint16_t language, void* data,
                             size_t length, size_t* out_actual);
+  zx_status_t GetDescriptor(fuchsia_hardware_usb_descriptor::DescriptorType desc_type,
+                            uint8_t index, uint16_t language, void* data, size_t length,
+                            size_t* out_actual) {
+    return GetDescriptor(static_cast<uint16_t>(fidl::ToUnderlying(desc_type)), index, language,
+                         data, length, out_actual);
+  }
+  zx_status_t ClearFeature(uint8_t request_type, uint16_t feature, uint16_t index,
+                           zx_duration_t timeout) {
+    return UsbControlOut(
+        request_type,
+        fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::StandardRequest::kClearFeature),
+        feature, index, timeout, nullptr, 0);
+  }
+  zx_status_t ClearFeature(uint8_t request_type,
+                           fuchsia_hardware_usb_descriptor::FeatureSelector feature, uint16_t index,
+                           zx_duration_t timeout) {
+    return ClearFeature(request_type, static_cast<uint16_t>(fidl::ToUnderlying(feature)), index,
+                        timeout);
+  }
+  zx_status_t SetFeature(uint8_t request_type, uint16_t feature, uint16_t index,
+                         zx_duration_t timeout) {
+    return UsbControlOut(
+        request_type,
+        fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::StandardRequest::kSetFeature), feature,
+        index, timeout, nullptr, 0);
+  }
+  zx_status_t SetFeature(uint8_t request_type,
+                         fuchsia_hardware_usb_descriptor::FeatureSelector feature, uint16_t index,
+                         zx_duration_t timeout) {
+    return SetFeature(request_type, static_cast<uint16_t>(fidl::ToUnderlying(feature)), index,
+                      timeout);
+  }
   zx_status_t Reinitialize();
 
   inline uint32_t GetHubId() const { return hub_id_; }
@@ -191,7 +225,7 @@ class UsbDevice : public UsbDeviceType,
   void QueueCallback(usb_request_t* req);
   static void ControlComplete(void* ctx, usb_request_t* req);
   zx_status_t Control(uint8_t request_type, uint8_t request, uint16_t value, uint16_t index,
-                      zx_time_t timeout, const void* write_buffer, size_t write_size,
+                      zx_duration_t timeout, const void* write_buffer, size_t write_size,
                       void* out_read_buffer, size_t read_size, size_t* out_read_actual);
   const usb_configuration_descriptor_t* GetConfigDesc(uint8_t config);
 

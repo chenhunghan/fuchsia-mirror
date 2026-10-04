@@ -29,7 +29,7 @@ use crate::vm::vm_object_paged::VmObjectPaged;
 use core::convert::Infallible;
 use core::pin::Pin;
 use core::{ptr, slice};
-use fbl::{Array, Canary, Recyclable, RefPtr, pin_make_ref_counted, ref_counted};
+use fbl::{Array, Canary, Recyclable, RefPtr, Vector, pin_make_ref_counted, ref_counted};
 use iob::{BlobIdAllocator, ZeroFill};
 use kalloc::AllocError;
 use ksync::{KMutex, LockToken, PhantomMutex, guarded};
@@ -40,30 +40,16 @@ use page;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_IOB_ACCESS_EP0_CAN_MAP_READ, ZX_IOB_ACCESS_EP0_CAN_MAP_WRITE,
+    ZX_DEFAULT_IOB_RIGHTS, ZX_IOB_ACCESS_EP0_CAN_MAP_READ, ZX_IOB_ACCESS_EP0_CAN_MAP_WRITE,
     ZX_IOB_ACCESS_EP0_CAN_MEDIATED_READ, ZX_IOB_ACCESS_EP0_CAN_MEDIATED_WRITE,
     ZX_IOB_ACCESS_EP1_CAN_MAP_READ, ZX_IOB_ACCESS_EP1_CAN_MAP_WRITE,
     ZX_IOB_ACCESS_EP1_CAN_MEDIATED_READ, ZX_IOB_ACCESS_EP1_CAN_MEDIATED_WRITE,
     ZX_IOB_DISCIPLINE_TYPE_ID_ALLOCATOR, ZX_IOB_DISCIPLINE_TYPE_MEDIATED_WRITE_RING_BUFFER,
     ZX_IOB_DISCIPLINE_TYPE_NONE, ZX_IOB_MAX_REGIONS, ZX_IOB_PEER_CLOSED,
     ZX_IOB_REGION_TYPE_PRIVATE, ZX_IOB_REGION_TYPE_SHARED, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_IOB,
-    ZX_RIGHT_DUPLICATE, ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT, ZX_RIGHT_MAP, ZX_RIGHT_NONE,
-    ZX_RIGHT_READ, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_SIGNAL, ZX_RIGHT_SIGNAL_PEER, ZX_RIGHT_TRANSFER,
-    ZX_RIGHT_WAIT, ZX_RIGHT_WRITE, ZX_USER_SIGNAL_ALL, zx_info_iob_t, zx_iob_region_info_t,
-    zx_iob_region_t, zx_iovec_t, zx_koid_t, zx_rights_t,
+    ZX_RIGHT_MAP, ZX_RIGHT_NONE, ZX_RIGHT_READ, ZX_RIGHT_WRITE, ZX_USER_SIGNAL_ALL, zx_info_iob_t,
+    zx_iob_region_info_t, zx_iob_region_t, zx_iovec_t, zx_koid_t, zx_rights_t,
 };
-
-const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_GET_PROPERTY
-    | ZX_RIGHT_SET_PROPERTY
-    | ZX_RIGHT_MAP
-    | ZX_RIGHT_SIGNAL
-    | ZX_RIGHT_SIGNAL_PEER;
 
 const ALLOWED_SIGNALS: u32 = ZX_USER_SIGNAL_ALL;
 
@@ -496,7 +482,7 @@ impl_peered_dispatcher_facade_with_state!(
 
 impl IoBufferDispatcher {
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_IOB_RIGHTS
     }
 
     /// Performs the C++ multiple-inheritance upcast from `IoBufferDispatcher*` to
@@ -559,107 +545,114 @@ impl IoBufferDispatcher {
         handle0.dispatcher().init_peer(handle1.dispatcher().clone());
         handle1.dispatcher().init_peer(handle0.dispatcher().clone());
 
-        Ok((handle0, handle1, DEFAULT_RIGHTS))
+        Ok((handle0, handle1, ZX_DEFAULT_IOB_RIGHTS))
     }
 
     fn create_regions(
         region_configs: &[zx_iob_region_t],
     ) -> Result<Array<IobRegionVariant>, Status> {
-        let mut regions = Array::<IobRegionVariant>::try_new_uninit_slice(region_configs.len())
-            .map_err(|_| Status::NO_MEMORY)?;
+        Self::create_regions_with(region_configs.len(), |i| Self::create_region(&region_configs[i]))
+    }
 
-        for (i, config) in region_configs.iter().enumerate() {
-            let mut region_config = *config;
-            let (vmo, vmo_user_id, dispatcher) = match region_config.r#type {
-                ZX_IOB_REGION_TYPE_PRIVATE => {
-                    let options = unsafe { region_config.extension.private_region.options };
-                    let stats = VmObjectDispatcher::parse_create_syscall_flags(
-                        options,
-                        region_config.size,
-                    )?;
-                    let created_vmo = VmObjectPaged::create(
-                        pmm::ALLOC_FLAG_ANY | pmm::ALLOC_FLAG_CAN_WAIT,
-                        stats.flags,
-                        stats.size,
-                    )?;
-                    // parse_create_syscall_flags will round up the size to the nearest page, or set
-                    // the size to the maximum possible VMO size if ZX_VMO_UNBOUNDED is used. We
-                    // need to know the actual size of the VMO to later return if asked.
-                    region_config.size = stats.size;
-                    let vmo_user_id = koid::generate();
-                    created_vmo.set_user_id(vmo_user_id);
-                    let vmo = VmObjectPaged::into_vm_object(created_vmo);
-                    (vmo, vmo_user_id, None)
-                }
-                ZX_IOB_REGION_TYPE_SHARED => {
-                    // TODO(https://fxbug.dev/319500512): Remove the cast when we move it out of
-                    // vdso next.
-                    let shared_region = unsafe { region_config.extension.shared_region };
-                    if shared_region.options != 0 || region_config.size != 0 {
-                        return Err(Status::INVALID_ARGS);
-                    }
-                    let sr = Dispatcher::get_with_rights::<IoBufferSharedRegionDispatcher>(
-                        HandleValue::new(shared_region.shared_region),
-                        ZX_RIGHT_NONE,
-                    )?;
-                    let vmo = sr.vmo();
-                    let paged_vmo =
-                        VmObject::downcast_paged(vmo.clone()).ok_or(Status::INVALID_ARGS)?;
-                    if paged_vmo.size() < (page::SIZE as u64) * 2 {
-                        return Err(Status::INVALID_ARGS);
-                    }
-                    // For memory attribution to work correctly, we need to use the same KOID for
-                    // all IOBuffers that use this shared region.
-                    let vmo_user_id = sr.get_koid();
-                    (vmo, vmo_user_id, Some(sr))
-                }
-                _ => return Err(Status::INVALID_ARGS),
-            };
-
-            // A note on resource management:
-            //
-            // Everything we allocate in this loop ultimately gets owned by the SharedIobState and
-            // will be cleaned up when both PeeredDispatchers are destroyed and drop their reference
-            // to the SharedIobState.
-            //
-            // However, there is a complication. The VmoChildObservers have a reference to the
-            // dispatchers which creates a cycle: IoBufferDispatcher -> SharedIobState -> IobRegion
-            // -> VmObject -> VmoChildObserver -> IoBufferDispatcher.
-            //
-            // Since the VmoChildObservers keep raw pointers to the dispatchers, we need to be sure
-            // to reset the corresponding pointers when we destroy an IoBufferDispatcher. Otherwise
-            // when an IoBufferDispatcher maps a region, it could try to update a destroyed peer.
-            //
-            // See: PinnedDrop for IoBufferDispatcherState.
-
-            // We effectively duplicate the logic from sys_vmo_create here, but instead of creating
-            // a kernel handle and dispatcher, we keep ownership of it and assign it to a region.
-
-            // In order to track mappings and unmappings separately for each endpoint, we give each
-            // endpoint a child reference instead of the created VMO.
-            let resizability = if vmo.is_resizable() {
-                Resizability::Resizable
-            } else {
-                Resizability::NonResizable
-            };
-            let (ep0_reference, _) = vmo.create_child_reference(resizability, 0, 0, true)?;
-            let (ep1_reference, _) = vmo.create_child_reference(resizability, 0, 0, true)?;
-
-            ep0_reference.set_user_id(vmo_user_id);
-            ep1_reference.set_user_id(vmo_user_id);
-
-            let variant = Self::create_iob_region_variant(
-                ep0_reference,
-                ep1_reference,
-                vmo,
-                &region_config,
-                vmo_user_id,
-                dispatcher,
-            )?;
-            regions[i].write(variant);
+    /// Creates `count` regions by calling `create_region` for each index. If any of the calls
+    /// fails, then the regions created so far are dropped.
+    fn create_regions_with(
+        count: usize,
+        mut create_region: impl FnMut(usize) -> Result<IobRegionVariant, Status>,
+    ) -> Result<Array<IobRegionVariant>, Status> {
+        // Reserve the exact capacity, so the conversion to `Array` below doesn't need to
+        // reallocate the buffer.
+        let mut regions = Vector::new();
+        regions.reserve(count).map_err(|_| Status::NO_MEMORY)?;
+        for i in 0..count {
+            regions.push_back(create_region(i)?).map_err(|_| Status::NO_MEMORY)?;
         }
+        regions.try_into_array().map_err(|_| Status::NO_MEMORY)
+    }
 
-        Ok(unsafe { regions.assume_init() })
+    fn create_region(config: &zx_iob_region_t) -> Result<IobRegionVariant, Status> {
+        let mut region_config = *config;
+        let (vmo, vmo_user_id, dispatcher) = match region_config.r#type {
+            ZX_IOB_REGION_TYPE_PRIVATE => {
+                let options = unsafe { region_config.extension.private_region.options };
+                let stats =
+                    VmObjectDispatcher::parse_create_syscall_flags(options, region_config.size)?;
+                let created_vmo = VmObjectPaged::create(
+                    pmm::ALLOC_FLAG_ANY | pmm::ALLOC_FLAG_CAN_WAIT,
+                    stats.flags,
+                    stats.size,
+                )?;
+                // parse_create_syscall_flags will round up the size to the nearest page, or set
+                // the size to the maximum possible VMO size if ZX_VMO_UNBOUNDED is used. We
+                // need to know the actual size of the VMO to later return if asked.
+                region_config.size = stats.size;
+                let vmo_user_id = koid::generate();
+                created_vmo.set_user_id(vmo_user_id);
+                let vmo = VmObjectPaged::into_vm_object(created_vmo);
+                (vmo, vmo_user_id, None)
+            }
+            ZX_IOB_REGION_TYPE_SHARED => {
+                // TODO(https://fxbug.dev/319500512): Remove the cast when we move it out of
+                // vdso next.
+                let shared_region = unsafe { region_config.extension.shared_region };
+                if shared_region.options != 0 || region_config.size != 0 {
+                    return Err(Status::INVALID_ARGS);
+                }
+                let sr = Dispatcher::get_with_rights::<IoBufferSharedRegionDispatcher>(
+                    HandleValue::new(shared_region.shared_region),
+                    ZX_RIGHT_NONE,
+                )?;
+                let vmo = sr.vmo();
+                let paged_vmo =
+                    VmObject::downcast_paged(vmo.clone()).ok_or(Status::INVALID_ARGS)?;
+                if paged_vmo.size() < (page::SIZE as u64) * 2 {
+                    return Err(Status::INVALID_ARGS);
+                }
+                // For memory attribution to work correctly, we need to use the same KOID for
+                // all IOBuffers that use this shared region.
+                let vmo_user_id = sr.get_koid();
+                (vmo, vmo_user_id, Some(sr))
+            }
+            _ => return Err(Status::INVALID_ARGS),
+        };
+
+        // A note on resource management:
+        //
+        // Everything we allocate in this loop ultimately gets owned by the SharedIobState and
+        // will be cleaned up when both PeeredDispatchers are destroyed and drop their reference
+        // to the SharedIobState.
+        //
+        // However, there is a complication. The VmoChildObservers have a reference to the
+        // dispatchers which creates a cycle: IoBufferDispatcher -> SharedIobState -> IobRegion
+        // -> VmObject -> VmoChildObserver -> IoBufferDispatcher.
+        //
+        // Since the VmoChildObservers keep raw pointers to the dispatchers, we need to be sure
+        // to reset the corresponding pointers when we destroy an IoBufferDispatcher. Otherwise
+        // when an IoBufferDispatcher maps a region, it could try to update a destroyed peer.
+        //
+        // See: PinnedDrop for IoBufferDispatcherState.
+
+        // We effectively duplicate the logic from sys_vmo_create here, but instead of creating
+        // a kernel handle and dispatcher, we keep ownership of it and assign it to a region.
+
+        // In order to track mappings and unmappings separately for each endpoint, we give each
+        // endpoint a child reference instead of the created VMO.
+        let resizability =
+            if vmo.is_resizable() { Resizability::Resizable } else { Resizability::NonResizable };
+        let (ep0_reference, _) = vmo.create_child_reference(resizability, 0, 0, true)?;
+        let (ep1_reference, _) = vmo.create_child_reference(resizability, 0, 0, true)?;
+
+        ep0_reference.set_user_id(vmo_user_id);
+        ep1_reference.set_user_id(vmo_user_id);
+
+        Self::create_iob_region_variant(
+            ep0_reference,
+            ep1_reference,
+            vmo,
+            &region_config,
+            vmo_user_id,
+            dispatcher,
+        )
     }
 
     fn create_iob_region_variant(
@@ -963,6 +956,7 @@ mod tests {
     use crate::vm::pmm::ALLOC_FLAG_ANY;
     use crate::vm::vm_object_paged::VmObjectPaged;
     use core::{mem, ptr, slice};
+    use fbl::HasRefCount;
     use iob::{BlobIdAllocator, Header, Index, ZeroFill};
     use kalloc::Box;
     use page;
@@ -1023,6 +1017,44 @@ mod tests {
                 expect_ok!(IoBufferDispatcher::create(0, &regions).map(|_| ()));
             }
         }
+    }
+
+    /// Tests that already created regions are released when creating a later region fails.
+    #[test]
+    fn test_create_regions_failure_releases_regions() {
+        const REGION_COUNT: usize = 4;
+
+        let page_size = page::SIZE as u64;
+        let (sr_handle, _) =
+            IoBufferSharedRegionDispatcher::create(2 * page_size).expect("create shared region");
+        let sr_disp = sr_handle.dispatcher().clone();
+        let initial_ref_count = sr_disp.ref_count().ref_count_debug();
+
+        let mut region = unsafe { mem::zeroed::<zx_iob_region_t>() };
+        region.r#type = ZX_IOB_REGION_TYPE_SHARED;
+        region.access = ZX_IOB_ACCESS_EP0_CAN_MEDIATED_WRITE | ZX_IOB_ACCESS_EP1_CAN_MAP_READ;
+        region.discipline.r#type = ZX_IOB_DISCIPLINE_TYPE_MEDIATED_WRITE_RING_BUFFER;
+
+        // Each region holds a reference to the shared region. Creation of the last region fails.
+        let result = IoBufferDispatcher::create_regions_with(REGION_COUNT, |i| {
+            if i == REGION_COUNT - 1 {
+                return Err(Status::INVALID_ARGS);
+            }
+            let vmo =
+                VmObjectPaged::into_vm_object(VmObjectPaged::create(ALLOC_FLAG_ANY, 0, page_size)?);
+            IoBufferDispatcher::create_iob_region_variant(
+                vmo.clone(),
+                vmo.clone(),
+                vmo,
+                &region,
+                sr_disp.get_koid(),
+                Some(sr_disp.clone()),
+            )
+        });
+        expect_true!(result.map(|_| ()) == Err(Status::INVALID_ARGS));
+
+        // All references held by the created regions must be released.
+        expect_eq!(sr_disp.ref_count().ref_count_debug(), initial_ref_count);
     }
 
     /// Tests Header and Index conversions and bounds checking.
@@ -1257,8 +1289,8 @@ mod tests {
 
         let (h0, h1, rights) =
             IoBufferDispatcher::create(0, &[r0, r1]).expect("failed to create iob");
-        expect_eq!(rights, super::DEFAULT_RIGHTS);
-        expect_eq!(IoBufferDispatcher::default_rights(), super::DEFAULT_RIGHTS);
+        expect_eq!(rights, ZX_DEFAULT_IOB_RIGHTS);
+        expect_eq!(IoBufferDispatcher::default_rights(), ZX_DEFAULT_IOB_RIGHTS);
 
         let d0 = h0.dispatcher();
         let d1 = h1.dispatcher();
@@ -1284,18 +1316,18 @@ mod tests {
 
         // Map rights
         expect_eq!(
-            d0.get_map_rights(super::DEFAULT_RIGHTS, 0),
+            d0.get_map_rights(ZX_DEFAULT_IOB_RIGHTS, 0),
             ZX_RIGHT_READ | ZX_RIGHT_WRITE | ZX_RIGHT_MAP
         );
-        expect_eq!(d1.get_map_rights(super::DEFAULT_RIGHTS, 0), ZX_RIGHT_READ | ZX_RIGHT_MAP);
-        expect_eq!(d0.get_map_rights(super::DEFAULT_RIGHTS, 1), ZX_RIGHT_READ | ZX_RIGHT_MAP);
+        expect_eq!(d1.get_map_rights(ZX_DEFAULT_IOB_RIGHTS, 0), ZX_RIGHT_READ | ZX_RIGHT_MAP);
+        expect_eq!(d0.get_map_rights(ZX_DEFAULT_IOB_RIGHTS, 1), ZX_RIGHT_READ | ZX_RIGHT_MAP);
         expect_eq!(
-            d1.get_map_rights(super::DEFAULT_RIGHTS, 1),
+            d1.get_map_rights(ZX_DEFAULT_IOB_RIGHTS, 1),
             ZX_RIGHT_READ | ZX_RIGHT_WRITE | ZX_RIGHT_MAP
         );
         // Masking with limited rights
         expect_eq!(d0.get_map_rights(ZX_RIGHT_READ, 0), ZX_RIGHT_READ);
-        expect_eq!(d0.get_map_rights(super::DEFAULT_RIGHTS, 2), 0);
+        expect_eq!(d0.get_map_rights(ZX_DEFAULT_IOB_RIGHTS, 2), 0);
 
         // Region info swapping
         let rinfo0_ep0 = d0.get_region_info(0);

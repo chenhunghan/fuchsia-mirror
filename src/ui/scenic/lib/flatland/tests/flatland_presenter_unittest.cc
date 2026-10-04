@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -177,13 +178,45 @@ TEST_F(FlatlandPresenterTest, RemoveSessionForwardsToFrameScheduler) {
   auto presenter = CreateFlatlandPresenterImpl(frame_scheduler);
 
   const scheduling::SessionId kSessionId = 1;
-  presenter->RemoveSession(kSessionId, std::nullopt);
+  presenter->RemoveSession(kSessionId, {}, {});
 
   RunLoopUntilIdle();
 
   // Since this function runs on the main thread, no RunLoopUntilIdle() is necessary.
   EXPECT_THAT(results, testing::ElementsAre(std::make_pair("RemoveSession", kSessionId),
                                             std::make_pair("Schedule", kSessionId)));
+}
+
+TEST_F(FlatlandPresenterTest, RemoveSessionStoresReleaseFencesAndCounters) {
+  scheduling::test::MockFrameScheduler frame_scheduler;
+  auto presenter = CreateFlatlandPresenterImpl(frame_scheduler);
+
+  const scheduling::SessionId kSessionId = 1;
+  zx::event release_fence = utils::CreateEvent();
+  zx_handle_t release_fence_handle = release_fence.get();
+  zx::counter release_counter = utils::CreateCounter();
+  zx_handle_t release_counter_handle = release_counter.get();
+
+  std::vector<zx::event> release_fences;
+  release_fences.push_back(std::move(release_fence));
+  std::vector<zx::counter> release_counters;
+  release_counters.push_back(std::move(release_counter));
+
+  presenter->RemoveSession(kSessionId, std::move(release_fences), std::move(release_counters));
+  RunLoopUntilIdle();
+
+  // Accumulate fences and retrieve them.
+  presenter->AccumulateFences({{kSessionId, std::numeric_limits<scheduling::PresentId>::max()}});
+  auto fences = presenter->TakeFences();
+
+  EXPECT_EQ(fences.release_fences.size(), 1u);
+  if (!fences.release_fences.empty()) {
+    EXPECT_EQ(fences.release_fences[0].get(), release_fence_handle);
+  }
+  EXPECT_EQ(fences.release_counters.size(), 1u);
+  if (!fences.release_counters.empty()) {
+    EXPECT_EQ(fences.release_counters[0].get(), release_counter_handle);
+  }
 }
 
 TEST_F(FlatlandPresenterTest, GetFuturePresentationInfosForwardsToFrameScheduler) {

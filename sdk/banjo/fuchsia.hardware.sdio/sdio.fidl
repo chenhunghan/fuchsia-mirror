@@ -66,29 +66,29 @@ type SdioRwTxn = resource struct {
 @banjo_layout("ddk-protocol")
 closed protocol Sdio {
     strict GetDevHwInfo() -> (struct {
-        s zx.Status;
+        s zx.Result;
         hw_info SdioHwInfo;
     });
     strict EnableFn() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     strict DisableFn() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     strict EnableFnIntr() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     strict DisableFnIntr() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     strict UpdateBlockSize(struct {
         blk_sz uint16;
         deflt bool;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     strict GetBlockSize() -> (struct {
-        s zx.Status;
+        s zx.Result;
         cur_blk_size uint16;
     });
     strict DoRwByte(struct {
@@ -96,14 +96,14 @@ closed protocol Sdio {
         addr uint32;
         write_byte uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         read_byte uint8;
     });
     /// Returns a virtual interrupt that will be triggered by the SDIO driver when the card signals
     /// an interrupt corresponding to this function. No additional interrupts will be triggered
     /// until `AckInBandIntr()` is called.
     strict GetInBandIntr() -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         irq zx.Handle:INTERRUPT;
     });
     /// See above. Clients should call `AckInBandIntr()` after starting to wait on the interrupt
@@ -112,11 +112,11 @@ closed protocol Sdio {
     /// The following functions access the card common control registers (CCCR) on function 0.
     /// Aborts an I/O operation occurring on the specified function.
     strict IoAbort() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     /// Returns true if an interrupt is pending for function fn_idx, false otherwise.
     strict IntrPending() -> (struct {
-        s zx.Status;
+        s zx.Result;
         pending bool;
     });
     /// Reads or writes to a vendor CCCR register. addr must be in [0xF0, 0xFF].
@@ -125,7 +125,7 @@ closed protocol Sdio {
         addr uint8;
         write_byte uint8;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         read_byte uint8;
     });
 
@@ -137,12 +137,12 @@ closed protocol Sdio {
         size uint64;
         vmo_rights uint32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     strict UnregisterVmo(struct {
         vmo_id uint32;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         vmo zx.Handle:VMO;
     });
 
@@ -163,7 +163,7 @@ closed protocol Sdio {
     strict DoRwTxn(resource struct {
         txn SdioRwTxn;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Requests that the core driver hard reset the card and perform the SDIO initialization
@@ -181,7 +181,7 @@ closed protocol Sdio {
     /// The specific method used to hard reset the card is platform- or board-specific; examples
     /// include toggling a reset GPIO or power cycling the card.
     strict RequestCardReset() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Perform tuning in the background. Clients can use this to update the host controller delay
@@ -194,6 +194,6 @@ closed protocol Sdio {
     /// Otherwise returns `ZX_OK` or an error value if the SDMMC driver's tuning process failed (see
     /// the [SDMMC protocol](/sdk/banjo/fuchsia.hardware.sdmmc/sdmmc.fidl)).
     strict PerformTuning() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

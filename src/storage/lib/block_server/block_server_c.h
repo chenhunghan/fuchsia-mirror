@@ -244,6 +244,15 @@ void block_server_session_release(const Session *session);
 void block_server_send_reply(const BlockServer *block_server, RequestId request_id,
                              zx_status_t status);
 
+/// Registers a hardware inline encryption key slot `hw_slot` with `block_server`, writing the
+/// client end of the minted eventpair token to `out_handle`.
+///
+/// # Safety
+///
+/// `block_server` and `out_handle` must be valid.
+zx_status_t block_server_register_key_slot(const BlockServer *block_server, uint8_t hw_slot,
+                                           zx_handle_t *out_handle);
+
 }  // extern "C"
 
 }  // namespace internal

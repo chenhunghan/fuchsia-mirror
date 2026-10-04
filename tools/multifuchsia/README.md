@@ -111,7 +111,7 @@ not be the desired / expected behavior. Maybe that should only be for `mfcd`?
 
 Note2: `./multifuchsia mount` fails if it can't unmount what is already mounted
 on the mountpoint. The most common problem is a shell which is `cd`ed into the
-mountpoint. Some other common causes include: `ffx` daemons, `fx shell`
+mountpoint. Some other common causes include: `fx shell`
 connections, and the vscode remote server. `lsof $MOUNTPOINT` and `fuser
 -m $MOUNTPOINT` can find most causes, but for some reason not all. Anyway, it's
 not usually too hard to look through the running processes and find one which is

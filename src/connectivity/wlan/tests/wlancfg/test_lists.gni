@@ -41,8 +41,10 @@ wlancfg_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/wlancfg:ping_test",
   "//src/connectivity/wlan/tests/wlancfg:policy_scan_test",
   "//src/connectivity/wlan/tests/wlancfg:regulatory_recovery_test",
+  "//src/connectivity/wlan/tests/wlancfg:soft_ap_lifecycle_test",
   "//src/connectivity/wlan/tests/wlancfg:vape_interop_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_misc_scenario_test",
+  "//src/connectivity/wlan/tests/wlancfg:wlan_target_security_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_wireless_network_management_test",
   "//src/testing/end_to_end/antlion/tests/wlan/compliance:wlan_security_type_test",
 ]
@@ -57,10 +59,8 @@ wlancfg_tests_for_fyi = [
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_combinatorial_options_test",
   "//src/connectivity/wlan/tests/wlancfg:saved_networks_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_bss_transition_management_test",
-  "//src/connectivity/wlan/tests/wlancfg:wlan_target_security_test",
   "//src/connectivity/wlan/tests/wlancfg:reboot_soft_test",
   "//src/connectivity/wlan/tests/wlancfg:reboot_hard_test",
-  "//src/connectivity/wlan/tests/wlancfg:soft_ap_lifecycle_test",
 ]
 
 # Tests longer than ~20 minutes consume significant resources and significantly

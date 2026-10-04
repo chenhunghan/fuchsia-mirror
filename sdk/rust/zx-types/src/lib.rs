@@ -151,6 +151,106 @@ multiconst!(zx_rights_t, [
     ZX_RIGHT_SAME_RIGHTS    = 1 << 31;
 ]);
 
+// From //zircon/system/public/zircon/rights.h
+// Convenient names for commonly grouped rights.
+multiconst!(zx_rights_t, [
+    ZX_RIGHTS_BASIC    = ZX_RIGHT_TRANSFER | ZX_RIGHT_DUPLICATE | ZX_RIGHT_WAIT | ZX_RIGHT_INSPECT;
+    ZX_RIGHTS_IO       = ZX_RIGHT_READ | ZX_RIGHT_WRITE;
+    ZX_RIGHTS_PROPERTY = ZX_RIGHT_GET_PROPERTY | ZX_RIGHT_SET_PROPERTY;
+    ZX_RIGHTS_POLICY   = ZX_RIGHT_GET_POLICY | ZX_RIGHT_SET_POLICY;
+]);
+
+// From //zircon/system/public/zircon/rights.h
+multiconst!(zx_rights_t, [
+    ZX_DEFAULT_CHANNEL_RIGHTS = (ZX_RIGHTS_BASIC & !ZX_RIGHT_DUPLICATE)
+        | ZX_RIGHTS_IO
+        | ZX_RIGHT_SIGNAL
+        | ZX_RIGHT_SIGNAL_PEER;
+    ZX_DEFAULT_EVENT_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_SYSTEM_EVENT_LOW_MEMORY_RIGHTS =
+        ZX_RIGHT_WAIT | ZX_RIGHT_DUPLICATE | ZX_RIGHT_TRANSFER;
+    ZX_DEFAULT_SYSTEM_MEMORY_STALL_EVENT_RIGHTS =
+        ZX_RIGHT_WAIT | ZX_RIGHT_DUPLICATE | ZX_RIGHT_TRANSFER;
+    ZX_DEFAULT_EVENTPAIR_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHT_SIGNAL | ZX_RIGHT_SIGNAL_PEER;
+    ZX_DEFAULT_FIFO_RIGHTS =
+        ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHT_SIGNAL | ZX_RIGHT_SIGNAL_PEER;
+    ZX_DEFAULT_GUEST_RIGHTS = ZX_RIGHT_TRANSFER
+        | ZX_RIGHT_DUPLICATE
+        | ZX_RIGHT_WRITE
+        | ZX_RIGHT_INSPECT
+        | ZX_RIGHT_MANAGE_THREAD;
+    ZX_DEFAULT_INTERRUPT_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_JOB_RIGHTS = ZX_RIGHTS_BASIC
+        | ZX_RIGHTS_IO
+        | ZX_RIGHTS_PROPERTY
+        | ZX_RIGHTS_POLICY
+        | ZX_RIGHT_ENUMERATE
+        | ZX_RIGHT_DESTROY
+        | ZX_RIGHT_SIGNAL
+        | ZX_RIGHT_MANAGE_JOB
+        | ZX_RIGHT_MANAGE_PROCESS
+        | ZX_RIGHT_MANAGE_THREAD;
+    ZX_DEFAULT_LOG_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHT_WRITE | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_MSI_RIGHTS = ZX_RIGHTS_BASIC;
+    ZX_DEFAULT_PCI_DEVICE_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHTS_IO;
+    ZX_DEFAULT_PCI_INTERRUPT_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_PORT_RIGHTS = (ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT) | ZX_RIGHTS_IO;
+    ZX_DEFAULT_PROCESS_RIGHTS = ZX_RIGHTS_BASIC
+        | ZX_RIGHTS_IO
+        | ZX_RIGHTS_PROPERTY
+        | ZX_RIGHT_ENUMERATE
+        | ZX_RIGHT_DESTROY
+        | ZX_RIGHT_SIGNAL
+        | ZX_RIGHT_MANAGE_PROCESS
+        | ZX_RIGHT_MANAGE_THREAD;
+    ZX_DEFAULT_RESOURCE_RIGHTS =
+        (ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT) | ZX_RIGHT_WRITE | ZX_RIGHT_GET_PROPERTY;
+    ZX_DEFAULT_SOCKET_RIGHTS = ZX_RIGHTS_BASIC
+        | ZX_RIGHTS_IO
+        | ZX_RIGHT_GET_PROPERTY
+        | ZX_RIGHT_SET_PROPERTY
+        | ZX_RIGHT_SIGNAL
+        | ZX_RIGHT_SIGNAL_PEER
+        | ZX_RIGHT_MANAGE_SOCKET;
+    ZX_DEFAULT_STREAM_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHTS_PROPERTY | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_THREAD_RIGHTS = ZX_RIGHTS_BASIC
+        | ZX_RIGHTS_IO
+        | ZX_RIGHTS_PROPERTY
+        | ZX_RIGHT_DESTROY
+        | ZX_RIGHT_SIGNAL
+        | ZX_RIGHT_MANAGE_THREAD;
+    ZX_DEFAULT_TIMER_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHT_WRITE | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_VCPU_RIGHTS =
+        ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHT_EXECUTE | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_VMAR_RIGHTS = (ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT) | ZX_RIGHT_OP_CHILDREN;
+    ZX_DEFAULT_VMO_RIGHTS =
+        ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHTS_PROPERTY | ZX_RIGHT_MAP | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_IOMMU_RIGHTS = ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT;
+    ZX_DEFAULT_BTI_RIGHTS =
+        (ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT) | ZX_RIGHTS_IO | ZX_RIGHTS_PROPERTY | ZX_RIGHT_MAP;
+    ZX_DEFAULT_PROFILE_RIGHTS = (ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT) | ZX_RIGHT_APPLY_PROFILE;
+    ZX_DEFAULT_PMT_RIGHTS = ZX_RIGHT_INSPECT;
+    ZX_DEFAULT_SUSPEND_TOKEN_RIGHTS = ZX_RIGHT_TRANSFER | ZX_RIGHT_INSPECT;
+    ZX_DEFAULT_PAGER_RIGHTS =
+        ZX_RIGHT_INSPECT | ZX_RIGHT_TRANSFER | ZX_RIGHT_ATTACH_VMO | ZX_RIGHT_MANAGE_VMO;
+    ZX_DEFAULT_EXCEPTION_RIGHTS = ZX_RIGHT_TRANSFER | ZX_RIGHTS_PROPERTY | ZX_RIGHT_INSPECT;
+    // Default rights applied to a created clock handle. The creator should consider whether
+    // ZX_RIGHT_SIGNAL is to be retained or removed when duplicating the clock handle.
+    ZX_DEFAULT_CLOCK_RIGHTS =
+        ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHT_SIGNAL | ZX_RIGHTS_PROPERTY;
+    ZX_DEFAULT_IOB_RIGHTS = ZX_RIGHTS_BASIC
+        | ZX_RIGHT_WAIT
+        | ZX_RIGHTS_IO
+        | ZX_RIGHTS_PROPERTY
+        | ZX_RIGHT_MAP
+        | ZX_RIGHT_SIGNAL
+        | ZX_RIGHT_SIGNAL_PEER;
+    ZX_DEFAULT_COUNTER_RIGHTS = ZX_RIGHTS_BASIC | ZX_RIGHTS_IO | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS =
+        ZX_RIGHTS_BASIC | ZX_RIGHT_WAIT | ZX_RIGHTS_PROPERTY | ZX_RIGHT_SIGNAL;
+    ZX_DEFAULT_SAMPLER_RIGHTS = ZX_RIGHTS_BASIC & !ZX_RIGHT_WAIT;
+]);
+
 multiconst!(u32, [
     ZX_VMO_RESIZABLE = 1 << 1;
     ZX_VMO_DISCARDABLE = 1 << 2;
@@ -252,6 +352,13 @@ multiconst!(u32, [
 
 multiconst!(u32, [
     ZX_SYSTEM_BARRIER_DATA_MEMORY = 0;
+]);
+
+// From //zircon/system/public/zircon/syscalls-next.h
+// Options for zx_system_suspend_enter().
+multiconst!(u64, [
+    ZX_SYSTEM_SUSPEND_OPTION_DISCARD     = 1 << 0;
+    ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY = 1 << 1;
 ]);
 
 // LINT.IfChange(zx_status_t)
@@ -706,6 +813,8 @@ multiconst!(zx_rsrc_kind_t, [
     ZX_RSRC_KIND_IOPORT     = 2;
     ZX_RSRC_KIND_SMC        = 4;
     ZX_RSRC_KIND_SYSTEM     = 5;
+    #[cfg(feature = "kernel")]
+    ZX_RSRC_KIND_COUNT      = 6;
 ]);
 
 // From //zircon/system/public/zircon/syscalls/resource.h
@@ -727,6 +836,8 @@ multiconst!(zx_rsrc_system_base_t, [
     ZX_RSRC_SYSTEM_TRACING_BASE     = 14;
     // A resource representing the ability to sample callstack information about other processes.
     ZX_RSRC_SYSTEM_SAMPLING_BASE    = 15;
+    #[cfg(feature = "kernel")]
+    ZX_RSRC_SYSTEM_COUNT            = 16;
 ]);
 
 // clock ids
@@ -923,6 +1034,8 @@ pub const ZX_CPRNG_ADD_ENTROPY_MAX_LEN: usize = 256;
 // Socket flags and limits.
 pub const ZX_SOCKET_STREAM: u32 = 0;
 pub const ZX_SOCKET_DATAGRAM: u32 = 1 << 0;
+pub const ZX_SOCKET_CREATE_MASK: u32 = ZX_SOCKET_DATAGRAM;
+pub const ZX_SOCKET_PEEK: u32 = 1 << 3;
 pub const ZX_SOCKET_DISPOSITION_WRITE_DISABLED: u32 = 1 << 0;
 pub const ZX_SOCKET_DISPOSITION_WRITE_ENABLED: u32 = 1 << 1;
 
@@ -972,6 +1085,7 @@ pub const ZX_TASK_RETCODE_CRITICAL_PROCESS_KILL: i64 = -1029;
 
 // Resource flags.
 pub const ZX_RSRC_FLAG_EXCLUSIVE: zx_rsrc_flags_t = 0x00010000;
+pub const ZX_RSRC_FLAGS_MASK: zx_rsrc_flags_t = ZX_RSRC_FLAG_EXCLUSIVE;
 
 // System event types.
 multiconst!(zx_system_event_type_t, [
@@ -996,6 +1110,7 @@ pub const ZX_CACHE_POLICY_CACHED: u32 = 0;
 pub const ZX_CACHE_POLICY_UNCACHED: u32 = 1;
 pub const ZX_CACHE_POLICY_UNCACHED_DEVICE: u32 = 2;
 pub const ZX_CACHE_POLICY_WRITE_COMBINING: u32 = 3;
+pub const ZX_CACHE_POLICY_MASK: u32 = 3;
 
 // Flag bits for zx_cache_flush.
 multiconst!(u32, [
@@ -1130,6 +1245,7 @@ pub type zx_rrec_t = [u8; 64];
 // Ports V2
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "zerocopy", derive(Immutable, IntoBytes, KnownLayout))]
 #[non_exhaustive]
 pub enum zx_packet_type_t {
     #[default]
@@ -1171,6 +1287,7 @@ pub type zx_packet_user_t = [u8; 32];
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(Immutable, IntoBytes, KnownLayout))]
 pub struct zx_port_packet_t {
     pub key: u64,
     pub packet_type: zx_packet_type_t,
@@ -1292,6 +1409,12 @@ multiconst!(u32, [
     ZX_PAGER_OP_WRITEBACK_BEGIN = 3;
     ZX_PAGER_OP_WRITEBACK_END = 4;
 ]);
+
+// Values for zx_pager_vmo_stats_t.modified.
+pub const ZX_PAGER_VMO_STATS_MODIFIED: u32 = 1;
+
+// Options for zx_pager_query_vmo_stats().
+pub const ZX_PAGER_RESET_VMO_STATS: u32 = 1;
 
 pub type zx_excp_type_t = u32;
 
@@ -1937,6 +2060,7 @@ pub struct zx_restricted_exception_t {
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_vcpu_state_t {
     pub rax: u64,
     pub rcx: u64,
@@ -1961,6 +2085,7 @@ pub struct zx_vcpu_state_t {
 #[cfg(target_arch = "aarch64")]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_vcpu_state_t {
     pub x: [u64; 31],
     pub sp: u64,
@@ -1972,12 +2097,14 @@ pub struct zx_vcpu_state_t {
 #[cfg(target_arch = "riscv64")]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_vcpu_state_t {
     pub empty: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_vcpu_io_t {
     pub access_size: u8,
     padding1: [PadByte; 3],
@@ -2177,6 +2304,18 @@ pub struct zx_iob_region_info_t {
     pub region: zx_iob_region_t,
     pub koid: zx_koid_t,
 }
+
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_info_vcpu_t {
+    // Bitwise OR of ZX_INFO_VCPU_FLAG_* values.
+    pub flags: u32,
+}
+
+multiconst!(u32, [
+    ZX_INFO_VCPU_FLAG_KICKED = 1 << 0;
+]);
 
 multiconst!(u32, [
     ZX_INFO_PROCESS_FLAG_STARTED = 1 << 0;
@@ -2826,6 +2965,15 @@ pub const DEBUGLOG_INFO: u8 = 0x30;
 pub const DEBUGLOG_WARNING: u8 = 0x40;
 pub const DEBUGLOG_ERROR: u8 = 0x50;
 pub const DEBUGLOG_FATAL: u8 = 0x60;
+
+// From //zircon/system/public/zircon/syscalls/log.h
+// Do not forward this message via network (for logging in network core and drivers).
+pub const ZX_LOG_LOCAL: u32 = 0x10;
+pub const ZX_LOG_FLAGS_MASK: u32 = ZX_LOG_LOCAL;
+
+// From //zircon/system/public/zircon/processargs.h
+pub const ZX_PROCARGS_PROTOCOL: u32 = 0x4150585d; // MXPA
+pub const ZX_PROCARGS_VERSION: u32 = 0x00001000;
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]

@@ -30,9 +30,8 @@ pub(super) async fn route_storage(
     target: &Arc<ComponentInstance>,
 ) -> Result<RoutedStorage, ModelError> {
     let storage_router_capability = target
-        .lock_resolved_state()
+        .component_sandbox()
         .await?
-        .sandbox
         .program_input
         .namespace()
         .get_capability(storage_path)

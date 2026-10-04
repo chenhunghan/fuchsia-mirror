@@ -9,13 +9,14 @@ import difflib
 import json
 import os
 import sys
+from typing import Any
 
 
-def by_name(x):
+def by_name(x: dict[str, Any]) -> str:
     return x["name"]
 
 
-def normalize_entry(entry):
+def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     entry["package_breakdown"] = sorted(
         list(entry["package_breakdown"].values()), key=by_name
     )
@@ -28,13 +29,13 @@ def normalize_entry(entry):
     return entry
 
 
-def normalize(size_report):
+def normalize(size_report: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(
         [normalize_entry(entry) for entry in size_report.values()], key=by_name
     )
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Compares size reports")
     parser.add_argument(
         "--verbose_size_report1", type=argparse.FileType("r"), required=True
@@ -91,6 +92,8 @@ def main():
         )
 
         return 1
+
+    return 0
 
 
 if __name__ == "__main__":

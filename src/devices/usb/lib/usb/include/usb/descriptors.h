@@ -5,8 +5,99 @@
 #ifndef SRC_DEVICES_USB_LIB_USB_INCLUDE_USB_DESCRIPTORS_H_
 #define SRC_DEVICES_USB_LIB_USB_INCLUDE_USB_DESCRIPTORS_H_
 
+#if !defined(__cplusplus) || __cplusplus < 202002L
+#error "Descriptors library requires C++20 or later."
+#endif
+
 #include <endian.h>
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
+#include <fuchsia/hardware/usb/c/banjo.h>
+
+#include <type_traits>
+#include <utility>
+
+namespace fuchsia_hardware_usb_descriptor {
+void fuchsia_hardware_usb_descriptor_adl_tag(auto);
+}  // namespace fuchsia_hardware_usb_descriptor
+
+namespace fuchsia_hardware_usb_descriptor_internal {
+template <typename E>
+concept IsUsbDescriptorEnum =
+    !std::is_integral_v<E> && (std::is_enum_v<E> || fidl::IsFidlType<E>::value || requires(E e) {
+      { fidl::ToUnderlying(e) } -> std::integral;
+    }) && requires(E e) { fuchsia_hardware_usb_descriptor_adl_tag(e); };
+}  // namespace fuchsia_hardware_usb_descriptor_internal
+
+namespace fuchsia_hardware_usb_descriptor {
+
+// Overloaded bitwise OR operators for setup request enums via IsUsbBitmaskEnum concept.
+template <typename E>
+concept IsUsbBitmaskEnum = std::is_same_v<E, EndpointDirection> || std::is_same_v<E, RequestType> ||
+                           std::is_same_v<E, RequestRecipient>;
+
+template <typename E>
+inline constexpr auto ToUnderlyingHelper(E val) {
+  if constexpr (std::is_integral_v<E>) {
+    return val;
+  } else if constexpr (requires { fidl::ToUnderlying(val); }) {
+    return fidl::ToUnderlying(val);
+  } else {
+    return static_cast<std::underlying_type_t<E>>(val);
+  }
+}
+
+template <IsUsbBitmaskEnum E1, IsUsbBitmaskEnum E2>
+inline constexpr uint8_t operator|(E1 a, E2 b) {
+  return static_cast<uint8_t>(fidl::ToUnderlying(a) | fidl::ToUnderlying(b));
+}
+template <IsUsbBitmaskEnum E, typename T>
+  requires std::is_integral_v<T>
+inline constexpr uint8_t operator|(E a, T b) {
+  return static_cast<uint8_t>(fidl::ToUnderlying(a) | b);
+}
+template <typename T, IsUsbBitmaskEnum E>
+  requires std::is_integral_v<T>
+inline constexpr uint8_t operator|(T a, E b) {
+  return static_cast<uint8_t>(a | fidl::ToUnderlying(b));
+}
+
+template <IsUsbBitmaskEnum E1, IsUsbBitmaskEnum E2>
+inline constexpr uint8_t operator&(E1 a, E2 b) {
+  return static_cast<uint8_t>(fidl::ToUnderlying(a) & fidl::ToUnderlying(b));
+}
+template <IsUsbBitmaskEnum E, typename T>
+  requires std::is_integral_v<T>
+inline constexpr uint8_t operator&(E a, T b) {
+  return static_cast<uint8_t>(fidl::ToUnderlying(a) & b);
+}
+template <typename T, IsUsbBitmaskEnum E>
+  requires std::is_integral_v<T>
+inline constexpr uint8_t operator&(T a, E b) {
+  return static_cast<uint8_t>(a & fidl::ToUnderlying(b));
+}
+
+// Architectural Note:
+// When matching or switching on extensible FIDL class codes (e.g., UsbClass) and vendor protocols,
+// driver maintainers should explicitly handle `.is_unknown()` fallback paths. This ensures wire
+// compatibility with novel USB hardware and newly introduced specification codes.
+template <typename E>
+concept IsDescriptorEnum = fuchsia_hardware_usb_descriptor_internal::IsUsbDescriptorEnum<E>;
+
+template <typename T, IsDescriptorEnum E>
+  requires std::is_integral_v<T>
+inline constexpr bool operator==(T a, E b) {
+  return std::cmp_equal(a, ToUnderlyingHelper(b));
+}
+
+template <typename T, IsDescriptorEnum E>
+  requires std::is_integral_v<T>
+inline constexpr bool operator==(E a, T b) {
+  return std::cmp_equal(ToUnderlyingHelper(a), b);
+}
+
+}  // namespace fuchsia_hardware_usb_descriptor
+
+using fuchsia_hardware_usb_descriptor::IsDescriptorEnum;
 
 // maximum number of endpoints per device
 #define USB_MAX_EPS 32
@@ -22,147 +113,17 @@
 #define USB_3_1 USB_BCD_VERSION(3, 1, 0)
 #define USB_3_2 USB_BCD_VERSION(3, 2, 0)
 
-/* Request Types */
-#define USB_DIR_OUT (0 << 7)
-#define USB_DIR_IN (1 << 7)
-#define USB_DIR_MASK (1 << 7)
-#define USB_TYPE_STANDARD (0 << 5)
-#define USB_TYPE_CLASS (1 << 5)
-#define USB_TYPE_VENDOR (2 << 5)
-#define USB_TYPE_MASK (3 << 5)
-#define USB_RECIP_DEVICE (0 << 0)
-#define USB_RECIP_INTERFACE (1 << 0)
-#define USB_RECIP_ENDPOINT (2 << 0)
-#define USB_RECIP_OTHER (3 << 0)
-#define USB_RECIP_MASK (0x1f << 0)
+using UsbMode = fuchsia_hardware_usb_descriptor::UsbMode;
 
-/* 1.0 Request Values */
-#define USB_REQ_GET_STATUS 0x00
-#define USB_REQ_CLEAR_FEATURE 0x01
-#define USB_REQ_SET_FEATURE 0x03
-#define USB_REQ_SET_ADDRESS 0x05
-#define USB_REQ_GET_DESCRIPTOR 0x06
-#define USB_REQ_SET_DESCRIPTOR 0x07
-#define USB_REQ_GET_CONFIGURATION 0x08
-#define USB_REQ_SET_CONFIGURATION 0x09
-#define USB_REQ_GET_INTERFACE 0x0A
-#define USB_REQ_SET_INTERFACE 0x0B
-#define USB_REQ_SYNCH_FRAME 0x0C
-
-/* USB device/interface classes */
-#define USB_CLASS_AUDIO 0x01
-#define USB_CLASS_COMM 0x02
-#define USB_CLASS_HID 0x03
-#define USB_CLASS_PHYSICAL 0x05
-#define USB_CLASS_IMAGING 0x06
-#define USB_CLASS_PRINTER 0x07
-#define USB_CLASS_MSC 0x08
-#define USB_CLASS_HUB 0x09
-#define USB_CLASS_CDC 0x0a
-#define USB_CLASS_CCID 0x0b
-#define USB_CLASS_SECURITY 0x0d
-#define USB_CLASS_VIDEO 0x0e
-#define USB_CLASS_HEALTHCARE 0x0f
-#define USB_CLASS_DIAGNOSTIC 0xdc
-#define USB_CLASS_WIRELESS 0xe0
-#define USB_CLASS_MISC 0xef
-#define USB_CLASS_APPLICATION_SPECIFIC 0xfe
-#define USB_CLASS_VENDOR 0xFf
-
-#define USB_SUBCLASS_COMM_ACM 0x02
-
-#define USB_SUBCLASS_WIRELESS_MISC 0x01
-#define USB_PROTOCOL_WIRELESS_MISC_RNDIS 0x03
-
-#define USB_SUBCLASS_MSC_RNDIS 0x04
-#define USB_PROTOCOL_MSC_RNDIS_ETHERNET 0x01
-
-#define USB_SUBCLASS_MSC_SCSI 0x06
-#define USB_PROTOCOL_MSC_BULK_ONLY 0x50
-
-#define USB_SUBCLASS_DFU 0x01
-#define USB_PROTOCOL_DFU 0x02
-
-#define USB_SUBCLASS_ADB 0x42
-#define USB_PROTOCOL_ADB 0x01
-
-#define USB_SUBCLASS_VSOCK_BRIDGE 0x43
-#define USB_PROTOCOL_VSOCK_BRIDGE 0x00
-
-#define USB_SUBCLASS_FASTBOOT 0x42
-#define USB_PROTOCOL_FASTBOOT 0x03
-
-#define USB_SUBCLASS_VENDOR 0xFF
-#define USB_PROTOCOL_TEST_FTDI 0x01
-#define USB_PROTOCOL_TEST_HID_ONE_ENDPOINT 0x02
-#define USB_PROTOCOL_TEST_HID_TWO_ENDPOINT 0x03
-
-/* Descriptor Types */
-#define USB_DT_DEVICE 0x01
-#define USB_DT_CONFIG 0x02
-#define USB_DT_STRING 0x03
-#define USB_DT_INTERFACE 0x04
-#define USB_DT_ENDPOINT 0x05
-#define USB_DT_DEVICE_QUALIFIER 0x06
-#define USB_DT_OTHER_SPEED_CONFIG 0x07
-#define USB_DT_INTERFACE_POWER 0x08
-#define USB_DT_INTERFACE_ASSOCIATION 0x0b
-#define USB_DT_BOS 0x0f
-#define USB_DT_HID 0x21
-#define USB_DT_HIDREPORT 0x22
-#define USB_DT_HIDPHYSICAL 0x23
-#define USB_DT_CS_INTERFACE 0x24
-#define USB_DT_CS_ENDPOINT 0x25
-#define USB_DT_SS_EP_COMPANION 0x30
-#define USB_DT_SS_ISOCH_EP_COMPANION 0x31
-
-/* USB device feature selectors */
-#define USB_DEVICE_SELF_POWERED 0x00
-#define USB_DEVICE_REMOTE_WAKEUP 0x01
-#define USB_DEVICE_TEST_MODE 0x02
-
-/* Configuration attributes (bm_attributes) */
-#define USB_CONFIGURATION_REMOTE_WAKEUP 0x20
-#define USB_CONFIGURATION_SELF_POWERED 0x40
-#define USB_CONFIGURATION_RESERVED_7 0x80  // This bit must be set
-
-/* Endpoint direction (bEndpointAddress) */
-#define USB_ENDPOINT_IN 0x80
-#define USB_ENDPOINT_OUT 0x00
-#define USB_ENDPOINT_DIR_MASK 0x80
-#define USB_ENDPOINT_NUM_MASK 0x1F
-
-/* Endpoint synchronization type (bm_attributes) */
-#define USB_ENDPOINT_NO_SYNCHRONIZATION 0x00
-#define USB_ENDPOINT_ASYNCHRONOUS 0x04
-#define USB_ENDPOINT_ADAPTIVE 0x08
-#define USB_ENDPOINT_SYNCHRONOUS 0x0C
-#define USB_ENDPOINT_SYNCHRONIZATION_MASK 0x0C
-
-/* Endpoint usage type (bm_attributes) */
-#define USB_ENDPOINT_DATA 0x00
-#define USB_ENDPOINT_FEEDBACK 0x10
-#define USB_ENDPOINT_IMPLICIT_FEEDBACK 0x20
-#define USB_ENDPOINT_USAGE_MASK 0x30
-
-/* Endpoint feature selectors */
-#define USB_ENDPOINT_HALT 0x00
-
-typedef uint32_t usb_mode_t;
-#define USB_MODE_NONE UINT32_C(0)
-#define USB_MODE_HOST UINT32_C(1)
-#define USB_MODE_PERIPHERAL UINT32_C(2)
-#define USB_MODE_OTG UINT32_C(3)
-
-static inline const char* usb_mode_to_string(usb_mode_t mode) {
+static inline const char* usb_mode_to_string(UsbMode mode) {
   switch (mode) {
-    case USB_MODE_NONE:
+    case UsbMode::kNone:
       return "NONE";
-    case USB_MODE_HOST:
+    case UsbMode::kHost:
       return "HOST";
-    case USB_MODE_PERIPHERAL:
+    case UsbMode::kPeripheral:
       return "PERIPHERAL";
-    case USB_MODE_OTG:
+    case UsbMode::kOtg:
       return "OTG";
     default:
       return "<unknown>";
@@ -187,7 +148,7 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_DEVICE
+  uint8_t b_descriptor_type;  // DescriptorType::kDevice
   uint16_t bcd_usb;
   uint8_t b_device_class;
   uint8_t b_device_sub_class;
@@ -204,7 +165,7 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_CONFIG
+  uint8_t b_descriptor_type;  // DescriptorType::kConfiguration
   uint16_t w_total_length;
   uint8_t b_num_interfaces;
   uint8_t b_configuration_value;
@@ -215,13 +176,13 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_STRING
+  uint8_t b_descriptor_type;  // DescriptorType::kString
   uint8_t b_string[];
 } __attribute__((packed)) usb_string_descriptor_t;
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_INTERFACE
+  uint8_t b_descriptor_type;  // DescriptorType::kInterface
   uint8_t b_interface_number;
   uint8_t b_alternate_setting;
   uint8_t b_num_endpoints;
@@ -233,7 +194,7 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_ENDPOINT
+  uint8_t b_descriptor_type;  // DescriptorType::kEndpoint
   uint8_t b_endpoint_address;
   uint8_t bm_attributes;
   uint16_t w_max_packet_size;
@@ -242,7 +203,7 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_DEVICE_QUALIFIER
+  uint8_t b_descriptor_type;  // DescriptorType::kDeviceQualifier
   uint16_t bcd_usb;
   uint8_t b_device_class;
   uint8_t b_device_sub_class;
@@ -254,24 +215,26 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_SS_EP_COMPANION
+  uint8_t b_descriptor_type;  // DescriptorType::kSsEpCompanion
   uint8_t b_max_burst;
   uint8_t bm_attributes;
   uint16_t w_bytes_per_interval;
 } __attribute__((packed)) usb_ss_ep_comp_descriptor_info_t;
-#define usb_ss_ep_comp_isoc_mult(ep) ((ep)->bm_attributes & 0x3)
-#define usb_ss_ep_comp_isoc_comp(ep) (!!((ep)->bm_attributes & 0x80))
+#define usb_ss_ep_comp_isoc_mult(ep) \
+  ((ep)->bm_attributes & fuchsia_hardware_usb_descriptor::kSsEpCompIsochMultMask)
+#define usb_ss_ep_comp_isoc_comp(ep) \
+  (!!((ep)->bm_attributes & fuchsia_hardware_usb_descriptor::kSsEpCompIsochCompMask))
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_SS_ISOCH_EP_COMPANION
+  uint8_t b_descriptor_type;  // DescriptorType::kSsIsochEpCompanion
   uint16_t w_reserved;
   uint32_t dw_bytes_per_interval;
 } __attribute__((packed)) usb_ss_isoch_ep_comp_descriptor_t;
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_INTERFACE_ASSOCIATION
+  uint8_t b_descriptor_type;  // DescriptorType::kInterfaceAssociation
   uint8_t b_first_interface;
   uint8_t b_interface_count;
   uint8_t b_function_class;
@@ -282,48 +245,268 @@ typedef struct {
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_BOS
+  uint8_t b_descriptor_type;  // DescriptorType::kBos
   uint16_t w_total_length;
   uint8_t b_num_device_caps;
 } __attribute__((packed)) usb_bos_descriptor_t;
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_CS_INTERFACE
+  uint8_t b_descriptor_type;  // DescriptorType::kCsInterface
   uint8_t b_descriptor_sub_type;
 } __attribute__((packed)) usb_cs_interface_descriptor_t;
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_STRING
+  uint8_t b_descriptor_type;  // DescriptorType::kString
   uint16_t w_lang_ids[127];
 } __attribute__((packed)) usb_langid_desc_t;
 
 typedef struct {
   uint8_t b_length;
-  uint8_t b_descriptor_type;  // USB_DT_STRING
+  uint8_t b_descriptor_type;  // DescriptorType::kString
   uint16_t code_points[127];
 } __attribute__((packed)) usb_string_desc_t;
 
-// Descriptor support macros.
-#define usb_ep_num(ep) ((ep)->b_endpoint_address & USB_ENDPOINT_NUM_MASK)
-// usb_ep_num2() useful with you have b_endpoint_address outside of a descriptor.
-#define usb_ep_num2(addr) ((addr) & USB_ENDPOINT_NUM_MASK)
-#define usb_ep_direction(ep) ((ep)->b_endpoint_address & USB_ENDPOINT_DIR_MASK)
-// usb_ep_direction2() useful with you have b_endpoint_address outside of a descriptor.
-#define usb_ep_direction2(addr) ((addr) & USB_ENDPOINT_DIR_MASK)
-#define usb_ep_type(ep)                                       \
-  static_cast<fuchsia_hardware_usb_descriptor::EndpointType>( \
-      (ep)->bm_attributes & fuchsia_hardware_usb_descriptor::kEndpointTypeMask)
-#define usb_ep_type2(ep)                                      \
-  static_cast<fuchsia_hardware_usb_descriptor::EndpointType>( \
-      (ep).bm_attributes() & fuchsia_hardware_usb_descriptor::kEndpointTypeMask)  // FIDL endpoint
-#define usb_ep_sync_type(ep) ((ep)->bm_attributes & USB_ENDPOINT_SYNCHRONIZATION_MASK)
-// Max packet size is in bits 10..0
-#define usb_ep_max_packet(ep) (le16toh((ep)->w_max_packet_size) & 0x07FF)
-#define usb_ep_max_packet2(ep) (le16toh((ep).w_max_packet_size()) & 0x07FF)  // FIDL endpoint.
-// For high speed interrupt and isochronous endpoints, additional transactions per microframe
-// are in bits 12..11
-#define usb_ep_add_mf_transactions(ep) ((le16toh((ep)->w_max_packet_size) >> 11) & 3)
+// Returns a host-endian uint16_t suitable for assignment to wire structures that undergo LE
+// conversion.
+template <typename E>
+  requires std::is_integral_v<E> || IsDescriptorEnum<E>
+inline constexpr uint16_t usb_descriptor_w_value(E type, uint8_t index = 0) {
+  return static_cast<uint16_t>(
+      (static_cast<uint16_t>(fuchsia_hardware_usb_descriptor::ToUnderlyingHelper(type) & 0xFF)
+       << 8) |
+      index);
+}
+
+inline constexpr fuchsia_hardware_usb_descriptor::DescriptorType usb_descriptor_type_from_w_value(
+    uint16_t w_value) {
+  return static_cast<fuchsia_hardware_usb_descriptor::DescriptorType>((w_value >> 8) & 0xFF);
+}
+
+inline constexpr uint8_t usb_descriptor_index_from_w_value(uint16_t w_value) {
+  return static_cast<uint8_t>(w_value & 0xFF);
+}
+
+inline constexpr bool usb_request_is_in(uint8_t bm_request_type) {
+  return (bm_request_type & fuchsia_hardware_usb_descriptor::kEndpointDirectionMask) ==
+         fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kIn);
+}
+
+inline constexpr bool usb_request_is_out(uint8_t bm_request_type) {
+  return (bm_request_type & fuchsia_hardware_usb_descriptor::kEndpointDirectionMask) ==
+         fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kOut);
+}
+
+inline constexpr fuchsia_hardware_usb_descriptor::RequestType usb_request_type(
+    uint8_t bm_request_type) {
+  return static_cast<fuchsia_hardware_usb_descriptor::RequestType>(
+      bm_request_type & fuchsia_hardware_usb_descriptor::kRequestTypeMask);
+}
+
+// Universal Setup Request Combination Constants
+inline constexpr uint8_t kStandardDeviceIn =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+    fuchsia_hardware_usb_descriptor::RequestType::kStandard |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kDevice;
+inline constexpr uint8_t kStandardDeviceOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kStandard |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kDevice;
+inline constexpr uint8_t kStandardInterfaceIn =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+    fuchsia_hardware_usb_descriptor::RequestType::kStandard |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kInterface;
+inline constexpr uint8_t kStandardInterfaceOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kStandard |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kInterface;
+inline constexpr uint8_t kStandardEndpointIn =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+    fuchsia_hardware_usb_descriptor::RequestType::kStandard |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kEndpoint;
+inline constexpr uint8_t kStandardEndpointOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kStandard |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kEndpoint;
+
+inline constexpr uint8_t kClassDeviceIn =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+    fuchsia_hardware_usb_descriptor::RequestType::kClass |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kDevice;
+inline constexpr uint8_t kClassDeviceOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kClass |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kDevice;
+inline constexpr uint8_t kClassInterfaceIn =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+    fuchsia_hardware_usb_descriptor::RequestType::kClass |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kInterface;
+inline constexpr uint8_t kClassInterfaceOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kClass |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kInterface;
+inline constexpr uint8_t kClassEndpointOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kClass |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kEndpoint;
+inline constexpr uint8_t kClassPortIn = fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+                                        fuchsia_hardware_usb_descriptor::RequestType::kClass |
+                                        fuchsia_hardware_usb_descriptor::RequestRecipient::kOther;
+inline constexpr uint8_t kClassPortOut = fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+                                         fuchsia_hardware_usb_descriptor::RequestType::kClass |
+                                         fuchsia_hardware_usb_descriptor::RequestRecipient::kOther;
+
+inline constexpr uint8_t kVendorDeviceIn =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kIn |
+    fuchsia_hardware_usb_descriptor::RequestType::kVendor |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kDevice;
+inline constexpr uint8_t kVendorDeviceOut =
+    fuchsia_hardware_usb_descriptor::EndpointDirection::kOut |
+    fuchsia_hardware_usb_descriptor::RequestType::kVendor |
+    fuchsia_hardware_usb_descriptor::RequestRecipient::kDevice;
+
+// Descriptor support functions.
+namespace fuchsia_hardware_usb_descriptor_internal {
+
+template <typename T>
+concept HasEpAddress =
+    std::is_integral_v<T> || requires(const T& ep) { ep.b_endpoint_address(); } ||
+    requires(const T& ep) { ep->b_endpoint_address; } ||
+    requires(const T& ep) { ep.b_endpoint_address; };
+
+template <typename T>
+concept HasEpAttributes = std::is_integral_v<T> || requires(const T& ep) {
+  ep.bm_attributes();
+} || requires(const T& ep) { ep->bm_attributes; } || requires(const T& ep) { ep.bm_attributes; };
+
+template <typename T>
+concept HasEpMaxPacketSize = requires(const T& ep) { ep.w_max_packet_size(); } ||
+                             requires(const T& ep) { ep->w_max_packet_size; } ||
+                             requires(const T& ep) { ep.w_max_packet_size; };
+
+template <HasEpAddress T>
+inline constexpr uint8_t ep_address(const T& ep) {
+  if constexpr (std::is_integral_v<T>) {
+    return static_cast<uint8_t>(ep);
+  } else if constexpr (requires { ep.b_endpoint_address(); }) {
+    return ep.b_endpoint_address();
+  } else if constexpr (requires { ep->b_endpoint_address; }) {
+    return ep->b_endpoint_address;
+  } else {
+    return ep.b_endpoint_address;
+  }
+}
+
+template <HasEpAttributes T>
+inline constexpr uint8_t ep_attributes(const T& ep) {
+  if constexpr (std::is_integral_v<T>) {
+    return static_cast<uint8_t>(ep);
+  } else if constexpr (requires { ep.bm_attributes(); }) {
+    return ep.bm_attributes();
+  } else if constexpr (requires { ep->bm_attributes; }) {
+    return ep->bm_attributes;
+  } else {
+    return ep.bm_attributes;
+  }
+}
+
+template <HasEpMaxPacketSize T>
+inline constexpr uint16_t ep_max_packet_raw(const T& ep) {
+  if constexpr (requires { ep.w_max_packet_size(); }) {
+    return ep.w_max_packet_size();
+  } else if constexpr (requires { ep->w_max_packet_size; }) {
+    return le16toh(ep->w_max_packet_size);
+  } else {
+    return le16toh(ep.w_max_packet_size);
+  }
+}
+
+}  // namespace fuchsia_hardware_usb_descriptor_internal
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAddress T>
+inline constexpr uint8_t usb_ep_num(const T& ep) {
+  return fuchsia_hardware_usb_descriptor_internal::ep_address(ep) &
+         fuchsia_hardware_usb_descriptor::kEndpointNumberMask;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAddress T>
+inline constexpr fuchsia_hardware_usb_descriptor::EndpointDirection usb_ep_direction(const T& ep) {
+  return static_cast<fuchsia_hardware_usb_descriptor::EndpointDirection>(
+      fuchsia_hardware_usb_descriptor_internal::ep_address(ep) &
+      fuchsia_hardware_usb_descriptor::kEndpointDirectionMask);
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAddress T>
+inline constexpr bool usb_ep_is_in(const T& ep) {
+  return usb_ep_direction(ep) == fuchsia_hardware_usb_descriptor::EndpointDirection::kIn;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAddress T>
+inline constexpr bool usb_ep_is_out(const T& ep) {
+  return usb_ep_direction(ep) == fuchsia_hardware_usb_descriptor::EndpointDirection::kOut;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAttributes T>
+inline constexpr fuchsia_hardware_usb_descriptor::EndpointType usb_ep_type(const T& ep) {
+  return static_cast<fuchsia_hardware_usb_descriptor::EndpointType>(
+      fuchsia_hardware_usb_descriptor_internal::ep_attributes(ep) &
+      fuchsia_hardware_usb_descriptor::kEndpointTypeMask);
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAttributes T>
+inline constexpr bool usb_ep_is_bulk(const T& ep) {
+  return usb_ep_type(ep) == fuchsia_hardware_usb_descriptor::EndpointType::kBulk;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAttributes T>
+inline constexpr bool usb_ep_is_int(const T& ep) {
+  return usb_ep_type(ep) == fuchsia_hardware_usb_descriptor::EndpointType::kInterrupt;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAttributes T>
+inline constexpr bool usb_ep_is_isoch(const T& ep) {
+  return usb_ep_type(ep) == fuchsia_hardware_usb_descriptor::EndpointType::kIsochronous;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAttributes T>
+inline constexpr bool usb_ep_is_ctrl(const T& ep) {
+  return usb_ep_type(ep) == fuchsia_hardware_usb_descriptor::EndpointType::kControl;
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpAttributes T>
+inline constexpr fuchsia_hardware_usb_descriptor::SynchronizationType usb_ep_sync_type(
+    const T& ep) {
+  return static_cast<fuchsia_hardware_usb_descriptor::SynchronizationType>(
+      (fuchsia_hardware_usb_descriptor_internal::ep_attributes(ep) &
+       fuchsia_hardware_usb_descriptor::kSynchronizationTypeMask) >>
+      2);
+}
+
+template <fuchsia_hardware_usb_descriptor_internal::HasEpMaxPacketSize T>
+inline constexpr uint16_t usb_ep_max_packet(const T& ep) {
+  return fuchsia_hardware_usb_descriptor_internal::ep_max_packet_raw(ep) &
+         fuchsia_hardware_usb_descriptor::kEndpointMaxPacketSizeMask;
+}
+
+static_assert(sizeof(usb_device_descriptor_t) == 18);
+static_assert(sizeof(usb_configuration_descriptor_t) == 9);
+static_assert(sizeof(usb_interface_descriptor_t) == 9);
+static_assert(sizeof(usb_endpoint_descriptor_t) == 7);
+static_assert(sizeof(usb_device_qualifier_descriptor_t) == 10);
+static_assert(sizeof(usb_bos_descriptor_t) == 5);
+static_assert(sizeof(usb_setup_info_t) == 8);
+static_assert(sizeof(usb_descriptor_header_t) == 2);
+static_assert(sizeof(usb_device_descriptor_info_t) == 18);
+static_assert(sizeof(usb_string_descriptor_t) == 2);
+static_assert(sizeof(usb_interface_info_descriptor_t) == 9);
+static_assert(sizeof(usb_endpoint_info_descriptor_t) == 7);
+static_assert(sizeof(usb_ss_ep_comp_descriptor_info_t) == 6);
+static_assert(sizeof(usb_ss_ep_comp_descriptor_t) == 6);
+static_assert(sizeof(usb_ss_isoch_ep_comp_descriptor_t) == 8);
+static_assert(sizeof(usb_interface_assoc_descriptor_t) == 8);
+static_assert(sizeof(usb_cs_interface_descriptor_t) == 3);
+static_assert(sizeof(usb_langid_desc_t) == 256);
+static_assert(sizeof(usb_string_desc_t) == 256);
 
 #endif  // SRC_DEVICES_USB_LIB_USB_INCLUDE_USB_DESCRIPTORS_H_

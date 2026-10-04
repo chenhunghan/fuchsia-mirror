@@ -11,14 +11,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
-	"time"
 
-	"go.fuchsia.dev/fuchsia/tools/build"
 	fintpb "go.fuchsia.dev/fuchsia/tools/integration/fint/proto"
 	"go.fuchsia.dev/fuchsia/tools/lib/jsonutil"
 	"go.fuchsia.dev/fuchsia/tools/lib/logger"
@@ -49,15 +45,6 @@ var (
 		"/bin/bash",
 		"/bin/sh",
 		"/dev/zero",
-	}
-
-	// The following tests should never be considered affected. These tests use
-	// a system image as data, so they appear affected by a broad range of
-	// changes, but they're almost never actually sensitive to said changes.
-	// https://fxbug.dev/42146209 tracks generating this list automatically.
-	neverAffectedTestLabels = []string{
-		"//src/recovery/simulator:recovery_simulator_boot_test",
-		"//src/recovery/simulator:recovery_simulator_serial_test",
 	}
 )
 
@@ -412,200 +399,6 @@ func checkNinjaNoop(
 	}
 
 	return true, "", nil, nil
-}
-
-// touchFiles updates the modified time on all the specified files to the
-// current timestamp, skipping any nonexistent files.
-// Returns a map of paths touched to their previous stats.
-// This map can be passed to resetTouchedFiles to revert the operation.
-func touchFiles(paths []string) (map[string]time.Time, error) {
-	reset := make(map[string]time.Time)
-	now := time.Now()
-	for _, path := range paths {
-		stat, err := os.Stat(path)
-		if err != nil {
-			// Skip any paths that don't exist, e.g. because the file was deleted in
-			// the change under test.
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, err
-		}
-		// Note that we can't get access time in a platform-agnostic way.
-		// We end up coupling mtime with atime, even after a reset.
-		reset[path] = stat.ModTime()
-		if err := os.Chtimes(path, now, now); err != nil {
-			return nil, err
-		}
-	}
-	return reset, nil
-}
-
-// Rolls back changes made by a previous call to touchFiles.
-func resetTouchFiles(touchFilesResult map[string]time.Time) error {
-	for path, mtime := range touchFilesResult {
-		if err := os.Chtimes(path, mtime, mtime); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// affectedTestsResult is the type emitted by `affectedTestsNoWork()`. It exists
-// solely to keep return statements in that function concise.
-type affectedTestsResult struct {
-	// Names of tests that are affected based on the paths of the changed files.
-	affectedTests []string
-
-	// Whether the build graph is unaffected by the changed files.
-	noWork bool
-
-	// Keep track of logs so the caller can choose to present them to the user
-	// for debugging purposes.
-	logs map[string]string
-}
-
-// affectedTestsNoWork touches affected files and then does a ninja dry run and
-// analyzes the output, to determine:
-// a) If the build graph is affected by the changed files.
-// b) If so, which tests are affected by the changed files.
-func affectedTestsNoWork(
-	ctx context.Context,
-	runner ninjaRunner,
-	contextSpec *fintpb.Context,
-	allTests []build.Test,
-	targets []string,
-) (affectedTestsResult, error) {
-	result := affectedTestsResult{
-		logs: map[string]string{},
-	}
-
-	// Map from "... is dirty" line printed by Ninja to affected test
-	testsByDirtyLine := map[string][]string{}
-	// Map from test path (if defined) to test name
-	testsByPath := map[string]string{}
-	// Map from path to BUILD.gn file defining the test to the test
-	testsByBuildGn := map[string][]string{}
-
-	for _, test := range allTests {
-		// Ignore any tests that shouldn't be considered affected.
-		labelNoToolchain := strings.Split(test.Label, "(")[0]
-		if slices.Contains(neverAffectedTestLabels, labelNoToolchain) {
-			continue
-		}
-
-		// For host tests we use the executable path.
-		if test.Path != "" {
-			testsByPath[test.Path] = test.Name
-		}
-
-		for _, packageManifest := range test.PackageManifests {
-			dirtyLine := dirtyLineForPackageManifest(packageManifest)
-			testsByDirtyLine[dirtyLine] = append(testsByDirtyLine[dirtyLine], test.Name)
-		}
-
-		buildGnPath := buildGnPathForLabel(test.Label)
-		testsByBuildGn[buildGnPath] = append(testsByBuildGn[buildGnPath], test.Name)
-		if test.PackageLabel != "" {
-			buildGnPath = buildGnPathForLabel(test.PackageLabel)
-			testsByBuildGn[buildGnPath] = append(testsByBuildGn[buildGnPath], test.Name)
-		}
-	}
-
-	var gnFiles, nonGNFiles []string
-	for _, f := range contextSpec.ChangedFiles {
-		ext := filepath.Ext(f.Path)
-		if ext == ".gn" || ext == ".gni" {
-			gnFiles = append(gnFiles, f.Path)
-		} else {
-			nonGNFiles = append(nonGNFiles, f.Path)
-		}
-	}
-
-	var affectedTests []string
-	for _, gnFile := range gnFiles {
-		gnFile = strings.TrimPrefix(gnFile, "build/secondary/")
-		match, ok := testsByBuildGn[gnFile]
-		if ok {
-			affectedTests = append(affectedTests, match...)
-		}
-	}
-
-	// Our Ninja graph is set up in such a way that touching any GN files
-	// triggers an action to regenerate the entire graph. So if GN files were
-	// modified and we touched them then the following dry run results are not
-	// useful for determining affected tests.
-	touchNonGNResult, err := touchFiles(makeAbsolute(contextSpec.CheckoutDir, nonGNFiles))
-	if err != nil {
-		return result, err
-	}
-	defer resetTouchFiles(touchNonGNResult)
-	// TODO: Pass a real path here to capture dirty sources in the pre-build phase.
-	stdout, stderr, err := ninjaDryRun(ctx, runner, targets, "")
-	if err != nil {
-		return result, err
-	}
-	ninjaOutput := strings.Join([]string{stdout, stderr}, "\n\n")
-
-	for _, line := range strings.Split(ninjaOutput, "\n") {
-		match, ok := testsByDirtyLine[line]
-		if ok {
-			// Matched an expected line
-			affectedTests = append(affectedTests, match...)
-		} else {
-			// Look for actions that reference host test path. Different types
-			// of host tests have different actions, but they all mention the
-			// final executable path.
-			// fxbug.dev(85524): tokenize with shlex in case test paths include
-			// whitespace.
-			for _, maybeTestPath := range strings.Split(line, " ") {
-				maybeTestPath = strings.Trim(maybeTestPath, `"`)
-				testName, ok := testsByPath[maybeTestPath]
-				if !ok {
-					continue
-				}
-				affectedTests = append(affectedTests, testName)
-			}
-		}
-	}
-
-	// For determination of "no work to do", we want to consider all files,
-	// *including* GN files. If no GN files are affected, then we already have
-	// the necessary output from the first ninja dry run, so we can skip doing
-	// the second dry run that includes GN files.
-	if len(gnFiles) > 0 {
-		result.logs["ninja dry run output (no GN files)"] = ninjaOutput
-
-		// Since we only did a Ninja dry run, the non-GN files will still be
-		// considered dirty, so we need only touch the GN files.
-		touchGNResult, err := touchFiles(makeAbsolute(contextSpec.CheckoutDir, gnFiles))
-		if err != nil {
-			return result, err
-		}
-		defer resetTouchFiles(touchGNResult)
-		var stdout, stderr string
-		// TODO: Pass a real path here to capture dirty sources in the pre-build phase.
-		stdout, stderr, err = ninjaDryRun(ctx, runner, targets, "")
-		if err != nil {
-			return result, err
-		}
-		ninjaOutput = strings.Join([]string{stdout, stderr}, "\n\n")
-	}
-	result.logs["ninja dry run output"] = ninjaOutput
-	result.noWork = strings.Contains(ninjaOutput, noWorkString)
-	result.affectedTests = removeDuplicates(affectedTests)
-
-	return result, nil
-}
-
-func dirtyLineForPackageManifest(label string) string {
-	return "ninja explain: " + label + " is dirty"
-}
-
-func buildGnPathForLabel(label string) string {
-	result := strings.TrimPrefix(label, "//")
-	result = strings.Split(result, ":")[0]
-	return path.Join(result, "BUILD.gn")
 }
 
 func runNinjatrace(ctx context.Context, runner subprocessRunner, ninjatraceToolPath string, ninjaTracePath string, traceJson string) error {

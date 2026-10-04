@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::channel_dispatcher::MessageWaiter;
 use super::handle::KernelHandle;
 use super::process_dispatcher::ProcessDispatcher;
 use super::thread_dispatcher::ThreadDispatcher;
@@ -217,4 +218,12 @@ unsafe extern "C" {
         thread: *const ThreadDispatcher,
         out_report: *mut zx_types::zx_exception_report_t,
     ) -> zx_status_t;
+
+    /// Returns the current thread's `MessageWaiter`.
+    ///
+    /// # Safety
+    ///
+    /// The current thread must be an active thread with an initialized `MessageWaiter`.
+    #[allow(improper_ctypes)]
+    pub fn cpp_thread_dispatcher_get_current_message_waiter() -> *mut MessageWaiter;
 }

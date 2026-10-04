@@ -4,6 +4,8 @@
 
 #include <zircon/errors.h>
 
+#include <thread>
+
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/bcdc.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/fwil.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/sim.h"
@@ -17,7 +19,6 @@ class IovarTest : public SimTest {
   IovarTest() = default;
   // This is the interface we will use for our single client interface
   SimInterface client_ifc_;
-  SimFirmware* sim_fw_;
 
   void Init();
 
@@ -154,4 +155,53 @@ TEST_F(IovarTest, CheckIovarBufLenTooLong) {
   zx_status_t status = IovarGet(buf, BRCMF_DCMD_MAXLEN + 1);
   EXPECT_NE(status, ZX_OK);
 }
+
+TEST_F(IovarTest, RaceIovarGetAndProtoDetach) {
+  Init();
+  ASSERT_EQ(StartInterface(wlan_common::WlanMacRole::kClient, &client_ifc_), ZX_OK);
+
+  libsync::Completion cmd_blocked;
+  libsync::Completion cmd_resume;
+
+  brcmf_pub* drvr = nullptr;
+
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    drvr = device->drvr();
+    device->GetSim()->sim_fw->SetCommandHook([&](uint32_t cmd) {
+      if (cmd == BRCMF_C_GET_VAR) {
+        cmd_blocked.Signal();
+        cmd_resume.Wait();
+      }
+    });
+  });
+
+  ASSERT_NOT_NULL(drvr);
+
+  std::thread cmd_thread([&] {
+    char buf[32];
+    strcpy(buf, "anything");
+
+    // We don't care if this succeeds or not so long as it doesn't crash.
+    IovarGet(buf, sizeof(buf));
+  });
+
+  // Wait until the thread is blocked in BusTxCtl.
+  cmd_blocked.Wait();
+
+  // Call detach from a separate thread and wait for it to start.
+  libsync::Completion detach_thread_started;
+  std::thread detach_thread([&] {
+    detach_thread_started.Signal();
+    brcmf_proto_bcdc_detach(drvr);
+  });
+  detach_thread_started.Wait();
+
+  // We resume the blocked command thread.
+  cmd_resume.Signal();
+
+  // Wait for both threads to finish.
+  cmd_thread.join();
+  detach_thread.join();
+}
+
 }  // namespace wlan::brcmfmac

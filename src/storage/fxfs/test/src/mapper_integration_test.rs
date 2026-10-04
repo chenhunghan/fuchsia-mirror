@@ -327,7 +327,9 @@ async fn test_mapper_with_verification_on_gpt_partition() -> Result<(), Error> {
         TestBlob::new_uncompressed(vec![0x42u8; 3500]),
         TestBlob::new_uncompressed(vec![0x77u8; 32 * 1024]),
         TestBlob::new_type1_compressed(vec![0xAAu8; 64 * 1024]),
+        TestBlob::new_type1_compressed(vec![0xBBu8; 200 * 1024]),
         TestBlob::new_type3_compressed(vec![0x55u8; 128 * 1024]),
+        TestBlob::new_type3_compressed(vec![0x66u8; 300 * 1024]),
     ];
 
     for (idx, blob) in test_blobs.iter().enumerate() {

@@ -5842,6 +5842,7 @@ mod tests {
     use netstack3_ip::testutil::DualStackSendIpPacketMeta;
     use netstack3_ip::{
         BaseTransportIpContext, HopLimits, IpTransportContext, LocalDeliveryPacketInfo,
+        MaybeSegmentableTransportSerializer,
     };
     use packet::{Buf, BufferMut, NestablePacketBuilder as _, ParseBuffer as _, Serializer as _};
     use packet_formats::icmp::{
@@ -6307,7 +6308,7 @@ mod tests {
             tx_meta: BC::TxMetadata,
         ) -> Result<(), IpSockSendError>
         where
-            S: TransportPacketSerializer<I>,
+            S: TransportPacketSerializer<I> + MaybeSegmentableTransportSerializer,
             S::Buffer: BufferMut,
             O: SendOptions<I> + RouteResolutionOptions<I>,
         {

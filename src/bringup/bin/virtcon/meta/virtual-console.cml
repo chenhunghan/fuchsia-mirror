@@ -134,7 +134,10 @@
             availability: "optional",
         },
         { service: "fuchsia.hardware.display.Service" },
-        { service: "fuchsia.input.report.Service" },
+        {
+            service: "fuchsia.input.report.Service",
+            availability: "optional",
+        },
     ],
     expose: [
         {

@@ -61,7 +61,6 @@
 #include <object/vm_object_dispatcher.h>
 #include <phys/handoff.h>
 #include <platform/halt_helper.h>
-#include <platform/halt_token.h>
 #include <platform/mexec.h>
 #include <vm/handoff-end.h>
 #include <vm/physmap.h>
@@ -148,11 +147,6 @@ extern "C" FFI_ALWAYS_INLINE zx_status_t cpp_mp_unplug_cpu_mask_all_but_primary(
 extern "C" FFI_ALWAYS_INLINE void cpp_platform_graceful_halt_helper(uint32_t action) {
   platform_graceful_halt_helper(static_cast<platform_halt_action>(action),
                                 ZirconCrashReason::NoCrash, ZX_TIME_INFINITE);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-extern "C" FFI_ALWAYS_INLINE zx_status_t cpp_halt_token_ack_pending_halt() {
-  return HaltToken::Get().AckPendingHalt();
 }
 
 #if defined(__x86_64__)

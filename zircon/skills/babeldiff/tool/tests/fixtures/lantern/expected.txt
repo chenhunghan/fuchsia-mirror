@@ -1,0 +1,289 @@
+babeldiff: 8 pairs, 12 issues, 17 notes; 0 C++ and 1 Rust function unpaired
+issues by kind: call 3, value 3, comment 2, assert 2, error-path 1, pairing 1
+rubric lints: 3 issues, 0 notes (file-placement 1, provenance-comment 1, invented-lifetime 1); see the end of the report
+legend: = same  ~ note  ! issue  < only in C++  > only in Rust
+
+==== read_brightness  <->  read_brightness
+  C++   zircon/kernel/arch/toy/lantern.cc:13-17
+  Rust  zircon/kernel/arch/toy/src/lantern.rs:8-15
+  why   names and bodies are similar (score 0.80)
+  similarity 0.79, 0 issues, 0 notes
+
+= C     13  static uint64_t read_brightness(void) {
+  R      8  fn read_brightness() -> u64 {
+= C     14    uint64_t value;
+  R      9      let value: u64;
+> R     10      // SAFETY: Reading the brightness register has no side effects.
+= C     15    __asm__ volatile("mov %%dr6, %0" : "=r"(value));
+  R     12          asm!("mov {}, dr6", out(reg) value, options(nomem, nostack));
+= C     16    return value | LANTERN_BRIGHT_MASK;
+  R     14      value | LANTERN_BRIGHT_MASK
+
+  errors   same
+  locks    same
+  flow     return 1
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== read_brightness  <->  read_brightness
+  C++   zircon/kernel/arch/toy/lantern.cc:13-17
+  Rust  zircon/kernel/arch/toy/src/glow.rs:9-17
+  why   a second Rust definition of read_brightness; the first is at zircon/kernel/arch/toy/src/lantern.rs:8 (score 0.68)
+  similarity 0.68, 3 issues, 0 notes
+
+> R      9  /// Reads the brightness register.
+        ^ ! doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
+= C     13  static uint64_t read_brightness(void) {
+  R     10  pub fn read_brightness() -> u64 {
+= C     14    uint64_t value;
+  R     11      let value: u64;
+> R     12      // SAFETY: Reading the brightness register has no side effects.
+= C     15    __asm__ volatile("mov %%dr6, %0" : "=r"(value));
+  R     14          asm!("mov {}, dr6", out(reg) value, options(nomem, nostack));
+! C     16    return value | LANTERN_BRIGHT_MASK;
+  R     16      value
+        ^ ! C++ sets LANTERN_BRIGHT_MASK here, and the Rust doesn't
+
+  errors   same
+  locks    same
+  flow     return 1
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+  findings
+    ! - | glow.rs:9  the change defines read_brightness twice, here and at zircon/kernel/arch/toy/src/lantern.rs:8, and the copies differ; both are compared with the C++, and callers may reach either
+    ! - | glow.rs:9  doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
+    ! lantern.cc:16 | glow.rs:16  C++ sets LANTERN_BRIGHT_MASK here, and the Rust doesn't
+
+==== lantern_disable  <->  lantern_disable
+  C++   zircon/kernel/arch/toy/lantern.cc:19-23
+  Rust  zircon/kernel/arch/toy/src/glow.rs:19-26
+  why   same class and method name
+  similarity 0.69, 1 issue, 0 notes
+
+= C     19  void lantern_disable(void) {
+  R     19  pub fn lantern_disable() {
+= C     20    // Clearing the control register turns the lantern off.
+  R     20      // Clearing the control register turns the lantern off.
+< C     21    uint64_t zero_val = 0;
+> R     21      let value = LANTERN_OFF_MASK;
+        ^ ! only Rust uses LANTERN_OFF_MASK (0x700); the C++ function never mentions it
+> R     22      // SAFETY: Writing the control register only affects the lantern.
+= C     22    __asm__ volatile("mov %0, %%dr7" ::"r"(zero_val));
+  R     24          asm!("mov dr7, {}", in(reg) value, options(nomem, nostack));
+
+  errors   same
+  locks    same
+  flow     none
+  comments 1 C++ comment: 1 identical, 0 reworded, 0 missing in Rust
+  findings
+    ! - | glow.rs:21  only Rust uses LANTERN_OFF_MASK (0x700); the C++ function never mentions it
+
+==== lantern_save  <->  lantern_save
+  C++   zircon/kernel/arch/toy/lantern.cc:25-28
+  Rust  zircon/kernel/arch/toy/src/lantern.rs:17-20
+  why   same class and method name
+  similarity 1.00, 0 issues, 0 notes
+
+= C     25  void lantern_save(lantern_state_t* state) {
+  R     17  pub fn lantern_save(state: &mut LanternState) {
+= C     26    state->brightness = read_brightness();
+  R     18      state.brightness = read_brightness();
+= C     27    state->mode = lantern_mode();
+  R     19      state.mode = lantern_mode();
+
+  errors   same
+  locks    same
+  flow     none
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+
+==== lantern_copy_from_frame  <->  lantern_copy_from_frame
+  C++   zircon/kernel/arch/toy/lantern.cc:30-33
+  Rust  zircon/kernel/arch/toy/src/lantern.rs:22-27
+  why   same class and method name
+  similarity 0.45, 2 issues, 2 notes
+
+= C     30  void lantern_copy_from_frame(lantern_state_t* out, const frame_t* in) {
+  R     22  pub fn lantern_copy_from_frame(out: &mut LanternState, inp: &Frame) {
+< C     31    COPY_WICKS(out, in);
+        ^ ! C++ macro COPY_WICKS is expanded inline in the Rust; keep it as a macro (macro_rules!) and use it where the C++ does
+        ^ ~ statement (calls copy_wicks) only in C++; the C++ macro COPY_WICKS is expanded inline
+> R     23      out.wick0 = inp.wick0;
+        ^ ~ lines 23-25 only in Rust, with no C++ counterpart: 3 statement
+> R     24      out.wick1 = inp.wick1;
+> R     25      out.wick2 = inp.wick2;
+! C     32    out->flags = in->flags;
+  R     26      out.flags = inp.flags & !LANTERN_FLAGS_RESUME;
+        ^ ! Rust also clears LANTERN_FLAGS_RESUME, which the C++ doesn't
+
+  errors   same
+  locks    same
+  flow     none
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+  findings
+    ! lantern.cc:31 | -  C++ macro COPY_WICKS is expanded inline in the Rust; keep it as a macro (macro_rules!) and use it where the C++ does
+    ! lantern.cc:32 | lantern.rs:26  Rust also clears LANTERN_FLAGS_RESUME, which the C++ doesn't
+    ~ lantern.cc:31 | -  statement (calls copy_wicks) only in C++; the C++ macro COPY_WICKS is expanded inline
+    ~ - | lantern.rs:23  lines 23-25 only in Rust, with no C++ counterpart: 3 statement
+
+==== lantern_copy_from_syscall  <->  lantern_copy_from_syscall
+  C++   zircon/kernel/arch/toy/lantern.cc:35-38
+  Rust  zircon/kernel/arch/toy/src/lantern.rs:29-34
+  why   same class and method name
+  similarity 0.47, 1 issue, 2 notes
+
+= C     35  void lantern_copy_from_syscall(lantern_state_t* out, const syscall_frame_t* in) {
+  R     29  pub fn lantern_copy_from_syscall(out: &mut LanternState, inp: &SyscallFrame) {
+< C     36    COPY_WICKS(out, in);
+        ^ ! C++ macro COPY_WICKS is expanded inline in the Rust; keep it as a macro (macro_rules!) and use it where the C++ does
+        ^ ~ statement (calls copy_wicks) only in C++; the C++ macro COPY_WICKS is expanded inline
+> R     30      out.wick0 = inp.wick0;
+        ^ ~ lines 30-32 only in Rust, with no C++ counterpart: 3 statement
+> R     31      out.wick1 = inp.wick1;
+> R     32      out.wick2 = inp.wick2;
+= C     37    out->flags = in->flags;
+  R     33      out.flags = inp.flags;
+
+  errors   same
+  locks    same
+  flow     none
+  comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
+  findings
+    ! lantern.cc:36 | -  C++ macro COPY_WICKS is expanded inline in the Rust; keep it as a macro (macro_rules!) and use it where the C++ does
+    ~ lantern.cc:36 | -  statement (calls copy_wicks) only in C++; the C++ macro COPY_WICKS is expanded inline
+    ~ - | lantern.rs:30  lines 30-32 only in Rust, with no C++ counterpart: 3 statement
+
+==== lantern_get_colors  <->  lantern_get_colors
+  C++   zircon/kernel/arch/toy/lantern.cc:40-48
+  Rust  zircon/kernel/arch/toy/src/lantern.rs:36-42
+  why   same class and method name
+  similarity 0.81, 1 issue, 4 notes
+
+= C     40  zx_status_t lantern_get_colors(Lantern* lantern, lantern_colors_t* out) {
+  R     36  pub fn lantern_get_colors(lantern: &Lantern, out: &mut LanternColors) -> zx_status_t {
+< C     41    auto copy_color =
+  C     42        [](uint8_t* dst, const uint8_t* src, size_t len) { memcpy(dst, src, len); };
+        ^ ~ statement (calls memcpy) only in C++; the other side makes the same calls elsewhere
+= C     43    // Red first, then green and blue.
+  R     37      // Red first, then green and blue.
+! C     44    copy_color(out->red, lantern->red, kColorSize);
+  R     38      out.red.copy_from_slice(&lantern.red[..COLOR_SIZE]);
+        ^ ! C++ calls the helper copy_color at 3 places (lines 44, 45, 46); the Rust never calls it, so its code is repeated inline
+        ^ ~ only C++ calls copy_color; only Rust calls memcpy
+~ C     45    copy_color(out->green, lantern->green, kColorSize);
+  R     39      out.green.copy_from_slice(&lantern.green[..COLOR_SIZE]);
+        ^ ~ only C++ calls copy_color; only Rust calls memcpy
+~ C     46    copy_color(out->blue, lantern->blue, kColorSize);
+  R     40      out.blue.copy_from_slice(&lantern.blue[..COLOR_SIZE]);
+        ^ ~ only C++ calls copy_color; only Rust calls memcpy
+= C     47    return ZX_OK;
+  R     41      ZX_OK
+
+  errors   same
+  locks    same
+  flow     return 1
+  comments 1 C++ comment: 1 identical, 0 reworded, 0 missing in Rust
+  findings
+    ! lantern.cc:44 | lantern.rs:38  C++ calls the helper copy_color at 3 places (lines 44, 45, 46); the Rust never calls it, so its code is repeated inline
+    ~ lantern.cc:41 | -  statement (calls memcpy) only in C++; the other side makes the same calls elsewhere
+    ~ lantern.cc:44 | lantern.rs:38  only C++ calls copy_color; only Rust calls memcpy
+    ~ lantern.cc:45 | lantern.rs:39  only C++ calls copy_color; only Rust calls memcpy
+    ~ lantern.cc:46 | lantern.rs:40  only C++ calls copy_color; only Rust calls memcpy
+
+==== lantern_get_state  <->  lantern_get_state
+  C++   zircon/kernel/arch/toy/lantern.cc:50-68
+  Rust  zircon/kernel/arch/toy/src/lantern.rs:44-80
+  via   FFI shim lantern_get_state  zircon/kernel/arch/toy/src/lantern.rs:44-80
+  similarity 0.61, 4 issues, 9 notes
+
+> R     44  /// Reads the lantern's state (`lantern.cc:52-70`).
+        ^ ! doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
+> R     46  /// # Safety
+  R     47  ///
+  R     48  /// `lantern` and `out` must be null or valid.
+= C     50  zx_status_t lantern_get_state(Lantern* lantern, lantern_state_t* out) {
+  R     50  pub unsafe extern "C" fn lantern_get_state(lantern: *mut Lantern, out: *mut LanternState) -> zx_status_t {
+> R     51      if lantern.is_null() || out.is_null() {
+        ^ ! Rust adds a check `lantern.is_null() || out.is_null()`, returning INVALID_ARGS, that the C++ doesn't make
+> R     52          return ZX_ERR_INVALID_ARGS;
+~ C     51    SingleChainLockGuard guard{IrqSaveOption, lantern->get_lock(), CLT_TAG("lantern_get_state")};
+  R     54      let f = |lantern: *mut Lantern| -> zx_status_t {
+        ^ ~ only C++ calls clt_tag
+        ^ ~ same lock, but the Rust takes it by passing this closure to a callback instead of holding a guard like the C++; a guard type would keep the Rust shaped like the C++
+> R     55          // SAFETY: `lantern` is valid and its lock is held.
+> R     56          let lit = unsafe { lantern::is_lit(lantern) };
+> R     57          debug_assert!(lit);
+        ^ ~ statement (calls assert) only in Rust; resembles C++ line 64, so the order may differ
+> R     58          // SAFETY: `lantern` is valid and its lock is held.
+! C     52    DEBUG_ASSERT(lantern->IsLitLocked());
+  R     59          let l = unsafe { &*lantern };
+        ^ ~ only C++ calls assert, is_lit_locked
+        ^ ! C++ calls is_lit_locked only inside DEBUG_ASSERT, so only in debug builds; the Rust calls it unconditionally at line 56
+= C     53    // Nothing to report until the lantern has been lit.
+  R     60          // Nothing to report until the lantern has been lit.
+= C     54    if (lantern->frame == nullptr)
+  R     61          if l.frame.is_null() {
+= C     55      return ZX_ERR_BAD_STATE;
+  R     62              return ZX_ERR_BAD_STATE;
+< C     56    switch (lantern->source) {
+        ^ ~ switch/match only in C++; the switch and the if/else-if chain dispatch the same way
+> R     64          // SAFETY: `out` is non-null and valid.
+> R     65          let out = unsafe { &mut *out };
+= C     57      case LanternSource::Frame:
+  R     66          if l.source == LanternSource::Frame {
+> R     67              // SAFETY: `frame` is non-null.
+= C     58        lantern_copy_from_frame(out, lantern->frame);
+  R     68              lantern_copy_from_frame(out, unsafe { &*l.frame });
+= C     60      case LanternSource::Syscall:
+  R     69          } else if l.source == LanternSource::Syscall {
+> R     70              // SAFETY: A syscall frame is set whenever the source says so.
+= C     61        lantern_copy_from_syscall(out, lantern->syscall_frame);
+  R     71              lantern_copy_from_syscall(out, unsafe { &*l.syscall_frame });
+= C     63      default:
+  R     72          } else {
+< C     64        ASSERT(false);
+        ^ ! C++ panics here (ASSERT(false)); the Rust returns NOT_SUPPORTED instead (line 73)
+> R     73              return ZX_ERR_NOT_SUPPORTED;
+        ^ ~ return of error NOT_SUPPORTED only in Rust; it stands in for a C++ panic
+= C     66    out->level = lantern->level;
+  R     75          out.level = l.level;
+> R     76          ZX_OK
+        ^ ~ statement only in Rust
+> R     78      // SAFETY: `lantern` is non-null and valid.
+~ C     67    return ZX_OK;
+  R     79      unsafe { lantern::with_chain_lock(lantern, f) }
+        ^ ~ C++ returns ok, Rust returns a value
+
+  errors   DIFFERENT
+           C++:  BAD_STATE
+           Rust: INVALID_ARGS, BAD_STATE, NOT_SUPPORTED
+  locks    same
+           C++:  lantern
+           Rust: lantern
+  flow     if 1/4!, else 0/1!, switch 4/0!, return 2/4!  (C++/Rust counts where they differ)
+  comments 1 C++ comment: 1 identical, 0 reworded, 0 missing in Rust
+  findings
+    ! - | lantern.rs:44  doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
+    ! - | lantern.rs:51  Rust adds a check `lantern.is_null() || out.is_null()`, returning INVALID_ARGS, that the C++ doesn't make
+    ! lantern.cc:52 | lantern.rs:59  C++ calls is_lit_locked only inside DEBUG_ASSERT, so only in debug builds; the Rust calls it unconditionally at line 56
+    ! lantern.cc:64 | -  C++ panics here (ASSERT(false)); the Rust returns NOT_SUPPORTED instead (line 73)
+    ~ lantern.cc:51 | lantern.rs:54  only C++ calls clt_tag
+    ~ lantern.cc:51 | lantern.rs:54  same lock, but the Rust takes it by passing this closure to a callback instead of holding a guard like the C++; a guard type would keep the Rust shaped like the C++
+    ~ - | lantern.rs:57  statement (calls assert) only in Rust; resembles C++ line 64, so the order may differ
+    ~ lantern.cc:52 | lantern.rs:59  only C++ calls assert, is_lit_locked
+    ~ lantern.cc:56 | -  switch/match only in C++; the switch and the if/else-if chain dispatch the same way
+    ~ - | lantern.rs:73  return of error NOT_SUPPORTED only in Rust; it stands in for a C++ panic
+    ~ - | lantern.rs:76  statement only in Rust
+    ~ lantern.cc:67 | lantern.rs:79  C++ returns ok, Rust returns a value
+    ~ - | lantern.rs:44  Rust adds 6 unsafe blocks where the C++ needs none; a safe facade for what they reach into would keep it closer to the C++
+
+==== Unpaired functions
+  > Rust glow_level  zircon/kernel/arch/toy/src/glow.rs:28-33
+
+==== File placement
+  lantern.cc -> lantern.rs (6), glow.rs (1, unexpected)
+
+==== Rubric lints
+  ! zircon/kernel/arch/toy/lantern.cc:1  [file-placement] lantern.cc was split across 2 Rust files: lantern.rs (6), glow.rs (1, not named after it); convert each C++ file into one Rust file
+  ! zircon/kernel/arch/toy/src/glow.rs:31  [invented-lifetime] a reference is made from `buf_ptr`, a raw pointer into `lantern.buffer` (line 29), so its lifetime is invented rather than borrowed from `lantern.buffer`; borrow `lantern.buffer` instead
+  ! zircon/kernel/arch/toy/src/lantern.rs:4  [provenance-comment] 2 comments say where the code was ported from (lines 4, 44), such as "Ported from `zircon/kernel/arch/toy/lantern.cc`."; drop them, since they stop being relevant once the change lands
+
+==== FFI shims
+  lantern_get_state -> lantern_copy_from_syscall  zircon/kernel/arch/toy/src/lantern.rs:44-80

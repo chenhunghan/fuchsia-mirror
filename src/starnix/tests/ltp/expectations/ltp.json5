@@ -221,7 +221,6 @@
 
                 // Needs /proc/sys/fs/pipe-user-pages-soft
                 "pipe15",
-                "prctl01",
                 "prctl02",
 
                 // TODO(https://fxbug.dev/547878640): Requires O_DIRECT support.

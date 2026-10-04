@@ -38,6 +38,7 @@ macro_rules! __assert_parses_exactly {
 macro_rules! assert_parses_to_record {
     ($buf:expr, $expected:expr $(,)?) => {{
         let buf = $buf.to_owned();
+        let buf = zerocopy::IntoBytes::as_bytes(buf.as_slice()).to_vec();
         __assert_parses_exactly!(buf => $crate::RawTraceRecord::parse =>
             $crate::ParsedWithOriginalBytes { parsed: $expected, bytes: &buf[..] });
     }};
@@ -46,6 +47,8 @@ macro_rules! assert_parses_to_record {
 #[macro_export]
 macro_rules! assert_parses_to_arg {
     ($buf:expr, $expected:expr $(,)?) => {{
-        __assert_parses_exactly!($buf => crate::args::RawArg::parse => $expected);
+        let buf = $buf.to_owned();
+        let buf = zerocopy::IntoBytes::as_bytes(buf.as_slice()).to_vec();
+        __assert_parses_exactly!(buf => crate::args::RawArg::parse => $expected);
     }}
 }

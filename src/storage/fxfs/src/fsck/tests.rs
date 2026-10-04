@@ -2658,7 +2658,10 @@ async fn test_encrypted_symlink_has_missing_keys() {
             .update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -2757,7 +2760,10 @@ async fn test_encrypted_directory_has_unencrypted_child() {
             .update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -2883,7 +2889,10 @@ async fn test_encrypted_directory_has_legacy_casefold_child() {
             .update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -3087,7 +3096,10 @@ async fn test_parent_and_child_encrypted_with_different_wrapping_keys() {
             .update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -3142,7 +3154,7 @@ async fn test_parent_and_child_encrypted_with_different_wrapping_keys() {
             ..
         }) = &mut mutation
         {
-            *dir_type = DirType::Encrypted(CHILD_WRAPPING_KEY_ID);
+            *dir_type = DirType::Encrypted(CHILD_WRAPPING_KEY_ID.into());
         } else {
             unreachable!();
         }
@@ -3219,7 +3231,10 @@ async fn test_encrypted_directory_no_wrapping_key() {
             .update_attributes(
                 transaction,
                 Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
+                    encryption_policy: Some(fio::FscryptPolicy {
+                        key_identifier: WRAPPING_KEY_ID,
+                        flags: crate::object_store::LEGACY_FSCRYPT_FLAGS,
+                    }),
                     ..Default::default()
                 }),
                 0,
@@ -4631,7 +4646,7 @@ async fn test_bad_casefold_hash() {
             &store,
             &mut transaction,
             HandleOptions::default(),
-            Some(WRAPPING_KEY_ID),
+            Some(WRAPPING_KEY_ID.into()),
         )
         .await
         .expect("create_object failed");

@@ -5,6 +5,7 @@
 #include <endian.h>
 #include <fcntl.h>
 #include <fidl/fuchsia.hardware.ax88179/cpp/wire.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <lib/async-loop/testing/cpp/real_loop.h>
 #include <lib/component/incoming/cpp/directory.h>
 #include <lib/component/incoming/cpp/protocol.h>
@@ -22,6 +23,8 @@
 
 #include "asix-88179-regs.h"
 #include "src/connectivity/lib/network-device/cpp/network_device_client.h"
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_ax88179 {
 namespace {
@@ -60,8 +63,8 @@ class UsbAx88179Test : public zxtest::Test, loop_fixture::RealLoop {
     device_desc.b_num_configurations = 1;
 
     usb_peripheral::wire::FunctionDescriptor usb_ax88179_desc = {
-        .interface_class = USB_CLASS_COMM,
-        .interface_subclass = USB_CDC_SUBCLASS_ETHERNET,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+        .interface_subclass = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
         .interface_protocol = 0,
     };
 
@@ -201,6 +204,29 @@ TEST_F(UsbAx88179Test, SetOnlineBeforeStart) {
   ASSERT_NO_FATAL_FAILURE(StartDevice());
 
   ASSERT_NO_FATAL_FAILURE(WaitDeviceOnline());
+}
+
+TEST_F(UsbAx88179Test, ShortControlReadRejection) {
+  ASSERT_NO_FATAL_FAILURE(ConnectNetdeviceClient());
+  ASSERT_NO_FATAL_FAILURE(StartDevice());
+
+  component::SyncServiceMemberWatcher<ax88179::Service::Hooks> watcher(bus_->GetExposedDir());
+  zx::result test_client_end = watcher.GetNextInstance(false);
+  ASSERT_OK(test_client_end.status_value());
+  fidl::WireSyncClient test_client{std::move(*test_client_end)};
+
+  auto fail_res = test_client->SetFailShortRead(true);
+  ASSERT_OK(fail_res.status());
+  ASSERT_OK(fail_res->status);
+
+  // When we set online now, ConfigureMediumMode fails due to short control read on ReadPhy.
+  auto online_res = test_client->SetOnline(true);
+  ASSERT_OK(online_res.status());
+  ASSERT_OK(online_res->status);
+
+  zx::result online = GetDeviceOnline();
+  ASSERT_OK(online);
+  ASSERT_FALSE(online.value());
 }
 
 }  // namespace

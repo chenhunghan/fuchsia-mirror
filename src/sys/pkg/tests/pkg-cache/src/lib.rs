@@ -910,6 +910,14 @@ where
             .add_route(
                 Route::new()
                     .capability(Capability::protocol_by_name(format!(
+                        "{}-base",
+                        fpkg::PackageResolverMarker::PROTOCOL_NAME
+                    )))
+                    .capability(Capability::protocol_by_name(format!(
+                        "{}-base",
+                        fcomponent_resolution::ResolverMarker::PROTOCOL_NAME
+                    )))
+                    .capability(Capability::protocol_by_name(format!(
                         "{}-ota",
                         fpkg::PackageResolverMarker::PROTOCOL_NAME
                     )))
@@ -925,11 +933,9 @@ where
                     .capability(Capability::protocol::<fpkg::PackageCacheMarker>())
                     .capability(Capability::protocol::<fpkg::RetainedPackagesMarker>())
                     .capability(Capability::protocol::<fpkg::RetainedBlobsMarker>())
-                    .capability(Capability::protocol::<fpkg::PackageResolverMarker>())
                     .capability(Capability::protocol::<fpkg_gc::ManagerMarker>())
                     .capability(Capability::protocol::<fpkg_internal::OtaDownloaderMarker>())
                     .capability(Capability::protocol::<fpkg_resolution::PackageResolverMarker>())
-                    .capability(Capability::protocol::<fcomponent_resolution::ResolverMarker>())
                     .capability(Capability::directory(SHELL_COMMANDS_BIN_PATH))
                     .capability(Capability::directory("pkgfs"))
                     .capability(Capability::directory("system"))

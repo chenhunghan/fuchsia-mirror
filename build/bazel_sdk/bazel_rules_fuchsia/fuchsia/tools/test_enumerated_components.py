@@ -4,13 +4,20 @@
 # found in the LICENSE file.
 
 import argparse
+import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Sequence
 from enum import Enum
 
-from fuchsia.tools.fuchsia_task_lib import *
+from fuchsia.tools.fuchsia_task_lib import (
+    ArgumentScope,
+    FuchsiaTask,
+    ScopedArgumentParser,
+    TaskExecutionException,
+    Terminal,
+)
 
 
 class TestingResult(Enum):
@@ -86,7 +93,7 @@ class FuchsiaTaskTestEnumeratedComponents(FuchsiaTask):
         return parser.parse_args()
 
     def run_cmd_with_retries(
-        self, retries: int, cmd: Iterable[str]
+        self, retries: int, cmd: Sequence[str]
     ) -> TestingResult:
         for i in range(retries + 1, 0, -1):
             retries_left = i - 1

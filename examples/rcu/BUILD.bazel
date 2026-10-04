@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "rcu_examples_lib",
+    srcs = [
+        "src/lib.rs",
+        "src/rcu_arc_example.rs",
+        "src/rcu_hash_map_example.rs",
+    ],
+    edition = "2024",
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/fuchsia-rcu",
+        "//src/starnix/lib/starnix_rcu",
+    ],
+)

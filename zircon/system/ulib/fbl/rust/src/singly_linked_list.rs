@@ -331,7 +331,7 @@ where
 
     /// Removes all elements from the list.
     pub fn clear(&mut self) {
-        while let Some(_) = self.pop_front() {}
+        while self.pop_front().is_some() {}
     }
 
     /// Inserts an element after the specified position.
@@ -394,10 +394,10 @@ where
         F: FnMut(&P::Target) -> bool,
     {
         // Step 1: Check if head matches.
-        if let Some(head_ref) = self.front() {
-            if f(head_ref) {
-                return self.pop_front();
-            }
+        if let Some(head_ref) = self.front()
+            && f(head_ref)
+        {
+            return self.pop_front();
         }
 
         if self.is_empty() {
@@ -446,14 +446,14 @@ where
         F: FnMut(&P::Target) -> bool,
     {
         // Step 1: Handle matching elements at the head.
-        if let Some(head_ref) = self.front() {
-            if f(head_ref) {
-                let old_head = self.pop_front().unwrap();
-                // SAFETY: `value` is a valid pointer that will outlive its reference from this
-                // list.
-                unsafe { self.push_front_raw(value) };
-                return Some(old_head);
-            }
+        if let Some(head_ref) = self.front()
+            && f(head_ref)
+        {
+            let old_head = self.pop_front().unwrap();
+            // SAFETY: `value` is a valid pointer that will outlive its reference from this
+            // list.
+            unsafe { self.push_front_raw(value) };
+            return Some(old_head);
         }
 
         // Step 2: Head does not match. Use a cursor to check subsequent elements.

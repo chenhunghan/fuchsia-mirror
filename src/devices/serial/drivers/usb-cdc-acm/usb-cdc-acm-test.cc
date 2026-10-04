@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <endian.h>
 #include <fidl/fuchsia.hardware.serial/cpp/wire.h>
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.virtual.bus/cpp/wire.h>
 #include <fidl/fuchsia.io/cpp/wire.h>
@@ -26,6 +27,8 @@
 #include <usb/cdc.h>
 #include <usb/usb.h>
 #include <zxtest/zxtest.h>
+
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_virtual_bus {
 namespace {
@@ -74,8 +77,8 @@ class UsbCdcAcmTest : public zxtest::Test {
     device_desc.b_num_configurations = 1;
 
     usb_peripheral::wire::FunctionDescriptor usb_cdc_acm_function_desc = {
-        .interface_class = USB_CLASS_COMM,
-        .interface_subclass = USB_CDC_SUBCLASS_ABSTRACT,
+        .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+        .interface_subclass = fidl::ToUnderlying(fdescriptor::CdcSubclass::kAbstract),
         .interface_protocol = 0,
     };
 

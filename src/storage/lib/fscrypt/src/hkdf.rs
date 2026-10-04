@@ -7,6 +7,7 @@ use hmac::{KeyInit, Mac};
 // This prefix is built from one of the following context.
 pub const HKDF_CONTEXT_KEY_IDENTIFIER: u8 = 1;
 pub const HKDF_CONTEXT_PER_FILE_ENC_KEY: u8 = 2;
+pub const HKDF_CONTEXT_IV_INO_LBLK_64_KEY: u8 = 4;
 pub const HKDF_CONTEXT_DIRHASH_KEY: u8 = 5;
 pub const HKDF_CONTEXT_IV_INO_LBLK_32_KEY: u8 = 6;
 pub const HKDF_CONTEXT_INODE_HASH_KEY: u8 = 7;

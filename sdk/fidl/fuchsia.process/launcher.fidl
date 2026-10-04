@@ -120,7 +120,7 @@ closed protocol Launcher {
     strict Launch(resource struct {
         info LaunchInfo;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         process zx.Handle:<PROCESS, optional>;
     });
 
@@ -136,7 +136,7 @@ closed protocol Launcher {
     strict CreateWithoutStarting(resource struct {
         info LaunchInfo;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         data box<ProcessStartData>;
     });
 

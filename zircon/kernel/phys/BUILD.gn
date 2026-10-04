@@ -764,6 +764,13 @@ if (toolchain_environment == "kernel.phys" ||
       "//zircon/kernel/lib/libc",
     ]
   }
+
+  source_set("linuxboot-embed") {
+    public = [ "include/phys/linuxboot-embed.h" ]
+    public_configs = [ ":includes" ]
+    sources = [ "linuxboot-embed.cc" ]
+    deps = [ "//zircon/kernel/lib/arch" ]
+  }
 }
 
 source_set("zbi") {
@@ -1028,12 +1035,11 @@ compiler_config("phys-elf-module.config") {
   # The GNU linkers don't do page-aligned segments by default like LLD,
   # so a linker script is required.
   if (is_gcc) {
-    linker_flags += [ "-zrelro" ]
-    if (toolchain_environment != "kernel") {
-      # The kernel has its own linker script, so don't pass two -T switches.
-      inputs = [ "phys-elf-module.ld" ]
-      linker_flags += [ "-T" + rebase_path(inputs[0], root_build_dir) ]
-    }
+    inputs = [ "phys-elf-module.ld" ]
+    linker_flags += [
+      "-zrelro",
+      "-T" + rebase_path(inputs[0], root_build_dir),
+    ]
   }
 }
 

@@ -7,11 +7,8 @@
 use core::mem::MaybeUninit;
 use zx_status::Status;
 use zx_types::{
-    ZX_OBJECT_SIGNAL_6, ZX_RIGHT_DESTROY, ZX_RIGHT_DUPLICATE, ZX_RIGHT_ENUMERATE,
-    ZX_RIGHT_GET_POLICY, ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT, ZX_RIGHT_MANAGE_JOB,
-    ZX_RIGHT_MANAGE_PROCESS, ZX_RIGHT_MANAGE_THREAD, ZX_RIGHT_READ, ZX_RIGHT_SET_POLICY,
-    ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_SIGNAL, ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT, ZX_RIGHT_WRITE,
-    zx_policy_basic_v1_t, zx_policy_basic_v2_t, zx_policy_timer_slack_t, zx_rights_t, zx_signals_t,
+    ZX_DEFAULT_JOB_RIGHTS, ZX_OBJECT_SIGNAL_6, zx_policy_basic_v1_t, zx_policy_basic_v2_t,
+    zx_policy_timer_slack_t, zx_rights_t, zx_signals_t,
 };
 
 use super::handle::KernelHandle;
@@ -25,24 +22,6 @@ use super::job_dispatcher_ffi::{
     cpp_job_dispatcher_set_basic_policy_v2, cpp_job_dispatcher_set_kill_on_oom,
     cpp_job_dispatcher_set_timer_slack_policy,
 };
-
-/// Default rights assigned to a newly created JobDispatcher handle.
-pub const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_GET_PROPERTY
-    | ZX_RIGHT_SET_PROPERTY
-    | ZX_RIGHT_GET_POLICY
-    | ZX_RIGHT_SET_POLICY
-    | ZX_RIGHT_ENUMERATE
-    | ZX_RIGHT_DESTROY
-    | ZX_RIGHT_SIGNAL
-    | ZX_RIGHT_MANAGE_JOB
-    | ZX_RIGHT_MANAGE_PROCESS
-    | ZX_RIGHT_MANAGE_THREAD;
 
 /// Maximum height of the root job hierarchy.
 pub const ROOT_JOB_MAX_HEIGHT: u32 = 32;
@@ -73,7 +52,7 @@ zr::static_assert!(core::mem::size_of::<JobDispatcher>() == 0);
 impl JobDispatcher {
     /// Returns the default rights for a JobDispatcher handle.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_JOB_RIGHTS
     }
 
     /// Creates a child `JobDispatcher` under `parent`.

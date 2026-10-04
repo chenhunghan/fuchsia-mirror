@@ -1,0 +1,8 @@
+{
+  "content": {
+    "manifests": [
+      "gen/build/bazel/output_base/execroot/_main/bazel-out/fuchsia_platform_x64-opt/bin/build/bazel/rules/packages/tests/example_test.package_manifest.json"
+    ]
+  },
+  "version": "1"
+}

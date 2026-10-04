@@ -13,13 +13,13 @@
     capabilities: [
         {
             protocol: [
-                "fuchsia.component.resolution.Resolver",
+                "fuchsia.component.resolution.Resolver-base",
                 "fuchsia.component.resolution.Resolver-full",
                 "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.internal.OtaDownloader",
                 "fuchsia.pkg.PackageCache",
-                "fuchsia.pkg.PackageResolver",
+                "fuchsia.pkg.PackageResolver-base",
                 "fuchsia.pkg.PackageResolver-full",
                 "fuchsia.pkg.PackageResolver-ota",
                 "fuchsia.pkg.resolution.PackageResolver",
@@ -29,7 +29,7 @@
         },
         {
             resolver: "base_resolver",
-            path: "/svc/fuchsia.component.resolution.Resolver",
+            path: "/svc/fuchsia.component.resolution.Resolver-base",
         },
         {
             directory: "pkgfs",
@@ -178,13 +178,13 @@
         },
         {
             protocol: [
-                "fuchsia.component.resolution.Resolver",
+                "fuchsia.component.resolution.Resolver-base",
                 "fuchsia.component.resolution.Resolver-full",
                 "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.internal.OtaDownloader",
                 "fuchsia.pkg.PackageCache",
-                "fuchsia.pkg.PackageResolver",
+                "fuchsia.pkg.PackageResolver-base",
                 "fuchsia.pkg.PackageResolver-full",
                 "fuchsia.pkg.PackageResolver-ota",
                 "fuchsia.pkg.resolution.PackageResolver",

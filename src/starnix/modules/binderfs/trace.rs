@@ -107,7 +107,8 @@
 //!
 //! Submitting threads receive `BR_TRANSACTION_COMPLETE` immediately after submitting a transaction
 //! or reply:
-//! - `Command::TransactionComplete`: 2-step flow (`"BinderTransactionComplete"`).
+//! - `Command::TransactionComplete` (reply): 2-step flow (`"BinderTransactionComplete"`).
+//! - `Command::TwoWayTransactionComplete`: 2-step flow (`"BinderTwoWayTransactionComplete"`).
 //! - `Command::OnewayTransactionComplete`: 2-step flow (`"BinderOnewayTransactionComplete"`).
 //!
 //! ## 6. Reference Counting & State Notifications
@@ -266,6 +267,14 @@ pub fn on_command_enqueued(command: &Command, trace_id: fuchsia_trace::Id) {
                 CATEGORY_STARNIX_BINDER,
                 "BinderTransactionComplete",
                 "enqueue_transaction_complete",
+                trace_id
+            );
+        }
+        Command::TwoWayTransactionComplete => {
+            fuchsia_trace::instaflow_begin!(
+                CATEGORY_STARNIX_BINDER,
+                "BinderTwoWayTransactionComplete",
+                "enqueue_two_way_transaction_complete",
                 trace_id
             );
         }
@@ -438,6 +447,14 @@ pub fn on_command_dequeued(command: &Command, trace_id: fuchsia_trace::Id) {
                 CATEGORY_STARNIX_BINDER,
                 "BinderTransactionComplete",
                 "dequeue_transaction_complete",
+                trace_id
+            );
+        }
+        Command::TwoWayTransactionComplete => {
+            fuchsia_trace::instaflow_end!(
+                CATEGORY_STARNIX_BINDER,
+                "BinderTwoWayTransactionComplete",
+                "dequeue_two_way_transaction_complete",
                 trace_id
             );
         }

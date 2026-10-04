@@ -207,6 +207,13 @@ fn elf_load_error_to_errno(err: elf_load::ElfLoadError) -> Errno {
 struct Mapper {
     file: Arc<FileMapping>,
     mm: Arc<MemoryManager>,
+
+    /// The memory object holding the ELF file being loaded.
+    ///
+    /// `elf_load` maps most segments straight out of this VMO and only creates a writable clone
+    /// for segments that need one. Segments that map this VMO can share this `MemoryObject`
+    /// rather than each duplicating its handle.
+    elf_memory: Arc<MemoryObject>,
 }
 
 impl elf_load::Mapper for Mapper {
@@ -218,7 +225,11 @@ impl elf_load::Mapper for Mapper {
         length: usize,
         vmar_flags: zx::VmarFlags,
     ) -> Result<usize, zx::Status> {
-        let memory = Arc::new(MemoryObject::from(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?));
+        let memory = if self.elf_memory.as_vmo() == Some(vmo) {
+            self.elf_memory.clone()
+        } else {
+            Arc::new(MemoryObject::from(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?))
+        };
         self.mm
             .map_memory(
                 // TODO(https://fxbug.dev/380427153): This checked_add won't help with arch32.
@@ -329,7 +340,7 @@ fn load_elf(
     // TODO(https://fxbug.dev/380427153): I think we need to do a 32-bit wrap here and then
     // a 32-bit wrap at the wrapping addition.  The Mapper may need a checked_add as well.
     let vaddr_bias = file_base.wrapping_sub(elf_info.low);
-    let mapper = Mapper { file: elf_file, mm: mm.clone() };
+    let mapper = Mapper { file: elf_file, mm: mm.clone(), elf_memory: elf_memory.clone() };
     elf_load::map_elf_segments(vmo, &headers, &mapper, mm.base_addr.ptr(), vaddr_bias)
         .map_err(elf_load_error_to_errno)?;
     Ok(LoadedElf { arch_width, headers, file_base, vaddr_bias, length })

@@ -29,11 +29,10 @@ use zx_types::{
     ZX_CLOCK_OPT_CONTINUOUS, ZX_CLOCK_OPT_MAPPABLE, ZX_CLOCK_OPT_MONOTONIC, ZX_CLOCK_OPTS_ALL,
     ZX_CLOCK_STARTED, ZX_CLOCK_UNKNOWN_ERROR, ZX_CLOCK_UPDATE_OPTION_ERROR_BOUND_VALID,
     ZX_CLOCK_UPDATE_OPTION_RATE_ADJUST_VALID, ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID,
-    ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID, ZX_CLOCK_UPDATED, ZX_MAX_NAME_LEN,
-    ZX_OBJ_TYPE_CLOCK, ZX_RIGHT_DUPLICATE, ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT, ZX_RIGHT_MAP,
-    ZX_RIGHT_READ, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_SIGNAL, ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT,
-    ZX_RIGHT_WRITE, zx_clock_create_args_v1_t, zx_clock_details_v1_t, zx_clock_transformation_t,
-    zx_clock_update_args_v1_t, zx_clock_update_args_v2_t, zx_rights_t, zx_time_t,
+    ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID, ZX_CLOCK_UPDATED, ZX_DEFAULT_CLOCK_RIGHTS,
+    ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_CLOCK, ZX_RIGHT_MAP, zx_clock_create_args_v1_t,
+    zx_clock_details_v1_t, zx_clock_transformation_t, zx_clock_update_args_v1_t,
+    zx_clock_update_args_v2_t, zx_rights_t, zx_time_t,
 };
 
 use super::KernelHandle;
@@ -41,17 +40,6 @@ use super::clock_dispatcher_ffi::cpp_clock_dispatcher_create;
 use super::dispatcher::DispatcherOps;
 
 use object_constants_rs as object_constants;
-
-/// Default rights assigned to a newly created ClockDispatcher handle.
-const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_WAIT
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_READ
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_SIGNAL
-    | ZX_RIGHT_GET_PROPERTY
-    | ZX_RIGHT_SET_PROPERTY;
 
 zr::static_assert_size_and_align!(
     ClockDispatcherState,
@@ -774,7 +762,7 @@ impl ClockDispatcher {
 
     /// Returns the default rights for a clock handle.
     pub const fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_CLOCK_RIGHTS
     }
 
     fn get_current_time(boot_time: bool) -> zx_time_t {
@@ -920,7 +908,7 @@ impl ClockDispatcher {
 #[cfg(ktest)]
 #[unittest::suite(name = "clock_dispatcher_rust")]
 mod tests {
-    use super::{ClockDispatcher, DEFAULT_RIGHTS};
+    use super::{ClockDispatcher, ZX_DEFAULT_CLOCK_RIGHTS};
     use crate::platform_rs::timer::current_mono_time;
     use unittest::{expect_eq, expect_false, expect_ok, expect_true};
     use zx_status::Status;
@@ -937,7 +925,7 @@ mod tests {
     fn test_default_create() {
         let args = zx_clock_create_args_v1_t { backstop_time: 0 };
         let (handle, rights) = ClockDispatcher::create(0, &args).expect("failed to create clock");
-        expect_eq!(rights, DEFAULT_RIGHTS);
+        expect_eq!(rights, ZX_DEFAULT_CLOCK_RIGHTS);
 
         let disp = handle.dispatcher();
         expect_true!(disp.get_koid() != 0);
@@ -958,7 +946,7 @@ mod tests {
         let args = zx_clock_create_args_v1_t { backstop_time: 0 };
         let (handle, rights) = ClockDispatcher::create(ZX_CLOCK_OPT_AUTO_START, &args)
             .expect("failed to create auto-start clock");
-        expect_eq!(rights, DEFAULT_RIGHTS);
+        expect_eq!(rights, ZX_DEFAULT_CLOCK_RIGHTS);
 
         let disp = handle.dispatcher();
         expect_false!(disp.is_mappable());
@@ -977,7 +965,7 @@ mod tests {
         let args = zx_clock_create_args_v1_t { backstop_time: 0 };
         let (handle, rights) = ClockDispatcher::create(ZX_CLOCK_OPT_MAPPABLE, &args)
             .expect("failed to create mappable clock");
-        expect_eq!(rights, DEFAULT_RIGHTS | ZX_RIGHT_MAP);
+        expect_eq!(rights, ZX_DEFAULT_CLOCK_RIGHTS | ZX_RIGHT_MAP);
 
         let disp = handle.dispatcher();
         expect_true!(disp.is_mappable());

@@ -775,6 +775,9 @@ impl Polisher {
         !matches!(
             info.charge_source,
             Some(fpower::ChargeSource::None) | Some(fpower::ChargeSource::Unknown) | None
+        ) || matches!(
+            info.charge_status,
+            Some(fpower::ChargeStatus::Charging) | Some(fpower::ChargeStatus::Full)
         )
     }
 
@@ -892,7 +895,9 @@ impl Polisher {
             self.last_rate_limited_level = rate_limited_soc; // Store current RL for next cycle
             self.last_post_curve = post_curve; // Store UIC here!
         }
-        self.last_is_plugged_in = Some(Self::is_plugged_in(&info));
+        if scaled_real_soc.is_some() {
+            self.last_is_plugged_in = Some(Self::is_plugged_in(&info));
+        }
         info
     }
 

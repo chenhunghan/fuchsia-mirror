@@ -20,12 +20,20 @@ import("//zircon/kernel/phys/efi/efi_executable.gni")
 import("//zircon/kernel/phys/efi/efi_shell_test.gni")
 import("//zircon/kernel/phys/efi/efi_test.gni")
 import("//zircon/kernel/phys/kernel_elf_binary.gni")
+import("//zircon/kernel/phys/linuxboot_embed.gni")
 import("//zircon/kernel/phys/qemu.gni")
 import("//zircon/kernel/phys/qemu_kernel_test.gni")
 import("//zircon/kernel/phys/zbi_executable.gni")
 import("phys_zbi_test.gni")
 import("physload_binary_test.gni")
 import("turducken_zbi_test.gni")
+
+qemu_linuxboot_embed = []
+foreach(qemu, qemu_boot_formats) {
+  if (qemu.name == "linuxboot" && qemu.has_embed) {
+    qemu_linuxboot_embed += [ qemu ]
+  }
+}
 
 # Used for turducken_cuckoo_test(), instructing tuducken tests, when the tests
 # finishes successfully it should boot the next kernel item in the boot zbi.
@@ -465,6 +473,65 @@ qemu_kernel_test("qemu-phys-exception-test") {
   ]
 }
 
+if (qemu_linuxboot_embed != []) {
+  boot_test("linuxboot-embed-test") {
+    qemu_kernel = ":linuxboot-embed-hello-world-test-packed($phys_toolchain)"
+    foreach(qemu, qemu_linuxboot_embed) {
+      timeout = qemu.timeout
+      environments = qemu.supported_environments
+      forward_variables_from(qemu, [ "disabled" ])
+    }
+  }
+
+  if (toolchain_environment == "kernel.phys") {
+    phys_executable("linuxboot-embed-hello-world-test") {
+      testonly = true
+      sources = [ "linuxboot-embed-hello-world-test.cc" ]
+      deps = [
+        ":qemu-test-main",
+        "..:linuxboot-embed",
+        "//zircon/kernel/lib/ktl",
+        "//zircon/kernel/lib/libc",
+        "//zircon/system/ulib/pretty",
+      ]
+      foreach(qemu, qemu_linuxboot_embed) {
+        deps += qemu.deps
+      }
+    }
+
+    generated_file("linuxboot-embed-hello-world-test-data1.txt") {
+      visibility = [ ":*" ]
+      testonly = true
+      outputs = [ "$target_gen_dir/$target_name" ]
+      output_conversion = "list lines"
+      contents = [ "Hello, world!" ]
+    }
+
+    generated_file("linuxboot-embed-hello-world-test-data2.txt") {
+      visibility = [ ":*" ]
+      testonly = true
+      outputs = [ "$target_gen_dir/$target_name" ]
+      output_conversion = "list lines"
+      contents = [ "Lorem ipsum" ]
+    }
+
+    linuxboot_embed("linuxboot-embed-hello-world-test-packed") {
+      visibility = [ ":*" ]
+      testonly = true
+      shim_label = ":linuxboot-embed-hello-world-test"
+      deps = [
+        ":linuxboot-embed-hello-world-test-data1.txt",
+        ":linuxboot-embed-hello-world-test-data2.txt",
+      ]
+      inputs = []
+      foreach(label, deps) {
+        inputs += get_target_outputs(label)
+      }
+      emulator_support_aib = true
+    }
+  }
+}
+
 # turkey
 zbi_executable("trampoline-boot-test") {
   testonly = true
@@ -679,8 +746,7 @@ group("phys-test") {
   }
 }
 
-if (current_toolchain ==
-    default_toolchain) {  # current_toolchain == default_toolchain
+if (current_toolchain == default_toolchain) {
   # We create mexec-chainloading variations of all of the phys ZBI tests.
   test_deps = []
   if (target_cpu != "riscv64") {  # TODO(mcgrathr): No mexec on riscv64 (yet?).
@@ -701,6 +767,10 @@ if (current_toolchain ==
 
       test_deps += [ ":mexec-$test" ]
     }
+  }
+
+  if (qemu_linuxboot_embed != []) {
+    test_deps += [ ":linuxboot-embed-test" ]
   }
 
   group("test") {

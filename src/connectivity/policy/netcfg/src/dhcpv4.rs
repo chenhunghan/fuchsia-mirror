@@ -44,14 +44,6 @@ pub(super) type InterfaceIdTaggedConfigurationStream = Tagged<InterfaceId, Confi
 pub(super) type ConfigurationStream =
     futures::stream::BoxStream<'static, Result<fnet_dhcp_ext::Configuration, fnet_dhcp_ext::Error>>;
 
-pub(super) async fn probe_for_presence(provider: &fnet_dhcp::ClientProviderProxy) -> bool {
-    match provider.check_presence().await {
-        Ok(()) => true,
-        Err(fidl::Error::ClientChannelClosed { .. }) => false,
-        Err(e) => panic!("unexpected error while probing: {e}"),
-    }
-}
-
 pub(super) async fn update_configuration(
     interface_id: InterfaceId,
     ClientState { shutdown_sender: _, routers: configured_routers, route_set }: &mut ClientState,

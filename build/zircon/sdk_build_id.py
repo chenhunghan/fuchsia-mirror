@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from typing import TypeAlias
 
 sys.path.append(
     os.path.join(
@@ -17,10 +18,13 @@ sys.path.append(
 )
 import binaries
 
+# A debug file name, or a (possibly nested) list of them.
+DebugPaths: TypeAlias = str | list["DebugPaths"]
+
 
 # Rewrite a debug file name (or list of them) into its .build-id/...
 # name for publication, collecting the mappings in the `manifest` dict.
-def rewrite(debug, manifest):
+def rewrite(debug: DebugPaths, manifest: dict[str, str]) -> DebugPaths:
     if isinstance(debug, list):
         return [rewrite(x, manifest) for x in debug]
     id_path = binaries.get_sdk_debug_path(debug)
@@ -28,7 +32,7 @@ def rewrite(debug, manifest):
     return id_path
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input",
@@ -60,7 +64,7 @@ def main():
     data = json.load(args.input)
 
     # Poor man's JSON pointer: /foo/bar/baz looks up in dicts.
-    manifest = {}
+    manifest: dict[str, str] = {}
     if args.location:
         ptr = args.location.split("/")
         assert ptr[0] == "", (

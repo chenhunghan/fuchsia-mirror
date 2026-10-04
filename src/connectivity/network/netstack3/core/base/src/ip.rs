@@ -199,6 +199,16 @@ pub enum MarkDomain {
     Mark2,
 }
 
+impl MarkDomain {
+    /// Returns the name of the domain as a string.
+    pub fn name(&self) -> &str {
+        match self {
+            MarkDomain::Mark1 => "Mark1",
+            MarkDomain::Mark2 => "Mark2",
+        }
+    }
+}
+
 const MARK_DOMAINS: usize = MarkDomain::COUNT;
 
 /// A storage backed by an array with the same cardinality of [`MarkDomain`].
@@ -271,11 +281,7 @@ impl Inspectable for Marks {
     fn record<I: Inspector>(&self, inspector: &mut I) {
         for (domain, Mark(mark)) in self.iter() {
             if let Some(mark) = mark {
-                let domain_name = match domain {
-                    MarkDomain::Mark1 => "Mark1",
-                    MarkDomain::Mark2 => "Mark2",
-                };
-                inspector.record_uint(domain_name, *mark);
+                inspector.record_uint(domain.name(), *mark);
             }
         }
     }

@@ -8,6 +8,7 @@
 #include <object/handle.h>
 #include <object/job_dispatcher.h>
 #include <object/process_dispatcher.h>
+#include <object/process_dispatcher_ffi.h>
 #include <object/thread_dispatcher.h>
 #include <object/vm_address_region_dispatcher.h>
 #include <object/vm_object_dispatcher.h>
@@ -156,6 +157,30 @@ FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_get_handle_locked(
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_handle_t cpp_process_dispatcher_handle_table_map_handle_to_value(
+    const ProcessDispatcher* process, const Handle* handle) {
+  return process->handle_table().MapHandleToValue(handle);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_process_dispatcher_handle_table_add_handle_locked(
+    ProcessDispatcher* process, Handle* handle) TA_NO_THREAD_SAFETY_ANALYSIS {
+  process->handle_table().AddHandleLocked(HandleOwner(handle));
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_remove_handle_locked(
+    ProcessDispatcher* process, zx_handle_t handle_value) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return process->handle_table().RemoveHandleLocked(*process, handle_value).release();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_remove_handle_ptr_locked(
+    ProcessDispatcher* process, Handle* handle) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return process->handle_table().RemoveHandleLocked(handle).release();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_koid_t
 cpp_process_dispatcher_handle_table_koid(const ProcessDispatcher* process) {
   return process->handle_table().get_koid();
@@ -217,6 +242,16 @@ FFI_ALWAYS_INLINE JobDispatcher* cpp_process_dispatcher_job(ProcessDispatcher* p
 FFI_ALWAYS_INLINE VmAspace* cpp_process_dispatcher_aspace_at(ProcessDispatcher* process,
                                                              zx_vaddr_t va) {
   return process->aspace_at(va);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE VmAspace* cpp_process_dispatcher_normal_aspace(ProcessDispatcher* process) {
+  return process->normal_aspace();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE VmAspace* cpp_process_dispatcher_restricted_aspace(ProcessDispatcher* process) {
+  return process->restricted_aspace();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.

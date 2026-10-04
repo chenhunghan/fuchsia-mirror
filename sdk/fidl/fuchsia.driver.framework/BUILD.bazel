@@ -22,7 +22,7 @@ fidl_library(
     enable_hlcpp = True,
     enable_rust_drivers = True,
     enable_rust_next = True,
-    stable = True,
+    stable = False,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.component",

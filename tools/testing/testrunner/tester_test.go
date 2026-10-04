@@ -402,11 +402,14 @@ func (*fakeDataSinkCopier) Close() error {
 
 func TestFFXTester(t *testing.T) {
 	cases := []struct {
-		name           string
-		expectedStatus runtests.TestStatus
-		connErr        bool
-		experiments    []string
-		output         string
+		name                  string
+		expectedStatus        runtests.TestStatus
+		expectedFailureReason *runtests.FailureReason
+		timeout               time.Duration
+		connErr               bool
+		experiments           []string
+		output                string
+		stderrOutput          string
 	}{
 		{
 			name:           "run v2 tests with ffx",
@@ -414,14 +417,24 @@ func TestFFXTester(t *testing.T) {
 			experiments:    []string{"use_ffx_test", "use_ffx_test_parallel"},
 		},
 		{
-			name:           "ffx test fails",
-			expectedStatus: runtests.TestFailure,
-			experiments:    []string{"use_ffx_test"},
+			name:                  "ffx test fails",
+			expectedStatus:        runtests.TestFailure,
+			expectedFailureReason: runtests.FailureReasonFromMessage("unknown failure reason"),
+			experiments:           []string{"use_ffx_test"},
 		},
 		{
-			name:           "ffx test times out",
-			expectedStatus: runtests.TestAborted,
-			experiments:    []string{"use_ffx_test"},
+			name:                  "ffx test fails with stderr",
+			expectedStatus:        runtests.TestFailure,
+			expectedFailureReason: runtests.FailureReasonFromMessage("There was an internal error running tests: Fidl(ClientRead(Other(Transport(None))))"),
+			stderrOutput:          "There was an internal error running tests: Fidl(ClientRead(Other(Transport(None))))\n",
+			experiments:           []string{"use_ffx_test"},
+		},
+		{
+			name:                  "ffx test times out",
+			expectedStatus:        runtests.TestAborted,
+			expectedFailureReason: runtests.FailureReasonFromMessage("test timed out after 5s"),
+			timeout:               5 * time.Second,
+			experiments:           []string{"use_ffx_test"},
 		},
 		{
 			name:           "ffx test skipped",
@@ -429,11 +442,12 @@ func TestFFXTester(t *testing.T) {
 			experiments:    []string{"use_ffx_test"},
 		},
 		{
-			name:           "ffx test returns ssh connection failure",
-			expectedStatus: runtests.TestFailure,
-			connErr:        true,
-			experiments:    []string{"use_ffx_test"},
-			output:         sshutilconstants.ProcessTerminatedMsg + "\n" + ffxutilconstants.ClientChannelClosedMsg,
+			name:                  "ffx test returns ssh connection failure",
+			expectedStatus:        runtests.TestFailure,
+			expectedFailureReason: runtests.FailureReasonFromMessage("unknown failure reason"),
+			connErr:               true,
+			experiments:           []string{"use_ffx_test"},
+			output:                sshutilconstants.ProcessTerminatedMsg + "\n" + ffxutilconstants.ClientChannelClosedMsg,
 		},
 	}
 	for _, c := range cases {
@@ -449,7 +463,11 @@ func TestFFXTester(t *testing.T) {
 			case runtests.TestSkipped:
 				outcome = ffxutil.TestNotStarted
 			}
-			ffx := &ffxutil.MockFFXInstance{TestOutcome: outcome, Output: c.output}
+			ffx := &ffxutil.MockFFXInstance{
+				TestOutcome:  outcome,
+				Output:       c.output,
+				StderrOutput: c.stderrOutput,
+			}
 			localOutputDir := t.TempDir()
 			experiments := botanist.GetExperiments(c.experiments)
 			tester, err := NewFFXTester(context.Background(), FFXTesterOptions{Ffx: ffx, OutputDir: localOutputDir, Experiments: experiments})
@@ -467,6 +485,7 @@ func TestFFXTester(t *testing.T) {
 				Test:         build.Test{PackageURL: "fuchsia-pkg://foo#meta/bar.cm"},
 				Runs:         1,
 				RunAlgorithm: testsharder.StopOnSuccess,
+				Timeout:      c.timeout,
 			}
 			ctx := context.Background()
 			outDir := t.TempDir()
@@ -486,6 +505,9 @@ func TestFFXTester(t *testing.T) {
 			if testResult.Status != c.expectedStatus {
 				t.Errorf("tester.Test got result: %s, want result: %s", testResult.Status, c.expectedStatus)
 			}
+			if diff := cmp.Diff(c.expectedFailureReason, testResult.FailureReason); diff != "" {
+				t.Errorf("Unexpected suite failure reason (-want +got):\n%s", diff)
+			}
 
 			testArgs := []string{}
 			if experiments.Contains(botanist.UseFFXTestParallel) {
@@ -498,15 +520,18 @@ func TestFFXTester(t *testing.T) {
 			if numRuns != 1 {
 				t.Errorf("called `ffx test` %d times, expected 1", numRuns)
 			}
-			expectedCaseStatus := runtests.TestSuccess
-			if c.expectedStatus != runtests.TestSuccess {
-				expectedCaseStatus = runtests.TestFailure
-			}
-			if len(testResult.Cases) != 1 {
+			if c.expectedStatus == runtests.TestSkipped {
+				if len(testResult.Cases) != 0 {
+					t.Errorf("expected 0 test cases, got %d", len(testResult.Cases))
+				}
+			} else if len(testResult.Cases) != 1 {
 				t.Errorf("expected 1 test case, got %d", len(testResult.Cases))
 			} else {
-				if testResult.Cases[0].Status != expectedCaseStatus {
-					t.Errorf("test case has status: %s, want: %s", testResult.Cases[0].Status, expectedCaseStatus)
+				if testResult.Cases[0].Status != c.expectedStatus {
+					t.Errorf("test case has status: %s, want: %s", testResult.Cases[0].Status, c.expectedStatus)
+				}
+				if diff := cmp.Diff(c.expectedFailureReason, testResult.Cases[0].FailureReason); diff != "" {
+					t.Errorf("Unexpected case failure reason (-want +got):\n%s", diff)
 				}
 			}
 			p := filepath.Join(t.TempDir(), "testrunner-cmd-test")
@@ -1262,7 +1287,7 @@ func TestProcessTestResult(t *testing.T) {
 		},
 	}
 
-	testDetails, err := processTestResult(runResult, test, 5*time.Second, false)
+	testDetails, err := processTestResult(runResult, test, "", 5*time.Second, false)
 	if err != nil {
 		t.Fatalf("processTestResult failed: %s", err)
 	}

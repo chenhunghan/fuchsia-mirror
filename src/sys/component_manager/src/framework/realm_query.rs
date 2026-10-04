@@ -20,7 +20,7 @@ use log::warn;
 use measure_tape_for_instance::Measurable;
 use moniker::Moniker;
 use router_error::Explain;
-use routing::component_instance::{ComponentInstanceInterface, ResolvedInstanceInterface};
+use routing::component_instance::ComponentInstanceInterface;
 use routing::resolving::ComponentAddress;
 use std::sync::Arc;
 use vfs::ToObjectRequest;

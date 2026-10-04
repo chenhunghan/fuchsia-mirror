@@ -5,18 +5,25 @@
 """Utility that classifies the licenses in an SPDX file."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 
-from fuchsia.tools.licenses.classification_types import *
-from fuchsia.tools.licenses.spdx_types import *
+from fuchsia.tools.licenses.classification_types import (
+    ConditionOverrideRuleSet,
+    IdentifiedSnippet,
+    LicenseClassification,
+    LicensesClassifications,
+)
+from fuchsia.tools.licenses.spdx_types import SpdxDocument, SpdxIndex
 
 _VERBOSE = True
 
 
-def _log(*kwargs):
+def _log(*kwargs: object) -> None:
     if _VERBOSE:
         print(*kwargs, file=sys.stderr)
 
@@ -239,7 +246,7 @@ def _check_for_missing_identifications(
     spdx_index: SpdxIndex,
     classifications: LicensesClassifications,
 ) -> LicensesClassifications:
-    extra_classifications = []
+    extra_classifications: list[LicenseClassification] = []
     unclassified_licenses = []
     for l in spdx_doc.extracted_licenses:
         if l.license_id not in classifications.license_ids():
@@ -318,7 +325,7 @@ def _apply_policy_and_overrides(
 
 
 def _verification_error_message(
-    classifications: LicensesClassifications, preamble_file_path
+    classifications: LicensesClassifications, preamble_file_path: str | None
 ) -> str:
     message: list[str] = [
         "ERROR: Licenses verification failed. See following details."
@@ -356,7 +363,7 @@ def _verification_error_message(
     return "\n".join(message)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--spdx_input",

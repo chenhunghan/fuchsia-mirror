@@ -8,6 +8,8 @@
 
 #include <usb/request-cpp.h>
 
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
 namespace virtualbus {
 
 void TestFunction::ExpectControl(ExpectControlRequest& request,
@@ -49,8 +51,8 @@ void TestFunction::Connect(ConnectRequest& request, ConnectCompleter::Sync& comp
   completer.Reply();
 }
 
-zx::result<std::vector<uint8_t>> TestFunction::DoControl(
-    const fuchsia_hardware_usb_descriptor::UsbSetup& setup, std::vector<uint8_t> write_data) {
+zx::result<std::vector<uint8_t>> TestFunction::DoControl(const fdescriptor::UsbSetup& setup,
+                                                         std::vector<uint8_t> write_data) {
   if (!expect_control_) {
     return zx::ok(std::vector<uint8_t>{});
   }
@@ -67,13 +69,17 @@ zx::result<std::vector<uint8_t>> TestFunction::DoControl(
     return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
 
-  if (setup.bm_request_type() == (USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE)) {
+  if (setup.bm_request_type() == (fidl::ToUnderlying(fdescriptor::EndpointDirection::kIn) |
+                                  fidl::ToUnderlying(fdescriptor::RequestType::kStandard) |
+                                  fidl::ToUnderlying(fdescriptor::RequestRecipient::kInterface))) {
     std::vector<uint8_t> data = expect_control_data_;
     expect_control_->Reply(zx::ok(std::vector<uint8_t>{}));
     expect_control_.reset();
     return zx::ok(std::move(data));
   }
-  if (setup.bm_request_type() == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE)) {
+  if (setup.bm_request_type() == (fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut) |
+                                  fidl::ToUnderlying(fdescriptor::RequestType::kStandard) |
+                                  fidl::ToUnderlying(fdescriptor::RequestRecipient::kInterface))) {
     expect_control_->Reply(zx::ok(write_data));
     expect_control_.reset();
     return zx::ok(std::vector<uint8_t>{});

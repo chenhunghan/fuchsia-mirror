@@ -6,13 +6,14 @@
 
 //! RISC-V 64 thread initialization, context switching, and register management.
 
+use super::Iframe;
 use super::arch::{
     RISCV64_CSR_SSTATUS, RISCV64_CSR_SSTATUS_FS_INITIAL, RISCV64_CSR_SSTATUS_FS_MASK,
     RISCV64_CSR_SSTATUS_FS_SHIFT, RISCV64_CSR_SSTATUS_SD, RISCV64_CSR_SSTATUS_SPIE,
     RISCV64_CSR_SSTATUS_UXL_64BIT, RISCV64_CSR_SSTATUS_VS_INITIAL, RISCV64_CSR_SSTATUS_VS_MASK,
     RISCV64_CSR_SSTATUS_VS_SHIFT, riscv64_csr_read,
 };
-use super::{Iframe, is_user_accessible};
+use super::vm::is_user_accessible;
 use debug::{dprintf, ltracef};
 use zx_types::zx_restricted_state_t;
 

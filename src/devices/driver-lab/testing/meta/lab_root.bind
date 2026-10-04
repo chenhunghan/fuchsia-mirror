@@ -1,0 +1,15 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+using fuchsia.driver.lab;
+using fuchsia.test;
+
+// Binds to the DriverTestRealm test parent, or to a node explicitly
+// marked for lab_root (for example one added with
+// `ffx driver test-node add <name> fuchsia.driver.lab.LAB_ROOT=selected`).
+if fuchsia.driver.lab.LAB_ROOT == fuchsia.driver.lab.LAB_ROOT.SELECTED {
+  true;
+} else {
+  fuchsia.BIND_PROTOCOL == fuchsia.test.BIND_PROTOCOL.PARENT;
+}

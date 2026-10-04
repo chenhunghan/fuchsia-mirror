@@ -9,7 +9,6 @@ use cm_rust::FidlIntoNative;
 use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_component_resolution as fresolution;
 use fidl_fuchsia_driver_framework as fdf;
-use fidl_fuchsia_driver_index as fdi;
 use fidl_fuchsia_pkg_ext::BlobId;
 use fuchsia_pkg::PackageDirectory;
 use futures::TryFutureExt;
@@ -158,9 +157,9 @@ impl ResolvedDriver {
     pub fn matches(
         &self,
         properties: &DeviceProperties,
-    ) -> Result<Option<fdi::MatchDriverResult>, bind::interpreter::common::BytecodeError> {
+    ) -> Result<bool, bind::interpreter::common::BytecodeError> {
         if let DecodedRules::Normal(rules) = &self.bind_rules {
-            let matches = match_bind(
+            return match_bind(
                 MatchBindData {
                     symbol_table: &rules.symbol_table,
                     instructions: &rules.instructions,
@@ -170,16 +169,10 @@ impl ResolvedDriver {
             .map_err(|e| {
                 log::error!("Driver {}: bind error: {}", self, e);
                 e
-            })?;
-
-            if !matches {
-                return Ok(None);
-            }
-
-            return Ok(Some(fdi::MatchDriverResult::Driver(self.create_driver_info(false))));
+            });
         }
 
-        Ok(None)
+        Ok(false)
     }
 
     pub fn create_driver_info(&self, full: bool) -> fdf::DriverInfo {

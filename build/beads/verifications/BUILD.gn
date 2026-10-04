@@ -66,12 +66,19 @@ if (is_host) {
     ]
     deps = [
       "//:ninja_outputs_json(${default_toolchain})",
-      "//build/beads/verifications/cc:asm_example_lib",
-      "//build/beads/verifications/cc:c_example_lib",
-      "//build/beads/verifications/cc:cc_example_bin",
-      "//build/beads/verifications/cc:cc_example_lib",
-      "//build/beads/verifications/rust:rust_example_bin",
-      "//build/beads/verifications/rust:rust_example_lib",
+      "//build/beads/verifications/cc:beads_asm_example_lib",
+      "//build/beads/verifications/cc:beads_asm_example_lib(${default_toolchain})",
+      "//build/beads/verifications/cc:beads_c_example_lib",
+      "//build/beads/verifications/cc:beads_c_example_lib(${default_toolchain})",
+      "//build/beads/verifications/cc:beads_cc_example_bin",
+      "//build/beads/verifications/cc:beads_cc_example_bin(${default_toolchain})",
+      "//build/beads/verifications/cc:beads_cc_example_lib",
+      "//build/beads/verifications/cc:beads_cc_example_lib(${default_toolchain})",
+      "//build/beads/verifications/rust:beads_rust_example_bin",
+      "//build/beads/verifications/rust:beads_rust_example_bin(${default_toolchain})",
+      "//build/beads/verifications/rust:beads_rust_example_bin_with_linker_args",
+      "//build/beads/verifications/rust:beads_rust_example_lib",
+      "//build/beads/verifications/rust:beads_rust_example_lib(${default_toolchain})",
     ]
 
     # This action runs GN, Ninja, and Bazel queries, and it's very difficult

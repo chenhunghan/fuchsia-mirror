@@ -78,6 +78,12 @@ fn check_emul_temp() {
         let fake_temp_str = std::fs::read("/sys/class/thermal/thermal_zone0/temp").unwrap();
         assert_eq!(expected_temp, str::from_utf8(&fake_temp_str).unwrap());
     }
+    {
+        let expected_temp = "-274000\n";
+        std::fs::write("/sys/class/thermal/thermal_zone0/emul_temp", expected_temp).unwrap();
+        let fake_temp_str = std::fs::read("/sys/class/thermal/thermal_zone0/temp").unwrap();
+        assert_eq!(expected_temp, str::from_utf8(&fake_temp_str).unwrap());
+    }
 
     // Reset emul_temp.
     std::fs::write("/sys/class/thermal/thermal_zone0/emul_temp", "0").unwrap();
@@ -413,6 +419,57 @@ fn check_thermal_sampling_returns_samples(sampling_group_id: u32) {
     socket::bind(nl_socket.as_raw_fd(), &socket::NetlinkAddr::new(0, 0)).unwrap();
     socket::connect(nl_socket.as_raw_fd(), &socket::NetlinkAddr::new(0, 0)).unwrap();
     socket::setsockopt(&nl_socket, NetlinkAddMembership, &sampling_group_id).unwrap();
+
+    // Receive one normal sample first to synchronize with the start of run_samplers's 2-second
+    // SAMPLING_DELAY timer before setting emul_temp to -274000.
+    let mut rxbuf = vec![0u8; 256];
+    let (recv_size, _addr) =
+        socket::recvfrom::<socket::NetlinkAddr>(nl_socket.as_raw_fd(), &mut rxbuf).unwrap();
+    assert!(recv_size > 0);
+    let rx_packet = <NetlinkMessage<GenlMessage<GenlThermalPayload>>>::deserialize(
+        &rxbuf[..recv_size],
+        EmptyDeserializeOptions,
+    )
+    .unwrap();
+    let genlmsg = assert_matches!(rx_packet.payload, NetlinkPayload::InnerMessage(m) => m);
+    assert_eq!(GenlThermalCmd::ThermalGenlSamplingTemp, genlmsg.payload.cmd);
+    let temp = assert_matches!(genlmsg.payload.nlas[1], ThermalAttr::ThermalZoneTemp(temp) => temp);
+    assert_eq!(celsius_to_millicelsius(EXPECTED_TEMP_C) as u32, temp);
+
+    // Set emul_temp to -274000 (-274.0°C, THERMAL_TEMP_INVALID) and verify that power-gated
+    // sentinel readings are suppressed from netlink sampling notifications.
+    let invalid_temp = "-274000\n";
+    std::fs::write("/sys/class/thermal/thermal_zone0/emul_temp", invalid_temp).unwrap();
+    let fake_temp_str = std::fs::read("/sys/class/thermal/thermal_zone0/temp").unwrap();
+    assert_eq!(invalid_temp, str::from_utf8(&fake_temp_str).unwrap());
+
+    // Drain any sample packet that was already queued before emul_temp was set.
+    while let Ok(recv_size) =
+        socket::recv(nl_socket.as_raw_fd(), &mut rxbuf, socket::MsgFlags::MSG_DONTWAIT)
+    {
+        let rx_packet = <NetlinkMessage<GenlMessage<GenlThermalPayload>>>::deserialize(
+            &rxbuf[..recv_size],
+            EmptyDeserializeOptions,
+        )
+        .unwrap();
+        let genlmsg = assert_matches!(rx_packet.payload, NetlinkPayload::InnerMessage(m) => m);
+        let temp =
+            assert_matches!(genlmsg.payload.nlas[1], ThermalAttr::ThermalZoneTemp(temp) => temp);
+        assert_eq!(celsius_to_millicelsius(EXPECTED_TEMP_C) as u32, temp);
+    }
+
+    // Wait longer than SAMPLING_DELAY (2s) while emul_temp is -274000 and verify no sample is sent.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        Err(nix::errno::Errno::EAGAIN),
+        socket::recv(nl_socket.as_raw_fd(), &mut rxbuf, socket::MsgFlags::MSG_DONTWAIT)
+    );
+
+    // Reset emul_temp and verify normal sampling resumes.
+    std::fs::write("/sys/class/thermal/thermal_zone0/emul_temp", "0").unwrap();
+    let real_temp_str = std::fs::read("/sys/class/thermal/thermal_zone0/temp").unwrap();
+    let expected_real_temp = celsius_to_millicelsius(EXPECTED_TEMP_C) as u32;
+    assert_eq!(&format!("{}\n", expected_real_temp), str::from_utf8(&real_temp_str).unwrap());
 
     let now = std::time::Instant::now();
     for _ in 0..3 {

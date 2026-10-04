@@ -18,14 +18,11 @@ pub enum Scope {
     Global,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id(());
 
 impl Id {
     pub fn new() -> Self {
-        Self(())
-    }
-    pub fn random() -> Self {
         Self(())
     }
 }
@@ -34,6 +31,13 @@ impl From<u64> for Id {
     #[inline]
     fn from(_id: u64) -> Self {
         Self(())
+    }
+}
+
+impl From<Id> for u64 {
+    #[inline]
+    fn from(_id: Id) -> Self {
+        0
     }
 }
 

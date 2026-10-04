@@ -22,7 +22,7 @@ load(
     "FuchsiaComponentManifestInfo",
 )
 
-def _make_fuchsia_component_providers(*, component_name, manifest, resources, is_driver, is_test, moniker, run_tag):
+def _make_fuchsia_component_providers(*, component_name, manifest, resources, is_driver, is_test, moniker, run_tag, test_realm):
     return [
         FuchsiaComponentInfo(
             name = component_name,
@@ -32,6 +32,7 @@ def _make_fuchsia_component_providers(*, component_name, manifest, resources, is
             is_test = is_test,
             moniker = moniker,
             run_tag = run_tag,
+            test_realm = test_realm,
         ),
         FuchsiaPackageResourcesInfo(resources = [
             make_resource_struct(
@@ -45,6 +46,8 @@ def _fuchsia_component_common_impl(ctx):
     # TODO(http://b/525461025): Also check for session components per the doc string.
     if ctx.attr.moniker and (ctx.attr.is_driver or ctx.attr.is_test):
         fail("`moniker` should not be set for driver or test components.")
+    if ctx.attr.test_realm and not ctx.attr.is_test:
+        fail("`test_realm` can only be set for test components (`is_test = True`).")
 
     component_name = ctx.attr.component_name or ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].component_name
     manifest = ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].compiled_manifest
@@ -68,6 +71,7 @@ def _fuchsia_component_common_impl(ctx):
         is_test = ctx.attr.is_test,
         moniker = ctx.attr.moniker.format(COMPONENT_NAME = component_name),
         run_tag = ctx.label.name,
+        test_realm = ctx.attr.test_realm or None,
     ) + [
         merge_debug_symbol_infos(ctx.attr.deps),
     ]
@@ -126,6 +130,18 @@ number of dependencies which will be included in the final package.
             This is independent of the `testonly` attribute.
             """,
             mandatory = True,
+        ),
+        "test_realm": attr.string(
+            doc = """The non-hermetic realm moniker to run the test component in.
+
+            Use only when `is_test` is True. If empty, the test runs in the
+            default hermetic test realm.
+
+            Only used for platform test components. The SDK does not use test
+            realms.
+            """,
+            # Cannot be mandatory because it is a string.
+            mandatory = False,
         ),
     },
 )

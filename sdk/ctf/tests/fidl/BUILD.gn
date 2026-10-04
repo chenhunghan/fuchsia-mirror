@@ -6,7 +6,6 @@ import("//sdk/ctf/build/ctf.gni")
 group("tests") {
   deps = [
     "fuchsia.diagnostics:tests",
-    "fuchsia.driver.test:tests",
     "fuchsia.element:tests",
     "fuchsia.hwinfo:tests",
     "fuchsia.intl:tests",
@@ -19,7 +18,6 @@ group("ctf-tests") {
   testonly = true
   deps = [
     "fuchsia.diagnostics:ctf-tests",
-    "fuchsia.driver.test:ctf-tests",
     "fuchsia.element:ctf-tests",
     "fuchsia.hwinfo:ctf-tests",
     "fuchsia.intl:ctf-tests",

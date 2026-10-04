@@ -12,6 +12,8 @@ STABLE_CC_SOURCE_LIBRARY_ATOMS = [
     "//sdk/lib/async:async_idk",
     "//sdk/lib/async-loop:async-loop-cpp_idk",
     "//sdk/lib/async-loop:async-loop_idk",
+    "//sdk/lib/async-loop-testing/cpp:cpp_idk",
+    "//sdk/lib/async-testing:async-testing_idk",
     "//sdk/lib/component/incoming/cpp:cpp_idk",
     "//sdk/lib/component/outgoing/cpp:cpp_idk",
     "//sdk/lib/fidl:fidl_idk",
@@ -32,6 +34,7 @@ STABLE_CC_SOURCE_LIBRARY_ATOMS = [
     "//sdk/lib/syslog/cpp:cpp_idk",
     "//sdk/lib/syslog/structured_backend:structured_backend_idk",
     "//sdk/lib/utf-utils:utf-utils_idk",
+    "//sdk/lib/vfs/cpp:cpp_idk",
     "//zircon/system/ulib/sync:sync-cpp_idk",
     "//zircon/system/ulib/zx:zx_idk",
 ]
@@ -49,6 +52,7 @@ CC_PREBUILT_SHARED_LIBRARY_ATOMS = [
     "//sdk/lib/fdio:fdio_idk",
     "//sdk/lib/svc:svc_idk",
     "//sdk/lib/syslog/cpp:backend_fuchsia_globals_idk",
+    "//sdk/lib/vfs/internal:vfs_internal_idk",
 ]
 
 CC_PREBUILT_STATIC_LIBRARY_ATOMS = [
@@ -67,6 +71,7 @@ DATA_ATOMS = [
 
 BUILD_HOST_TOOLS_ATOMS = [
     # buildifier: keep sorted
+    "//tools/cmc:cmc_idk",
     "//tools/fidl/fidlc:fidl-format_idk",
     "//tools/fidl/fidlc:fidlc_idk",
     "//tools/fidl/fidlgen_cpp:fidlgen_cpp_idk",

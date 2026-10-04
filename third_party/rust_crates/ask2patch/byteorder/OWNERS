@@ -10,7 +10,7 @@ include /src/connectivity/network/dhcpv6/OWNERS
 include /src/connectivity/wlan/OWNERS
 include /src/developer/ffx/OWNERS
 include /src/developer/ffx/lib/emulator_instance/OWNERS
-include /src/developer/ffx/lib/fuchsia-controller/OWNERS
+include /src/developer/fuchsia-controller/OWNERS
 include /src/devices/lib/OWNERS
 include /src/diagnostics/iquery/OWNERS
 include /src/firmware/OWNERS

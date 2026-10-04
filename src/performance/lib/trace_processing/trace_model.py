@@ -5,9 +5,9 @@
 
 import copy
 import enum
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from functools import total_ordering
-from typing import Any, Iterator, Self, TypeVar
+from typing import Any, Self, TypeVar
 
 from trace_processing import trace_time
 

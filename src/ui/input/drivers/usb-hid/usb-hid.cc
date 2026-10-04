@@ -213,10 +213,10 @@ void UsbHidbus::GetDescriptor(fhidbus::wire::HidbusGetDescriptorRequest* request
   size_t desc_len = hid_desc_->descriptors[desc_idx].wDescriptorLength;
   std::vector<uint8_t> desc;
   desc.resize(desc_len);
-  zx_status_t status =
-      UsbHidControlIn(USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, USB_REQ_GET_DESCRIPTOR,
-                      static_cast<uint16_t>(static_cast<uint16_t>(request->desc_type) << 8),
-                      interface_, desc.data(), desc_len, nullptr);
+  zx_status_t status = UsbHidControlIn(
+      kStandardInterfaceIn, fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor),
+      usb_descriptor_w_value(static_cast<uint8_t>(request->desc_type)), interface_, desc.data(),
+      desc_len, nullptr);
   if (status < 0) {
     fdf::error("Failed to read report descriptor {:#02x}: {}",
                static_cast<uint16_t>(request->desc_type), zx_status_get_string(status));
@@ -232,7 +232,7 @@ void UsbHidbus::GetReport(fhidbus::wire::HidbusGetReportRequest* request,
   report.resize(request->len);
   size_t actual;
   auto status = UsbHidControlIn(
-      USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_HID_GET_REPORT,
+      kClassInterfaceIn, fidl::ToUnderlying(fdescriptor::HidRequest::kGetReport),
       static_cast<uint16_t>(static_cast<uint16_t>(request->rpt_type) << 8 | request->rpt_id),
       interface_, report.data(), report.size(), &actual);
   if (status != ZX_OK) {
@@ -297,7 +297,7 @@ void UsbHidbus::SetReport(fhidbus::wire::HidbusSetReportRequest* request,
     return;
   }
   auto status = UsbHidControlOut(
-      USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_HID_SET_REPORT,
+      kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::HidRequest::kSetReport),
       (static_cast<uint16_t>(static_cast<uint16_t>(request->rpt_type) << 8 | request->rpt_id)),
       interface_, request->data.data(), request->data.size(), NULL);
   if (status != ZX_OK) {
@@ -310,8 +310,9 @@ void UsbHidbus::SetReport(fhidbus::wire::HidbusSetReportRequest* request,
 void UsbHidbus::GetIdle(fhidbus::wire::HidbusGetIdleRequest* request,
                         GetIdleCompleter::Sync& completer) {
   uint8_t duration;
-  auto status = UsbHidControlIn(USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_HID_GET_IDLE,
-                                request->rpt_id, interface_, &duration, sizeof(duration), NULL);
+  auto status =
+      UsbHidControlIn(kClassInterfaceIn, fidl::ToUnderlying(fdescriptor::HidRequest::kGetIdle),
+                      request->rpt_id, interface_, &duration, sizeof(duration), NULL);
   if (status != ZX_OK) {
     completer.ReplyError(status);
     return;
@@ -322,7 +323,7 @@ void UsbHidbus::GetIdle(fhidbus::wire::HidbusGetIdleRequest* request,
 void UsbHidbus::SetIdle(fhidbus::wire::HidbusSetIdleRequest* request,
                         SetIdleCompleter::Sync& completer) {
   auto status = UsbHidControlOut(
-      USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_HID_SET_IDLE,
+      kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::HidRequest::kSetIdle),
       static_cast<uint16_t>((request->duration << 8) | request->rpt_id), interface_, NULL, 0, NULL);
   if (status != ZX_OK) {
     completer.ReplyError(status);
@@ -334,8 +335,8 @@ void UsbHidbus::SetIdle(fhidbus::wire::HidbusSetIdleRequest* request,
 void UsbHidbus::GetProtocol(GetProtocolCompleter::Sync& completer) {
   uint8_t protocol;
   auto status =
-      UsbHidControlIn(USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_HID_GET_PROTOCOL, 0,
-                      interface_, &protocol, sizeof(protocol), NULL);
+      UsbHidControlIn(kClassInterfaceIn, fidl::ToUnderlying(fdescriptor::HidRequest::kGetProtocol),
+                      0, interface_, &protocol, sizeof(protocol), NULL);
   if (status != ZX_OK) {
     completer.ReplyError(status);
     return;
@@ -345,9 +346,9 @@ void UsbHidbus::GetProtocol(GetProtocolCompleter::Sync& completer) {
 
 void UsbHidbus::SetProtocol(fhidbus::wire::HidbusSetProtocolRequest* request,
                             SetProtocolCompleter::Sync& completer) {
-  auto status =
-      UsbHidControlOut(USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE, USB_HID_SET_PROTOCOL,
-                       static_cast<uint8_t>(request->protocol), interface_, NULL, 0, NULL);
+  auto status = UsbHidControlOut(
+      kClassInterfaceOut, fidl::ToUnderlying(fdescriptor::HidRequest::kSetProtocol),
+      static_cast<uint8_t>(request->protocol), interface_, NULL, 0, NULL);
   if (status != ZX_OK) {
     completer.ReplyError(status);
     return;
@@ -380,16 +381,29 @@ void UsbHidbus::FindDescriptors(usb::Interface interface, const usb_hid_descript
                                 const usb_endpoint_descriptor_t** endptin,
                                 const usb_endpoint_descriptor_t** endptout) {
   for (const auto& descriptor : interface.GetDescriptorList()) {
-    if (descriptor.b_descriptor_type == USB_DT_HID) {
-      *hid_desc = reinterpret_cast<const usb_hid_descriptor_t*>(&descriptor);
-    } else if (descriptor.b_descriptor_type == USB_DT_ENDPOINT) {
+    if (descriptor.b_descriptor_type == fidl::ToUnderlying(fdescriptor::DescriptorType::kHid)) {
+      if (descriptor.b_length < sizeof(usb_hid_descriptor_t)) {
+        fdf::error("HID descriptor is too small (b_length = {})", descriptor.b_length);
+        continue;
+      }
+      auto temp_hid_desc = reinterpret_cast<const usb_hid_descriptor_t*>(&descriptor);
+      if (descriptor.b_length <
+          sizeof(usb_hid_descriptor_t) +
+              temp_hid_desc->bNumDescriptors * sizeof(usb_hid_descriptor_entry_t)) {
+        fdf::error("HID descriptor bLength {} is too small for bNumDescriptors {}",
+                   descriptor.b_length, temp_hid_desc->bNumDescriptors);
+        continue;
+      }
+      *hid_desc = temp_hid_desc;
+    } else if (descriptor.b_descriptor_type ==
+               fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint)) {
       auto endpt_desc = reinterpret_cast<const usb_endpoint_descriptor_t*>(&descriptor);
       if (usb_ep_type(endpt_desc) == fdescriptor::EndpointType::kInterrupt) {
         switch (usb_ep_direction(endpt_desc)) {
-          case USB_ENDPOINT_IN:
+          case fdescriptor::EndpointDirection::kIn:
             *endptin = endpt_desc;
             break;
-          case USB_ENDPOINT_OUT:
+          case fdescriptor::EndpointDirection::kOut:
             *endptout = endpt_desc;
             break;
           default:
@@ -479,9 +493,9 @@ zx::result<> UsbHidbus::Start(fdf::DriverContext context) {
     return zx::error(status);
   }
   // Calculation according to 9.6.6 of USB2.0 Spec for interrupt endpoints
-  switch (auto speed = usb_.GetSpeed()) {
-    case USB_SPEED_LOW:
-    case USB_SPEED_FULL:
+  switch (auto speed = usb_.GetSpeed(); static_cast<fdescriptor::UsbSpeed>(speed)) {
+    case fdescriptor::UsbSpeed::kLow:
+    case fdescriptor::UsbSpeed::kFull:
       if (endptin->b_interval > 255 || endptin->b_interval < 1) {
         fdf::error("bInterval for LOW/FULL Speed EPs must be between 1 and 255. bInterval = {}",
                    endptin->b_interval);
@@ -489,7 +503,7 @@ zx::result<> UsbHidbus::Start(fdf::DriverContext context) {
       }
       info_builder.polling_rate(zx::msec(endptin->b_interval).to_usecs());
       break;
-    case USB_SPEED_HIGH:
+    case fdescriptor::UsbSpeed::kHigh:
       if (endptin->b_interval > 16 || endptin->b_interval < 1) {
         fdf::error("bInterval for HIGH Speed EPs must be between 1 and 16. bInterval = {}",
                    endptin->b_interval);
@@ -524,9 +538,9 @@ zx::result<> UsbHidbus::Start(fdf::DriverContext context) {
 
   interface_ = interface.descriptor()->b_interface_number;
   info_builder.dev_num(interface_);
-  if (interface.descriptor()->b_interface_protocol == USB_HID_PROTOCOL_KBD) {
+  if (interface.descriptor()->b_interface_protocol == fdescriptor::HidProtocol::kKbd) {
     info_builder.boot_protocol(fhidbus::wire::HidBootProtocol::kKbd);
-  } else if (interface.descriptor()->b_interface_protocol == USB_HID_PROTOCOL_MOUSE) {
+  } else if (interface.descriptor()->b_interface_protocol == fdescriptor::HidProtocol::kMouse) {
     info_builder.boot_protocol(fhidbus::wire::HidBootProtocol::kPointer);
   } else {
     info_builder.boot_protocol(fhidbus::wire::HidBootProtocol::kNone);

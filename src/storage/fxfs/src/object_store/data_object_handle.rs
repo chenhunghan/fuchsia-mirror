@@ -1606,7 +1606,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         ensure!(
             !matches!(
                 node_attributes,
-                Some(fio::MutableNodeAttributes { wrapping_key_id: Some(_), .. })
+                Some(fio::MutableNodeAttributes { encryption_policy: Some(_), .. })
             ),
             FxfsError::BadPath
         );

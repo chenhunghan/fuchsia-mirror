@@ -18,6 +18,7 @@ use futures::TryStreamExt as _;
 use log::{error, info, warn};
 use net_types::ethernet::Mac;
 use net_types::ip::IpVersion;
+use netstack3_core::CoreTxMetadata;
 use netstack3_core::device::{
     DeviceId, EthernetLinkDevice, LoopbackDevice, PureIpDevice, PureIpHeaderParams, WeakDeviceId,
 };
@@ -26,6 +27,7 @@ use netstack3_core::device_socket::{
     EthernetHeaderParams, Frame, FrameDestination, IpFrame, Protocol, ReceiveFrameError,
     ReceivedFrame, SendFrameErrorReason, SentFrame, SocketId, SocketInfo, TargetDevice,
 };
+use netstack3_core::ip::{DeviceIpLayerMetadata, Marks};
 use netstack3_core::sync::{Mutex, RwLock};
 use packet::Buf;
 use packet_formats::ethernet::EtherType;
@@ -517,6 +519,12 @@ impl<'a> RequestHandler<'a> {
             }
         }?;
 
+        // TODO(https://fxbug.dev/391946195): Apply send buffer enforcement for
+        // device sockets instead of using empty metadata.
+        let ip_layer_metadata = DeviceIpLayerMetadata::from_tx_metadata_and_marks(
+            CoreTxMetadata::default(),
+            Marks::default(),
+        );
         let result = match device {
             DeviceId::Loopback(device_id) => {
                 let metadata = match kind {
@@ -527,7 +535,7 @@ impl<'a> RequestHandler<'a> {
                 };
                 ctx.api().device_socket().send_frame::<_, LoopbackDevice>(
                     id,
-                    DeviceSocketMetadata { device_id, metadata },
+                    DeviceSocketMetadata { device_id, metadata, ip_layer_metadata },
                     data,
                 )
             }
@@ -540,7 +548,7 @@ impl<'a> RequestHandler<'a> {
                 };
                 ctx.api().device_socket().send_frame::<_, EthernetLinkDevice>(
                     id,
-                    DeviceSocketMetadata { device_id, metadata },
+                    DeviceSocketMetadata { device_id, metadata, ip_layer_metadata },
                     data,
                 )
             }
@@ -550,7 +558,7 @@ impl<'a> RequestHandler<'a> {
                 let metadata = PureIpHeaderParams::try_from_fidl(packet_info)?;
                 ctx.api().device_socket().send_frame::<_, PureIpDevice>(
                     id,
-                    DeviceSocketMetadata { device_id, metadata },
+                    DeviceSocketMetadata { device_id, metadata, ip_layer_metadata },
                     data,
                 )
             }

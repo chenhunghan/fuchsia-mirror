@@ -14,7 +14,7 @@ closed protocol Codec {
     strict Connect(resource struct {
         channel zx.Handle:CHANNEL;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };
 
@@ -25,6 +25,6 @@ closed protocol Dai {
     strict Connect(resource struct {
         channel zx.Handle:CHANNEL;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

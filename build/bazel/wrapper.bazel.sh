@@ -208,8 +208,17 @@ esac
 #       [infra/infra]/cmd/buildproxywrap/main.go.
 # These environment-sensitive modifications to config definitions
 # manifest in the short-lived 'invocation.bazelrc'.
-# Delete after use.
-trap "rm -f ${_INVOCATION_BAZELRC}" EXIT
+# Cleanup handler called on script exit.
+function cleanup {
+  local exit_code=$?
+  rm -f "${_INVOCATION_BAZELRC}"
+  # Preserve the completed invocation's command.log (stdout/stderr stream from Bazel).
+  if [[ -n "${_BAZEL_INVOCATION_LOG_DIR:-}" && -d "${_BAZEL_INVOCATION_LOG_DIR}" && -f "${_BAZEL_OUTPUT_BASE}/command.log" ]]; then
+    cp -f "${_BAZEL_OUTPUT_BASE}/command.log" "${_BAZEL_INVOCATION_LOG_DIR}/command.log" 2>/dev/null || true
+  fi
+  return "$exit_code"
+}
+trap cleanup EXIT
 "${_GENERATE_INVOCATION_BAZELRC}" \
   --sub_builds_link="$RESULTSTORE_SUB_BUILDS_LINK" \
   > "${_INVOCATION_BAZELRC}"
@@ -220,11 +229,15 @@ trap "rm -f ${_INVOCATION_BAZELRC}" EXIT
 readonly _BAZEL_INVOCATION_DATE="$(date +%Y%m%d-%H%M%S)"
 readonly _BAZEL_INVOCATION_LOG_DIR_NAME="invocation-${_BAZEL_INVOCATION_DATE}--${RESULTSTORE_invocation_id}"
 
+# LINT.IfChange(bazel_logs_dir)
+readonly _BAZEL_LOGS_DIRNAME="bazel_logs"
+# LINT.ThenChange(//build/scripts/main_build.py:bazel_logs_dir)
+
 if [[ -n "$FX_BUILD_LOGDIR" ]]; then
-  readonly _BAZEL_INVOCATION_LOG_PARENT="$FX_BUILD_LOGDIR/bazel_logs"
+  readonly _BAZEL_INVOCATION_LOG_PARENT="$FX_BUILD_LOGDIR/${_BAZEL_LOGS_DIRNAME}"
 else
   # This can happen if this script is run outside of `fx build`.
-  readonly _BAZEL_INVOCATION_LOG_PARENT="${_NINJA_BUILD_DIR}/bazel_logs"
+  readonly _BAZEL_INVOCATION_LOG_PARENT="${_NINJA_BUILD_DIR}/${_BAZEL_LOGS_DIRNAME}"
   echo >&2 "WARNING: FX_BUILD_LOGDIR is not set. Using fallback log directory: ${_BAZEL_INVOCATION_LOG_PARENT}"
 fi
 readonly _BAZEL_INVOCATION_LOG_DIR="${_BAZEL_INVOCATION_LOG_PARENT}/${_BAZEL_INVOCATION_LOG_DIR_NAME}"
@@ -377,9 +390,47 @@ _bazel_env=(
     # )
 )
 
+_bazel_exec="${_BAZEL_BIN}"
+_bazel_install_dir="$(dirname "${_BAZEL_BIN}")"
+_bazel_install_base="${_bazel_install_dir}/install_base"
+if [[ -f "${_BAZEL_BIN}-real" && -d "${_bazel_install_base}" ]]; then
+  # The prebuilt `${_BAZEL_BIN}` wrapper script in CIPD unconditionally runs
+  # `touch $(find "${BAZEL_INSTALL_BASE}")` on every invocation. Even when
+  # mtimes are already in the future, `touch` updates ctime, which Bazel
+  # includes in its FileStateValue for `@bazel_tools`
+  # (`install_base/embedded_tools`) and which forces Bzlmod module resolution
+  # and full package reloading on every Bazel command. Only touch files whose
+  # mtime is not already in the future, and invoke `bazel-real` directly.
+  # See //build/bootstrap_scripts/bazel/bazel_wrapper_script.bash.
+  #
+  # TODO(b/567975215): Remove this bypass once the prebuilt Bazel CIPD
+  # package includes the updated bazel_wrapper_script.bash.
+  #
+  # The timestamps and cutoffs must match bazel_wrapper_script.bash.
+  case "$OSTYPE" in
+    linux*)
+      find "${_bazel_install_base}" ! -newermt "2042-07-28" \
+        -exec touch -d "2042-07-29 00:00:00" {} +
+      ;;
+    darwin*|*bsd)
+      find "${_bazel_install_base}" ! -newermt "2040-02-04" \
+        -exec touch -t 204002050000 {} +
+      ;;
+  esac
+  _bazel_exec="${_BAZEL_BIN}-real"
+  # These must exactly match the flags passed by bazel_wrapper_script.bash,
+  # otherwise the Bazel server restarts whenever a command is run through
+  # the other entry point.
+  _BAZEL_PRE_COMMAND_ARGS=(
+    --install_base="${_bazel_install_base}"
+    --server_javabase="${_bazel_install_base}/embedded_tools/jdk"
+    "${_BAZEL_PRE_COMMAND_ARGS[@]}"
+  )
+fi
+
 _bazel_command=(
     "${_bazel_env[@]}"
-    "${_BAZEL_BIN}"
+    "${_bazel_exec}"
     "${_BAZEL_PRE_COMMAND_ARGS[@]}"
 )
 # When "${BAZEL_COMMAND} is empty, do not add it nor _BAZEL_EXTRA_ARGS to _bazel_command,

@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "critical-section"
+version = "1.2.0"
+authors = ["The Fuchsia Authors <rust-fuchsia@fuchsia.com>"]
+
+[features]
+restore-state-bool = []
+restore-state-none = []
+restore-state-u16 = []
+restore-state-u32 = []
+restore-state-u64 = []
+restore-state-u8 = []
+restore-state-usize = []
+std = ["restore-state-bool"]

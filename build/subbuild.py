@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger("subbuild.py")
@@ -69,7 +70,9 @@ def write_file_if_changed(path: Path, content: str) -> bool:
 
 
 def command_args_to_string(
-    args: list[str], env: dict[str, str] | None, cwd: Path | str | None
+    args: Sequence[str | Path],
+    env: dict[str, str] | None,
+    cwd: Path | str | None,
 ) -> str:
     elements = []
     if cwd:
@@ -86,11 +89,11 @@ def command_args_to_string(
 
 
 def run_command(
-    args: list[str],
+    args: Sequence[str | Path],
     capture_output: bool = False,
     env: dict[str, str] | None = None,
     cwd: Path | str | None = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run a command.
 
     Args:
@@ -115,7 +118,7 @@ def run_command(
 
 
 def run_checked_command(
-    args: list[str],
+    args: Sequence[str | Path],
     capture_output: bool,
     env: dict[str, str] | None = None,
     cwd: Path | str | None = None,
@@ -250,7 +253,7 @@ def main() -> int:
         logger.error(f"Missing ninja prebuilt binary: {ninja_path}")
         return 1
 
-    ninja_cmd_prefix = [ninja_path]
+    ninja_cmd_prefix: list[str | Path] = [ninja_path]
     if not args.verbose:
         ninja_cmd_prefix.append("--quiet")
 
@@ -430,7 +433,7 @@ def main() -> int:
             # schedule one action at time for minutes on end.
             ninja_cmd += [
                 "-j",
-                args.parallelism,
+                str(args.parallelism),
             ]
 
         ninja_cmd += [

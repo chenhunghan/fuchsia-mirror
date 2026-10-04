@@ -301,3 +301,87 @@ class TestExecutionEnvironment(unittest.TestCase):
             with open(log_path, "w") as f:
                 f.write("test")
             self.assertEqual(env.get_most_recent_log(), log_path)
+
+    def test_fx_cmd_line_direct_ffx_and_host_tools(self) -> None:
+        """When host-tools binaries exist in out_dir, fx_cmd_line invokes them directly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = os.path.join(tmp, "out", "default")
+            host_tools_dir = os.path.join(out_dir, "host-tools")
+            os.makedirs(host_tools_dir)
+
+            ffx_bin = os.path.join(host_tools_dir, "ffx")
+            ffx_test_bin = os.path.join(host_tools_dir, "ffx-test")
+            dldist_bin = os.path.join(host_tools_dir, "dldist")
+            test_list_tool_bin = os.path.join(host_tools_dir, "test_list_tool")
+
+            for p in (ffx_bin, ffx_test_bin, dldist_bin, test_list_tool_bin):
+                with open(p, "w") as f:
+                    f.write("#!/bin/sh\n")
+                os.chmod(p, 0o755)
+
+            # Write ffx_tools.json listing ffx-test (present) and ffx-repository (missing)
+            with open(os.path.join(out_dir, "ffx_tools.json"), "w") as f:
+                f.write('[{"name": "ffx-test"}, {"name": "ffx-repository"}]')
+
+            env = environment.ExecutionEnvironment(
+                fuchsia_dir=tmp,
+                out_dir=out_dir,
+                test_json_file=os.path.join(out_dir, "tests.json"),
+                disabled_ctf_tests_file=os.path.join(
+                    tmp, "sdk/ctf/disabled_tests.json"
+                ),
+            )
+
+            with mock.patch.dict(os.environ, {}, clear=True):
+                # Built-in subcommand (target) uses direct ffx
+                self.assertEqual(
+                    env.fx_cmd_line(
+                        "ffx", "--machine", "json", "target", "list"
+                    ),
+                    [ffx_bin, "--machine", "json", "target", "list"],
+                )
+                # External subtool present on disk (ffx-test) uses direct ffx
+                self.assertEqual(
+                    env.fx_cmd_line("ffx", "test", "run", "fuchsia-pkg://foo"),
+                    [ffx_bin, "test", "run", "fuchsia-pkg://foo"],
+                )
+                # External subtool missing from disk but listed in ffx_tools.json falls back to fx
+                self.assertEqual(
+                    env.fx_cmd_line("ffx", "repository", "publish"),
+                    ["fx", "--dir", out_dir, "ffx", "repository", "publish"],
+                )
+                # Direct host tools (dldist, test_list_tool)
+                self.assertEqual(
+                    env.fx_cmd_line("dldist", "--needle", "foo"),
+                    [dldist_bin, "--needle", "foo"],
+                )
+                self.assertEqual(
+                    env.fx_cmd_line("test_list_tool", "--build-dir", out_dir),
+                    [test_list_tool_bin, "--build-dir", out_dir],
+                )
+
+            # With FUCHSIA_NODENAME set, -t <target> is passed directly to ffx
+            with mock.patch.dict(
+                os.environ, {"FUCHSIA_NODENAME": "my-target"}, clear=True
+            ):
+                self.assertEqual(
+                    env.fx_cmd_line("ffx", "test", "run", "fuchsia-pkg://foo"),
+                    [
+                        ffx_bin,
+                        "-t",
+                        "my-target",
+                        "test",
+                        "run",
+                        "fuchsia-pkg://foo",
+                    ],
+                )
+                # Explicit -t in args is not duplicated
+                self.assertEqual(
+                    env.fx_cmd_line("ffx", "-t", "other", "target", "echo"),
+                    [ffx_bin, "-t", "other", "target", "echo"],
+                )
+                # Direct host tools do not get -t injected
+                self.assertEqual(
+                    env.fx_cmd_line("dldist", "--needle", "foo"),
+                    [dldist_bin, "--needle", "foo"],
+                )

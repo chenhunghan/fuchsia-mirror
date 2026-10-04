@@ -78,5 +78,26 @@
             to: "self/toolbox",
             target_availability: "unknown",
         },
+        {
+            config: [
+                "fuchsia.bluetooth.EnableSink",
+                "fuchsia.bluetooth.SourceType",
+            ],
+            from: "parent",
+            to: "#bt-a2dp",
+            availability: "optional",
+        },
+        {
+            config: [
+                "fuchsia.bluetooth.ChannelMode",
+                "fuchsia.bluetooth.Domain",
+                "fuchsia.bluetooth.EnableAac",
+                "fuchsia.bluetooth.EnableAvrcpTarget",
+                "fuchsia.bluetooth.InitiatorDelay",
+            ],
+            from: "void",
+            to: "#bt-a2dp",
+            availability: "optional",
+        },
     ],
 }

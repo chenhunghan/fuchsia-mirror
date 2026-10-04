@@ -38,12 +38,12 @@ closed protocol ActionProtocol {
         id uint32;
         cb client_end:ActionNotify;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
     strict GetCallback(struct {
         id uint32;
     }) -> (resource struct {
-        s zx.Status;
+        s zx.Result;
         cb client_end:ActionNotify;
     });
 };

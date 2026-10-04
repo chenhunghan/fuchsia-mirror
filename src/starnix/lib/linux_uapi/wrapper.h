@@ -105,6 +105,7 @@
 #include <linux/utsname.h>
 #include <linux/vm_sockets.h>
 #include <linux/wait.h>
+#include <linux/watch_queue.h>
 #include <linux/xattr.h>
 #include <linux/xfrm.h>
 

@@ -2,7 +2,8 @@
 
 Reviewed: 2022-04-11
 
-Infrastructure and tools for the management of [session components][glossary.session-component].
+Infrastructure and tools for the management of
+[session components](/docs/glossary/README.md#session-component).
 
 ## Getting started
 
@@ -25,5 +26,4 @@ level descriptions of the contents in the session subdirectories are as follows:
   - `lib`: libraries used by `session_manager`
   - `tests`: integration tests for `tools` and `bin`
 
-[glossary.session-component]: /docs/glossary.md#session-component
 [source-code-layout]: /docs/development/source_code/layout.md

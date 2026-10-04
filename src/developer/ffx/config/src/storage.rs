@@ -711,6 +711,23 @@ impl fmt::Display for Config {
     }
 }
 
+impl From<&Config> for Value {
+    fn from(config: &Config) -> Self {
+        let mut merged = ConfigMap::new();
+        let levels: Vec<&ConfigMap> = config.iter().flatten().collect();
+        for level in levels.into_iter().rev() {
+            merge_map(&mut merged, level);
+        }
+        Value::Object(merged)
+    }
+}
+
+impl From<Config> for Value {
+    fn from(config: Config) -> Self {
+        Self::from(&config)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1115,6 +1132,79 @@ mod test {
         let default_reg = Regex::new("\"name\": \"Default\"").expect("test regex");
         assert_eq!(1, default_reg.find_iter(&output).count());
         Ok(())
+    }
+
+    #[fuchsia::test]
+    fn test_from_config_to_value() {
+        let default: ConfigMap = serde_json::from_value(json!({
+            "name": "Default",
+            "default_only": true,
+            "nested": {
+                "a": "default_a",
+                "b": "default_b",
+                "c": "default_c"
+            }
+        }))
+        .unwrap();
+        let global: ConfigMap = serde_json::from_value(json!({
+            "name": "Global",
+            "global_only": 1,
+            "nested": {
+                "a": "global_a",
+                "b": "global_b"
+            }
+        }))
+        .unwrap();
+        let build: ConfigMap = serde_json::from_value(json!({
+            "name": "Build",
+            "build_only": 2,
+            "nested": {
+                "b": "build_b"
+            }
+        }))
+        .unwrap();
+        let user: ConfigMap = serde_json::from_value(json!({
+            "name": "User",
+            "user_only": 3,
+            "nested": {
+                "a": "user_a"
+            }
+        }))
+        .unwrap();
+        let runtime: ConfigMap = serde_json::from_value(json!({
+            "runtime_only": 4,
+            "nested": {
+                "d": "runtime_d"
+            }
+        }))
+        .unwrap();
+
+        let config = Config {
+            user: Some(ConfigFile::from_map(None, user)),
+            build: Some(ConfigFile::from_map(None, build)),
+            global: Some(ConfigFile::from_map(None, global)),
+            default,
+            runtime,
+        };
+
+        let merged = Value::from(&config);
+        assert_eq!(
+            merged,
+            json!({
+                "name": "User",
+                "default_only": true,
+                "global_only": 1,
+                "build_only": 2,
+                "user_only": 3,
+                "runtime_only": 4,
+                "nested": {
+                    "a": "user_a",
+                    "b": "build_b",
+                    "c": "default_c",
+                    "d": "runtime_d"
+                }
+            })
+        );
     }
 
     fn test_map(value: Value) -> Option<Value> {

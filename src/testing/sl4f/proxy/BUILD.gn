@@ -36,6 +36,6 @@ fuchsia_unittest_package("data-proxy-test") {
   manifest = "meta/data_proxy_bin_test.cml"
   deps = [
     ":bin_test",
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
   ]
 }

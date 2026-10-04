@@ -8,6 +8,7 @@ rules and must not have any external dependencies.
 """
 
 import argparse
+import errno
 import os
 import shutil
 import sys
@@ -17,19 +18,19 @@ _FUCHSIA_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
 _SCRIPT_NAME = os.path.relpath(os.path.abspath(__file__), _FUCHSIA_DIR)
 
 
-def force_symlink(target_path, link_path):
+def force_symlink(target_path: str, link_path: str) -> None:
     target_path = os.path.relpath(target_path, os.path.dirname(link_path))
     try:
         os.symlink(target_path, link_path)
     except OSError as e:
         if e.errno == errno.EEXIST:
             os.remove(link_path)
-            os.symlink(ltarget_path, link_path)
+            os.symlink(target_path, link_path)
         else:
             raise
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--fuchsia-dir", help="Specify alternate Fuchsia root path."
@@ -44,7 +45,7 @@ def main():
     args = parser.parse_args()
 
     if args.fuchsia_dir:
-        fuchsia_dir = os.path.abspath(fuchsia_dir)
+        fuchsia_dir = os.path.abspath(args.fuchsia_dir)
     else:
         fuchsia_dir = _FUCHSIA_DIR
 

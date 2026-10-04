@@ -190,7 +190,7 @@ pub async fn route_backing_directory(
         StorageDirectorySource::Child(name) => {
             let child_name = ChildName::parse(name)
                 .expect("invalid child name, this should be prevented by manifest validation");
-            let child_component = ComponentInstanceInterface::lock_resolved_state(&storage_component).await?.get_child(&child_name).expect("resolver registration references nonexistent static child, this should be prevented by manifest validation");
+            let child_component = storage_component.get_child_maybe_resolve(&child_name).await?.expect("resolver registration references nonexistent static child, this should be prevented by manifest validation");
             let child_sandbox = child_component.component_sandbox().await?;
             child_sandbox.component_output.capabilities().clone()
         }

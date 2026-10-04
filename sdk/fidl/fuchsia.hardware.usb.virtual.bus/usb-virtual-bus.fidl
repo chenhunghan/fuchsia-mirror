@@ -11,7 +11,7 @@ closed protocol Bus {
     /// Returns ZX_OK if already enabled or successfully enabled.
     /// Returns ZX_ERR_INTERNAL if child node creation fails.
     strict Enable() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Disables the virtual bus. This disconnects the simulated cable and
     /// destroys the child nodes.
@@ -19,7 +19,7 @@ closed protocol Bus {
     /// Returns ZX_ERR_BAD_STATE if a Connect or Disconnect operation is in progress.
     /// Returns ZX_ERR_INTERNAL if child node removal or underlying disconnection fails.
     strict Disable() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Simulates a USB connected event.
     /// This initiates a 2-phase asynchronous connection via DCI and then HCI.
@@ -28,7 +28,7 @@ closed protocol Bus {
     /// or if the virtual bus or its interfaces are not initialized.
     /// Returns ZX_ERR_INTERNAL if the underlying DCI or HCI operations fail.
     strict Connect() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
     /// Simulates a USB disconnect event.
     /// This initiates a 2-phase asynchronous disconnection via HCI and then DCI.
@@ -36,6 +36,6 @@ closed protocol Bus {
     /// Returns ZX_ERR_BAD_STATE if an operation (Connect/Disconnect) is in progress.
     /// Returns ZX_ERR_INTERNAL if the underlying DCI or HCI operations fail.
     strict Disconnect() -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

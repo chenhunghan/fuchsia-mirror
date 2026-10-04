@@ -4,7 +4,7 @@
 
 use super::{
     ActiveRequests, DecodedRequest, DeviceInfo, FIFO_MAX_REQUESTS, HandleRequestResult,
-    IntoOrchestrator, OffsetMap, Operation, SessionHelper, TraceFlowId,
+    IntoOrchestrator, KeyRegistry, OffsetMap, Operation, SessionHelper, TraceFlowId,
 };
 use crate::mapper::serve_mapper_session;
 use crate::verifier::Verifier;
@@ -242,6 +242,9 @@ impl PassthroughSession {
             fblock::SessionRequest::AttachVmo { vmo, responder } => {
                 responder.send(self.0.attach_vmo(vmo).await?.as_ref().map_err(|s| *s))?;
             }
+            fblock::SessionRequest::RegisterKey { key_token, responder } => {
+                responder.send(self.0.register_key(key_token).await?)?;
+            }
             fblock::SessionRequest::Close { responder } => {
                 responder.send(self.0.close().await?)?;
             }
@@ -263,6 +266,7 @@ impl PassthroughSession {
 pub struct SessionManager<I: Interface + ?Sized> {
     interface: Arc<I>,
     active_requests: ActiveRequests<usize>,
+    key_registry: KeyRegistry,
 
     // NOTE: This must be dropped *after* `active_requests` because we store `Buffer<'_>` with an
     // erased ('static) lifetime in `ActiveRequest`.
@@ -282,6 +286,7 @@ impl<I: Interface + ?Sized> SessionManager<I> {
         Self {
             interface,
             active_requests: ActiveRequests::default(),
+            key_registry: KeyRegistry::default(),
             buffer_allocator: OnceLock::new(),
         }
     }
@@ -871,6 +876,10 @@ impl<I: Interface + ?Sized> super::SessionManager for SessionManager<I> {
     fn active_requests(&self) -> &ActiveRequests<Self::Session> {
         return &self.active_requests;
     }
+
+    fn key_registry(&self) -> &KeyRegistry {
+        &self.key_registry
+    }
 }
 
 impl<I: Interface + ?Sized> Drop for Session<I> {
@@ -886,11 +895,7 @@ impl<I: Interface> IntoOrchestrator for Arc<I> {
     type SM = SessionManager<I>;
 
     fn into_orchestrator(self) -> Arc<Self::SM> {
-        Arc::new(SessionManager {
-            interface: self,
-            active_requests: ActiveRequests::default(),
-            buffer_allocator: OnceLock::new(),
-        })
+        Arc::new(SessionManager::new(self))
     }
 }
 

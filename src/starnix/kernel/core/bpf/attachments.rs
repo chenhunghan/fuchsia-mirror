@@ -936,8 +936,7 @@ fn get_capability_for_program(program_type: ProgramType) -> Result<Capabilities,
         | ProgramType::Tracepoint
         | ProgramType::Tracing
         | ProgramType::Unspec
-        | ProgramType::Xdp
-        | ProgramType::Fuse => error!(ENOTSUP),
+        | ProgramType::Xdp => error!(ENOTSUP),
     }
 }
 

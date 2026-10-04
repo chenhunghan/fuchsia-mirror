@@ -9,6 +9,7 @@ use fuchsia_image_format::{
 };
 
 use mapped_vmo::Mapping;
+use std::cell::Cell;
 use std::cmp::min;
 
 // TODO(armansito): Extend this to support different patterns and tiled image formats.
@@ -18,6 +19,10 @@ pub struct MappedImage {
     mapping: Mapping,
     pixel_width: u32,
     row_bytes: u32,
+
+    /// Time spent in [`MappedImage::cache_clean`] since the last
+    /// [`MappedImage::take_clean_time`] call.
+    clean_time: Cell<zx::MonotonicDuration>,
 }
 
 pub struct Frame {
@@ -43,7 +48,13 @@ impl MappedImage {
         )
         .unwrap();
         let row_bytes = image_format_minimum_row_bytes_2(constraints, image.parameters.width)?;
-        Ok(MappedImage { image, mapping, pixel_width, row_bytes })
+        Ok(MappedImage {
+            image,
+            mapping,
+            pixel_width,
+            row_bytes,
+            clean_time: Cell::new(zx::MonotonicDuration::ZERO),
+        })
     }
 
     pub fn id(&self) -> ImageId {
@@ -104,8 +115,16 @@ impl MappedImage {
     /// during scanout in height refresh rates if the image is changing frequently. This operation
     /// can be expensive on large images and should be performed sparingly.
     pub fn cache_clean(&self) -> Result<()> {
+        let start = zx::MonotonicInstant::get();
         self.image.vmo.op_range(zx::VmoOp::CACHE_CLEAN, 0, self.image.vmo.get_size()?)?;
+        self.clean_time.set(self.clean_time.get() + (zx::MonotonicInstant::get() - start));
         Ok(())
+    }
+
+    /// Returns the time spent in [`MappedImage::cache_clean`] since the previous call, and resets
+    /// the count.
+    pub fn take_clean_time(&self) -> zx::MonotonicDuration {
+        self.clean_time.replace(zx::MonotonicDuration::ZERO)
     }
 
     fn width(&self) -> u32 {

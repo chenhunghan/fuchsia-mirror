@@ -43,7 +43,8 @@ class TestConnection : public magma::TestDeviceBase {
     ASSERT_TRUE(connection_);
 
     uint32_t context_id;
-    ASSERT_EQ(MAGMA_STATUS_OK, magma_connection_create_context(connection_, &context_id));
+    ASSERT_EQ(MAGMA_STATUS_OK,
+              magma_connection_create_context2(connection_, MAGMA_PRIORITY_MEDIUM, &context_id));
 
     ASSERT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
 

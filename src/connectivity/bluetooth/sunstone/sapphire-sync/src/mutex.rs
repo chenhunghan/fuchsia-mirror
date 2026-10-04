@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::mutex::raw::RawMutex;
+use crate::mutex::raw::{ConstInit, RawMutex};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 pub mod raw;
@@ -73,15 +73,30 @@ impl<Kind: RawMutex, T> Mutex<Kind, T> {
     pub fn into_inner(self) -> T {
         self.payload.into_inner()
     }
+
     /// Returns a mutable reference to the protected data without locking.
     pub fn get_mut(&mut self) -> &mut T {
         self.payload.get_mut()
     }
+
+    /// Returns a raw pointer to the protected data without locking.
+    pub fn as_ptr(&self) -> *mut T {
+        self.payload.get()
+    }
+
     /// Acquires the mutex, blocking until the lock becomes available.
     pub fn lock(&self) -> MutexGuard<'_, Kind, T> {
         MutexGuard::new(self)
     }
 }
+
+impl<Kind: RawMutex + ConstInit, T> Mutex<Kind, T> {
+    /// Creates a new mutex protecting the given data in a const context.
+    pub const fn const_new(data: T) -> Self {
+        Self { raw_mutex: Kind::INIT, payload: UnsafeCell::new(data) }
+    }
+}
+
 /// An RAII guard representing exclusive access to the data protected by a `Mutex`.
 pub struct MutexGuard<'a, Kind: RawMutex, T> {
     mutex: &'a Mutex<Kind, T>,

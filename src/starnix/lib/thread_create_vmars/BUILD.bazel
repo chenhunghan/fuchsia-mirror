@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "thread_create_vmars",
+    srcs = [
+        "src/lib.rs",
+        "src/thread_create_vmars.rs",
+    ],
+    edition = "2024",
+    test_deps = ["//src/lib/fuchsia"],
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-runtime",
+        "//src/starnix/lib/starnix_uapi",
+    ],
+)

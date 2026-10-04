@@ -195,7 +195,9 @@ void brcmf_sim_rx_frame(brcmf_simdev* simdev, std::shared_ptr<std::vector<uint8_
 
 zx_status_t brcmf_sim_recovery(brcmf_bus* bus) {
   brcmf_simdev* simdev = bus->bus_priv.sim;
-  simdev->sim_fw->BusRecovery();
+  if (zx_status_t status = simdev->sim_fw->BusRecovery(); status != ZX_OK) {
+    return status;
+  }
 
   // Go through the recovery process in SIM bus(Here we just do firmware reset
   // instead of firmware reload).

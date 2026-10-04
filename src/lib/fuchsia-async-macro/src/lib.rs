@@ -81,13 +81,13 @@ fn executor_ident() -> Ident {
 
 fn common(item: TokenStream, run_executor: TokenStream, test: bool) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemFn);
-    let syn::ItemFn { attrs, sig, vis, block } = item;
+    let syn::ItemFn { attrs, sig, vis, block, modifiers: _ } = item;
     if let Err(e) = (|| {
         // Disallow const, unsafe or abi linkage, generics etc
         if let Some(c) = &sig.constness {
             return Err(Error::new(c.span, "async entry may not be 'const'"));
         }
-        if let Some(u) = &sig.unsafety {
+        if let syn::Safety::Unsafe(u) = &sig.safety {
             return Err(Error::new(u.span, "async entry may not be 'unsafe'"));
         }
         if let Some(abi) = &sig.abi {

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use starnix_sync::Mutex;
+use starnix_sync::{ExpandoLock, LockDepMutex};
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::marker::{Send, Sync};
@@ -37,7 +37,7 @@ impl ExpandoSlot {
 /// the module know that no other code is accessing its slot on the expando.
 #[derive(Debug, Default)]
 pub struct Expando {
-    properties: Mutex<BTreeMap<TypeId, ExpandoSlot>>,
+    properties: LockDepMutex<BTreeMap<TypeId, ExpandoSlot>, ExpandoLock>,
 }
 
 impl Expando {
@@ -46,12 +46,7 @@ impl Expando {
     /// The slot is added to the expando lazily but the same instance is returned every time the
     /// expando is queried for the same type.
     pub fn get<T: Any + Send + Sync + Default + 'static>(&self) -> Arc<T> {
-        let mut properties = self.properties.lock();
-        let type_id = TypeId::of::<T>();
-        let slot =
-            properties.entry(type_id).or_insert_with(|| ExpandoSlot::new(Arc::new(T::default())));
-        assert_eq!(type_id, slot.value.deref().type_id());
-        slot.downcast().expect("downcast of expando slot was successful")
+        self.get_or_init(T::default)
     }
 
     /// Get the slot in the expando associated with the given type, running `init` to initialize
@@ -114,6 +109,7 @@ impl Expando {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starnix_sync::Mutex;
 
     #[derive(Debug, Default)]
     struct MyStruct {

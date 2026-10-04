@@ -1511,5 +1511,35 @@ TEST(ErrcatGoodTests, Good0223) {
   ASSERT_COMPILED(library);
 }
 
+TEST(ErrcatGoodTests, Good0224) {
+  TestLibrary library;
+  library.AddFile("good/fi-0224.test.fidl");
+  ASSERT_COMPILED(library);
+}
+
+TEST(ErrcatGoodTests, Good0225a) {
+  TestLibrary library;
+  library.AddFile("good/fi-0225-a.test.fidl");
+  ASSERT_COMPILED(library);
+}
+
+TEST(ErrcatGoodTests, Good0225b) {
+  TestLibrary library;
+  library.AddFile("good/fi-0225-b.test.fidl");
+  ASSERT_COMPILED(library);
+}
+
+TEST(ErrcatGoodTests, Good0226a) {
+  TestLibrary library;
+  library.AddFile("good/fi-0226-a.test.fidl");
+  ASSERT_COMPILED(library);
+}
+
+TEST(ErrcatGoodTests, Good0226b) {
+  TestLibrary library;
+  library.AddFile("good/fi-0226-b.test.fidl");
+  ASSERT_COMPILED(library);
+}
+
 }  // namespace
 }  // namespace fidlc

@@ -159,5 +159,7 @@ In some cases though, this might be undesirable: to keep the initial iterations'
 times instead of dropping them or to allow standard deviations to be reported
 to Chromeperf and have them displayed in the graphs.
 
-Therefore, summarization can be turned off by adding `[no-summarize-metrics]`
-at the top of a metric names expectations file.
+Therefore, summarization can be turned off for the entire file by adding
+`[no-summarize-metrics]` at the top of a metric names expectations file, or for
+individual metrics by adding the suffix `[no-summarize]` to the metric's entry
+in the expectations file.

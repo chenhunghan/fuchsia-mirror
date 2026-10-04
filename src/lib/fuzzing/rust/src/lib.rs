@@ -7,10 +7,10 @@
 use proc_macro::TokenStream;
 use quote::{quote, quote_spanned};
 use std::ops::Deref;
-use syn::parse::Error;
-use syn::parse_macro_input;
 use syn::FnArg::{self, Receiver, Typed};
 use syn::Type::Reference;
+use syn::parse::Error;
+use syn::parse_macro_input;
 
 /// Defines a fuzz target function.
 ///
@@ -64,7 +64,7 @@ use syn::Type::Reference;
 #[proc_macro_attribute]
 pub fn fuzz(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemFn);
-    let syn::ItemFn { attrs, sig, vis: _, block } = item;
+    let syn::ItemFn { attrs, sig, vis: _, block, modifiers: _ } = item;
     let sig_ident = &sig.ident;
     let span = sig_ident.span();
     let name = sig_ident.to_string();

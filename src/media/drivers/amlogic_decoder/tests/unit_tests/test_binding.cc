@@ -108,7 +108,7 @@ class BindingTest : public testing::Test {
     config.use_fake_irq = true;
 
     config.device_info = {
-        .mmio_count = 5,
+        .mmio_count = 7,
         .irq_count = 4,
     };
     for (uint32_t i = 0; i < config.device_info->mmio_count; i++) {

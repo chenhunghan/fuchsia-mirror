@@ -43,7 +43,7 @@ closed protocol Resolver {
     strict Resolve(struct {
         name string:MAX_RESOLVE_NAME_SIZE;
     }) -> (resource struct {
-        status zx.Status;
+        status zx.Result;
         executable zx.Handle:<VMO, optional>;
         ldsvc client_end:<fuchsia.ldsvc.Loader, optional>;
     });

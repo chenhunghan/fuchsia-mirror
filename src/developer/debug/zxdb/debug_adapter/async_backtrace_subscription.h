@@ -64,6 +64,11 @@ class Session;
 class Process;
 class Err;
 class Frame;
+class AsyncTaskTree;
+class SourceFileProviderImpl;
+
+dap::array<dap::AsyncTaskNode> FormatAsyncTaskTree(const AsyncTaskTree& tree,
+                                                   const SourceFileProviderImpl& file_provider);
 
 class AsyncBacktraceSubscription : public ThreadObserver {
  public:

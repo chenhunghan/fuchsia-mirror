@@ -11,7 +11,7 @@ import sys
 USAGE = "This scripts asserts product bundle names are unique."
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(usage=USAGE)
     parser.add_argument(
         "--product-bundle-json",
@@ -41,7 +41,7 @@ def main():
             )
             return 1
 
-    counts = {}
+    counts: dict[str, int] = {}
     for pb in product_bundles:
         counts[pb] = counts.get(pb, 0) + 1
     duplicates = [pb for (pb, count) in counts.items() if count > 1]

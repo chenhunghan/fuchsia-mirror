@@ -21,3 +21,8 @@ open protocol VirtualController {
         1: uart_channel zx.Handle:CHANNEL;
     });
 };
+
+/// Support service connection
+service VirtualControllerService {
+    device client_end:VirtualController;
+};

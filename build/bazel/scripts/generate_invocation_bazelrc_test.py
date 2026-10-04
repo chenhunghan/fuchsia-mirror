@@ -16,34 +16,34 @@ import generate_invocation_bazelrc as gen
 
 
 class BBIDLinkTest(unittest.TestCase):
-    def test_led_link(self):
+    def test_led_link(self) -> None:
         link = gen.bbid_link("infra/led/01234")
         self.assertEqual(
             link, "http://go/lucibuild/infra/led/01234/+/build.proto"
         )
 
-    def test_regular_link(self):
+    def test_regular_link(self) -> None:
         link = gen.bbid_link("87654321")
         self.assertEqual(link, "http://go/bbid/87654321")
 
 
 class MetadataOptionTest(unittest.TestCase):
-    def test_key_value(self):
+    def test_key_value(self) -> None:
         opt = gen.metadata_option("FOOD", "bbq")
         self.assertEqual(opt, "--build_metadata=FOOD=bbq")
 
 
 class BuildConfigOptionTest(unittest.TestCase):
-    def test_single_option(self):
+    def test_single_option(self) -> None:
         rc = gen.build_config_option("feature_x", "--bazel-flag=value")
         self.assertEqual(rc, "build:feature_x --bazel-flag=value")
 
 
 class MetadataBazelrcTest(unittest.TestCase):
-    def test_no_id(self):
+    def test_no_id(self) -> None:
         self.assertEqual(list(gen.metadata_bazelrc(dict())), [])
 
-    def test_uuid_top_build(self):
+    def test_uuid_top_build(self) -> None:
         uuid = "uuid-6767"
         rc = set(gen.metadata_bazelrc({"FX_BUILD_UUID": uuid}))
         self.assertEqual(
@@ -53,7 +53,7 @@ class MetadataBazelrcTest(unittest.TestCase):
             },
         )
 
-    def test_uuid_sub_build(self):
+    def test_uuid_sub_build(self) -> None:
         uuid = "uuid-5678"
         parent_id = "dada"
         parent_link = f"go/to/{parent_id}"
@@ -78,7 +78,7 @@ class MetadataBazelrcTest(unittest.TestCase):
             },
         )
 
-    def test_bbid_top_build(self):
+    def test_bbid_top_build(self) -> None:
         bbid = "9988"
         rc = set(gen.metadata_bazelrc({"BUILDBUCKET_ID": bbid}))
         self.assertEqual(
@@ -90,7 +90,7 @@ class MetadataBazelrcTest(unittest.TestCase):
             },
         )
 
-    def test_bbid_sub_build(self):
+    def test_bbid_sub_build(self) -> None:
         bbid = "8877"
         parent_id = "baba"
         parent_link = f"go/to/{parent_id}"

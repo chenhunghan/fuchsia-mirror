@@ -61,7 +61,7 @@ use packet_formats::ip::IpProto;
 use packet_formats::ipv4::Ipv4PacketBuilder;
 use packet_formats::udp::UdpPacketBuilder;
 use regex::Regex;
-use sampler_config::runtime::ProjectConfig;
+use sampler_config::input::ProjectConfig;
 use test_case::test_case;
 
 enum TcpSocketState {
@@ -1554,6 +1554,24 @@ async fn inspect_devices_ipv6_disabled(name: &str) {
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
                         },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                        },
                     },
                     IPv6: {
                         PacketTx: {
@@ -1601,6 +1619,24 @@ async fn inspect_devices_ipv6_disabled(name: &str) {
                             ErrorBodyTooLong: 0u64,
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
+                        },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
                         },
                     },
                     IGMP: {
@@ -1778,6 +1814,24 @@ async fn inspect_devices_ipv6_disabled(name: &str) {
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
                         },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                        },
                     },
                     IPv6: {
                         PacketTx: {
@@ -1825,6 +1879,24 @@ async fn inspect_devices_ipv6_disabled(name: &str) {
                             ErrorBodyTooLong: 0u64,
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
+                        },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
                         },
                     },
                     IGMP: {
@@ -2065,6 +2137,24 @@ async fn inspect_devices(name: &str) {
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
                         },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                        },
                     },
                     IPv6: {
                         PacketTx: {
@@ -2112,6 +2202,24 @@ async fn inspect_devices(name: &str) {
                             ErrorBodyTooLong: 0u64,
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
+                        },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
                         },
                     },
                     IGMP: {
@@ -2309,6 +2417,24 @@ async fn inspect_devices(name: &str) {
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
                         },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                        },
                     },
                     IPv6: {
                         PacketTx: {
@@ -2356,6 +2482,24 @@ async fn inspect_devices(name: &str) {
                             ErrorBodyTooLong: 0u64,
                             ErrorInnerSizeLimitExceeded: 0u64,
                             ErrorFragmentedSerializer: 0u64,
+                        },
+                        SegmentsTx: {
+                            Forwarded: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
+                            Local: {
+                                SegmentationRequired: 0u64,
+                                Segments: 0u64,
+                                ErrorParse: 0u64,
+                                ErrorNotSegmentable: 0u64,
+                                ErrorUnsupportedHeaders: 0u64,
+                                ErrorPayloadTooLong: 0u64,
+                            },
                         },
                     },
                     IGMP: {
@@ -2750,6 +2894,24 @@ async fn inspect_counters(name: &str) {
                     ErrorInnerSizeLimitExceeded: 0u64,
                     ErrorFragmentedSerializer: 0u64,
                 },
+                "SegmentsTx": {
+                    Forwarded: {
+                        SegmentationRequired: 0u64,
+                        Segments: 0u64,
+                        ErrorParse: 0u64,
+                        ErrorNotSegmentable: 0u64,
+                        ErrorUnsupportedHeaders: 0u64,
+                        ErrorPayloadTooLong: 0u64,
+                    },
+                    Local: {
+                        SegmentationRequired: 0u64,
+                        Segments: 0u64,
+                        ErrorParse: 0u64,
+                        ErrorNotSegmentable: 0u64,
+                        ErrorUnsupportedHeaders: 0u64,
+                        ErrorPayloadTooLong: 0u64,
+                    },
+                },
             },
             "IPv6": {
                 PacketTx: {
@@ -2797,6 +2959,24 @@ async fn inspect_counters(name: &str) {
                     ErrorBodyTooLong: 0u64,
                     ErrorInnerSizeLimitExceeded: 0u64,
                     ErrorFragmentedSerializer: 0u64,
+                },
+                "SegmentsTx": {
+                    Forwarded: {
+                        SegmentationRequired: 0u64,
+                        Segments: 0u64,
+                        ErrorParse: 0u64,
+                        ErrorNotSegmentable: 0u64,
+                        ErrorUnsupportedHeaders: 0u64,
+                        ErrorPayloadTooLong: 0u64,
+                    },
+                    Local: {
+                        SegmentationRequired: 0u64,
+                        Segments: 0u64,
+                        ErrorParse: 0u64,
+                        ErrorNotSegmentable: 0u64,
+                        ErrorUnsupportedHeaders: 0u64,
+                        ErrorPayloadTooLong: 0u64,
+                    },
                 },
             },
             "MulticastForwarding": {

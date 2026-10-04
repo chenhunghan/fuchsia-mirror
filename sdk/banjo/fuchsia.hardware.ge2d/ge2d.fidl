@@ -67,7 +67,7 @@ closed protocol Ge2d {
         res_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelResChangeCallback;
         task_remove_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelRemoveTaskCallback;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         task_index uint32;
     });
 
@@ -86,7 +86,7 @@ closed protocol Ge2d {
         res_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelResChangeCallback;
         task_remove_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelRemoveTaskCallback;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         task_index uint32;
     });
 
@@ -102,7 +102,7 @@ closed protocol Ge2d {
         res_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelResChangeCallback;
         task_remove_callback client_end:fuchsia.hardware.camerahwaccel.HwAccelRemoveTaskCallback;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         task_index uint32;
     });
 
@@ -121,7 +121,7 @@ closed protocol Ge2d {
         input_buffer_index uint32;
         capture_timestamp uint64;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Releases the frame |buffer_index| from the |output_buffer_collection| to be
@@ -138,7 +138,7 @@ closed protocol Ge2d {
         task_index uint32;
         new_output_image_format_index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Similar to SetOutputResolution, this call sets the input and output resolution on all
@@ -147,7 +147,7 @@ closed protocol Ge2d {
         task_index uint32;
         new_image_format_index uint32;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     // Sets/Changes the crop rectangle (on a Resize Task). Typically called when

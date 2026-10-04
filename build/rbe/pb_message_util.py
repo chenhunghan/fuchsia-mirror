@@ -11,8 +11,13 @@ This works on any proto Message subtype.
 from collections.abc import Sequence
 from typing import Any
 
-from google.protobuf import descriptor, json_format, message, timestamp_pb2
-from google.protobuf.internal import containers as proto_containers
+from google.protobuf import (  # type: ignore[import-untyped]
+    descriptor,
+    json_format,
+    message,
+    timestamp_pb2,
+)
+from google.protobuf.internal import containers  # type: ignore[import-untyped]
 
 
 def _dict_to_key_values(d: dict[str, Any]) -> Sequence[dict[str, Any]]:
@@ -21,7 +26,7 @@ def _dict_to_key_values(d: dict[str, Any]) -> Sequence[dict[str, Any]]:
     ]
 
 
-def _value_to_bq_dict(val):
+def _value_to_bq_dict(val: object) -> object:
     """Converts data to json_format dictionary form."""
     if isinstance(val, message.Message):
         return proto_message_to_bq_dict(val)
@@ -35,8 +40,8 @@ def _convert_repeated_bq_value(
     # proto maps appear as Message types, but are implemented as special classes
     # instead of dictionaries (but still have a dictionary interface).
     if fd.type == descriptor.FieldDescriptor.TYPE_MESSAGE:
-        if isinstance(value, proto_containers.MessageMap) or isinstance(
-            value, proto_containers.ScalarMap
+        if isinstance(value, containers.MessageMap) or isinstance(
+            value, containers.ScalarMap
         ):
             return _dict_to_key_values(value)
     return [_convert_scalar_bq_value(fd, v) for v in value]

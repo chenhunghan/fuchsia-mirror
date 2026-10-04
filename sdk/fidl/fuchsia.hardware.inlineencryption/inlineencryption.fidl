@@ -9,11 +9,14 @@ using zx;
 @discoverable
 closed protocol Device {
     /// Programs the ephemerally wrapped `wrapped_key` into the inline encryption hardware in the
-    /// next available `slot`. All slots programmed via the connection this method is called on
-    /// will be evicted once the connection is dropped. It is not possible to evict individual keys
-    /// (not for any technical reasons; a need for this has not yet arisen). `wrapped_key` must be
-    /// a key wrapped by the inline encryption hardware (in the same session/boot) via a separate
-    /// mechanism to this protocol.
+    /// next available slot and returns a `key_token` capability representing that slot. The
+    /// returned `key_token` must be registered with a block session via
+    /// `fuchsia.storage.block/Session.RegisterKey` before the slot can be used in block I/O
+    /// requests. All slots programmed via the connection this method is called on will be evicted
+    /// once the connection is dropped. It is not possible to evict individual keys (not for any
+    /// technical reasons; a need for this has not yet arisen). `wrapped_key` must be a key wrapped
+    /// by the inline encryption hardware (in the same session/boot) via a separate mechanism to
+    /// this protocol.
     ///
     /// Returns
     /// - ZX_ERR_NO_RESOURCES if there are no available key slots.
@@ -24,8 +27,8 @@ closed protocol Device {
     strict ProgramKey(resource struct {
         wrapped_key vector<uint8>:MAX;
         data_unit_size uint32;
-    }) -> (struct {
-        slot uint8;
+    }) -> (resource struct {
+        key_token zx.Handle:EVENTPAIR;
     }) error zx.Status;
 
     /// Derives a raw software secret from the ephemerally wrapped `wrapped_key`. `wrapped_key`
@@ -45,9 +48,26 @@ closed protocol Device {
     }) error zx.Status;
 };
 
-/// A driver transport variant of the `Device` protocol.
+/// Protocol used between block drivers and hardware inline encryption controllers.
+@discoverable
+closed protocol Controller {
+    strict ProgramKeySlot(resource struct {
+        wrapped_key vector<uint8>:MAX;
+        data_unit_size uint32;
+    }) -> (struct {
+        slot uint8;
+    }) error zx.Status;
+
+    strict DeriveRawSecret(resource struct {
+        wrapped_key vector<uint8>:MAX;
+    }) -> (resource struct {
+        secret vector<uint8>:MAX;
+    }) error zx.Status;
+};
+
+/// A driver transport variant of the `Controller` protocol.
 @discoverable
 @transport("Driver")
 closed protocol DriverDevice {
-    compose Device;
+    compose Controller;
 };

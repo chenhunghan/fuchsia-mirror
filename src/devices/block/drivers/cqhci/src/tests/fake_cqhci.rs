@@ -111,6 +111,10 @@ impl FakeCqhci {
         self.host.task_handler.fail_next_crypto_gce(count);
     }
 
+    pub fn invalidate_crypto_slot(&self, slot: u8) {
+        self.host.task_handler.state.lock().valid_crypto_slots.remove(&slot);
+    }
+
     /// Returns a mask of the in-progress tasks.
     pub fn in_progress_tasks(&self) -> u32 {
         self.host.task_handler.state.lock().tasks_in_progress
@@ -173,11 +177,14 @@ impl MockInlineEncryptionServer {
 }
 
 impl finlineencryption::DriverDeviceServerHandler for MockInlineEncryptionServer {
-    async fn program_key(
+    async fn program_key_slot(
         &mut self,
-        _request: fidl_next::Request<finlineencryption::driver_device::ProgramKey, DriverChannel>,
+        _request: fidl_next::Request<
+            finlineencryption::driver_device::ProgramKeySlot,
+            DriverChannel,
+        >,
         responder: fidl_next::Responder<
-            finlineencryption::driver_device::ProgramKey,
+            finlineencryption::driver_device::ProgramKeySlot,
             DriverChannel,
         >,
     ) {

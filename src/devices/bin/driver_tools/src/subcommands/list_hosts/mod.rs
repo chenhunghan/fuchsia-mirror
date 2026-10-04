@@ -34,6 +34,9 @@ pub async fn list_hosts(
         }
     }
 
+    let max_koid_len =
+        driver_hosts.keys().map(|koid| koid.to_string().len()).max().unwrap_or(0).max(5);
+
     for (koid, drivers) in driver_hosts {
         if termion::is_tty(&std::io::stdout()) {
             println!("Driver Host: {}", koid);
@@ -43,7 +46,7 @@ pub async fn list_hosts(
             println!("");
         } else {
             for driver in drivers {
-                println!("Driver Host: {:<6}{}", koid, driver);
+                println!("Driver Host: {:<width$} {}", koid, driver, width = max_koid_len);
             }
         }
     }

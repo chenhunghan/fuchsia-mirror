@@ -288,6 +288,10 @@ fidl_testdata_info = [
     ]
   },
   {
+    name = "nonzero"
+    target = "//tools/fidl/fidlc/testdata:test.nonzero"
+  },
+  {
     name = "nullable"
     target = "//tools/fidl/fidlc/testdata:test.nullable"
     host_build_denylist = [

@@ -57,6 +57,12 @@ if (is_host) {
       "//src/lib/fuchsia",
       "//third_party/rust_crates:tempfile",
     ]
+    visibility = [
+      ":*",
+      "//src/developer/ffx/lib/usb_fastboot_discovery:*",
+      "//src/developer/ffx/lib/usb_vsock_host:*",
+      "//tools/zedmon/client:*",
+    ]
     with_unit_tests = true
     deps = [
       "//src/lib/fuchsia-sync",

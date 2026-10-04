@@ -7,7 +7,7 @@
                     event_codes: [
                         4,
                     ],
-                    metric_id: 39,
+                    metric_name: "need_more_fragments",
                     metric_type: "Occurrence",
                     selector: "core/network/netstack:root/Counters/IPv4/FragmentsRx:NeedMoreFragments",
                 },
@@ -15,7 +15,7 @@
                     event_codes: [
                         6,
                     ],
-                    metric_id: 39,
+                    metric_name: "need_more_fragments",
                     metric_type: "Occurrence",
                     selector: "core/network/netstack:root/Counters/IPv6/FragmentsRx:NeedMoreFragments",
                 },
@@ -23,7 +23,7 @@
                     event_codes: [
                         4,
                     ],
-                    metric_id: 43,
+                    metric_name: "conntrack_num_entries",
                     metric_type: "Integer",
                     selector: "core/network/netstack:root/Filtering\\ State/IPv4/conntrack:num_entries",
                 },
@@ -31,7 +31,7 @@
                     event_codes: [
                         6,
                     ],
-                    metric_id: 43,
+                    metric_name: "conntrack_num_entries",
                     metric_type: "Integer",
                     selector: "core/network/netstack:root/Filtering\\ State/IPv6/conntrack:num_entries",
                 },
@@ -39,7 +39,7 @@
                     event_codes: [
                         4,
                     ],
-                    metric_id: 41,
+                    metric_name: "conntrack_table_limit_hits",
                     metric_type: "Occurrence",
                     selector: "core/network/netstack:root/Filtering\\ State/IPv4/conntrack:table_limit_hits",
                 },
@@ -47,7 +47,7 @@
                     event_codes: [
                         6,
                     ],
-                    metric_id: 41,
+                    metric_name: "conntrack_table_limit_hits",
                     metric_type: "Occurrence",
                     selector: "core/network/netstack:root/Filtering\\ State/IPv6/conntrack:table_limit_hits",
                 },
@@ -55,7 +55,7 @@
                     event_codes: [
                         4,
                     ],
-                    metric_id: 42,
+                    metric_name: "conntrack_table_limit_drops",
                     metric_type: "Occurrence",
                     selector: "core/network/netstack:root/Filtering\\ State/IPv4/conntrack:table_limit_drops",
                 },
@@ -63,7 +63,7 @@
                     event_codes: [
                         6,
                     ],
-                    metric_id: 42,
+                    metric_name: "conntrack_table_limit_drops",
                     metric_type: "Occurrence",
                     selector: "core/network/netstack:root/Filtering\\ State/IPv6/conntrack:table_limit_drops",
                 },

@@ -707,6 +707,10 @@ def find_tests_affected_by_changed_files(
         last_build_artifacts = set(
             ninja_artifacts.get_last_build_artifacts(ninja_runner)
         )
+        # build.ninja.stamp is generated whenever any BUILD.gn or .gni file
+        # that is part of this builder's build plan is modified. If it is in
+        # affected_ninja_artifacts, the build graph for this builder was changed.
+        last_build_artifacts.add("build.ninja.stamp")
         affected_build_artifacts = (
             affected_ninja_artifacts & last_build_artifacts
         )

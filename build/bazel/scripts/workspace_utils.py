@@ -305,6 +305,7 @@ class GeneratedWorkspaceFiles(object):
                 # Nothing to change here.
                 return False
 
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(current_manifest)
         create_clean_dir(str(out_dir))
         self.write(out_dir)
@@ -659,26 +660,81 @@ def generate_fuchsia_workspace(
         log=log,
     )
 
-    # Remove the old workspace's content, which is just a set
-    # of symlinks and some auto-generated files.
-    create_clean_dir(str(top_dir / "workspace"))
+    # Only recreate the workspace directory and clean `output_base/external`
+    # when the generated workspace manifest actually changes. Unconditionally
+    # unlinking `workspace` deletes the running Bazel server's working
+    # directory (forcing a daemon restart on every `fx gen`), and wiping
+    # `output_base/external` forces Bazel to re-fetch all external
+    # repositories during `tests.json` generation.
+    generated_json = generated.to_json()
+    generated_info_file = top_dir / "generated-info.json"
+    workspace_dir = top_dir / "workspace"
+    if (
+        not workspace_dir.is_dir()
+        or not generated_info_file.exists()
+        or generated_info_file.read_text() != generated_json
+    ):
+        # Remove the old workspace's content, which is just a set
+        # of symlinks and some auto-generated files.
+        create_clean_dir(str(workspace_dir))
 
-    # Do not clean the output_base because it is now massive,
-    # and doing this will very slow and will force a lot of
-    # unnecessary rebuilds after that,
-    #
-    # However, do remove $OUTPUT_BASE/external/ which holds
-    # the content of external repositories.
-    #
-    # This is a guard against repository rules that do not
-    # list their input dependencies properly, and would fail
-    # to re-run if one of them is updated. Sadly, this is
-    # pretty common with Bazel.
-    create_clean_dir(os.path.join(top_dir / "output_base" / "external"))
+        # Do not clean the output_base because it is now massive,
+        # and doing this will very slow and will force a lot of
+        # unnecessary rebuilds after that,
+        #
+        # However, do remove $OUTPUT_BASE/external/ which holds
+        # the content of external repositories.
+        #
+        # This is a guard against repository rules that do not
+        # list their input dependencies properly, and would fail
+        # to re-run if one of them is updated. Sadly, this is
+        # pretty common with Bazel.
+        create_clean_dir(os.path.join(top_dir / "output_base" / "external"))
 
-    generated.write(top_dir)
+        generated.write(top_dir)
+        generated_info_file.write_text(generated_json)
 
     return input_files | generated.input_files
+
+
+def _format_starlark_value(value: T.Any, indent: int = 0) -> str:
+    """Format a JSON-decoded value as a Starlark literal."""
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        inner_indent = " " * (indent + 4)
+        items = [
+            f"{inner_indent}{_format_starlark_value(v, indent + 4)},"
+            for v in value
+        ]
+        return "[\n" + "\n".join(items) + f"\n{' ' * indent}]"
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        inner_indent = " " * (indent + 4)
+        items = [
+            f"{inner_indent}{json.dumps(k)}: {_format_starlark_value(v, indent + 4)},"
+            for k, v in sorted(value.items())
+        ]
+        return "{\n" + "\n".join(items) + f"\n{' ' * indent}}}"
+    raise TypeError(f"Unsupported Starlark value type: {type(value)}")
+
+
+def _format_starlark_struct(fields: dict[str, T.Any]) -> str:
+    """Format a dictionary of fields as a Starlark `struct(...)` call."""
+    if not fields:
+        return "struct()"
+    items = [
+        f"    {k} = {_format_starlark_value(v, 4)},"
+        for k, v in sorted(fields.items())
+    ]
+    return "struct(\n" + "\n".join(items) + "\n)"
 
 
 class GnBuildArgs(object):
@@ -882,6 +938,64 @@ platform_flags_map = {
         content += "}\n"
         return content
 
+    _STRUCT_ENVIRONMENT_KEYS = frozenset({"device_types", "host_device_types"})
+    # Host-only environments (host_test() uses host constraints, not
+    # environments) and the internal GN build argument.
+    _EXCLUDED_ENVIRONMENT_KEYS = frozenset(
+        {"basic_env_names", "host_env", "linux_env"}
+    )
+
+    @staticmethod
+    def generate_environments_bzl(
+        build_dir: Path,
+    ) -> str:
+        """Generate an `environments.bzl` file from `test_environments_for_bazel.json`.
+
+        Args:
+            build_dir: Path to Fuchsia build directory.
+        Returns:
+            The content of the generated `environments.bzl` file as a string.
+        Raises:
+            ValueError if the input file is missing or malformed.
+        """
+        # LINT.IfChange(test_environments_for_bazel_path)
+        environments_file = build_dir / "test_environments_for_bazel.json"
+        # LINT.ThenChange(//build/bazel/BUILD.gn:test_environments_for_bazel_path)
+        if not environments_file.exists():
+            raise ValueError(
+                f"Missing required test environments file: {environments_file}"
+            )
+        with environments_file.open("rb") as f:
+            environments = json.load(f)
+        if not isinstance(environments, dict):
+            raise ValueError(f"{environments_file}: Expected a JSON object")
+
+        lines = [
+            "# AUTO-GENERATED BY FUCHSIA BUILD - DO NOT EDIT",
+            f"# Generated from {environments_file}",
+            "",
+            '"""Fuchsia target test environments exported from //build/testing/environments.gni."""',
+        ]
+        for name, value in sorted(environments.items()):
+            # Export everything except an explicit denylist so that new
+            # environments (including ones not named `*_env`) can't silently
+            # go missing.
+            if (
+                name.startswith("_")
+                or name in GnBuildArgs._EXCLUDED_ENVIRONMENT_KEYS
+            ):
+                continue
+            lines.append("")
+            if name in GnBuildArgs._STRUCT_ENVIRONMENT_KEYS:
+                if not isinstance(value, dict):
+                    raise ValueError(
+                        f"{environments_file}: Expected '{name}' to be a dict"
+                    )
+                lines.append(f"{name} = {_format_starlark_struct(value)}")
+            else:
+                lines.append(f"{name} = {_format_starlark_value(value)}")
+        return "\n".join(lines) + "\n"
+
     @staticmethod
     def record_fuchsia_build_info_dir(
         fuchsia_dir: Path,
@@ -940,6 +1054,10 @@ bazel_dep(name = "fuchsia_rules_common", version = "0.0")
             else:
                 args_bzl_filename = "args.bzl"
             generated.record_file_content(args_bzl_filename, args_bzl_content)
+
+        # Generate @fuchsia_build_info//:environments.bzl
+        environments_content = GnBuildArgs.generate_environments_bzl(build_dir)
+        generated.record_file_content("environments.bzl", environments_content)
 
         # Generate @fuchsia_build_info//:platform_flags.bzl
         platforms_flags_content = GnBuildArgs.generate_platforms_flags_bzl(
@@ -1044,6 +1162,40 @@ class BazelPackageAndTargetToGnInputsEntriesMap(
     dict[str, BazelTargetGnInputsEntriesMap]
 ):
     """Maps Bazel package names to a BazelTargetGnInputsEntriesMap instance."""
+
+
+def merge_gn_target_manifests(
+    manifests: list[Path],
+) -> BazelPackageAndTargetToGnInputsEntriesMap:
+    """Merge several gn_targets manifests into a single set of entries.
+
+    Args:
+        manifests: Paths of the per-bazel_action() gn_targets manifests.
+    Returns:
+        The merged entries, keyed by Bazel package then by target name.
+    Raises:
+        ValueError if two manifests disagree about the same Bazel target.
+    """
+    manifest_entries_package_map = BazelPackageAndTargetToGnInputsEntriesMap()
+    for manifest_path in manifests:
+        with open(manifest_path) as f:
+            for entry_json in json.load(f):
+                entry = GnTargetsDirectoryManifestEntry.from_json_value(
+                    entry_json
+                )
+
+                bazel_package = entry.bazel_package
+                name_map = manifest_entries_package_map.setdefault(
+                    bazel_package, BazelTargetGnInputsEntriesMap()
+                )
+
+                bazel_name = entry.bazel_name
+                found_entry = name_map.setdefault(bazel_name, entry)
+                if found_entry != entry:
+                    raise ValueError(
+                        f"Found duplicate GN target entry for //{bazel_package}:{bazel_name}:  {found_entry.generator_label} vs {entry.generator_label}"
+                    )
+    return manifest_entries_package_map
 
 
 def record_gn_targets_dir_from_entries(
@@ -1559,10 +1711,15 @@ def generate_fuchsia_platform_sysroot_repository(
             variant, _ = _extract_variant_and_subpath(symlink_dest, "debug/")
             debug_files[variant] = symlink_dest_path
 
+    def write_file_if_changed(path: Path, content: str) -> None:
+        if not path.exists() or path.read_text() != content:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+
     # As Bazel doesn't support labels pointing to directories, this empty file can
     # be referenced as @<repo_name>//:sysroot/empty instead.
     repository_dir.mkdir(parents=True, exist_ok=True)
-    (repository_dir / "sysroot/empty").write_text("")
+    write_file_if_changed(repository_dir / "sysroot/empty", "")
 
     dist_targets = _generate_sysroot_dist_targets(
         dist_files,
@@ -1598,12 +1755,13 @@ def generate_fuchsia_platform_sysroot_repository(
     )
     dist_targets_str = "\n\n".join(dist_targets)
 
-    (repository_dir / "MODULE.bazel").write_text(module_content)
+    write_file_if_changed(repository_dir / "MODULE.bazel", module_content)
 
     header_files_str = "".join(f'        "{f}",\n' for f in header_files)
     lib_files_str = "".join(f'        "{f}",\n' for f in lib_files)
 
-    (repository_dir / "BUILD.bazel").write_text(
+    write_file_if_changed(
+        repository_dir / "BUILD.bazel",
         f"""# AUTO-GENERATED - DO NOT EDIT
 
 {load_block}
@@ -1633,7 +1791,7 @@ filegroup(
 )
 
 {dist_targets_str}
-"""
+""",
     )
 
 

@@ -29,6 +29,7 @@ rustc_library("blob_pager_and_verifier") {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
     "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:test-case",
   ]
 
   sources = [

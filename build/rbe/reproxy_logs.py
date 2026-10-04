@@ -19,6 +19,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
+from typing import Protocol
 
 import fuchsia
 from api.log import log_pb2
@@ -92,7 +93,14 @@ def distribute_bytes_downloaded_over_time(
     return list(zip(bytes_per_interval, concurrent_downloads_per_interval))
 
 
-def timestamp_pb_to_float(timestamp) -> float:
+class TimestampLike(Protocol):
+    """Structural type for google.protobuf.Timestamp, which lacks stubs."""
+
+    seconds: int
+    nanos: int
+
+
+def timestamp_pb_to_float(timestamp: TimestampLike) -> float:
     return timestamp.seconds + (timestamp.nanos / 1e9)
 
 
@@ -190,10 +198,10 @@ class ReproxyLog(object):
                 )
         return total_download_bytes, total_upload_bytes
 
-    def _min_max_event_times(self) -> tuple[float, float]:
+    def _min_max_event_times(self) -> tuple[float | None, float | None]:
         """Find the minimum and maximum event times in the reproxy log."""
-        min_time = None
-        max_time = None
+        min_time: float | None = None
+        max_time: float | None = None
         for record in self.proto.records:
             if record.HasField("remote_metadata"):
                 rmd = record.remote_metadata

@@ -21,9 +21,10 @@ set -uo pipefail
 #   DIR...        Target directories (default: $PLANTER_TARGET_DIRS).
 #
 # The checks run in $PLANTER_WORKDIR (default: the current directory) against the
-# change since $PLANTER_CHANGE_BASE (default: HEAD). Without --skip-build, a run
-# first waits for a machinery evolution that planter is running alongside the
-# coder, so that it runs the checks planter will run. Progress goes to stderr.
+# change since $PLANTER_CHANGE_BASE (default: HEAD). It never waits for a machinery
+# evolution that planter is running alongside the coder: it runs the current checks
+# and notes the evolution; planter re-runs the checks with the evolved machinery
+# after the coder reports. Progress goes to stderr.
 # Exit status: 0 if no finding blocks, 1 if some do, 2 on usage or manifest
 # errors.
 
@@ -45,8 +46,8 @@ usage: run_checks.sh [--skip-build] [--only NAME[,NAME...]] [--json] [--list] [D
 
 Runs the checks in checks/manifest.json the way planter runs them after the
 coder reports. Exits 1 if any ERROR or WARNING finding would send the change
-back, 0 otherwise. Without --skip-build it first waits for a machinery evolution
-in progress, so that it runs the checks planter will run.
+back, 0 otherwise. It does not wait for a machinery evolution in progress: planter
+runs the checks again with the evolved machinery after you report.
 
   --skip-build  set PLANTER_SKIP_BUILD=1 so build_verification does not build
   --only NAMES  run only these checks (comma-separated, repeatable)
@@ -181,32 +182,9 @@ def evolution_running():
     return False
 
 
-def wait_for_evolution():
-    if not evolution_running():
-        return
-    log(
-        "planter is evolving the machinery (checks may change); waiting for it to finish so that "
-        "this run uses the checks planter will run after you report..."
-    )
-    started = last = time.monotonic()
-    while evolution_running():
-        time.sleep(2)
-        if time.monotonic() - last >= HEARTBEAT_SECS:
-            last = time.monotonic()
-            log(f"still waiting for the machinery evolution ({fmt_secs(last - started)})")
-    log(f"the machinery evolution finished after {fmt_secs(time.monotonic() - started)}")
-
-
-evolution_in_progress = False
-if not list_only:
-    if skip_build:
-        evolution_in_progress = evolution_running()
-    else:
-        try:
-            wait_for_evolution()
-        except KeyboardInterrupt:
-            log("interrupted")
-            sys.exit(130)
+# Never wait for an evolution: it can take many minutes, and planter itself applies it
+# before running the checks after the coder reports.
+evolution_in_progress = not list_only and evolution_running()
 
 
 # --- checks/manifest.json, read the way planter reads it (Go encoding/json) ---
@@ -577,16 +555,60 @@ def run_check(spec):
     return results
 
 
+def commit_msg_only_since_upload():
+    uploaded_commit = os.environ.get("PLANTER_UPLOADED_COMMIT", "").strip()
+    if not uploaded_commit or not workdir:
+        return False
+    try:
+        up_tree = subprocess.check_output(
+            ["git", "-C", workdir, "rev-parse", f"{uploaded_commit}^{{tree}}"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        head_tree = subprocess.check_output(
+            ["git", "-C", workdir, "rev-parse", "HEAD^{tree}"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if not up_tree or up_tree != head_tree:
+            return False
+        diff_wt = subprocess.check_output(
+            ["git", "-C", workdir, "diff", "--name-only", "HEAD", "--"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if diff_wt:
+            return False
+        untracked = [
+            u.strip() for u in subprocess.check_output(
+                ["git", "-C", workdir, "ls-files", "--others", "--exclude-standard"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).splitlines() if u.strip()
+        ]
+        if any(any(u == d or u.startswith(d + "/") for d in target_dirs) for u in untracked):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+COMMIT_MSG_CHECKS = {"confidentiality_check", "build_verification"}
+commit_msg_only = not only and commit_msg_only_since_upload()
+if commit_msg_only:
+    enabled = [s for s in enabled if s["name"] in COMMIT_MSG_CHECKS]
+    if len(target_dirs) > 1:
+        target_dirs = target_dirs[:1]
+
 builds_skipped = skip_build or os.environ.get("PLANTER_SKIP_BUILD", "").strip() not in ("", "0")
 evolution_note = (
-    "planter was evolving the machinery during this run, so the checks may still change; the "
-    "final run without --skip-build waits for the evolution."
+    "planter is evolving the machinery alongside you, so the checks may still change. Do not wait "
+    "for it: report when this run passes; planter runs the checks again with the evolved "
+    "machinery and sends any new finding back as another round."
 )
 if evolution_in_progress:
     log(evolution_note)
 log(
     f"{len(enabled)} check(s) in {workdir}; target dirs: {' '.join(target_dirs) or '(none)'}; "
-    f"change base: {change_base}" + ("; builds skipped" if builds_skipped else "")
+    f"change base: {change_base}"
+    + ("; commit-msg only since upload" if commit_msg_only else "")
+    + ("; builds skipped" if builds_skipped and not commit_msg_only else "")
 )
 rows = []
 all_findings = []
@@ -678,7 +700,7 @@ else:
     print("RESULT: PASS: no blocking findings.")
 if only:
     print("NOTE: only some checks ran (--only). Run all of them before reporting.")
-if builds_skipped:
+if any(f["category"] == "build_skipped" for f in all_findings):
     print("NOTE: the builds were skipped. Run `run_checks.sh` without --skip-build before reporting.")
 if evolution_in_progress:
     print(f"NOTE: {evolution_note}")

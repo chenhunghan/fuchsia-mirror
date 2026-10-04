@@ -4,7 +4,7 @@
 
 pub mod args;
 
-use crate::common::{node_property_key_to_string, node_property_value_to_string};
+use crate::common::node_property_value_to_string;
 use anyhow::{Result, anyhow};
 use args::ListDevicesCommand;
 use fidl_fuchsia_component_decl as fdecl;
@@ -94,7 +94,7 @@ impl DevicePrinter for Device {
                     "[{:>2}/ {:>2}] : Key {:30} Value {}",
                     i + 1,
                     node_property_list.len(),
-                    node_property_key_to_string(&node_property.key),
+                    node_property.key,
                     node_property_value_to_string(&node_property.value),
                 );
             }

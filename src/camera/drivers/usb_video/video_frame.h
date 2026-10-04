@@ -64,9 +64,9 @@ class VideoFrame {
     static zx::result<PayloadHeader> ParseHeader(usb_request_t* req);
 
     uint32_t length() const { return header.bHeaderLength; }
-    uint8_t fid() const { return header.bmHeaderInfo & USB_VIDEO_VS_PAYLOAD_HEADER_FID; }
-    uint8_t eof() const { return header.bmHeaderInfo & USB_VIDEO_VS_PAYLOAD_HEADER_EOF; }
-    uint8_t error() const { return header.bmHeaderInfo & USB_VIDEO_VS_PAYLOAD_HEADER_ERR; }
+    uint8_t fid() const { return header.bmHeaderInfo & fdescriptor::kVideoVsPayloadHeaderFid; }
+    uint8_t eof() const { return header.bmHeaderInfo & fdescriptor::kVideoVsPayloadHeaderEof; }
+    uint8_t error() const { return header.bmHeaderInfo & fdescriptor::kVideoVsPayloadHeaderErr; }
 
     const usb_video_vs_payload_header header;
   };

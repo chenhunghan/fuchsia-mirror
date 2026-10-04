@@ -101,7 +101,7 @@ class BuildDir:
         except OSError:
             return BuildStatus.UNKNOWN
 
-    def get_build_time_ago_sec(self) -> float | None:
+    def get_build_time_ago_sec(self, now: float | None = None) -> float | None:
         ninja_log = self.path / ".ninja_log"
         if not ninja_log.exists():
             return None
@@ -109,8 +109,10 @@ class BuildDir:
         try:
             import time
 
+            if now is None:
+                now = time.time()
             mtime = ninja_log.stat().st_mtime
-            diff = time.time() - mtime
+            diff = now - mtime
             return max(0.0, diff)
         except OSError:
             return None

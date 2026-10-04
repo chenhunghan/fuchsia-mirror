@@ -5,6 +5,7 @@
 import("//build/bazel/bazel_workspace.gni")
 import("//build/config/clang/clang_prefix.gni")
 import("//build/icu/build_config.gni")
+import("//build/rust/config.gni")
 
 # The following lists which content hash files need to be generated
 # for the Bazel workspace. Each entry contains the argument to a call
@@ -41,6 +42,17 @@ bazel_content_hash_definitions = [
     ]
   },
   {
+    repo_name = "fuchsia_prebuilt_rust"
+    source_paths = [
+      # rustc_prefix points at the toolchain root.
+      rustc_prefix,
+
+      # changes to the following files should trigger repository rules.
+      "//build/bazel/toolchains/rust",
+    ]
+    cipd_name = "rust"
+  },
+  {
     repo_name = "prebuilt_clang"
     source_paths = [
       # clang_prefix points to bin under clang root.
@@ -51,6 +63,11 @@ bazel_content_hash_definitions = [
       "//build/bazel/toolchains/clang",
     ]
     cipd_name = "clang"
+  },
+  {
+    repo_name = "prebuilt_llvm"
+    source_paths = [ "//prebuilt/third_party/llvm/${host_os}-${host_cpu}" ]
+    cipd_name = "llvm"
   },
   {
     repo_name = "prebuilt_python"

@@ -11,6 +11,6 @@
 
 #include <ktl/optional.h>
 
-ktl::optional<linux_boot_config::LinuxBootConfig> GetLinuxBootConfig();
+linux_boot_config::LinuxBootConfig GetLinuxBootConfig();
 
 #endif  // ZIRCON_KERNEL_PHYS_TEST_LINUX_BOOT_CONFIG_LINUX_BOOT_CONFIG_H_

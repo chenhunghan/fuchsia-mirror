@@ -2590,6 +2590,175 @@ TEST_P(SdmmcBlockDeviceTest, Inspect) {
   EXPECT_EQ(io_retries->value(), 9);
 }
 
+TEST_P(SdmmcBlockDeviceTest, InspectExtCsd) {
+  std::array<uint8_t, MMC_EXT_CSD_SIZE> expected_ext_csd = {};
+  SetDefaultMmcExtCsd(expected_ext_csd);
+  expected_ext_csd[MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_START - 1] = 0x11;
+  expected_ext_csd[MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_START +
+                   MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_SIZE] = 0x22;
+
+  sdmmc_.set_command_callback(MMC_SEND_EXT_CSD, [&](cpp20::span<uint8_t> out_data) {
+    ASSERT_EQ(out_data.size(), expected_ext_csd.size());
+    memcpy(out_data.data(), expected_ext_csd.data(), expected_ext_csd.size());
+    memset(&out_data[MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_START], 0xff,
+           MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_SIZE);
+  });
+
+  ASSERT_OK(StartDriverForMmc());
+
+  zx::result<std::unique_ptr<block_client::RemoteBlockDevice>> client_result =
+      GetRemoteBlockDeviceForBlockServer("user");
+  ASSERT_OK(client_result);
+  auto client = std::move(client_result.value());
+
+  inspect::InspectTestHelper inspector;
+  inspector.ReadInspect(block_device_->inspect());
+
+  const inspect::Hierarchy* root = inspector.hierarchy().GetByPath({"sdmmc_core"});
+  ASSERT_NOT_NULL(root);
+
+  const auto* ext_csd = root->node().get_property<inspect::ByteVectorPropertyValue>("ext_csd");
+  ASSERT_NOT_NULL(ext_csd);
+  ASSERT_EQ(ext_csd->value().size(), expected_ext_csd.size());
+  EXPECT_BYTES_EQ(ext_csd->value().data(), expected_ext_csd.data(), expected_ext_csd.size());
+
+  const auto* ext_csd_timestamp =
+      root->node().get_property<inspect::UintPropertyValue>("ext_csd_timestamp");
+  ASSERT_NOT_NULL(ext_csd_timestamp);
+  EXPECT_EQ(ext_csd_timestamp->value(), 0);
+
+  const auto* ext_csd_status =
+      root->node().get_property<inspect::StringPropertyValue>("ext_csd_status");
+  ASSERT_NOT_NULL(ext_csd_status);
+  EXPECT_EQ(ext_csd_status->value(), "ZX_OK");
+
+  // EXT_CSD timestamp should remain zero after a successful block op.
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(5 * FakeSdmmcDevice::kBlockSize, 0, &vmo));
+  storage::Vmoid owned_vmoid;
+  EXPECT_OK(client->BlockAttachVmo(vmo, &owned_vmoid));
+  vmoid_t vmoid = owned_vmoid.TakeId();
+
+  BlockFifoRequest req1 = {
+      .command = {.opcode = BLOCK_OPCODE_WRITE},
+      .vmoid = vmoid,
+      .length = 5,
+      .dev_offset = 0x8000,
+  };
+  EXPECT_OK(client->FifoTransaction(&req1, 1));
+
+  inspector.ReadInspect(block_device_->inspect());
+
+  root = inspector.hierarchy().GetByPath({"sdmmc_core"});
+  ASSERT_NOT_NULL(root);
+
+  ext_csd_timestamp = root->node().get_property<inspect::UintPropertyValue>("ext_csd_timestamp");
+  ASSERT_NOT_NULL(ext_csd_timestamp);
+  EXPECT_EQ(ext_csd_timestamp->value(), 0);
+
+  // EXT_CSD and timestamp should be updated after a failed block op.
+  expected_ext_csd[0] = 0xa5;
+  sdmmc_.set_command_callback(SDMMC_WRITE_MULTIPLE_BLOCK,
+                              [](const sdmmc_req_t& req) -> zx_status_t { return ZX_ERR_IO; });
+
+  BlockFifoRequest req2 = {
+      .command = {.opcode = BLOCK_OPCODE_WRITE},
+      .vmoid = vmoid,
+      .length = 5,
+      .dev_offset = 0x8000,
+  };
+  const zx::time before_error = zx::clock::get_monotonic();
+  EXPECT_STATUS(client->FifoTransaction(&req2, 1), ZX_ERR_IO);
+  const zx::time after_error = zx::clock::get_monotonic();
+
+  inspector.ReadInspect(block_device_->inspect());
+
+  root = inspector.hierarchy().GetByPath({"sdmmc_core"});
+  ASSERT_NOT_NULL(root);
+
+  ext_csd = root->node().get_property<inspect::ByteVectorPropertyValue>("ext_csd");
+  ASSERT_NOT_NULL(ext_csd);
+  ASSERT_EQ(ext_csd->value().size(), expected_ext_csd.size());
+  EXPECT_BYTES_EQ(ext_csd->value().data(), expected_ext_csd.data(), expected_ext_csd.size());
+
+  ext_csd_timestamp = root->node().get_property<inspect::UintPropertyValue>("ext_csd_timestamp");
+  ASSERT_NOT_NULL(ext_csd_timestamp);
+  const uint64_t updated_timestamp = ext_csd_timestamp->value();
+  EXPECT_GT(updated_timestamp, 0);
+  EXPECT_GE(updated_timestamp, before_error.get());
+  EXPECT_LE(updated_timestamp, after_error.get());
+
+  ext_csd_status = root->node().get_property<inspect::StringPropertyValue>("ext_csd_status");
+  ASSERT_NOT_NULL(ext_csd_status);
+  EXPECT_EQ(ext_csd_status->value(), "ZX_OK");
+
+  // If fetching EXT_CSD fails after a failed block op, ext_csd_status should reflect the error,
+  // while ext_csd and ext_csd_timestamp remain unchanged.
+  sdmmc_.set_command_callback(MMC_SEND_EXT_CSD, [](const sdmmc_req_t& req) -> zx_status_t {
+    return ZX_ERR_IO_DATA_INTEGRITY;
+  });
+
+  BlockFifoRequest req3 = {
+      .command = {.opcode = BLOCK_OPCODE_WRITE},
+      .vmoid = vmoid,
+      .length = 5,
+      .dev_offset = 0x8000,
+  };
+  EXPECT_STATUS(client->FifoTransaction(&req3, 1), ZX_ERR_IO);
+
+  inspector.ReadInspect(block_device_->inspect());
+
+  root = inspector.hierarchy().GetByPath({"sdmmc_core"});
+  ASSERT_NOT_NULL(root);
+
+  ext_csd = root->node().get_property<inspect::ByteVectorPropertyValue>("ext_csd");
+  ASSERT_NOT_NULL(ext_csd);
+  ASSERT_EQ(ext_csd->value().size(), expected_ext_csd.size());
+  EXPECT_BYTES_EQ(ext_csd->value().data(), expected_ext_csd.data(), expected_ext_csd.size());
+
+  ext_csd_timestamp = root->node().get_property<inspect::UintPropertyValue>("ext_csd_timestamp");
+  ASSERT_NOT_NULL(ext_csd_timestamp);
+  EXPECT_EQ(ext_csd_timestamp->value(), updated_timestamp);
+
+  ext_csd_status = root->node().get_property<inspect::StringPropertyValue>("ext_csd_status");
+  ASSERT_NOT_NULL(ext_csd_status);
+  EXPECT_EQ(ext_csd_status->value(), "ZX_ERR_IO_DATA_INTEGRITY");
+
+  // If a subsequent failed block op succeeds in fetching EXT_CSD, ext_csd_status should be updated
+  // back to ZX_OK along with the new ext_csd contents and timestamp.
+  expected_ext_csd[0] = 0x5a;
+  sdmmc_.set_command_callback(MMC_SEND_EXT_CSD, [&](cpp20::span<uint8_t> out_data) {
+    ASSERT_EQ(out_data.size(), expected_ext_csd.size());
+    memcpy(out_data.data(), expected_ext_csd.data(), expected_ext_csd.size());
+    memset(&out_data[MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_START], 0xff,
+           MMC_EXT_CSD_VENDOR_SPECIFIC_FIELD_SIZE);
+  });
+
+  const zx::time before_recovery = zx::clock::get_monotonic();
+  EXPECT_STATUS(client->FifoTransaction(&req3, 1), ZX_ERR_IO);
+  const zx::time after_recovery = zx::clock::get_monotonic();
+
+  inspector.ReadInspect(block_device_->inspect());
+
+  root = inspector.hierarchy().GetByPath({"sdmmc_core"});
+  ASSERT_NOT_NULL(root);
+
+  ext_csd = root->node().get_property<inspect::ByteVectorPropertyValue>("ext_csd");
+  ASSERT_NOT_NULL(ext_csd);
+  ASSERT_EQ(ext_csd->value().size(), expected_ext_csd.size());
+  EXPECT_BYTES_EQ(ext_csd->value().data(), expected_ext_csd.data(), expected_ext_csd.size());
+
+  ext_csd_timestamp = root->node().get_property<inspect::UintPropertyValue>("ext_csd_timestamp");
+  ASSERT_NOT_NULL(ext_csd_timestamp);
+  EXPECT_GT(ext_csd_timestamp->value(), updated_timestamp);
+  EXPECT_GE(ext_csd_timestamp->value(), before_recovery.get());
+  EXPECT_LE(ext_csd_timestamp->value(), after_recovery.get());
+
+  ext_csd_status = root->node().get_property<inspect::StringPropertyValue>("ext_csd_status");
+  ASSERT_NOT_NULL(ext_csd_status);
+  EXPECT_EQ(ext_csd_status->value(), "ZX_OK");
+}
+
 TEST_P(SdmmcBlockDeviceTest, InspectInvalidLifetime) {
   sdmmc_.set_command_callback(MMC_SEND_EXT_CSD, [](cpp20::span<uint8_t> out_data) {
     *reinterpret_cast<uint32_t*>(&out_data[212]) = htole32(FakeSdmmcDevice::kBlockCount);
@@ -3400,6 +3569,9 @@ TEST_P(SdmmcBlockDeviceTest, NodeToken) {
 TEST_P(SdmmcBlockDeviceTest, InlineCryptoDunOutOfRange) {
   ASSERT_OK(StartDriverForMmc());
 
+  zx::result key_token = block_device_->child_partition_devices()[0]->RegisterKeySlot(1);
+  ASSERT_OK(key_token);
+
   zx::vmo vmo;
   ASSERT_OK(zx::vmo::create(FakeSdmmcDevice::kBlockSize, 0, &vmo));
 
@@ -3420,6 +3592,12 @@ TEST_P(SdmmcBlockDeviceTest, InlineCryptoDunOutOfRange) {
         .dun = uint64_t{1} << 32,
         .slot = 1,
     };
+    EXPECT_EQ(client->FifoTransaction(&req, 1), ZX_ERR_ACCESS_DENIED);
+
+    zx::result slot = client->RegisterKey(std::move(*key_token));
+    ASSERT_OK(slot);
+    EXPECT_EQ(*slot, 1);
+
     EXPECT_EQ(client->FifoTransaction(&req, 1), ZX_ERR_OUT_OF_RANGE);
   });
 }

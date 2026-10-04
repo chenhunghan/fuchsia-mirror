@@ -67,7 +67,7 @@ fn parse_mutex_or_brwlock_args(
                 *custom_flags = Some(nv.value);
             }
             syn::Meta::Path(path) => {
-                *custom_class = Some(Type::Path(TypePath { qself: None, path }));
+                *custom_class = Some(Type::Path(TypePath { attrs: Vec::new(), qself: None, path }));
             }
             syn::Meta::List(list) => {
                 let tokens = quote! { #list };

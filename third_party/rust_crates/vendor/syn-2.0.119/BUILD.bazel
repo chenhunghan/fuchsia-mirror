@@ -56,18 +56,19 @@ rust_library(
         "clone-impls",
         "default",
         "derive",
-        "extra-traits",
         "full",
         "parsing",
         "printing",
         "proc-macro",
     ] + select({
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
+            "extra-traits",  # aarch64-unknown-linux-gnu
             "fold",  # aarch64-unknown-linux-gnu
             "visit",  # aarch64-unknown-linux-gnu
             "visit-mut",  # aarch64-unknown-linux-gnu
         ],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
+            "extra-traits",  # x86_64-unknown-linux-gnu
             "fold",  # x86_64-unknown-linux-gnu
             "visit",  # x86_64-unknown-linux-gnu
             "visit-mut",  # x86_64-unknown-linux-gnu
@@ -89,6 +90,7 @@ rust_library(
     target_compatible_with = select({
         "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [],
         "//conditions:default": ["@platforms//:incompatible"],

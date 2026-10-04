@@ -78,6 +78,11 @@ def _generate_prebuilt_llvm_repository_impl(repo_ctx):
     # rule will be re-run everytime the invoked script is modified.
     script_path = str(repo_ctx.path(Label("@//build/bazel/scripts:symlink-directory.py")))
 
+    # Bazel can't track the directory that symlink-directory.py mirrors, so
+    # without this the repository would go stale when the LLVM prebuilt
+    # changes (e.g. after a `jiri update` that rolls it).
+    repo_ctx.watch("%s/%s" % (workspace_dir, repo_ctx.attr.repository_version_file))
+
     repo_ctx.execute(
         [
             script_path,
@@ -102,6 +107,10 @@ generate_prebuilt_llvm_repository = repository_rule(
         "llvm_install_dir": attr.string(
             mandatory = True,
             doc = "Location of prebuilt LLVM toolchain installation, a full label, or relative to workspace dir",
+        ),
+        "repository_version_file": attr.string(
+            mandatory = True,
+            doc = "Content hash file for the LLVM prebuilt, relative to workspace root.",
         ),
     },
 )

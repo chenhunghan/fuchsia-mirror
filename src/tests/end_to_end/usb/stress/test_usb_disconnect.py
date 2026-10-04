@@ -4,11 +4,15 @@
 """USB Disconnect stress tests (handles both physical and virtual)."""
 
 import asyncio
+import json
 import logging
 
 import usb_lib
 from honeydew import errors
-from mobly import signals, test_runner
+from honeydew.transports.ffx import errors as ffx_errors
+from honeydew.typing import custom_types
+from mobly import asserts, signals, test_runner
+from usb_lib.link_speed import assert_link_speed
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -29,6 +33,14 @@ class UsbDisconnectTest(usb_lib.UsbPowerHubBaseTest):
             Defaults to 10.
         reconnect_timeout_sec (int, optional): How long to wait for the device
             to come back online after USB power is restored. Defaults to 60.
+        verify_mdns (bool, optional): Verify that the device is discoverable
+            over mDNS before the first disconnect and after every reconnect.
+            Defaults to False.
+        mdns_timeout_sec (int, optional): How long each mDNS check waits for
+            the device to be discovered. Defaults to 12, which allows one
+            retry, since ffx re-sends its mDNS query every 10s.
+        expected_usb_link_speed (str, optional): When set, e.g. to "high",
+            assert the USB link negotiated this speed after every reconnect.
     """
 
     USB_POWER_HUB_REQUIRED: bool = True
@@ -52,6 +64,14 @@ class UsbDisconnectTest(usb_lib.UsbPowerHubBaseTest):
             name_func=self._name_func,
             arg_sets=test_arg_tuple_list,
         )
+
+    async def setup_class(self) -> None:
+        """setup_class is called once before running tests."""
+        await super().setup_class()
+        if self.user_params.get("verify_mdns", False):
+            # Confirm mDNS works before any disconnect, so that a failure in
+            # an iteration can be attributed to the hotplug.
+            self._verify_mdns_advertisement("baseline")
 
     async def setup_test(self) -> None:
         """setup_test is called once before running each test."""
@@ -134,10 +154,76 @@ class UsbDisconnectTest(usb_lib.UsbPowerHubBaseTest):
             _LOGGER.info("Device is successfully back online.")
             self.dut.health_check()
 
+        # Outside the `finally` block so that an mDNS or link speed failure
+        # cannot mask a disconnect failure.
+        if self.user_params.get("verify_mdns", False):
+            self._verify_mdns_advertisement(f"iteration {iteration}")
+        if expected_speed := self.user_params.get("expected_usb_link_speed"):
+            assert_link_speed(
+                self.dut,
+                expected=expected_speed,
+                phase=f"iteration {iteration}",
+            )
+
         _LOGGER.info(
             "Successfully ended the Usb Disconnect test iteration# %s",
             iteration,
         )
+
+    def _verify_mdns_advertisement(self, phase: str) -> None:
+        """Asserts that the device is discoverable over mDNS.
+
+        In infra, Honeydew reconnects to the device by static IP, and ffx can
+        also find it over USB, so a broken mDNS responder would otherwise go
+        unnoticed. `--no-usb` limits discovery to mDNS, and `--no-probe` skips
+        connecting to the device since only discovery is under test.
+
+        Args:
+            phase: Label used in log and failure messages, e.g. "iteration 3".
+        """
+        timeout_sec = int(self.user_params.get("mdns_timeout_sec", 12))
+        try:
+            output = self.dut.ffx.run(
+                cmd=[
+                    "-c",
+                    f"discovery.timeout={timeout_sec * 1000}",
+                    "target",
+                    "list",
+                    "--no-usb",
+                    "--no-probe",
+                    self.dut.device_name,
+                ],
+                include_target=False,
+            )
+        except ffx_errors.FfxCommandError as e:
+            # When the named device is not discovered, ffx exits with an error
+            # rather than returning an empty list.
+            raise signals.TestFailure(
+                f"[{phase}] Device {self.dut.device_name} not discovered via "
+                f"mDNS within {timeout_sec}s: {e}"
+            ) from e
+
+        targets = json.loads(output)
+        asserts.assert_true(
+            bool(targets), f"[{phase}] No targets returned by ffx target list"
+        )
+        discovered_ips = [
+            str(custom_types.IpPort.from_json(address).ip).split("%")[0]
+            for address in targets[0]["addresses"]
+        ]
+        _LOGGER.info(
+            "[%s] Device discovered via mDNS at %s", phase, discovered_ips
+        )
+
+        ssh_address = self.dut.ffx.get_target_ssh_address()
+        if ssh_address is not None:
+            expected_ip = str(ssh_address.ip).split("%")[0]
+            asserts.assert_in(
+                expected_ip,
+                discovered_ips,
+                f"[{phase}] Expected DUT IP {expected_ip} in mDNS addresses "
+                f"{discovered_ips}",
+            )
 
     def _name_func(self, iteration: int) -> str:
         """This function generates the names of each test case based on each

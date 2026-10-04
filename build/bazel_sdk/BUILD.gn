@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/python/python_library.gni")
+
 group("tests") {
   testonly = true
   deps = [
@@ -13,4 +15,61 @@ group("tests") {
 group("tests-no-e2e") {
   testonly = true
   deps = [ "//build/bazel/bazel_sdk:tests" ]
+}
+
+if (is_host) {
+  # Python scripts in this directory that aren't part of any other Python
+  # target, usually because they're run directly by action() or Bazel rules.
+  # Listing them here makes them subject to type checking.
+  python_library("type_checked_scripts") {
+    testonly = true
+
+    # This target only exists for type checking; depending on it would package
+    # a grab-bag of unrelated scripts.
+    visibility = [
+      ":*",
+      "//build:*",
+    ]
+    sources = [
+      "bazel_rules_fuchsia/common/scripts/zip-directory.py",
+      "bazel_rules_fuchsia/fuchsia/tools/check_restricted_symbols.py",
+      "bazel_rules_fuchsia/fuchsia/tools/construct_budgets_file.py",
+      "bazel_rules_fuchsia/fuchsia/tools/create_package_manifest_list.py",
+      "bazel_rules_fuchsia/fuchsia/tools/create_platform_aibs_file.py",
+      "bazel_rules_fuchsia/fuchsia/tools/development_status.py",
+      "bazel_rules_fuchsia/fuchsia/tools/elf_sizes.py",
+      "bazel_rules_fuchsia/fuchsia/tools/ensure_build_config.py",
+      "bazel_rules_fuchsia/fuchsia/tools/fuchsia_shell_task.py",
+      "bazel_rules_fuchsia/fuchsia/tools/fuchsia_task_lib.py",
+      "bazel_rules_fuchsia/fuchsia/tools/json_comparator.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/classification_types.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/generate_licenses_classification.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/generate_licenses_notice.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/generate_licenses_review.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/generate_licenses_spdx.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/remove_license_segment.py",
+      "bazel_rules_fuchsia/fuchsia/tools/licenses/verify_licenses_collection.py",
+      "bazel_rules_fuchsia/fuchsia/tools/publish_packages.py",
+      "bazel_rules_fuchsia/fuchsia/tools/register_debug_symbols.py",
+      "bazel_rules_fuchsia/fuchsia/tools/register_driver.py",
+      "bazel_rules_fuchsia/fuchsia/tools/run_component.py",
+      "bazel_rules_fuchsia/fuchsia/tools/run_ffx.py",
+      "bazel_rules_fuchsia/fuchsia/tools/run_lacewing_test.py",
+      "bazel_rules_fuchsia/fuchsia/tools/run_test_component.py",
+      "bazel_rules_fuchsia/fuchsia/tools/run_workflow.py",
+      "bazel_rules_fuchsia/fuchsia/tools/test_enumerated_components.py",
+      "bazel_rules_fuchsia/fuchsia/tools/unbuffer.py",
+      "fuchsia_rules_common/debug_symbols/tools/elf_strip.py",
+      "fuchsia_rules_common/debug_symbols/tools/generate_symbols_dir.py",
+      "fuchsia_rules_common/debug_symbols/tools/pylib/elf_info.py",
+      "fuchsia_rules_common/packages/rebase_package_manifest.py",
+      "fuchsia_rules_common/packages/tools/validate_component_manifests.py",
+      "tests/fuchsia/drivers/verify_driver_binary.py",
+      "tests/fuchsia/licenses/review/review_test.py",
+      "tests/scripts/bazel_test.py",
+      "tests/tools/licenses/classification_types_test.py",
+      "tests/tools/licenses/spdx_types_test.py",
+      "tests/tools/package_checker.py",
+    ]
+  }
 }

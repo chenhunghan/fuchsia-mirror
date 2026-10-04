@@ -122,7 +122,7 @@ closed protocol AudioTuner {
         device_id string:32;
         profile AudioDeviceTuningProfile;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Deletes the current, tunable audio effects configuration and volume settings
@@ -130,7 +130,7 @@ closed protocol AudioTuner {
     strict DeleteAudioDeviceProfile(struct {
         device_id string:32;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 
     /// Applies the provided `AudioEffectConfig` to the specified device's tuning profile in the media
@@ -146,6 +146,6 @@ closed protocol AudioTuner {
         device_id string:32;
         effect AudioEffectConfig;
     }) -> (struct {
-        status zx.Status;
+        status zx.Result;
     });
 };

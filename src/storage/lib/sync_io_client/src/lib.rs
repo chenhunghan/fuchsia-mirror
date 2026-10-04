@@ -86,9 +86,10 @@ fn zxio_attr_from_fidl(
         out_attr.fsverity_enabled = verity_enabled;
         out_attr.has.fsverity_enabled = true;
     }
-    if let Some(wrapping_key_id) = mutable.wrapping_key_id {
-        out_attr.wrapping_key_id = wrapping_key_id;
-        out_attr.has.wrapping_key_id = true;
+    if let Some(policy) = mutable.encryption_policy {
+        out_attr.encryption_policy.key_identifier = policy.key_identifier;
+        out_attr.encryption_policy.flags = policy.flags.bits();
+        out_attr.has.encryption_policy = true;
     }
     out_attr
 }

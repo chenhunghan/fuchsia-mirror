@@ -97,7 +97,7 @@ impl<Spec: SystemRegisterSpec> SysRegIo<Spec> {
     pub const fn new() -> Self {
         // Associated constants are evaluated lazily, so force an evaluation
         // now.
-        let _ = Spec::VALID;
+        const { Spec::VALID };
         Self(PhantomData)
     }
 }

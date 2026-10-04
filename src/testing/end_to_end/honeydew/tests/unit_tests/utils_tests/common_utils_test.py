@@ -275,3 +275,58 @@ class CommonUtilsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(errors.HoneydewTimeoutError):
             with common.time_limit(timeout=1):
                 time.sleep(2)
+
+    def test_time_limit_fires_before_inner_timeout(self) -> None:
+        """Test case for common.time_limit() where outer time_limit fires first
+        and is neither swallowed by wait_for_state_sync nor caught by inner
+        HoneydewTimeoutError exception handling."""
+
+        def _slow_failing_state_fn() -> bool:
+            time.sleep(2)
+            return False
+
+        def _inner_method_with_timeout() -> None:
+            try:
+                common.wait_for_state_sync(
+                    state_fn=_slow_failing_state_fn,
+                    expected_state=True,
+                    timeout=5,
+                    wait_time=1,
+                )
+            except errors.HoneydewTimeoutError as err:
+                raise errors.HoneydewTimeoutError(
+                    "Inner method timed out"
+                ) from err
+
+        with self.assertRaisesRegex(
+            errors.HoneydewTimeoutError, "Outer time_limit timed out"
+        ):
+            with common.time_limit(
+                timeout=1, exception_message="Outer time_limit timed out"
+            ):
+                _inner_method_with_timeout()
+
+    def test_inner_timeout_fires_before_time_limit(self) -> None:
+        """Test case for common.time_limit() where inner method times out before
+        outer time_limit and is caught by inner HoneydewTimeoutError handler."""
+
+        def _inner_method_with_timeout() -> None:
+            try:
+                common.wait_for_state_sync(
+                    state_fn=lambda: False,
+                    expected_state=True,
+                    timeout=0.1,
+                    wait_time=0.05,
+                )
+            except errors.HoneydewTimeoutError as err:
+                raise errors.HoneydewTimeoutError(
+                    "Inner method timed out"
+                ) from err
+
+        with self.assertRaisesRegex(
+            errors.HoneydewTimeoutError, "Inner method timed out"
+        ):
+            with common.time_limit(
+                timeout=5, exception_message="Outer time_limit timed out"
+            ):
+                _inner_method_with_timeout()

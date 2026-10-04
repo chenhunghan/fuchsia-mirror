@@ -68,15 +68,21 @@ if [[ -d "${SOURCE}" ]]; then
   die "Tool \"copy\" does not support directory copies"
 fi
 
-# When copying symlinks with relative paths to parent directories, create
-# a new symlink to the same destination file but with a new correct relative
-# path to it.
+# Handle symlinks: dereference to the canonical regular file.
+# This guarantees:
+# 1. Hardlinks (ln -f) and copies (cp -af) operate on regular files,
+#    so deleting an fx worktree never leaves dangling links in build dirs.
+# 2. Build artifacts archive hermetically into CAS for Swarming bots.
+# 3. Relative sibling symlinks (e.g. clang++ -> llvm) do not become broken.
 if [[ -L "${SOURCE}" ]]; then
-  LINK="$(readlink "${SOURCE}")"
-  if [[ "${LINK##../}" != "${LINK}" ]]; then
-    ln -sf "$(realpath --relative-to=$(dirname "${DESTINATION}") $(realpath "${SOURCE}"))" "${DESTINATION}"
-    exit 0
+  if [[ ! -e "${SOURCE}" ]]; then
+    die "Tool \"copy\": symlink source \"${SOURCE}\" is dangling or missing"
   fi
+  REAL_SOURCE="$(realpath "${SOURCE}")"
+  if [[ -d "${REAL_SOURCE}" ]]; then
+    die "Tool \"copy\" does not support directory copies"
+  fi
+  SOURCE="${REAL_SOURCE}"
 fi
 
 # We use link instead of copy by default; the way "copy" tool is being used is

@@ -28,7 +28,7 @@ struct RawBrwLockPiStorage(zr::OpaqueBytes<72>);
 #[pin_data(PinnedDrop)]
 #[repr(C, align(16))]
 pub struct RawBrwLockPi {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     class_id: *const c_void,
     storage: RawBrwLockPiStorage,
 }
@@ -37,7 +37,7 @@ pub struct RawBrwLockPi {
 #[pin_data(PinnedDrop)]
 #[repr(C, align(8))]
 pub struct RawBrwLockPi {
-    #[cfg(feature = "lock_dep")]
+    #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
     class_id: *const c_void,
     storage: RawBrwLockPiStorage,
 }
@@ -141,25 +141,34 @@ impl RawBrwLockPi {
     }
 }
 
-#[cfg(all(not(target_arch = "riscv64"), not(feature = "lock_dep")))]
+#[cfg(all(
+    not(target_arch = "riscv64"),
+    not(any(feature = "lock_dep", feature = "lock_metadata_only"))
+))]
 const _: () = {
     assert!(core::mem::size_of::<RawBrwLockPi>() == 128);
     assert!(core::mem::align_of::<RawBrwLockPi>() == 16);
 };
 
-#[cfg(all(not(target_arch = "riscv64"), feature = "lock_dep"))]
+#[cfg(all(
+    not(target_arch = "riscv64"),
+    any(feature = "lock_dep", feature = "lock_metadata_only")
+))]
 const _: () = {
     assert!(core::mem::size_of::<RawBrwLockPi>() == 144);
     assert!(core::mem::align_of::<RawBrwLockPi>() == 16);
 };
 
-#[cfg(all(target_arch = "riscv64", not(feature = "lock_dep")))]
+#[cfg(all(
+    target_arch = "riscv64",
+    not(any(feature = "lock_dep", feature = "lock_metadata_only"))
+))]
 const _: () = {
     assert!(core::mem::size_of::<RawBrwLockPi>() == 72);
     assert!(core::mem::align_of::<RawBrwLockPi>() == 8);
 };
 
-#[cfg(all(target_arch = "riscv64", feature = "lock_dep"))]
+#[cfg(all(target_arch = "riscv64", any(feature = "lock_dep", feature = "lock_metadata_only")))]
 const _: () = {
     assert!(core::mem::size_of::<RawBrwLockPi>() == 80);
     assert!(core::mem::align_of::<RawBrwLockPi>() == 8);

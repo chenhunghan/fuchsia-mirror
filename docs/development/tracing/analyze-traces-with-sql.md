@@ -84,7 +84,7 @@ activity, excessive wakeups, and power blockers:
 
 * **Per-Core Utilization & Processing Rate:** Evaluates core duty cycles (%
   active non-idle time) weighted by DVFS frequency scaling counters
-  (`Processing Rate:CPU:N`).
+  (`Rate:CPU:N`).
 
 * **Top CPU Consumers (Usual Suspects):** Ranks threads by total accumulated
   CPU runtime.
@@ -203,7 +203,7 @@ Key concepts and ID relationships specific to Fuchsia traces include:
 * **Kernel Counters & Power Categories:**
 
   * Traces captured with specialized categories emit counters under the
-    `kernel` process (such as `Processing Rate:CPU:N` for CPU frequency
+    `kernel` process (such as `Rate:CPU:N` for CPU frequency
     scaling under `kernel:power`).
 
   * For details on how CPU frequency and bandwidth demand counters are captured

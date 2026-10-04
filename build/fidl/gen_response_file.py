@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate response file for FIDL frontend. "
         "Arguments not mentioned here are forwarded as is to fidlc."

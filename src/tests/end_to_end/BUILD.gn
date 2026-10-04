@@ -48,7 +48,8 @@ group_with_no_dir_target_deps("workbench_x64_stable_tests") {
   testonly = true
   public_deps = [
     "//scripts/lib/ffx_cmd:ffx_cmd_inspect_e2e_test($host_toolchain)",
-    "//src/developer/ffx/lib/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests($host_toolchain)",
+    "//src/developer/ffx/plugins/log/tests/e2e:ffx_log_e2e_test($host_toolchain)",
+    "//src/developer/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests($host_toolchain)",
     "//src/performance/cpu_profiler:e2e_tests",
     "//src/performance/memory/attribution/monitor/tests/e2e:memory_monitor2_e2e_test($host_toolchain)",
     "//src/storage/blackout/host:blackout_emulator_stable",
@@ -61,7 +62,7 @@ group_with_no_dir_target_deps("workbench_x64_stable_tests") {
 group_with_no_dir_target_deps("workbench_x64_unstable_tests") {
   testonly = true
   public_deps = [
-    "//src/developer/ffx/lib/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests_staging",
+    "//src/developer/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests_staging",
     "//src/power/bench:tests",
     "//src/storage/blackout/host:blackout_emulator_unstable",
   ]
@@ -79,7 +80,7 @@ group("workbench_x64_staging_tests") {
 group_with_no_dir_target_deps("workbench_vim3_stable_tests") {
   testonly = true
   public_deps = [
-    "//src/developer/ffx/lib/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests($host_toolchain)",
+    "//src/developer/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests($host_toolchain)",
     "//src/firmware/tests/lacewing:lacewing($host_toolchain)",
     "//src/performance/cpu_profiler:e2e_tests",
     "//src/performance/memory/attribution/monitor/tests/e2e:memory_monitor2_e2e_test($host_toolchain)",
@@ -94,7 +95,7 @@ group_with_no_dir_target_deps("workbench_vim3_unstable_tests") {
   testonly = true
   public_deps = [
     "//scripts/memory:components_sql_test($host_toolchain)",
-    "//src/developer/ffx/lib/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests_staging",
+    "//src/developer/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests_staging",
     "//src/firmware/tests/lacewing:lacewing($host_toolchain)",
     "//src/power/bench:tests",
     "//src/storage/blackout/host:blackout_workbench_vim3_unstable",

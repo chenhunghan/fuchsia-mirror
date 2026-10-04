@@ -76,6 +76,14 @@ impl<T> RcuPtr<T> {
         unsafe { RcuPtrRef::new(scope, ptr) }
     }
 
+    /// Returns `true` if the RCU pointer is currently null.
+    ///
+    /// This does not require an `RcuReadScope` because the pointer is never dereferenced. Another
+    /// thread running concurrently might see a different value.
+    pub fn is_null(&self) -> bool {
+        rcu_read_pointer(&self.ptr).is_null()
+    }
+
     /// Assign a new value to the RCU pointer.
     ///
     /// Concurrent readers may continue to see the old value of the pointer until the RCU state

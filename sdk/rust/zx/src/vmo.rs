@@ -202,12 +202,7 @@ impl Vmo {
         &self,
         offset: u64,
     ) -> Result<[T; N], Status> {
-        // TODO(https://fxbug.dev/42079731): replace with MaybeUninit::uninit_array.
-        let array: MaybeUninit<[MaybeUninit<T>; N]> = MaybeUninit::uninit();
-        // SAFETY: We are converting from an uninitialized array to an array
-        // of uninitialized elements which is the same. See
-        // https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#initializing-an-array-element-by-element.
-        let mut array = unsafe { array.assume_init() };
+        let mut array: [MaybeUninit<T>; N] = [const { MaybeUninit::uninit() }; N];
 
         // SAFETY: T is FromBytes, which means that any bit pattern is valid. Interpreting
         // [MaybeUninit<T>] as [MaybeUninit<u8>] is safe because T's alignment requirements

@@ -10,7 +10,7 @@ use quote::quote;
 use syn::spanned::Spanned as _;
 
 fn fixture_inner(wrapper_fn: syn::Path, input: syn::ItemFn) -> Result<TokenStream, TokenStream> {
-    let syn::ItemFn { attrs, sig, block, vis: _ } = input;
+    let syn::ItemFn { attrs, sig, block, vis: _, modifiers: _ } = input;
     let syn::Signature {
         ident: test_name,
         inputs,
@@ -18,7 +18,7 @@ fn fixture_inner(wrapper_fn: syn::Path, input: syn::ItemFn) -> Result<TokenStrea
         asyncness,
         constness,
         generics,
-        unsafety: _,
+        safety: _,
         abi: _,
         fn_token: _,
         paren_token: _,
@@ -150,7 +150,7 @@ impl syn::parse::Parse for TeardownArgs {
 
 fn teardown_inner(args: TeardownArgs, input: syn::ItemFn) -> Result<TokenStream, TokenStream> {
     let TeardownArgs { teardown_fn, noasync } = args;
-    let syn::ItemFn { attrs, sig, block, vis } = input;
+    let syn::ItemFn { attrs, sig, block, vis, modifiers: _ } = input;
 
     // Use function asyncness for teardown or force sync through option.
     let add_await = sig.asyncness.is_some() && !noasync;

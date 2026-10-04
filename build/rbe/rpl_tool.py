@@ -27,12 +27,12 @@ _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
 
 PROJECT_ROOT = fuchsia.project_root_dir()
-PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, start=os.curdir)
+PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, start=Path(os.curdir))
 
 _REPROXY_CFG = _SCRIPT_DIR / "fuchsia-reproxy.cfg"
 
 
-def msg(text: str):
+def msg(text: str) -> None:
     print(f"[{_SCRIPT_BASENAME}] {text}")
 
 
@@ -57,7 +57,7 @@ def normalize_input_path_prefix(path: Path, working_dirs: Iterable[str]) -> str:
 
 def infer_record_command_and_inputs(
     record: log_pb2.LogRecord, rtool: remotetool.RemoteTool
-):
+) -> None:
     """Adds command and inputs to a reduced reproxy log record.
 
     Args:
@@ -84,7 +84,7 @@ def infer_record_command_and_inputs(
 def expand_to_rpl(
     logdump: log_pb2.LogDump,
     rtool: remotetool.RemoteTool,
-    action: Callable[[log_pb2.LogRecord], None] = None,
+    action: Callable[[log_pb2.LogRecord], None] | None = None,
 ) -> log_pb2.LogDump:
     """Expands .rrpl to .rpl, adding data for command and inputs.
 
@@ -124,16 +124,18 @@ def expand_to_rpl_command(args: argparse.Namespace) -> int:
     rtool = remotetool.configure_remotetool(args.cfg)
 
     # Stream records out to avoid losing data in the event of an error.
+    outf: contextlib.AbstractContextManager[object]
     if args.output:
-        outf = open(args.output, "w")
+        outfile = open(args.output, "w")
+        outf = outfile
 
-        def printer(record: log_pb2.LogRecord):
-            outf.write(str(record) + "\n")
+        def printer(record: log_pb2.LogRecord) -> None:
+            outfile.write(str(record) + "\n")
 
     else:
         outf = contextlib.nullcontext()
 
-        def printer(record: log_pb2.LogRecord):
+        def printer(record: log_pb2.LogRecord) -> None:
             print(str(record) + "\n")  # print to stdout
 
     with outf:

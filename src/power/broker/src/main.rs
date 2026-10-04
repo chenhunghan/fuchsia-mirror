@@ -5,6 +5,7 @@
 use anyhow::{Context as _, Error};
 use async_utils::event::Event;
 use fidl::endpoints::{ClientEnd, ServerEnd};
+use fidl_fuchsia_feedback as ffeedback;
 use fidl_fuchsia_power_broker::{
     self as fpb, ElementControlRequest, ElementControlRequestStream, LeaseControlMarker,
     LeaseControlRequest, LeaseControlRequestStream, LeaseError, LeaseStatus, LessorRequest,
@@ -53,15 +54,17 @@ impl ElementHandlers {
 struct BrokerSvc {
     broker: Rc<RefCell<Broker>>,
     element_handlers: Rc<RefCell<HashMap<ElementID, ElementHandlers>>>,
+    stuck_detector: StuckDetector,
 }
 
 impl BrokerSvc {
-    fn new() -> Self {
+    fn new(stuck_detector: StuckDetector) -> Self {
         Self {
             broker: Rc::new(RefCell::new(Broker::new(
                 component::inspector().root().create_child("broker"),
             ))),
             element_handlers: Rc::new(RefCell::new(HashMap::new())),
+            stuck_detector,
         }
     }
 
@@ -613,7 +616,11 @@ impl BrokerSvc {
                                     wait_for_level,
                                     runner_lease_token,
                                 );
-                                runner.start(self.broker.clone(), element_runner.into_proxy());
+                                runner.start(
+                                    self.broker.clone(),
+                                    element_runner.into_proxy(),
+                                    self.stuck_detector.clone(),
+                                );
                                 self.element_handlers
                                     .borrow_mut()
                                     .entry(element_id)
@@ -675,6 +682,107 @@ impl BrokerSvc {
     }
 }
 
+const DEFAULT_WATCHDOG_INTERVAL_SECONDS: u32 = 10;
+
+#[derive(Clone)]
+struct StuckDetector {
+    set_level_timeout_seconds: u32,
+    crash_reporter: Option<ffeedback::CrashReporterProxy>,
+}
+
+impl StuckDetector {
+    fn new(
+        set_level_timeout_seconds: u32,
+        crash_reporter: Option<ffeedback::CrashReporterProxy>,
+    ) -> Self {
+        if set_level_timeout_seconds > 0 && crash_reporter.is_none() {
+            log::warn!(
+                "set_level_timeout_seconds is {}, but crash_reporter is None; crash reports will not be filed",
+                set_level_timeout_seconds
+            );
+        }
+
+        Self { set_level_timeout_seconds, crash_reporter }
+    }
+
+    fn from_config(config: &broker_config::Config) -> Self {
+        let crash_reporter = if config.set_level_timeout_seconds > 0 {
+            fuchsia_component::client::connect_to_protocol::<ffeedback::CrashReporterMarker>().ok()
+        } else {
+            None
+        };
+
+        Self::new(config.set_level_timeout_seconds, crash_reporter)
+    }
+
+    fn spawn_watchdog(
+        &self,
+        element_name: String,
+        debug_info: String,
+        required_level: IndexedPowerLevel,
+    ) -> Task<()> {
+        let this = self.clone();
+        Task::local(async move {
+            let mut crash_reported = false;
+            let mut elapsed_s = 0u32;
+            loop {
+                let next_interval_s = if this.set_level_timeout_seconds > 0
+                    && elapsed_s < this.set_level_timeout_seconds
+                {
+                    std::cmp::min(
+                        DEFAULT_WATCHDOG_INTERVAL_SECONDS,
+                        this.set_level_timeout_seconds - elapsed_s,
+                    )
+                } else {
+                    DEFAULT_WATCHDOG_INTERVAL_SECONDS
+                };
+
+                Timer::new(MonotonicInstant::after(Duration::from_seconds(next_interval_s as i64)))
+                    .await;
+                elapsed_s += next_interval_s;
+
+                log::warn!(
+                    "{debug_info}: set_level({required_level:?}) still pending after {elapsed_s}s..."
+                );
+
+                if this.set_level_timeout_seconds > 0
+                    && elapsed_s >= this.set_level_timeout_seconds
+                    && !crash_reported
+                {
+                    log::warn!(
+                        "{debug_info}: set_level({required_level:?}) timed out after {elapsed_s}s! Filing crash report..."
+                    );
+
+                    crash_reported = true;
+                    let reporter = this.crash_reporter.clone();
+                    let element_name = element_name.clone();
+
+                    // Spawn reporting onto the local executor so it runs to
+                    // completion even if set_level returns and drops _warn_task.
+                    Task::local(async move {
+                        if let Some(reporter) = reporter {
+                            let report = ffeedback::CrashReport {
+                                program_name: Some("power-broker".to_string()),
+                                crash_signature: Some(format!(
+                                    "fuchsia-power-broker-set-level-stuck-{element_name}"
+                                )),
+                                is_fatal: Some(false),
+                                ..Default::default()
+                            };
+                            match reporter.file_report(report).await {
+                                Ok(Ok(result)) => log::info!("Crash report filed: {:?}", result),
+                                Ok(Err(e)) => log::warn!("Failed to file crash report: {:?}", e),
+                                Err(e) => log::warn!("Failed to call FileReport: {:?}", e),
+                            }
+                        }
+                    })
+                    .detach();
+                }
+            }
+        })
+    }
+}
+
 struct ElementRunnerHandler {
     element_id: ElementID,
     element_name: String,
@@ -699,7 +807,12 @@ impl ElementRunnerHandler {
         }
     }
 
-    fn start(&mut self, broker: Rc<RefCell<Broker>>, element_runner: fpb::ElementRunnerProxy) {
+    fn start(
+        &mut self,
+        broker: Rc<RefCell<Broker>>,
+        element_runner: fpb::ElementRunnerProxy,
+        stuck_detector: StuckDetector,
+    ) {
         let element_id = self.element_id;
         let element_name = self.element_name.clone();
         let debug_info = format!("ElementRunnerHandler<{}:{}>", self.element_name, self.element_id);
@@ -735,6 +848,11 @@ impl ElementRunnerHandler {
                         wait_for_level = None;
                         if let Some(level) = suppressed_level.take() {
                             log::debug!("{debug_info}: emitting previously suppressed level {:?}", level);
+                            let _warn_task = stuck_detector.spawn_watchdog(
+                                element_name.clone(),
+                                debug_info.clone(),
+                                level.clone(),
+                            );
                             fuchsia_trace::duration!("power-broker", "ElementRunner::SetLevel", "element_name" => element_name.as_str());
                             if let Err(err) = element_runner.set_level(level.level).await {
                                 log::warn!("{debug_info}: set_level error during suppressed level: {:?}", err);
@@ -763,16 +881,14 @@ impl ElementRunnerHandler {
                                     }
                                 }
                                 log::debug!("{debug_info} calling set_level({required_level:?})");
-                                let debug_info_copy = debug_info.clone();
-                                let _warn_task = Task::local(async move {
-                                    for count in 1.. {
-                                        Timer::new(MonotonicInstant::after(Duration::from_seconds(10))).await;
-                                        let elapsed_s = count * 10;
-                                        log::warn!("{debug_info_copy}: set_level({required_level:?}) still pending after {elapsed_s}s...");
-                                    }
-                                });
+                                let _warn_task = stuck_detector.spawn_watchdog(
+                                    element_name.clone(),
+                                    debug_info.clone(),
+                                    required_level.clone(),
+                                );
 
                                 fuchsia_trace::duration!("power-broker", "ElementRunner::SetLevel", "element_name" => element_name.as_str());
+
                                 if let Err(err) = element_runner.set_level(required_level.level).await {
                                     log::warn!("{debug_info}: set_level error: {:?}", err);
                                 } else {
@@ -853,6 +969,8 @@ impl StatusChannelHandler {
 
 #[fuchsia::main(logging = true)]
 async fn main() -> Result<(), anyhow::Error> {
+    let config = broker_config::Config::take_from_startup_handle();
+
     let mut service_fs = ServiceFs::new_local();
 
     fuchsia_trace_provider::trace_provider_create_with_fdio();
@@ -872,7 +990,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     component::health().set_ok();
 
-    let svc = Rc::new(BrokerSvc::new());
+    log::info!(
+        "StuckDetector config: set_level_timeout_seconds={}",
+        config.set_level_timeout_seconds
+    );
+    let stuck_detector = StuckDetector::from_config(&config);
+    let svc = Rc::new(BrokerSvc::new(stuck_detector));
 
     service_fs
         .for_each_concurrent(None, |request: IncomingRequest| async {
@@ -889,8 +1012,80 @@ async fn main() -> Result<(), anyhow::Error> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use fidl::endpoints::create_proxy_and_stream;
+
     #[fuchsia::test]
-    async fn smoke_test() {
-        assert!(true);
+    fn test_stuck_detector() {
+        let mut executor = fuchsia_async::TestExecutor::new_with_fake_time();
+        let (crash_reporter_proxy, mut crash_reporter_stream) =
+            create_proxy_and_stream::<ffeedback::CrashReporterMarker>();
+
+        let detector = StuckDetector::new(1, Some(crash_reporter_proxy));
+
+        let task = detector.spawn_watchdog(
+            "test_element".to_string(),
+            "test_debug".to_string(),
+            IndexedPowerLevel { level: 1, index: 1 },
+        );
+
+        // Run until stalled to start the watchdog task and register the timer.
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(crash_reporter_stream.next().now_or_never().is_none());
+
+        // Advance fake time by 1s to trigger the timeout and crash report.
+        executor.set_fake_time(executor.now() + Duration::from_seconds(1));
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+
+        // Check crash report.
+        let ffeedback::CrashReporterRequest::FileReport { report, responder } =
+            crash_reporter_stream
+                .next()
+                .now_or_never()
+                .expect("Expected crash report")
+                .expect("Crash report stream closed")
+                .unwrap();
+        assert_eq!(report.program_name, Some("power-broker".to_string()));
+        assert_eq!(
+            report.crash_signature,
+            Some("fuchsia-power-broker-set-level-stuck-test_element".to_string())
+        );
+        assert_eq!(report.is_fatal, Some(false));
+        responder.send(Ok(&ffeedback::FileReportResults::default())).unwrap();
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+
+        // Clean up task.
+        drop(task);
+    }
+
+    #[fuchsia::test]
+    fn test_stuck_detector_disabled() {
+        let mut executor = fuchsia_async::TestExecutor::new_with_fake_time();
+        let (crash_reporter_proxy, mut crash_reporter_stream) =
+            create_proxy_and_stream::<ffeedback::CrashReporterMarker>();
+
+        let detector = StuckDetector::new(0, Some(crash_reporter_proxy));
+
+        let task = detector.spawn_watchdog(
+            "test_element".to_string(),
+            "test_debug".to_string(),
+            IndexedPowerLevel { level: 1, index: 1 },
+        );
+
+        // Run until stalled to start the watchdog task and register the timer.
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+
+        // Advance fake time past multiple watchdog intervals (60s total).
+        for _ in 0..6 {
+            executor.set_fake_time(
+                executor.now() + Duration::from_seconds(DEFAULT_WATCHDOG_INTERVAL_SECONDS.into()),
+            );
+            let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+        }
+
+        // Verify that NO crash report was filed.
+        assert!(crash_reporter_stream.next().now_or_never().is_none());
+
+        drop(task);
     }
 }

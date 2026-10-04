@@ -9,6 +9,7 @@ import argparse
 import os.path
 import sys
 from pathlib import Path
+from typing import Iterable
 
 # Exempt targets with these prefixes.
 EXEMPTION_PREFIXES = [
@@ -17,7 +18,7 @@ EXEMPTION_PREFIXES = [
 ]
 
 
-def parse_depfile(depfile_path):
+def parse_depfile(depfile_path: str) -> set[str]:
     with open(depfile_path) as f:
         # Only the first line contains important information.
         line = f.readline().strip()
@@ -35,7 +36,7 @@ def parse_depfile(depfile_path):
     )
 
 
-def build_file_source_path(target, source_path):
+def build_file_source_path(target: str, source_path: str) -> str:
     """Returns a source path suitable for listing in a BUILD.gn file.
 
     The returned path is relative to the `target` GN label, or source absolute if the
@@ -55,7 +56,7 @@ def build_file_source_path(target, source_path):
     return "//{}".format(source_path)
 
 
-def print_suggested_sources(varname, sources):
+def print_suggested_sources(varname: str, sources: Iterable[str]) -> None:
     """Prints a GN list variable assignment with the variable name `varname`.
 
     Eg.
@@ -71,7 +72,7 @@ def print_suggested_sources(varname, sources):
     print("  ]", file=sys.stderr)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verifies that the compiler-emitted depfile strictly contains the expected source files"
     )

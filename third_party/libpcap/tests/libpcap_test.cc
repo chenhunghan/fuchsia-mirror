@@ -246,7 +246,7 @@ class LibpcapPacketTest : public LibpcapTest {
     EXPECT_EQ(ntohs(packet.sll.sll2_protocol), ETH_P_IP);
     EXPECT_EQ(packet.sll.sll2_reserved_mbz, 0);
     EXPECT_EQ(ntohl(packet.sll.sll2_if_index), static_cast<unsigned int>(GetLoopbackIndex()));
-    EXPECT_EQ(packet.sll.sll2_hatype, ARPHRD_ETHER);
+    EXPECT_EQ(packet.sll.sll2_hatype, ARPHRD_LOOPBACK);
     EXPECT_EQ(packet.sll.sll2_pkttype, ctx->pkttype);
     EXPECT_EQ(packet.sll.sll2_halen, ETH_ALEN);
     // Packet was sent through the loopback interface which has the all zeroes

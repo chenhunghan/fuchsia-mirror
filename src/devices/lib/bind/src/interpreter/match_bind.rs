@@ -4,12 +4,14 @@
 
 use crate::bytecode_constants::*;
 use crate::compiler::Symbol;
-use crate::compiler::symbol_table::get_deprecated_key_identifier;
+use crate::compiler::symbol_table::get_deprecated_key_identifier_str;
 use crate::interpreter::common::*;
 use crate::interpreter::decode_bind_rules::DecodedBindRules;
 use crate::parser::bind_library;
-use core::hash::Hash;
+use core::hash::{Hash, Hasher};
 use num_traits::FromPrimitive;
+use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 #[derive(PartialEq)]
@@ -19,15 +21,84 @@ enum Condition {
     Inequal,
 }
 
+enum RawSymbol<'a> {
+    NumberValue(u64),
+    Key(&'a str),
+    StringValue(&'a str),
+    BoolValue(bool),
+    EnumValue(&'a str),
+}
+
 // TODO(https://fxbug.dev/42151229): Currently, the driver manager only supports number-based
 // device properties. It will support string-based properties soon. We should
 // support other device property types in the future.
-#[derive(
-    Clone, Debug, Hash, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum PropertyKey {
     NumberKey(u64),
     StringKey(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum PropertyKeyRef<'a> {
+    NumberKey(u64),
+    StringKey(&'a str),
+}
+
+pub trait PropertyKeyLookup {
+    fn as_key_ref(&self) -> PropertyKeyRef<'_>;
+}
+
+impl PropertyKeyLookup for PropertyKey {
+    fn as_key_ref(&self) -> PropertyKeyRef<'_> {
+        match self {
+            PropertyKey::NumberKey(k) => PropertyKeyRef::NumberKey(*k),
+            PropertyKey::StringKey(k) => PropertyKeyRef::StringKey(k.as_str()),
+        }
+    }
+}
+
+impl PropertyKeyLookup for PropertyKeyRef<'_> {
+    fn as_key_ref(&self) -> PropertyKeyRef<'_> {
+        *self
+    }
+}
+
+impl Hash for PropertyKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_key_ref().hash(state);
+    }
+}
+
+impl Hash for dyn PropertyKeyLookup + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_key_ref().hash(state);
+    }
+}
+
+impl PartialEq for dyn PropertyKeyLookup + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_key_ref() == other.as_key_ref()
+    }
+}
+
+impl Eq for dyn PropertyKeyLookup + '_ {}
+
+impl PartialOrd for dyn PropertyKeyLookup + '_ {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for dyn PropertyKeyLookup + '_ {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_key_ref().cmp(&other.as_key_ref())
+    }
+}
+
+impl<'a> Borrow<dyn PropertyKeyLookup + 'a> for PropertyKey {
+    fn borrow(&self) -> &(dyn PropertyKeyLookup + 'a) {
+        self
+    }
 }
 
 pub type DeviceProperties = HashMap<PropertyKey, Symbol>;
@@ -103,26 +174,25 @@ impl<'a> DeviceMatcher<'a> {
     // Read in two values and evaluate them based on the given condition.
     fn read_and_evaluate_values(&mut self, condition: Condition) -> Result<bool, BytecodeError> {
         let property_key = match self.read_next_value()? {
-            Symbol::NumberValue(key) => PropertyKey::NumberKey(key),
-            Symbol::StringValue(key) => PropertyKey::StringKey(key),
-            Symbol::Key(key, _) => PropertyKey::StringKey(key),
-            _ => {
+            RawSymbol::NumberValue(key) => PropertyKeyRef::NumberKey(key),
+            RawSymbol::StringValue(key) | RawSymbol::Key(key) => PropertyKeyRef::StringKey(key),
+            RawSymbol::BoolValue(_) | RawSymbol::EnumValue(_) => {
                 return Err(BytecodeError::InvalidKeyType);
             }
         };
 
         let expected_value = self.read_next_value()?;
-        let mut node_property_value = self.properties.get(&property_key);
+        let mut node_property_value = self.properties.get(&property_key as &dyn PropertyKeyLookup);
 
         // If the node properties doesn't contain an integer key, try to convert the
         // integer key to a deprecated string key, and check if the node properties
         // contain that.
-        if node_property_value.is_none() {
-            if let PropertyKey::NumberKey(int_key) = property_key {
-                if let Some(str_key) = get_deprecated_key_identifier(int_key as u32) {
-                    node_property_value = self.properties.get(&PropertyKey::StringKey(str_key));
-                }
-            }
+        if node_property_value.is_none()
+            && let PropertyKeyRef::NumberKey(int_key) = property_key
+            && let Some(str_key) = get_deprecated_key_identifier_str(int_key as u32)
+        {
+            node_property_value =
+                self.properties.get(&PropertyKeyRef::StringKey(str_key) as &dyn PropertyKeyLookup);
         }
 
         match node_property_value {
@@ -132,61 +202,60 @@ impl<'a> DeviceMatcher<'a> {
     }
 
     // Read in the next u8 as the value type and the next u32 as the value. Convert the value
-    // into a Symbol.
-    fn read_next_value(&mut self) -> Result<Symbol, BytecodeError> {
+    // into a RawSymbol.
+    fn read_next_value(&mut self) -> Result<RawSymbol<'a>, BytecodeError> {
         let value_type = *next_u8(&mut self.iter)?;
         let value_type = FromPrimitive::from_u8(value_type)
             .ok_or(BytecodeError::InvalidValueType(value_type))?;
 
         let value = next_u32(&mut self.iter)?;
         match value_type {
-            RawValueType::NumberValue => Ok(Symbol::NumberValue(value as u64)),
-            RawValueType::Key => {
-                // The key's value type is a placeholder. The value type doesn't matter since
-                // the only the key will be used for looking up the device property.
-                Ok(Symbol::Key(self.lookup_symbol_table(value)?, bind_library::ValueType::Str))
+            RawValueType::NumberValue => Ok(RawSymbol::NumberValue(value as u64)),
+            RawValueType::Key => Ok(RawSymbol::Key(self.lookup_symbol_table(value)?)),
+            RawValueType::StringValue => {
+                Ok(RawSymbol::StringValue(self.lookup_symbol_table(value)?))
             }
-            RawValueType::StringValue => Ok(Symbol::StringValue(self.lookup_symbol_table(value)?)),
             RawValueType::BoolValue => match value {
-                0x0 => Ok(Symbol::BoolValue(false)),
-                0x1 => Ok(Symbol::BoolValue(true)),
+                0x0 => Ok(RawSymbol::BoolValue(false)),
+                0x1 => Ok(RawSymbol::BoolValue(true)),
                 _ => Err(BytecodeError::InvalidBoolValue(value)),
             },
-            RawValueType::EnumValue => Ok(Symbol::EnumValue(self.lookup_symbol_table(value)?)),
+            RawValueType::EnumValue => Ok(RawSymbol::EnumValue(self.lookup_symbol_table(value)?)),
         }
     }
 
-    fn lookup_symbol_table(&self, key: u32) -> Result<String, BytecodeError> {
+    fn lookup_symbol_table(&self, key: u32) -> Result<&'a str, BytecodeError> {
         self.symbol_table
             .get(&key)
+            .map(String::as_str)
             .ok_or(BytecodeError::MissingEntryInSymbolTable(key))
-            .map(|val| val.to_string())
     }
 }
 
 fn compare_symbols(
     condition: Condition,
-    lhs: &Symbol,
+    lhs: &RawSymbol<'_>,
     rhs: &Symbol,
 ) -> Result<bool, BytecodeError> {
-    // If either side is an EnumValue type, convert it into a StringValue type for the comparison.
+    // If either side is an EnumValue type, treat it as a StringValue type for the comparison.
     // This is because both of these types contain a string inside of them and as long as that
     // value is the same, then the equality is satisfied.
-    let mut lhs_for_compare = lhs.clone();
-    let mut rhs_for_compare = rhs.clone();
-    if let Symbol::EnumValue(val) = lhs {
-        lhs_for_compare = Symbol::StringValue(val.to_string());
+    let is_equal = match (lhs, rhs) {
+        (RawSymbol::NumberValue(a), Symbol::NumberValue(b)) => a == b,
+        (RawSymbol::BoolValue(a), Symbol::BoolValue(b)) => a == b,
+        (
+            RawSymbol::StringValue(a) | RawSymbol::EnumValue(a),
+            Symbol::StringValue(b) | Symbol::EnumValue(b),
+        ) => *a == b.as_str(),
+        (RawSymbol::Key(a), Symbol::Key(b, vt)) => {
+            *a == b.as_str() && *vt == bind_library::ValueType::Str
+        }
+        _ => return Err(BytecodeError::MismatchValueTypes),
     };
-    if let Symbol::EnumValue(val) = rhs {
-        rhs_for_compare = Symbol::StringValue(val.to_string());
-    };
-    if std::mem::discriminant(&lhs_for_compare) != std::mem::discriminant(&rhs_for_compare) {
-        return Err(BytecodeError::MismatchValueTypes);
-    }
 
     Ok(match condition {
-        Condition::Equal => lhs_for_compare == rhs_for_compare,
-        Condition::Inequal => lhs_for_compare != rhs_for_compare,
+        Condition::Equal => is_equal,
+        Condition::Inequal => !is_equal,
         Condition::Unconditional => {
             panic!("This function shouldn't be called for Unconditional.")
         }

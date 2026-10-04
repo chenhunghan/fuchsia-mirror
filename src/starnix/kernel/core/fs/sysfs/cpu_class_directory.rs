@@ -12,6 +12,7 @@ use fidl_fuchsia_power_cpu as fcpu;
 use fuchsia_component::client::connect_to_protocol_sync;
 use itertools::Itertools;
 use starnix_logging::{bug_ref, log_warn};
+use starnix_sync::{CpuFreqProxyCacheLock, LockDepMutex};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
 use starnix_uapi::{errno, error, from_status_like_fdio};
@@ -36,7 +37,7 @@ pub fn build_cpu_class_directory(dir: &SimpleDirectoryMutator) {
 
     for (core_id, domain) in &core_to_domain_map {
         let name = format!("cpu{}", core_id);
-        dir.subdir(&name, 0o755, |dir| build_cpu_directory(dir, domain));
+        dir.subdir(&name, 0o755, |dir| build_cpu_directory(dir, *core_id, domain));
     }
 
     let core_count = core_to_domain_map.len();
@@ -204,7 +205,7 @@ fn get_available_frequencies(domain: &fcpu::DomainInfo) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-fn build_cpu_directory(dir: &SimpleDirectoryMutator, domain: &fcpu::DomainInfo) {
+fn build_cpu_directory(dir: &SimpleDirectoryMutator, core_id: u64, domain: &fcpu::DomainInfo) {
     let cluster_id = domain.id.as_ref().expect("id not available");
 
     dir.entry(
@@ -212,6 +213,9 @@ fn build_cpu_directory(dir: &SimpleDirectoryMutator, domain: &fcpu::DomainInfo) 
         StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
         mode!(IFREG, 0o444),
     );
+    dir.subdir("cpuidle", 0o755, |dir| {
+        build_cpuidle_directory(dir, core_id);
+    });
     dir.subdir("cpufreq", 0o755, |dir| {
         build_cpufreq_directory(dir, domain);
     });
@@ -226,6 +230,33 @@ fn build_cpu_directory(dir: &SimpleDirectoryMutator, domain: &fcpu::DomainInfo) 
             BytesFile::new_node(format!("{cluster_id}\n").into_bytes()),
             mode!(IFREG, 0o444),
         );
+    });
+}
+
+fn build_cpuidle_directory(dir: &SimpleDirectoryMutator, core_id: u64) {
+    // TODO(https://fxbug.dev/560171700): `fuchsia.kernel.Stats` (`PerCpuStats`) currently
+    // reports a single aggregate `idle_time` per CPU core rather than per-C-state residencies.
+    // Until Zircon exposes differentiated C-state statistics, attribute all aggregate idle
+    // time to `state0` ("C1") and report 0 for `state1` ("C2") to avoid double-counting.
+    dir.subdir("state0", 0o755, |dir| {
+        dir.entry("name", BytesFile::new_node(b"C1\n".to_vec()), mode!(IFREG, 0o444));
+        dir.entry("desc", BytesFile::new_node(b"idle\n".to_vec()), mode!(IFREG, 0o444));
+        dir.entry(
+            "time",
+            BytesFile::new_node(CpuIdleStatFile { core_id, stat_type: CpuIdleStatType::Time }),
+            mode!(IFREG, 0o444),
+        );
+        dir.entry(
+            "usage",
+            BytesFile::new_node(CpuIdleStatFile { core_id, stat_type: CpuIdleStatType::Usage }),
+            mode!(IFREG, 0o444),
+        );
+    });
+    dir.subdir("state1", 0o755, |dir| {
+        dir.entry("name", BytesFile::new_node(b"C2\n".to_vec()), mode!(IFREG, 0o444));
+        dir.entry("desc", BytesFile::new_node(b"deep idle\n".to_vec()), mode!(IFREG, 0o444));
+        dir.entry("time", BytesFile::new_node(b"0\n".to_vec()), mode!(IFREG, 0o444));
+        dir.entry("usage", BytesFile::new_node(b"0\n".to_vec()), mode!(IFREG, 0o444));
     });
 }
 
@@ -359,7 +390,8 @@ fn connect_to_cpu_device_by_domain_id(
 }
 
 fn create_scaling_cur_freq_file(domain_id: u64) -> impl FsNodeOps {
-    let proxy_cache = starnix_sync::Mutex::new(None::<fcpuctrl::DeviceSynchronousProxy>);
+    let proxy_cache =
+        LockDepMutex::<_, CpuFreqProxyCacheLock>::new(None::<fcpuctrl::DeviceSynchronousProxy>);
     SimpleFileNode::new(move |_| {
         let mut guard = proxy_cache.lock();
         if guard.is_none() {
@@ -388,4 +420,35 @@ fn create_scaling_cur_freq_file(domain_id: u64) -> impl FsNodeOps {
         let freq_khz = hz_to_khz(info.frequency_hz as u64);
         Ok(BytesFile::new(format!("{}\n", freq_khz).into_bytes()))
     })
+}
+
+enum CpuIdleStatType {
+    Time,
+    Usage,
+}
+
+struct CpuIdleStatFile {
+    core_id: u64,
+    stat_type: CpuIdleStatType,
+}
+
+impl BytesFileOps for CpuIdleStatFile {
+    fn read(&self, current_task: &CurrentTask) -> Result<std::borrow::Cow<'_, [u8]>, Errno> {
+        let cpu_stats = current_task
+            .kernel()
+            .stats
+            .get()
+            .get_cpu_stats(zx::MonotonicInstant::INFINITE)
+            .map_err(|_| errno!(EINVAL))?;
+        let per_cpu_stats = cpu_stats.per_cpu_stats.ok_or_else(|| errno!(EINVAL))?;
+        let per_cpu = per_cpu_stats.get(self.core_id as usize).ok_or_else(|| errno!(EINVAL))?;
+        let value = match self.stat_type {
+            CpuIdleStatType::Time => {
+                // Zircon idle_time is in nanoseconds. Linux cpuidle time is in microseconds.
+                per_cpu.idle_time.ok_or_else(|| errno!(EINVAL))? / 1000
+            }
+            CpuIdleStatType::Usage => per_cpu.reschedules.ok_or_else(|| errno!(EINVAL))? as i64,
+        };
+        Ok(format!("{value}\n").into_bytes().into())
+    }
 }

@@ -1,0 +1,12 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+declare_args() {
+  # Used to enable local benchmarking/fine-tuning when running benchmarks
+  # in `fx shell`. Pass `--args=local_bench='true'` to `fx set` in order to
+  # enable it.
+  # LINT.IfChange
+  local_bench = false
+  # LINT.ThenChange(//build/bazel/BUILD.gn)
+}

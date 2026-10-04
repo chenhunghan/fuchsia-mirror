@@ -2,19 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.net.root/cpp/fidl.h>
+#include <fidl/fuchsia.net.routes.admin/cpp/fidl.h>
 #include <fuchsia/net/cpp/fidl.h>
 #include <fuchsia/net/interfaces/admin/cpp/fidl_test_base.h>
 #include <fuchsia/net/interfaces/cpp/fidl_test_base.h>
 #include <fuchsia/net/root/cpp/fidl_test_base.h>
-#include <fuchsia/net/stack/cpp/fidl_test_base.h>
 #include <lib/fidl/cpp/binding_set.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/testing/component_context_provider.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -114,6 +117,176 @@ struct OwnedInterface {
   std::shared_ptr<std::vector<OwnedAddress>> ipv6addrs;
   std::unique_ptr<FakeControl> fake_control;
   std::shared_ptr<bool> forwarding_enabled;
+  zx::event auth_token;
+};
+
+class FakeRouteSetV6 : public fidl::Server<fuchsia_net_routes_admin::RouteSetV6> {
+ public:
+  FakeRouteSetV6(std::vector<fuchsia_net_routes::RouteV6>& route_table,
+                 std::vector<OwnedInterface>& interfaces)
+      : route_table_(route_table), interfaces_(interfaces) {}
+
+  ~FakeRouteSetV6() override {
+    for (const auto& route : added_routes_) {
+      auto it = std::remove_if(
+          route_table_.begin(), route_table_.end(),
+          [&](const fuchsia_net_routes::RouteV6& existing) {
+            return existing.destination().addr() == route.destination().addr() &&
+                   existing.destination().prefix_len() == route.destination().prefix_len() &&
+                   existing.action().forward().value().outbound_interface() ==
+                       route.action().forward().value().outbound_interface() &&
+                   GetRouteMetric(existing) == GetRouteMetric(route);
+          });
+      route_table_.erase(it, route_table_.end());
+    }
+  }
+
+  void AuthenticateForInterface(AuthenticateForInterfaceRequest& request,
+                                AuthenticateForInterfaceCompleter::Sync& completer) override {
+    uint64_t target_id = request.credential().interface_id();
+
+    // Verify that the interface exists.
+    auto it =
+        std::find_if(interfaces_.begin(), interfaces_.end(),
+                     [&](const OwnedInterface& interface) { return target_id == interface.id; });
+    if (it == interfaces_.end()) {
+      completer.Reply(fit::error(
+          fuchsia_net_routes_admin::AuthenticateForInterfaceError::kInvalidAuthentication));
+      return;
+    }
+
+    // Verify that the provided event token handle matches the interface auth_token.
+    zx_koid_t client_koid = GetKoid(request.credential().token().get());
+    zx_koid_t expected_koid = GetKoid(it->auth_token.get());
+
+    if (client_koid == ZX_KOID_INVALID || client_koid != expected_koid) {
+      completer.Reply(fit::error(
+          fuchsia_net_routes_admin::AuthenticateForInterfaceError::kInvalidAuthentication));
+    } else {
+      authenticated_interface_id_ = target_id;
+      completer.Reply(fit::ok());
+    }
+  }
+
+  void AddRoute(AddRouteRequest& request, AddRouteCompleter::Sync& completer) override {
+    if (!authenticated_interface_id_.has_value()) {
+      completer.Reply(fit::error(fuchsia_net_routes_admin::RouteSetError::kUnauthenticated));
+      return;
+    }
+
+    const auto& route = request.route();
+
+    // Check if already present (comparing metric as well!)
+    auto it = std::find_if(
+        route_table_.begin(), route_table_.end(), [&](const fuchsia_net_routes::RouteV6& existing) {
+          return existing.destination().addr() == route.destination().addr() &&
+                 existing.destination().prefix_len() == route.destination().prefix_len() &&
+                 existing.action().forward().value().outbound_interface() ==
+                     route.action().forward().value().outbound_interface() &&
+                 GetRouteMetric(existing) == GetRouteMetric(route);
+        });
+    if (it != route_table_.end()) {
+      fuchsia_net_routes_admin::RouteSetV6AddRouteResponse resp;
+      resp.did_add(false);
+      completer.Reply(fit::ok(std::move(resp)));
+    } else {
+      route_table_.push_back(route);
+      added_routes_.push_back(route);
+      fuchsia_net_routes_admin::RouteSetV6AddRouteResponse resp;
+      resp.did_add(true);
+      completer.Reply(fit::ok(std::move(resp)));
+    }
+  }
+
+  void RemoveRoute(RemoveRouteRequest& request, RemoveRouteCompleter::Sync& completer) override {
+    if (!authenticated_interface_id_.has_value()) {
+      completer.Reply(fit::error(fuchsia_net_routes_admin::RouteSetError::kUnauthenticated));
+      return;
+    }
+
+    const auto& route = request.route();
+
+    auto it = std::remove_if(
+        route_table_.begin(), route_table_.end(), [&](const fuchsia_net_routes::RouteV6& existing) {
+          return existing.destination().addr() == route.destination().addr() &&
+                 existing.destination().prefix_len() == route.destination().prefix_len() &&
+                 existing.action().forward().value().outbound_interface() ==
+                     route.action().forward().value().outbound_interface() &&
+                 GetRouteMetric(existing) == GetRouteMetric(route);
+        });
+    if (it == route_table_.end()) {
+      fuchsia_net_routes_admin::RouteSetV6RemoveRouteResponse resp;
+      resp.did_remove(false);
+      completer.Reply(fit::ok(std::move(resp)));
+    } else {
+      route_table_.erase(it, route_table_.end());
+      auto ait = std::remove_if(
+          added_routes_.begin(), added_routes_.end(),
+          [&](const fuchsia_net_routes::RouteV6& existing) {
+            return existing.destination().addr() == route.destination().addr() &&
+                   existing.destination().prefix_len() == route.destination().prefix_len() &&
+                   existing.action().forward().value().outbound_interface() ==
+                       route.action().forward().value().outbound_interface() &&
+                   GetRouteMetric(existing) == GetRouteMetric(route);
+          });
+      added_routes_.erase(ait, added_routes_.end());
+      fuchsia_net_routes_admin::RouteSetV6RemoveRouteResponse resp;
+      resp.did_remove(true);
+      completer.Reply(fit::ok(std::move(resp)));
+    }
+  }
+
+ private:
+  uint32_t GetRouteMetric(const fuchsia_net_routes::RouteV6& route) {
+    uint32_t m = 999;
+    if (route.properties().specified_properties().has_value()) {
+      const auto& spec = route.properties().specified_properties().value();
+      if (spec.metric().has_value()) {
+        const auto& sm = spec.metric().value();
+        if (sm.Which() == fuchsia_net_routes::SpecifiedMetric::Tag::kExplicitMetric) {
+          m = sm.explicit_metric().value();
+        }
+      }
+    }
+    return m;
+  }
+
+  zx_koid_t GetKoid(zx_handle_t handle) {
+    zx_info_handle_basic_t info;
+    if (zx_object_get_info(handle, ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr) !=
+        ZX_OK) {
+      return ZX_KOID_INVALID;
+    }
+    return info.koid;
+  }
+
+  std::vector<fuchsia_net_routes::RouteV6>& route_table_;
+  std::vector<OwnedInterface>& interfaces_;
+  std::optional<uint64_t> authenticated_interface_id_;
+  std::vector<fuchsia_net_routes::RouteV6> added_routes_;
+};
+
+class FakeRouteTableV6 : public fidl::Server<fuchsia_net_routes_admin::RouteTableV6> {
+ public:
+  FakeRouteTableV6(std::vector<fuchsia_net_routes::RouteV6>& route_table,
+                   std::vector<OwnedInterface>& interfaces, async_dispatcher_t* dispatcher)
+      : route_table_(route_table), interfaces_(interfaces), dispatcher_(dispatcher) {}
+
+  void NewRouteSet(NewRouteSetRequest& request, NewRouteSetCompleter::Sync& completer) override {
+    fidl::BindServer(dispatcher_, std::move(request.route_set()),
+                     std::make_unique<FakeRouteSetV6>(route_table_, interfaces_));
+  }
+
+  void GetTableId(GetTableIdCompleter::Sync& completer) override {}
+  void Detach(DetachCompleter::Sync& completer) override {}
+  void Remove(RemoveCompleter::Sync& completer) override {}
+  void GetAuthorizationForRouteTable(
+      GetAuthorizationForRouteTableCompleter::Sync& completer) override {}
+
+ private:
+  std::vector<fuchsia_net_routes::RouteV6>& route_table_;
+  std::vector<OwnedInterface>& interfaces_;
+  async_dispatcher_t* dispatcher_;
 };
 
 // A fake implementation of the
@@ -198,10 +371,12 @@ class FakeAddressStateProvider
 class FakeControl : public fuchsia::net::interfaces::admin::testing::Control_TestBase {
  public:
   FakeControl() = delete;
-  FakeControl(std::shared_ptr<std::vector<OwnedAddress>> addresses,
+  FakeControl(uint64_t interface_id, const zx::event& auth_token,
+              std::shared_ptr<std::vector<OwnedAddress>> addresses,
               std::shared_ptr<bool> forwarding_enabled, async_dispatcher_t* dispatcher,
               fidl::InterfaceRequest<fuchsia::net::interfaces::admin::Control> request,
               std::optional<zx_status_t> add_addresses_fail_with_err) {
+    interface_id_ = interface_id;
     addresses_ = addresses;
     forwarding_enabled_ = forwarding_enabled;
     // Hang on to the dispatcher for later; which will allow us to spawn
@@ -209,6 +384,9 @@ class FakeControl : public fuchsia::net::interfaces::admin::testing::Control_Tes
     dispatcher_ = dispatcher;
     binding_.Bind(std::move(request), dispatcher);
     add_addresses_fail_with_err_ = add_addresses_fail_with_err;
+
+    // Duplicate the stable auth token by value safely
+    ZX_ASSERT(auth_token.duplicate(ZX_RIGHT_TRANSFER | ZX_RIGHT_DUPLICATE, &auth_token_) == ZX_OK);
   }
 
   ~FakeControl() {
@@ -262,11 +440,20 @@ class FakeControl : public fuchsia::net::interfaces::admin::testing::Control_Tes
     callback(std::move(result));
   }
 
+  void GetAuthorizationForInterface(GetAuthorizationForInterfaceCallback callback) override {
+    fuchsia::net::resources::GrantForInterfaceAuthorization grant;
+    grant.interface_id = interface_id_;
+    ZX_ASSERT(auth_token_.duplicate(ZX_RIGHT_TRANSFER | ZX_RIGHT_DUPLICATE, &grant.token) == ZX_OK);
+    callback(std::move(grant));
+  }
+
   fidl::Binding<fuchsia::net::interfaces::admin::Control> binding_{this};
   std::shared_ptr<std::vector<OwnedAddress>> addresses_;
   std::shared_ptr<bool> forwarding_enabled_;
   std::optional<zx_status_t> add_addresses_fail_with_err_;
   async_dispatcher_t* dispatcher_;
+  uint64_t interface_id_;
+  zx::event auth_token_;
 };
 
 class FakeNetInterfaces : public fuchsia::net::interfaces::testing::State_TestBase,
@@ -346,8 +533,7 @@ class FakeNetInterfaces : public fuchsia::net::interfaces::testing::State_TestBa
 };
 
 // The minimal set of fuchsia networking protocols required for WARM to run.
-class FakeNetstack : public fuchsia::net::root::testing::Interfaces_TestBase,
-                     public fuchsia::net::stack::testing::Stack_TestBase {
+class FakeNetstack : public fuchsia::net::root::testing::Interfaces_TestBase {
  private:
   // Default implementation for any API method not explicitly overridden.
   void NotImplemented_(const std::string& name) override { FAIL() << "Not implemented: " << name; }
@@ -362,47 +548,24 @@ class FakeNetstack : public fuchsia::net::root::testing::Interfaces_TestBase,
     if (it == interfaces_.end()) {
       server_end.Close(ZX_ERR_NOT_FOUND);
     } else {
-      it->fake_control =
-          std::make_unique<FakeControl>(it->ipv6addrs, it->forwarding_enabled, dispatcher_,
-                                        std::move(server_end), add_addresses_fail_with_err_);
+      it->fake_control = std::make_unique<FakeControl>(
+          id, it->auth_token, it->ipv6addrs, it->forwarding_enabled, dispatcher_,
+          std::move(server_end), add_addresses_fail_with_err_);
     }
-  }
-
-  void AddForwardingEntry(fuchsia::net::stack::ForwardingEntry route_table_entry,
-                          AddForwardingEntryCallback callback) override {
-    route_table_.push_back(std::move(route_table_entry));
-    callback(fuchsia::net::stack::Stack_AddForwardingEntry_Result::WithResponse({}));
-  }
-
-  void DelForwardingEntry(fuchsia::net::stack::ForwardingEntry route_table_entry,
-                          DelForwardingEntryCallback callback) override {
-    auto it =
-        std::remove_if(route_table_.begin(), route_table_.end(),
-                       [&](const fuchsia::net::stack::ForwardingEntry& entry) {
-                         return entry.device_id == route_table_entry.device_id &&
-                                entry.metric == route_table_entry.metric &&
-                                entry.subnet.prefix_len == route_table_entry.subnet.prefix_len &&
-                                CompareIpAddress(entry.subnet.addr, route_table_entry.subnet.addr);
-                       });
-    if (it == route_table_.end()) {
-      callback(fuchsia::net::stack::Stack_DelForwardingEntry_Result::WithErr(
-          fuchsia::net::stack::Error::NOT_FOUND));
-      return;
-    }
-    route_table_.erase(it, route_table_.end());
-    callback(fuchsia::net::stack::Stack_DelForwardingEntry_Result::WithResponse({}));
   }
 
  public:
   // Mutators, accessors, and helpers for tests.
 
-  // Add a fake interface with the given name. Does not check for duplicates.
   FakeNetstack& AddOwnedInterface(std::string name) {
+    zx::event auth_token;
+    ZX_ASSERT(zx::event::create(0, &auth_token) == ZX_OK);
     interfaces_.push_back({
         .id = ++last_id_assigned,
         .name = name,
         .ipv6addrs = std::make_shared<std::vector<OwnedAddress>>(),
         .forwarding_enabled = std::make_shared<bool>(false),
+        .auth_token = std::move(auth_token),
     });
 
     // The real Weavestack installs the Tun Interface, and provides an accessor
@@ -439,11 +602,6 @@ class FakeNetstack : public fuchsia::net::root::testing::Interfaces_TestBase,
   // Access the current interfaces.
   const std::vector<OwnedInterface>& interfaces() const { return interfaces_; }
 
-  // Access the current route table.
-  const std::vector<fuchsia::net::stack::ForwardingEntry>& route_table() const {
-    return route_table_;
-  }
-
   // Get a pointer to an interface by name.
   OwnedInterface& GetInterfaceByName(const std::string name) {
     auto it = std::find_if(interfaces_.begin(), interfaces_.end(),
@@ -463,23 +621,48 @@ class FakeNetstack : public fuchsia::net::root::testing::Interfaces_TestBase,
   // Check if interface is forwarded.
   bool IsInterfaceForwarded(uint64_t id) { return *GetInterfaceById(id).forwarding_enabled; }
 
-  fidl::InterfaceRequestHandler<fuchsia::net::stack::Stack> GetStackHandler(
+  fidl::InterfaceRequestHandler<fuchsia::net::routes::admin::RouteTableV6> GetRoutesHandler(
       async_dispatcher_t* dispatcher) {
     dispatcher_ = dispatcher;
-    return [this](fidl::InterfaceRequest<fuchsia::net::stack::Stack> request) {
-      stack_binding_.Bind(std::move(request), dispatcher_);
+    return [this](fidl::InterfaceRequest<fuchsia::net::routes::admin::RouteTableV6> request) {
+      fidl::ServerEnd<fuchsia_net_routes_admin::RouteTableV6> server_end(request.TakeChannel());
+      fidl::BindServer(dispatcher_, std::move(server_end),
+                       std::make_unique<FakeRouteTableV6>(route_table_, interfaces_, dispatcher_));
     };
   }
 
   // Check if the given interface ID and address exists in the route table.
   bool FindRouteTableEntry(uint32_t nicid, ::nl::Inet::IPAddress addr,
                            uint32_t metric = kRouteMetric_HighPriority) {
-    auto it = std::find_if(route_table_.begin(), route_table_.end(),
-                           [&](const fuchsia::net::stack::ForwardingEntry& route_table_entry) {
-                             return nicid == route_table_entry.device_id &&
-                                    metric == route_table_entry.metric &&
-                                    CompareIpAddress(addr, route_table_entry.subnet.addr);
-                           });
+    auto it = std::find_if(
+        route_table_.begin(), route_table_.end(), [&](const fuchsia_net_routes::RouteV6& route) {
+          // Compare outbound interface
+          if (route.action().Which() != fuchsia_net_routes::RouteActionV6::Tag::kForward) {
+            return false;
+          }
+          if (route.action().forward().value().outbound_interface() != nicid) {
+            return false;
+          }
+          // Compare metric
+          if (!route.properties().specified_properties().has_value()) {
+            return false;
+          }
+          const auto& spec = route.properties().specified_properties().value();
+          if (!spec.metric().has_value()) {
+            return false;
+          }
+          const auto& sm = spec.metric().value();
+          if (sm.Which() != fuchsia_net_routes::SpecifiedMetric::Tag::kExplicitMetric) {
+            return false;
+          }
+          if (sm.explicit_metric().value() != metric) {
+            return false;
+          }
+          // Compare IP address
+          fuchsia_net::Ipv6Address expected_addr;
+          std::memcpy(expected_addr.addr().data(), addr.Addr, expected_addr.addr().size());
+          return route.destination().addr() == expected_addr;
+        });
 
     return it != route_table_.end();
   }
@@ -498,9 +681,8 @@ class FakeNetstack : public fuchsia::net::root::testing::Interfaces_TestBase,
   // TODO(https://fxbug.dev/42062982) Delete this once Weavestack no longer relies
   // on the root API.
   fidl::Binding<fuchsia::net::root::Interfaces> root_binding_{this};
-  fidl::Binding<fuchsia::net::stack::Stack> stack_binding_{this};
   async_dispatcher_t* dispatcher_;
-  std::vector<fuchsia::net::stack::ForwardingEntry> route_table_;
+  std::vector<fuchsia_net_routes::RouteV6> route_table_;
   std::vector<OwnedInterface> interfaces_;
   uint32_t last_id_assigned = 0;
   std::optional<zx_status_t> add_addresses_fail_with_err_;
@@ -515,7 +697,7 @@ class WarmTest : public testing::WeaveTestFixture<> {
     context_provider_.service_directory_provider()->AddService(
         fake_net_interfaces_.GetHandler(dispatcher()));
     context_provider_.service_directory_provider()->AddService(
-        fake_net_stack_.GetStackHandler(dispatcher()));
+        fake_net_stack_.GetRoutesHandler(dispatcher()));
     // TODO(https://fxbug.dev/42062982) Delete this once Weavestack no longer
     // relies on the root API.
     context_provider_.service_directory_provider()->AddService(

@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@rules_fuchsia//fuchsia:defs.bzl",
+    "fuchsia_fidl_library",
+)
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+fuchsia_fidl_library(
+    name = "fuchsia.hardware.power.stats",
+    srcs = [
+        "stats.fidl",
+    ],
+    cc_bindings = [
+        "cpp",
+        "cpp_wire",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)

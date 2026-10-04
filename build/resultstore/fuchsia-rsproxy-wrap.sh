@@ -232,6 +232,10 @@ esac
 # Scan wrapped command arguments for a build directory override (-C) to
 # organize log directories for nested sub-builds.
 #
+# NOTE: We use the directory basename of -C under the explicit assumption
+# that sub-build directory basenames do not collide across different sub-build
+# paths in the build graph.
+#
 # NOTE: The fragile command-line scanning for Ninja telemetry outputs
 # (--chrome_trace, --action_metrics_output, --dirty_sources_list) has been
 # removed. That responsibility has shifted to the caller (e.g. main_build.py),
@@ -255,6 +259,7 @@ do
 done
 
 if [[ -n "$subbuild_dir" ]]; then
+  # Preserves directory basename for sub-build log nesting.
   readonly subbuild_base="${subbuild_dir##*/}"  # basename
 else
   # For non-ninja commands, subbuild_dir is not expected.

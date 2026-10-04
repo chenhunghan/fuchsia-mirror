@@ -42,6 +42,22 @@ class BuildTestsJsonTest(unittest.TestCase):
             BazelPaths(self.source_dir, self.build_dir).execroot,
             self.build_dir,
         )
+        (self.build_dir / "ungrouped_bazel_target_test_suites.txt").write_text(
+            ""
+        )
+        (self.build_dir / "target_tests.gn_targets_manifest.json").write_text(
+            "[]"
+        )
+        (self.build_dir / "bazel_target_infos.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "bazel_target": "//build/bazel/target_tests:target_tests_stamp",
+                        "gn_targets_manifest": "target_tests.gn_targets_manifest.json",
+                    }
+                ]
+            )
+        )
 
     def tearDown(self) -> None:
         self._td.cleanup()
@@ -72,6 +88,7 @@ class BuildTestsJsonTest(unittest.TestCase):
                 "platforms": [
                     {"device_type": "AEMU", "cpu": "x64"},
                     {"device_type": "QEMU", "cpu": "x64"},
+                    {"device_type": "Intel NUC Kit NUC11TNHv5", "cpu": "x64"},
                     {"device_type": "QEMU", "cpu": "arm64"},
                     {
                         "device_type": "QEMU",
@@ -154,6 +171,12 @@ class BuildTestsJsonTest(unittest.TestCase):
             },
         ]
         self.assertEqual(expected_tests, tests)
+        self.assertEqual(
+            json.loads(
+                (self.build_dir / "bazel_test_packages.list").read_text()
+            ),
+            {"content": {"manifests": []}, "version": "1"},
+        )
 
     def test_only_test_groups(self) -> None:
         tests_json = [{"test": {"name": "test1"}}, {"test": {"name": "test2"}}]
@@ -161,8 +184,13 @@ class BuildTestsJsonTest(unittest.TestCase):
         tests_json_path = self.build_dir / "pb_tests.json"
         tests_json_path.write_text(tests_json_str)
 
+        env = {"dimensions": {"device_type": "Vim3"}}
         test_groups = [
-            {"product_bundle_name": "my_pb", "tests_json": str(tests_json_path)}
+            {
+                "product_bundle_name": "my_pb",
+                "environments": [env],
+                "tests_json": str(tests_json_path),
+            }
         ]
         product_bundles = [{"name": "my_pb"}]
         (_, tests) = self._test([], test_groups, product_bundles)
@@ -171,14 +199,12 @@ class BuildTestsJsonTest(unittest.TestCase):
             {
                 "product_bundle": "my_pb",
                 "test": {"name": "test1-my_pb"},
-                "build_only": True,
-                "environments": [],
+                "environments": [env],
             },
             {
                 "product_bundle": "my_pb",
                 "test": {"name": "test2-my_pb"},
-                "build_only": True,
-                "environments": [],
+                "environments": [env],
             },
         ]
         self.assertEqual(expected_tests_json, tests)
@@ -339,6 +365,246 @@ class BuildTestsJsonTest(unittest.TestCase):
         self.assertDictEqual(expected_tests_json[0], tests[0])
         self.assertDictEqual(expected_tests_json[1], tests[1])
 
+    def test_bazel_device_tests_get_default_environments(self) -> None:
+        (self.build_dir / "ungrouped_bazel_target_test_suites.txt").write_text(
+            "//fake/device_tests"
+        )
+        mock_runner = MockCommandRunner()
+        # Host test cquery, which finds no tests.
+        mock_runner.push_result(stdout="")
+        mock_runner.push_result(
+            stdout=json.dumps(
+                {
+                    "label": "@@//src/my_test:my_test",
+                    "package_manifest_execroot_path": "bazel-out/my_test/package_manifest.json",
+                    "os": "fuchsia",
+                    "cpu": "arm64",
+                    "test_components": [
+                        {
+                            "component_name": "my_test",
+                            "package_url": "fuchsia-pkg://fuchsia.com/my-test#meta/my_test.cm",
+                        },
+                    ],
+                }
+            )
+        )
+
+        _, tests = self._test(
+            [],
+            [],
+            [],
+            with_bazel_tests=True,
+            command_runner=mock_runner,
+            default_test_environments={
+                "target_cpu": "arm64",
+                "default_environments": [
+                    {"dimensions": {"device_type": "Vim3"}}
+                ],
+                "allowed_device_types": ["Vim3"],
+                "allowed_host_device_types": [],
+            },
+        )
+
+        self.assertEqual(len(tests), 1)
+        self.assertEqual(
+            tests[0]["test"]["package_url"],
+            "fuchsia-pkg://fuchsia.com/my-test#meta/my_test.cm",
+        )
+        self.assertEqual(
+            tests[0]["environments"], [{"dimensions": {"device_type": "Vim3"}}]
+        )
+
+    def test_bazel_device_tests_custom_environments(self) -> None:
+        (self.build_dir / "ungrouped_bazel_target_test_suites.txt").write_text(
+            "//fake/device_tests"
+        )
+        mock_runner = MockCommandRunner()
+        # Host test cquery, which finds no tests.
+        mock_runner.push_result(stdout="")
+        # Device test cquery returning two tests:
+        # 1) A test specifying AEMU, QEMU (with 1cpu emulator config), NUC11
+        #    (x64, filtered out by allowed_device_types = ["AEMU", "QEMU"]),
+        #    and Astro (arm64, filtered out by target_cpu = "x64").
+        # 2) A test specifying only NUC11 (x64, not in allowed_device_types)
+        #    and Vim3 (arm64), which should become build_only.
+        test1 = {
+            "label": "@@//src/my_test:my_test",
+            "package_manifest_execroot_path": "bazel-out/my_test/package_manifest.json",
+            "os": "fuchsia",
+            "cpu": "x64",
+            "environments": [
+                {"dimensions": {"device_type": "AEMU"}},
+                {
+                    "dimensions": {"device_type": "QEMU"},
+                    "emulator": {"name": "1cpu", "device": "x64-emu-min"},
+                },
+                {"dimensions": {"device_type": "Intel NUC Kit NUC11TNHv5"}},
+                {"dimensions": {"device_type": "Astro"}},
+            ],
+            "test_components": [
+                {
+                    "component_name": "my_test",
+                    "package_url": "fuchsia-pkg://fuchsia.com/my-test#meta/my_test.cm",
+                },
+            ],
+        }
+        test2 = {
+            "label": "@@//src/hw_only_test:hw_only_test",
+            "package_manifest_execroot_path": "bazel-out/hw_only_test/package_manifest.json",
+            "os": "fuchsia",
+            "cpu": "x64",
+            "environments": [
+                {"dimensions": {"device_type": "Intel NUC Kit NUC11TNHv5"}},
+                {"dimensions": {"device_type": "Vim3"}},
+            ],
+            "test_components": [
+                {
+                    "component_name": "hw_only_test",
+                    "package_url": "fuchsia-pkg://fuchsia.com/hw-only-test#meta/hw_only_test.cm",
+                },
+            ],
+        }
+        mock_runner.push_result(
+            stdout=json.dumps(test1) + "\n" + json.dumps(test2)
+        )
+
+        _, tests = self._test(
+            [],
+            [],
+            [],
+            with_bazel_tests=True,
+            command_runner=mock_runner,
+        )
+
+        self.assertEqual(len(tests), 2)
+        self.assertEqual(
+            tests[0]["environments"],
+            [
+                {"dimensions": {"device_type": "AEMU"}},
+                {
+                    "dimensions": {"device_type": "QEMU"},
+                    "emulator": {"name": "1cpu", "device": "x64-emu-min"},
+                },
+            ],
+        )
+        self.assertNotIn("build_only", tests[0])
+        self.assertEqual(tests[1]["environments"], [])
+        self.assertTrue(tests[1]["build_only"])
+
+    def test_bazel_device_tests_invalid_environment(self) -> None:
+        (self.build_dir / "ungrouped_bazel_target_test_suites.txt").write_text(
+            "//fake/device_tests"
+        )
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(stdout="")
+        mock_runner.push_result(
+            stdout=json.dumps(
+                {
+                    "label": "@@//src/bad_test:bad_test",
+                    "package_manifest_execroot_path": "bazel-out/bad_test/package_manifest.json",
+                    "os": "fuchsia",
+                    "cpu": "x64",
+                    "environments": [
+                        {"dimensions": {"device_type": "NonExistent"}},
+                    ],
+                    "test_components": [
+                        {
+                            "component_name": "bad_test",
+                            "package_url": "fuchsia-pkg://fuchsia.com/bad-test#meta/bad_test.cm",
+                        },
+                    ],
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"fuchsia-pkg://fuchsia.com/bad-test#meta/bad_test\.cm \(@@//src/bad_test:bad_test\): Could not match environment specifications",
+        ):
+            self._test(
+                [],
+                [],
+                [],
+                with_bazel_tests=True,
+                command_runner=mock_runner,
+            )
+
+    def test_bazel_device_tests_in_product_bundle_test_group(self) -> None:
+        pb_tests_json_path = self.build_dir / "pb_tests.json"
+        pb_tests_json_path.write_text("[]")
+        pb_bazel_suites_path = (
+            self.build_dir / "pb_bazel_target_test_suites.txt"
+        )
+        pb_bazel_suites_path.write_text("//fake/pb_device_tests\n")
+
+        mock_runner = MockCommandRunner()
+        # Host test cquery finds no tests.
+        mock_runner.push_result(stdout="")
+        # Device test cquery for the product_bundle_test_group's suite file.
+        mock_runner.push_result(
+            stdout=json.dumps(
+                {
+                    "label": "@@//src/my_test:my_test",
+                    "package_manifest_execroot_path": "bazel-out/my_test/package_manifest.json",
+                    "os": "fuchsia",
+                    "cpu": "arm64",
+                    "test_components": [
+                        {
+                            "component_name": "my_test",
+                            "package_url": "fuchsia-pkg://fuchsia.com/my-test#meta/my_test.cm",
+                        },
+                    ],
+                }
+            )
+        )
+
+        vim3_env = {"dimensions": {"device_type": "Vim3"}}
+        test_groups = [
+            {
+                "product_bundle_name": "my_pb",
+                "environments": [vim3_env],
+                "tests_json": "pb_tests.json",
+                "bazel_target_test_suites": "pb_bazel_target_test_suites.txt",
+            },
+            {
+                "product_bundle_name": "my_build_only_pb",
+                "build_only": True,
+                "tests_json": "pb_tests.json",
+                "bazel_target_test_suites": "pb_bazel_target_test_suites.txt",
+            },
+        ]
+        product_bundles = [{"name": "my_pb"}, {"name": "my_build_only_pb"}]
+
+        _, tests = self._test(
+            [],
+            test_groups,
+            product_bundles,
+            with_bazel_tests=True,
+            command_runner=mock_runner,
+            default_test_environments={
+                "target_cpu": "arm64",
+                "default_environments": [],
+                "allowed_device_types": [],
+                "allowed_host_device_types": [],
+            },
+        )
+
+        self.assertEqual(len(tests), 2)
+        self.assertEqual(
+            tests[0]["test"]["name"],
+            "fuchsia-pkg://fuchsia.com/my-test#meta/my_test.cm-my_pb",
+        )
+        self.assertEqual(tests[0]["product_bundle"], "my_pb")
+        self.assertEqual(tests[0]["environments"], [vim3_env])
+
+        self.assertEqual(
+            tests[1]["test"]["name"],
+            "fuchsia-pkg://fuchsia.com/my-test#meta/my_test.cm",
+        )
+        self.assertNotIn("product_bundle", tests[1])
+        self.assertTrue(tests[1]["build_only"])
+        self.assertEqual(tests[1]["environments"], [])
+
     def test_full(self) -> None:
         tests_from_metadata = [
             {
@@ -393,16 +659,6 @@ class BuildTestsJsonTest(unittest.TestCase):
                 "environments": [{"dimensions": {"device_type": "AEMU"}}],
             },
             {
-                "product_bundle": "my_pb",
-                "environments": [env],
-                "test": {"name": "test1-my_pb"},
-            },
-            {
-                "product_bundle": "my_pb",
-                "environments": [env],
-                "test": {"name": "test2-my_pb"},
-            },
-            {
                 "environments": [
                     {
                         "dimensions": {
@@ -421,6 +677,16 @@ class BuildTestsJsonTest(unittest.TestCase):
                     "os": "linux",
                     "cpu": "x64",
                 },
+            },
+            {
+                "product_bundle": "my_pb",
+                "environments": [env],
+                "test": {"name": "test1-my_pb"},
+            },
+            {
+                "product_bundle": "my_pb",
+                "environments": [env],
+                "test": {"name": "test2-my_pb"},
             },
         ]
         self.assertEqual(expected_tests_json, tests)
@@ -508,10 +774,23 @@ class BuildTestsJsonTest(unittest.TestCase):
         self.assertEqual(d1.access_points, "1")
         self.assertEqual(d1.get("access_points"), "1")
         self.assertIsNone(d1.get("missing"))
+        self.assertEqual(d1.to_dict(), instance_to_dict(d1))
 
         sub = build_tests_json.Dimensions(device_type="QEMU")
         self.assertTrue(sub.is_subset_of(d1))
         self.assertFalse(d1.is_subset_of(sub))
+        self.assertTrue(d1.is_subset_of(d1))
+        self.assertTrue(build_tests_json.Dimensions().is_subset_of(sub))
+        self.assertFalse(
+            build_tests_json.Dimensions(device_type="AEMU").is_subset_of(d1)
+        )
+        self.assertFalse(
+            build_tests_json.Dimensions(
+                device_type="QEMU", cpu="arm64"
+            ).is_subset_of(d1)
+        )
+        # An empty string is still an explicitly specified dimension.
+        self.assertFalse(build_tests_json.Dimensions(cpu="").is_subset_of(sub))
 
         with self.assertRaisesRegex(ValueError, "tags are only valid"):
             instance_from_dict(
@@ -527,30 +806,21 @@ class BuildTestsJsonTest(unittest.TestCase):
             )
 
     def test_emulator_config_dataclass(self) -> None:
+        emu_dict = {
+            "name": "1cpu",
+            "device": "x64-emu-min",
+            "accel": "hyper",
+            "kernel_args": ["arg1", "arg2"],
+            "uefi": True,
+            "vbmeta_key": "path/to/key.pem",
+            "vbmeta_key_metadata": "path/to/meta.bin",
+        }
         emu = instance_from_dict(
             build_tests_json.EmulatorConfig,
-            {
-                "name": "1cpu",
-                "device": "x64-emu-min",
-                "accel": "hyper",
-                "kernel_args": ["arg1", "arg2"],
-                "uefi": True,
-                "vbmeta_key": "path/to/key.pem",
-                "vbmeta_key_metadata": "path/to/meta.bin",
-            },
+            emu_dict,
         )
-        self.assertEqual(
-            instance_to_dict(emu),
-            {
-                "name": "1cpu",
-                "device": "x64-emu-min",
-                "accel": "hyper",
-                "kernel_args": ["arg1", "arg2"],
-                "uefi": True,
-                "vbmeta_key": "path/to/key.pem",
-                "vbmeta_key_metadata": "path/to/meta.bin",
-            },
-        )
+        self.assertEqual(emu.to_dict(), emu_dict)
+        self.assertEqual(instance_to_dict(emu), emu_dict)
 
         with self.assertRaisesRegex(ValueError, "requires a unique `name`"):
             instance_from_dict(
@@ -586,6 +856,7 @@ class BuildTestsJsonTest(unittest.TestCase):
         )
         self.assertEqual(env_a1, env_a2)
         self.assertEqual(hash(env_a1), hash(env_a2))
+        self.assertEqual(env_a1.to_dict(), instance_to_dict(env_a1))
         self.assertEqual(
             sorted({env_a1, env_b, env_a2}),
             [env_a1, env_b],
@@ -786,8 +1057,7 @@ class BuildTestsJsonTest(unittest.TestCase):
                 "environments": [astro_env, vim3_env],
             },
             {
-                "test": {"name": "build_only_pb_test-my_pb"},
-                "product_bundle": "my_pb",
+                "test": {"name": "build_only_pb_test"},
                 "build_only": True,
                 "environments": [],
             },
@@ -839,10 +1109,116 @@ class BuildTestsJsonTest(unittest.TestCase):
                 "environments": [vim3_env],
             },
             {
-                "test": {"name": "disjoint_pb_test-my_pb"},
-                "product_bundle": "my_pb",
+                "test": {"name": "disjoint_pb_test"},
                 "build_only": True,
                 "environments": [],
+            },
+        ]
+        self.assertEqual(expected_tests, tests)
+
+    def test_product_bundle_test_group_consolidates_build_only_tests(
+        self,
+    ) -> None:
+        aemu_env = {"dimensions": {"device_type": "AEMU"}}
+        vim3_env = {"dimensions": {"device_type": "Vim3"}}
+
+        tests_from_metadata = [
+            # Already build-only in metadata:
+            {
+                "test": {"name": "already_build_only"},
+                "build_only": True,
+            },
+            # Filtered out to build-only in metadata (Vim3 not in allowed_device_types):
+            {
+                "test": {"name": "filtered_to_build_only"},
+                "environments": [vim3_env],
+            },
+            # Runnable in metadata (NOT build-only):
+            {"test": {"name": "runnable_in_main"}},
+            # Already build-only in metadata, and will be deduplicated against those
+            # in PBs.
+            {
+                "test": {"name": "test_1"},
+                "build_only": True,
+            },
+        ]
+
+        pb_tests = [
+            {"test": {"name": "test_1"}},
+            {"test": {"name": "test_2"}},
+            {"test": {"name": "test_3"}},
+            {"test": {"name": "test_4"}},
+            {
+                "test": {
+                    "name": "pure_host_test",
+                    "os": "linux",
+                },
+                "expects_ssh": False,
+            },
+        ]
+        pb_tests_json_path = self.build_dir / "pb_tests.json"
+        pb_tests_json_path.write_text(json.dumps(pb_tests))
+
+        test_groups = [
+            {
+                "product_bundle_name": "my_pb",
+                "build_only": True,
+                "tests_json": str(pb_tests_json_path),
+            },
+            {
+                "product_bundle_name": "my_other_pb",
+                "build_only": True,
+                "tests_json": str(pb_tests_json_path),
+            },
+        ]
+        product_bundles = [{"name": "my_pb"}, {"name": "my_other_pb"}]
+        (_, tests) = self._test(
+            tests_from_metadata, test_groups, product_bundles
+        )
+
+        expected_tests = [
+            {
+                "test": {"name": "already_build_only"},
+                "build_only": True,
+                "environments": [],
+            },
+            {
+                "test": {"name": "filtered_to_build_only"},
+                "build_only": True,
+                "environments": [],
+            },
+            {
+                "test": {"name": "runnable_in_main"},
+                "environments": [aemu_env],
+            },
+            {
+                "test": {"name": "test_1"},
+                "build_only": True,
+                "environments": [],
+            },
+            {
+                "test": {"name": "test_2"},
+                "build_only": True,
+                "environments": [],
+            },
+            {
+                "test": {"name": "test_3"},
+                "build_only": True,
+                "environments": [],
+            },
+            {
+                "test": {"name": "test_4"},
+                "build_only": True,
+                "environments": [],
+            },
+            {
+                "test": {
+                    "name": "pure_host_test",
+                    "os": "linux",
+                },
+                "build_only": True,
+                "environments": [],
+                "expects_ssh": False,
             },
         ]
         self.assertEqual(expected_tests, tests)

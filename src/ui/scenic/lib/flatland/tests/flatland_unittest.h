@@ -221,15 +221,20 @@ class FlatlandTest : public LoggingEventLoop, public ::testing::Test {
               requested_presentation_times_[id_pair] = requested_presentation_time;
             }));
 
-    ON_CALL(*mock_flatland_presenter_, RemoveSession(::testing::_, ::testing::_))
-        .WillByDefault(::testing::Invoke(
-            [](scheduling::SessionId session_id, std::optional<zx::event> release_fence) {
-              if (release_fence) {
-                // Pretend that another frame was rendered, causing the release fence to be
-                // signaled.
-                release_fence.value().signal(0, ZX_EVENT_SIGNALED);
-              }
-            }));
+    ON_CALL(*mock_flatland_presenter_, RemoveSession(::testing::_, ::testing::_, ::testing::_))
+        .WillByDefault(::testing::Invoke([](scheduling::SessionId session_id,
+                                            std::vector<zx::event> release_fences,
+                                            std::vector<zx::counter> release_counters) {
+          for (auto& fence : release_fences) {
+            // Pretend that another frame was rendered, causing the release fence to be
+            // signaled.
+            fence.signal(0, ZX_EVENT_SIGNALED);
+          }
+          for (auto& counter : release_counters) {
+            counter.write(1);
+            counter.signal(0, ZX_COUNTER_SIGNALED);
+          }
+        }));
 
     sysmem_allocator_ = utils::CreateSysmemAllocatorClient(dispatcher(), "FlatlandTest::SetUp");
 
@@ -245,7 +250,7 @@ class FlatlandTest : public LoggingEventLoop, public ::testing::Test {
         .Times(::testing::AtLeast(0));
 
     // ~Flatland() ensures that RemoveSession will always be called; this is uninteresting.
-    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(::testing::_, ::testing::_, ::testing::_))
         .Times(::testing::AtLeast(0));
   }
 
@@ -456,6 +461,38 @@ class FlatlandTest : public LoggingEventLoop, public ::testing::Test {
   // Returns true if |session_id| currently has a session update pending.
   bool HasSessionUpdate(scheduling::SessionId session_id) const {
     return pending_instance_updates_.contains(session_id);
+  }
+
+  // Returns true if the pending release fences for `session_id` contain `expected_fence`.
+  bool ReleaseFencesContain(scheduling::SessionId session_id,
+                            const zx::object_base& expected_fence) const {
+    const auto expected_koid = fsl::GetKoid(expected_fence.get());
+    for (const auto& [id_pair, fences] : pending_release_fences_) {
+      if (id_pair.session_id == session_id) {
+        for (const auto& fence : fences) {
+          if (fsl::GetKoid(fence.get()) == expected_koid) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  // Returns true if the pending release counters for `session_id` contain `expected_counter`.
+  bool ReleaseCountersContain(scheduling::SessionId session_id,
+                              const zx::object_base& expected_counter) const {
+    const auto expected_koid = fsl::GetKoid(expected_counter.get());
+    for (const auto& [id_pair, counters] : pending_release_counters_) {
+      if (id_pair.session_id == session_id) {
+        for (const auto& counter : counters) {
+          if (fsl::GetKoid(counter.get()) == expected_koid) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   // Returns the requested presentation time for a particular |id_pair|, or std::nullopt if that
@@ -754,13 +791,18 @@ class Flatland2Test : public FlatlandTest {
     return nullptr;
   }
 
-  std::shared_ptr<Flatland> CreateFlatland2(std::optional<std::string>* error_log = nullptr) {
-    FlatlandConfig config{.use_flatland2 = true};
+  std::shared_ptr<Flatland> CreateFlatland2(FlatlandConfig config,
+                                            std::optional<std::string>* error_log = nullptr) {
+    config.use_flatland2 = true;
     auto flatland = FlatlandTest::CreateFlatland(config);
     if (error_log) {
       flatland->SetErrorReporter(std::make_unique<TestErrorReporter>(*error_log));
     }
     return flatland;
+  }
+
+  std::shared_ptr<Flatland> CreateFlatland2(std::optional<std::string>* error_log = nullptr) {
+    return CreateFlatland2(FlatlandConfig{}, error_log);
   }
 
   std::vector<ResolvedLayer> ComputeResolvedLayers(Flatland* flatland) {

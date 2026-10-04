@@ -238,6 +238,10 @@ pub enum Ipv4IdMode {
     Incrementing,
 }
 
+/// The maximum length of a transport payload that can be split by Generic
+/// Segmentation Offload (GSO).
+pub const MAX_GSO_PAYLOAD_LEN: u16 = u16::MAX;
+
 /// Generic Segmentation Offload (GSO) metadata associated with a frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GsoInfo {

@@ -21,18 +21,16 @@ use ::routing::bedrock::request_metadata::resolver_metadata;
 use ::routing::bedrock::sandbox_construction::ComponentSandbox;
 use ::routing::bedrock::structured_dict::ComponentInput;
 use ::routing::component_instance::{
-    ComponentInstanceInterface, ExtendedInstanceInterface, ResolvedInstanceInterface,
-    WeakComponentInstanceInterface, WeakExtendedInstanceInterface,
+    ComponentInstanceInterface, ExtendedInstanceInterface, WeakComponentInstanceInterface,
+    WeakExtendedInstanceInterface,
 };
 use ::routing::error::{ComponentInstanceError, RoutingError};
 use ::routing::policy::GlobalPolicyChecker;
 use ::routing::resolving::{
     ComponentAddress, ComponentResolutionContext, ResolvedComponent, ResolvedPackage, ResolverError,
 };
-use anyhow::format_err;
 use async_trait::async_trait;
 use capability_source::CapabilitySource;
-use clonable_error::ClonableError;
 use cm_graph::DependencyNode;
 use cm_rust::{CapabilityTypeName, ChildDecl, CollectionDecl, ComponentDecl, NativeIntoFidl};
 use cm_types::{Name, Url};
@@ -347,7 +345,6 @@ pub struct ComponentInstance {
     /// The context shared across the model.
     pub context: Arc<ModelContext>,
 
-    // These locks must be taken in the order declared if held simultaneously.
     /// The component's mutable state.
     state: Mutex<InstanceState>,
     /// Actions on the instance that must eventually be completed.
@@ -424,7 +421,6 @@ impl ComponentInstance {
     }
 
     /// Locks and returns the instance's mutable state.
-    // TODO(b/309656051): Remove this method from ComponentInstance's public API
     pub async fn lock_state(&self) -> MutexGuard<'_, InstanceState> {
         self.state.lock().await
     }
@@ -443,7 +439,6 @@ impl ComponentInstance {
     /// register a `Resolve` action unless the resolved state is not already populated, so this
     /// function can be called re-entrantly from a Resolved hook. Returns an `InstanceNotFound`
     /// error if the instance is destroyed.
-    // TODO(b/309656051): Remove this method from ComponentInstance's public API
     pub async fn lock_resolved_state<'a>(
         self: &'a Arc<Self>,
     ) -> Result<MappedMutexGuard<'a, InstanceState, ResolvedInstanceState>, ActionError> {
@@ -758,6 +753,12 @@ impl ComponentInstance {
                         .top_instance()
                         .await
                         .map_err(|_| StopActionError::GetTopInstanceFailed)?;
+                    {
+                        let mut state = self.lock_state().await;
+                        if let InstanceState::Resolved(resolved_state) = &mut *state {
+                            resolved_state.restarts_disabled = true;
+                        }
+                    }
                     top_instance.trigger_reboot();
                 }
                 Some((ret, started_timestamp, started_timestamp_monotonic))
@@ -998,8 +999,7 @@ impl ComponentInstance {
             let state = self.lock_state().await;
             match *state {
                 InstanceState::Resolved(ref s) | InstanceState::Started(ref s, _) => {
-                    let child = s.get_child(&moniker);
-                    child
+                    s.get_child(&moniker).cloned()
                 }
                 InstanceState::Shutdown(ref state, _) => {
                     state.children.get(&moniker).map(|r| r.clone())
@@ -1084,15 +1084,9 @@ impl ComponentInstance {
         self: &Arc<Self>,
     ) -> Result<Arc<Dictionary>, RouterError> {
         Ok(self
-            .lock_resolved_state()
+            .component_sandbox()
             .await
-            .map_err(|e| {
-                RoutingError::from(ComponentInstanceError::ResolveFailed {
-                    moniker: self.moniker.clone(),
-                    err: ClonableError::from(format_err!("{:?}", e)),
-                })
-            })?
-            .sandbox
+            .map_err(RoutingError::from)?
             .component_output
             .capabilities())
     }
@@ -1545,14 +1539,49 @@ impl ComponentInstanceInterface for ComponentInstance {
         self.parent.upgrade()
     }
 
-    async fn lock_resolved_state<'a>(
-        self: &'a Arc<Self>,
-    ) -> Result<Box<dyn ResolvedInstanceInterface<Component = Self> + 'a>, ComponentInstanceError>
-    {
-        Ok(Box::new(ComponentInstance::lock_resolved_state(self).await.map_err(|err| {
+    async fn get_child_maybe_resolve(
+        self: &Arc<Self>,
+        moniker: &BorrowedChildName,
+    ) -> Result<Option<Arc<Self>>, ComponentInstanceError> {
+        Ok(self
+            .lock_resolved_state()
+            .await
+            .map_err(|err| {
+                let err: anyhow::Error = err.into();
+                ComponentInstanceError::ResolveFailed {
+                    moniker: self.moniker.clone(),
+                    err: err.into(),
+                }
+            })?
+            .get_child(moniker)
+            .cloned())
+    }
+
+    async fn address_maybe_resolve(self: &Arc<Self>) -> Result<ComponentAddress, ResolverError> {
+        let state = self.lock_resolved_state().await.map_err(|err| {
             let err: anyhow::Error = err.into();
-            ComponentInstanceError::ResolveFailed { moniker: self.moniker.clone(), err: err.into() }
-        })?))
+            ResolverError::from(ComponentInstanceError::ResolveFailed {
+                moniker: self.moniker.clone(),
+                err: err.into(),
+            })
+        })?;
+        state.address().await
+    }
+
+    async fn context_to_resolve_children(
+        self: &Arc<Self>,
+    ) -> Result<Option<ComponentResolutionContext>, ComponentInstanceError> {
+        Ok(self
+            .lock_resolved_state()
+            .await
+            .map_err(|err| {
+                let err: anyhow::Error = err.into();
+                ComponentInstanceError::ResolveFailed {
+                    moniker: self.moniker.clone(),
+                    err: err.into(),
+                }
+            })?
+            .context_to_resolve_children())
     }
 
     async fn component_sandbox(
@@ -1874,16 +1903,14 @@ pub mod tests {
             test.model.root().start_instance(&Moniker::root(), &StartReason::Root).await.unwrap();
 
         let root_resolved = root_component.lock_resolved_state().await.expect("resolve failed");
+        let decl = root_resolved.resolved_component.decl.as_ref().unwrap();
 
-        assert_eq!(&[example_capability], &*root_resolved.try_capabilities().unwrap());
-        assert_eq!(&[example_use], &*root_resolved.try_uses().unwrap());
-        assert_eq!(&[example_offer], &*root_resolved.try_offers().unwrap());
-        assert_eq!(&[example_expose], &*root_resolved.try_exposes().unwrap());
-        assert_eq!(&[root_decl.collections[0].clone()], &*root_resolved.try_collections().unwrap());
-        assert_eq!(
-            &[env_a, env_b],
-            &*root_resolved.resolved_component.decl.as_ref().unwrap().environments
-        );
+        assert_eq!(&[example_capability], &*decl.capabilities);
+        assert_eq!(&[example_use], &*decl.uses);
+        assert_eq!(&[example_offer], &*decl.offers);
+        assert_eq!(&[example_expose], &*decl.exposes);
+        assert_eq!(&[root_decl.collections[0].clone()], &*decl.collections);
+        assert_eq!(&[env_a, env_b], &*decl.environments);
 
         let mut children = root_resolved
             .children()
@@ -2014,7 +2041,7 @@ pub mod tests {
 
             pretty_assertions::assert_eq!(
                 &[example_offer.clone()],
-                &*root_resolved.try_offers().unwrap()
+                &*root_resolved.resolved_component.decl.as_ref().unwrap().offers
             );
             pretty_assertions::assert_eq!(
                 root_resolved.resolved_component.dependencies,
@@ -2064,7 +2091,7 @@ pub mod tests {
 
             pretty_assertions::assert_eq!(
                 &[example_offer.clone()],
-                &*root_resolved.try_offers().unwrap()
+                &*root_resolved.resolved_component.decl.as_ref().unwrap().offers
             );
             pretty_assertions::assert_eq!(
                 root_resolved.resolved_component.dependencies,
@@ -2135,7 +2162,7 @@ pub mod tests {
 
             pretty_assertions::assert_eq!(
                 &[example_offer.clone()],
-                &*root_resolved.try_offers().unwrap()
+                &*root_resolved.resolved_component.decl.as_ref().unwrap().offers
             );
             pretty_assertions::assert_eq!(
                 root_resolved.resolved_component.dependencies,

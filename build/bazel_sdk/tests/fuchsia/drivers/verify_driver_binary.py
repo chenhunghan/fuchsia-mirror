@@ -6,9 +6,11 @@
 import argparse
 import subprocess
 import sys
+from collections.abc import Container
+from typing import NoReturn
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -24,7 +26,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def run(*command):
+def run(*command: str) -> str:
     try:
         return subprocess.check_output(
             command,
@@ -35,22 +37,22 @@ def run(*command):
         raise e
 
 
-def _fail(msg):
+def _fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}")
     sys.exit(1)
 
 
-def _assert_in(value, iterable, msg):
+def _assert_in(value: str, iterable: Container[str], msg: str) -> None:
     if not value in iterable:
         _fail(msg)
 
 
-def _assert_not_in(value, iterable, msg):
+def _assert_not_in(value: str, iterable: Container[str], msg: str) -> None:
     if value in iterable:
         _fail(msg)
 
 
-def get_exported_symbols(args):
+def get_exported_symbols(args: argparse.Namespace) -> list[str]:
     # contents will contain 2 header lines followed by the symbol table. We skip
     # the first first line and use the second to figure out how many columns we have.
     #
@@ -83,7 +85,7 @@ def get_exported_symbols(args):
     return symbols
 
 
-def verify_exported_symbols(symbols):
+def verify_exported_symbols(symbols: list[str]) -> None:
     # Initial validity check that our symbol table isn't huge which indicates something
     # went wrong. We choose 200 as an upper limit, we should figure out a better check
     # here. src/lib/driver_symbols/restricted_symbols.h contains a list of restricted
@@ -105,7 +107,7 @@ def verify_exported_symbols(symbols):
         )
 
 
-def verify_needed_libs(args):
+def verify_needed_libs(args: argparse.Namespace) -> None:
     # Running readelf --needed-libs returns a response that looks like
     # NeededLibraries [
     #  libc.so
@@ -143,12 +145,13 @@ def verify_needed_libs(args):
         )
 
 
-def main():
+def main() -> int:
     args = parse_args()
     symbols = get_exported_symbols(args)
 
     verify_exported_symbols(symbols)
     verify_needed_libs(args)
+    return 0
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ use zx::Status;
 
 use crate::ops;
 use crate::ops::v1::{PendingWaits, Task, TaskQueue};
+use crate::ops::v2::PendingIrqs;
 
 /// Implements a C++-compatible [`async_dispatcher_t`] around a [`fuchsia_async::Scope`].
 #[derive(Debug)]
@@ -26,6 +27,7 @@ pub struct ScopeDispatcher {
     dispatcher: async_dispatcher_t,
     task_queue: Mutex<TaskQueue>,
     pub(crate) pending_waits: Mutex<PendingWaits>,
+    pub(crate) pending_irqs: Mutex<PendingIrqs>,
     shutting_down: AtomicBool,
     shutdown_complete_waker: AtomicWaker,
     service_waker: AtomicWaker,
@@ -56,6 +58,7 @@ impl ScopeDispatcher {
         let dispatcher = async_dispatcher_t { ops: &ops::ASYNC_OPS };
         let task_queue = Mutex::new(TaskQueue::default());
         let pending_waits = Mutex::new(PendingWaits::default());
+        let pending_irqs = Mutex::new(PendingIrqs::default());
         let shutting_down = AtomicBool::new(false);
         let service_waker = AtomicWaker::new();
         let shutdown_complete_waker = AtomicWaker::new();
@@ -64,6 +67,7 @@ impl ScopeDispatcher {
             dispatcher,
             task_queue,
             pending_waits,
+            pending_irqs,
             shutting_down,
             shutdown_complete_waker,
             service_waker,
@@ -169,6 +173,10 @@ impl ScopeDispatcher {
         // this point.
         for next_wait in self.pending_waits.lock().get_all_waits() {
             next_wait.run(self.clone(), null(), Err(Status::CANCELED));
+        }
+        let irqs_to_cancel = self.pending_irqs.lock().drain_all();
+        for irq in irqs_to_cancel {
+            irq.run(self.clone(), null(), Err(Status::CANCELED));
         }
         while let Some(next_task) = self.task_queue.lock().next_task(MonotonicInstant::INFINITE) {
             next_task.run(self.clone(), Err(Status::CANCELED));

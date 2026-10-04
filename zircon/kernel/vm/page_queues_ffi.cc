@@ -279,13 +279,4 @@ FFI_ALWAYS_INLINE Thread* cpp_page_queues_debug_get_mru_thread(PageQueues* queue
   return queues->DebugGetMruThread();
 }
 
-FFI_ALWAYS_INLINE void cpp_debug_compressor_init(
-    ffi::Uninitialized<VmDebugCompressor>* compressor) {
-  compressor->Initialize();
-}
-
-FFI_ALWAYS_INLINE void cpp_debug_compressor_destroy(VmDebugCompressor* compressor) {
-  ktl::destroy_at(compressor);
-}
-
 }  // extern "C"

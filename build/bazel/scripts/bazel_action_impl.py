@@ -129,6 +129,7 @@ class BazelActionOutputs(object):
     directories: list[bazel_action_utils.DirectoryOutput]
     packages: list[bazel_action_utils.PackageOutput]
     final_symlinks: list[bazel_action_utils.FinalSymlinkOutput]
+    copy_debug_symbols: bool = False
 
     def __len__(self) -> int:
         return (
@@ -237,10 +238,6 @@ class BazelActionRunner(object):
         # These are the args that are listed after the command, targets, and configured
         # args.
         cmd_args = []
-
-        # if build-event uploading is enabled in global args, then append the config for that
-        if self.global_args.upload_build_events:
-            cmd_args += [f"--config={self.global_args.upload_build_events}"]
 
         # This returns an empty list of there's nothing for it to set, otherwise it sets all the
         # params appropriately based on the number of cores and the ENV vars.
@@ -460,7 +457,7 @@ class BazelActionRunner(object):
 
         # Perform the merging of debug symbols data, and optionally copy
         # and write the output to a manifest.
-        need_to_copy_debug_symbols = any(
+        need_to_copy_debug_symbols = outputs.copy_debug_symbols or any(
             entry.copy_debug_symbols
             for entry in outputs.packages + outputs.directories
         )
@@ -1075,6 +1072,7 @@ def merge_target_info_outputs(
     directory_outputs: list[bazel_action_utils.DirectoryOutput] = []
     package_outputs: list[bazel_action_utils.PackageOutput] = []
     final_symlink_outputs: list[bazel_action_utils.FinalSymlinkOutput] = []
+    copy_debug_symbols = False
 
     # This is the set of gn input targets manifests
     gn_target_manifests: set[Path] = set()
@@ -1084,6 +1082,7 @@ def merge_target_info_outputs(
         directory_outputs.extend(target_info.directory_outputs)
         package_outputs.extend(target_info.package_outputs)
         final_symlink_outputs.extend(target_info.final_symlink_outputs)
+        copy_debug_symbols |= target_info.copy_debug_symbols
 
         gn_target_manifests.add(Path(target_info.gn_targets_manifest))
 
@@ -1093,6 +1092,7 @@ def merge_target_info_outputs(
             directory_outputs,
             package_outputs,
             final_symlink_outputs,
+            copy_debug_symbols,
         ),
         list(gn_target_manifests),
     )

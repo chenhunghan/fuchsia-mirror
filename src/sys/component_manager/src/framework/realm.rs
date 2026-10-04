@@ -205,13 +205,12 @@ async fn get_child(
     child: &fdecl::ChildRef,
 ) -> Result<Option<Arc<ComponentInstance>>, fcomponent::Error> {
     let parent = parent.upgrade().map_err(|_| fcomponent::Error::InstanceDied)?;
-    let state = parent.lock_resolved_state().await.map_err(|error| {
-        debug!(error:%, moniker:% = parent.moniker; "failed to resolve instance");
-        fcomponent::Error::InstanceCannotResolve
-    })?;
     let child_moniker = ChildName::try_new(&child.name, child.collection.as_ref())
         .map_err(|_| fcomponent::Error::InvalidArguments)?;
-    Ok(state.get_child(&child_moniker).map(|r| r.clone()))
+    parent.get_child_maybe_resolve(&child_moniker).await.map_err(|error| {
+        debug!(error:%, moniker:% = parent.moniker; "failed to resolve instance");
+        fcomponent::Error::InstanceCannotResolve
+    })
 }
 
 async fn list_children(
@@ -301,12 +300,9 @@ async fn get_child_output_dictionary_deprecated(
 ) -> Result<fsandbox::DictionaryRef, fcomponent::Error> {
     match get_child(component, &child).await? {
         Some(child) => Ok(child
-            .lock_resolved_state()
+            .get_component_output_dict()
             .await
             .map_err(|_| fcomponent::Error::InstanceCannotResolve)?
-            .sandbox
-            .component_output
-            .capabilities()
             .to_fsandbox()),
         None => {
             debug!(child:?; "get_child_output_dictionary_deprecated() failed: instance not found");
@@ -324,12 +320,9 @@ async fn get_child_output_dictionary(
         return Err(fcomponent::Error::InstanceNotFound);
     };
     let output = child
-        .lock_resolved_state()
+        .get_component_output_dict()
         .await
-        .map_err(|_| fcomponent::Error::InstanceCannotResolve)?
-        .sandbox
-        .component_output
-        .capabilities();
+        .map_err(|_| fcomponent::Error::InstanceCannotResolve)?;
     let (e1, e2) = zx::EventPair::create();
     child.context.remote_capabilities().store(e1, output).expect("we used a valid handle");
     Ok(e2)

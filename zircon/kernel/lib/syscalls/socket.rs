@@ -11,9 +11,9 @@ use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
 use syscalls_macro::syscall;
 use zx_status::Status;
-use zx_types::{ZX_POL_NEW_SOCKET, ZX_RIGHT_MANAGE_SOCKET, ZX_RIGHT_READ, ZX_RIGHT_WRITE};
-
-pub const ZX_SOCKET_PEEK: u32 = 1 << 3;
+use zx_types::{
+    ZX_POL_NEW_SOCKET, ZX_RIGHT_MANAGE_SOCKET, ZX_RIGHT_READ, ZX_RIGHT_WRITE, ZX_SOCKET_PEEK,
+};
 
 const LOCAL_TRACE: u32 = 0;
 

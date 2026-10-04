@@ -84,6 +84,11 @@
             from: "parent",
         },
         {
+            service: "fuchsia.hardware.power.stats.Service",
+            from: "parent",
+            availability: "optional",
+        },
+        {
             // This service replaces the directory capability above.
             service: "fuchsia.gpu.magma.Service",
             availability: "optional",
@@ -207,6 +212,7 @@
                 "fuchsia.ui.composition.Flatland",
                 "fuchsia.ui.display.singleton.DisplayPower",
                 "fuchsia.ui.display.singleton.Info",
+                "fuchsia.ui.input.DeviceListenerRegistry",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.policy.DeviceListenerRegistry",
                 "fuchsia.ui.test.input.Registry",

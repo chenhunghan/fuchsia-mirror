@@ -7,6 +7,7 @@ use super::spi_device::registers;
 use fake_clock::FakeClock;
 use fake_gpio::FakeGpio;
 use fake_pdev::FakePDev;
+use fake_pin::FakePinStates;
 use fake_powerdomain::FakePowerDomain;
 use fake_reset::FakeReset;
 use fdf_component::testing::harness::TestHarness;
@@ -77,6 +78,9 @@ async fn test_init() {
 
     let mut reset = FakeReset::new();
 
+    let pin_states_0 = FakePinStates::new();
+    let pin_states_1 = FakePinStates::new();
+
     let gpio = FakeGpio::default();
 
     let mut harness = TestHarness::<DwSpiDriver>::new()
@@ -85,6 +89,8 @@ async fn test_init() {
         .add_offer(clock_bus.serve(&mut service_fs, scope.to_handle(), "bus"))
         .add_offer(clock_regs.serve(&mut service_fs, scope.to_handle(), "registers"))
         .add_offer(reset.serve(&mut service_fs, scope.to_handle(), "reset"))
+        .add_offer(pin_states_0.serve(&mut service_fs, scope.to_handle(), "pin-states-0"))
+        .add_offer(pin_states_1.serve(&mut service_fs, scope.to_handle(), "pin-states-1"))
         .add_offer(gpio.serve(&mut service_fs, scope.to_handle(), "cs-0"))
         .set_driver_incoming(service_fs);
 
@@ -95,6 +101,8 @@ async fn test_init() {
     assert!(clock_bus.enabled());
     assert!(clock_regs.enabled());
     assert!(reset.take_toggled());
+    assert_eq!(pin_states_0.current_state(), "default");
+    assert_eq!(pin_states_1.current_state(), "default");
 
     let read_u32 = |offset: usize| -> u32 {
         let mut bytes = [0u8; 4];

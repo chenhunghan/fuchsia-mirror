@@ -45,7 +45,7 @@ class TimerDispatcher final : public Dispatcher {
   ~TimerDispatcher() final;
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_TIMER; }
   void on_zero_handles() final { rust_timer_dispatcher_on_zero_handles(this); }
-  bool is_waitable() const final { return true; }
+  bool is_waitable() const final { return ZX_DEFAULT_TIMER_RIGHTS & ZX_RIGHT_WAIT; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
 
   zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {

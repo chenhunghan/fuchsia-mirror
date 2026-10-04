@@ -253,6 +253,16 @@ def new_testbed_config(
             }
             if ssh_path:
                 controller[SSH_CONFIG_KEY][SSH_PATH_KEY] = ssh_path
+        elif api_infra.IPERF_SERVER == controller_type:
+            controller[SSH_CONFIG_KEY] = {
+                SSH_HOST_KEY: controller.pop("ip"),
+                SSH_USER_KEY: controller.pop("user", "pi"),
+                SSH_IDENTITY_FILE_KEY: controller.pop("ssh_key"),
+            }
+            if ssh_path:
+                controller[SSH_CONFIG_KEY][SSH_PATH_KEY] = ssh_path
+            controller["port"] = 5201
+            controller["use_killall"] = True
 
         if controller_type in controllers:
             controllers[controller_type].append(controller)

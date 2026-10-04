@@ -191,7 +191,7 @@ protocol Listener {
 // [START events-1]
 protocol DeathWish {
     -> OnFatalError(struct {
-        error_code zx.Status;
+        error_code zx.Result;
     });
 };
 // [END events-1]
@@ -240,7 +240,7 @@ type Image = struct {};
 // [START feed-forward]
 protocol Canvas {
     Flush() -> (struct {
-        code zx.Status;
+        code zx.Result;
     });
     Clear();
     UploadImage(struct {

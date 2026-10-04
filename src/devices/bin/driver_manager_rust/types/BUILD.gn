@@ -12,7 +12,6 @@ rustc_library("driver_manager_types") {
   sources = [
     "src/bind_result.rs",
     "src/bind_result_tracker.rs",
-    "src/conversions.rs",
     "src/lib.rs",
     "src/node_types.rs",
   ]

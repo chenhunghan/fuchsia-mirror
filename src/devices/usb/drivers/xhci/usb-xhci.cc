@@ -55,11 +55,9 @@ uint32_t RoundUp(uint32_t dividend, uint32_t divisor) { return 1 + (dividend - 1
 
 // Computes the interval value for a specified endpoint.
 int ComputeInterval(const usb_endpoint_descriptor_t* ep, usb_speed_t speed) {
-  fdescriptor::EndpointType ep_type = usb_ep_type(ep);
   uint8_t interval = ep->b_interval;
-  if (ep_type == fdescriptor::EndpointType::kControl ||
-      ep_type == fdescriptor::EndpointType::kBulk) {
-    if (speed == USB_SPEED_HIGH) {
+  if (usb_ep_is_ctrl(ep) || usb_ep_is_bulk(ep)) {
+    if (speed == fdescriptor::UsbSpeed::kHigh) {
       interval = std::clamp(interval, static_cast<uint8_t>(1), static_cast<uint8_t>(16));
       return Log2(interval);
     } else {
@@ -70,24 +68,24 @@ int ComputeInterval(const usb_endpoint_descriptor_t* ep, usb_speed_t speed) {
   // now we deal with interrupt and isochronous endpoints
   // first make sure bInterval is in legal range
   // See table 6-12 in xHCI specification section 6.2.3.6
-  if (ep_type == fdescriptor::EndpointType::kInterrupt &&
-      (speed == USB_SPEED_LOW || speed == USB_SPEED_FULL)) {
+  if (usb_ep_is_int(ep) &&
+      (speed == fdescriptor::UsbSpeed::kLow || speed == fdescriptor::UsbSpeed::kFull)) {
     interval = static_cast<uint8_t>(std::clamp(static_cast<int>(interval), 1, 255));
   } else {
     interval = static_cast<uint8_t>(std::clamp(static_cast<int>(interval), 1, 16));
   }
 
-  switch (speed) {
-    case USB_SPEED_LOW:
+  switch (static_cast<fdescriptor::UsbSpeed>(speed)) {
+    case fdescriptor::UsbSpeed::kLow:
       return Log2(interval) + 3;  // + 3 to convert 125us to 1ms
-    case USB_SPEED_FULL:
-      if (ep_type == fdescriptor::EndpointType::kIsochronous) {
+    case fdescriptor::UsbSpeed::kFull:
+      if (usb_ep_is_isoch(ep)) {
         return (interval - 1) + 3;
       } else {
         return Log2(interval) + 3;
       }
-    case USB_SPEED_SUPER:
-    case USB_SPEED_HIGH:
+    case fdescriptor::UsbSpeed::kSuper:
+    case fdescriptor::UsbSpeed::kHigh:
       return interval - 1;
     default:
       return 0;
@@ -489,7 +487,8 @@ fpromise::promise<void, zx_status_t> UsbXhci::ConfigureHubAsync(uint32_t device_
         .set_MULTI_TT(multi_tt)
         .set_HUB(1)
         .set_PORT_COUNT(desc->b_nbr_ports)
-        .set_TTT((speed == USB_SPEED_HIGH) ? ((desc->w_hub_characteristics >> 5) & 3) : 0);
+        .set_TTT((speed == fdescriptor::UsbSpeed::kHigh) ? ((desc->w_hub_characteristics >> 5) & 3)
+                                                         : 0);
     // Use ConfigureEndpointCommand according to sections 6.2.2.2 and 6.2.2.3.
     Control::Get().FromValue(0).set_Type(Control::ConfigureEndpointCommand).ToTrb(&cmd);
     cmd.set_SlotID(slot).set_BSR(0);
@@ -509,7 +508,7 @@ fpromise::promise<void, zx_status_t> UsbXhci::ConfigureHubAsync(uint32_t device_
                      completion->CompletionCode());
           return fpromise::make_error_promise<zx_status_t>(ZX_ERR_IO);
         }
-        if (speed != USB_SPEED_SUPER) {
+        if (speed != fdescriptor::UsbSpeed::kSuper) {
           return fpromise::make_result_promise<void, zx_status_t>(fpromise::ok());
         }
         std::optional<usb::Request<void>> request_wrapper;
@@ -522,7 +521,7 @@ fpromise::promise<void, zx_status_t> UsbXhci::ConfigureHubAsync(uint32_t device_
         request->direct = true;
         request->header.device_id = device_id;
         request->header.ep_address = 0;
-        request->setup.bm_request_type = USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_DEVICE;
+        request->setup.bm_request_type = kClassDeviceOut;
         {
           fbl::AutoLock _(&state->transaction_lock());
           if (state->IsDisconnecting()) {
@@ -770,11 +769,11 @@ fpromise::promise<void, zx_status_t> UsbXhci::UsbHciEnableEndpoint(
     // See section 4.3.6
     fdescriptor::EndpointType ep_type = usb_ep_type(ep_desc);
     state->GetEndpoint(index - 1).set_ep_type(ep_type);
-    if (ep_type == fdescriptor::EndpointType::kIsochronous) {
+    if (usb_ep_is_isoch(ep_desc)) {
       state->GetEndpoint(index - 1).transfer_ring().SetIsochronous();
     }
-    uint32_t ep_index = static_cast<uint32_t>(ep_type);
-    if ((ep_desc->b_endpoint_address & USB_ENDPOINT_DIR_MASK) == USB_ENDPOINT_IN) {
+    uint32_t ep_index = fidl::ToUnderlying(ep_type);
+    if (usb_ep_is_in(ep_desc)) {
       ep_index += 4;
     }
     endpoint_context->Init(static_cast<EndpointContext::EndpointType>(ep_index), trb_phys,
@@ -790,13 +789,12 @@ fpromise::promise<void, zx_status_t> UsbXhci::UsbHciEnableEndpoint(
       max_burst = ss_com_desc->b_max_burst;
     } else {
       // TODO: Handle special case for interrupt/isochronous endpoints
-      if ((slot_context->SPEED() == USB_SPEED_HIGH) &&
-          (ep_type == fdescriptor::EndpointType::kIsochronous)) {
+      if ((slot_context->SPEED() == fdescriptor::UsbSpeed::kHigh) && (usb_ep_is_isoch(ep_desc))) {
         max_burst = (le16toh((ep_desc)->w_max_packet_size) >> 11) & 3;
       }
     }
     endpoint_context->set_MaxBurstSize(max_burst);
-    if (ep_type == fdescriptor::EndpointType::kIsochronous) {
+    if (usb_ep_is_isoch(ep_desc)) {
       endpoint_context->set_MAX_ESIT_PAYLOAD_LOW((ep_desc->w_max_packet_size & 0x07FF) *
                                                  (max_burst + 1));
     }

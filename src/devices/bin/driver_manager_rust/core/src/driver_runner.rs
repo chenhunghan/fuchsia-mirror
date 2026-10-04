@@ -14,7 +14,7 @@ use driver_manager_devfs::Devfs;
 use driver_manager_driver_host::{DriverHost, DriverHostComponent};
 use driver_manager_node::Node;
 use driver_manager_shutdown::NodeRemovalTracker;
-use driver_manager_types::{Collection, to_bind_rule2, to_property2};
+use driver_manager_types::Collection;
 use driver_manager_utils::DictionaryUtil;
 use fidl::endpoints::{ServerEnd, create_endpoints};
 use fidl_fuchsia_component as fcomponent;
@@ -558,37 +558,15 @@ impl DriverRunner {
     ) -> Result<(), fdf::CompositeNodeSpecError> {
         let name = spec.name.clone().ok_or(fdf::CompositeNodeSpecError::MissingArgs)?;
 
-        let parents_present = spec.parents.is_some();
-        let parents2_present = spec.parents2.is_some();
-
-        if !parents_present && !parents2_present {
+        if spec.parents2.is_none() {
             return Err(fdf::CompositeNodeSpecError::MissingArgs);
         }
 
-        if parents_present && parents2_present {
-            return Err(fdf::CompositeNodeSpecError::DuplicateParents);
+        let parents2 = spec.parents2.as_ref().unwrap();
+        if parents2.is_empty() {
+            return Err(fdf::CompositeNodeSpecError::EmptyNodes);
         }
-
-        let parents2 = if let Some(ref parents) = spec.parents {
-            if parents.is_empty() {
-                return Err(fdf::CompositeNodeSpecError::EmptyNodes);
-            }
-            parents
-                .iter()
-                .map(|parent| {
-                    let bind_rules = parent.bind_rules.iter().map(to_bind_rule2).collect();
-                    let properties = parent.properties.iter().map(to_property2).collect();
-                    fdf::ParentSpec2 { bind_rules, properties }
-                })
-                .collect()
-        } else if let Some(ref parents2) = spec.parents2 {
-            if parents2.is_empty() {
-                return Err(fdf::CompositeNodeSpecError::EmptyNodes);
-            }
-            parents2.clone()
-        } else {
-            unreachable!();
-        };
+        let parents2 = parents2.clone();
 
         let driver_host_name_for_colocation = spec.driver_host.clone().unwrap_or_default();
 

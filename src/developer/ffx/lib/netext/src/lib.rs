@@ -486,6 +486,24 @@ pub enum NetExtError {
 
 pub fn scope_id_to_name_checked(scope_id: u32) -> Result<String, InvalidInterfaceIdError> {
     let mut buf = vec![0; libc::IF_NAMESIZE];
+    // SAFETY: Local buffer argument, subject to the foreign obligations below:
+    // `buf` owns IF_NAMESIZE initialized, contiguous u8s. With the selected libc
+    // bindings, c_char is i8 or u8 (size/alignment 1), so this pointer cast keeps
+    // the buffer's address/provenance and satisfies character alignment. The
+    // allocation stays live and is neither reallocated nor otherwise accessed
+    // while this call uses it. Writing initialized characters preserves u8 validity.
+    //
+    // if_indextoname requires IF_NAMESIZE writable bytes, including space for
+    // the terminator (RFC 3493 section 4.2; Linux man-pages 6.18, if_nametoindex(3)):
+    // https://www.rfc-editor.org/rfc/rfc3493.html#section-4.2
+    // Every scope_id fits the selected c_uint; an absent index is a documented
+    // error, not a caller precondition. We check NULL and never dereference res;
+    // the success path uses only bounded, safe reads from the initialized buffer.
+    //
+    // Foreign obligations: the linked libc must match these bindings/constants
+    // and honor that buffer contract. No access through this pointer after return
+    // and no foreign unwind across extern "C" are also required; those temporal
+    // and unwind guarantees are not explicit in the cited contracts.
     let res = unsafe { libc::if_indextoname(scope_id, buf.as_mut_ptr() as *mut libc::c_char) };
     if res.is_null() {
         return Err(InvalidInterfaceIdError(scope_id));
@@ -503,8 +521,8 @@ pub fn name_to_scope_id(name: &str) -> u32 {
 
 fn name_to_scope_id_checked(name: &str) -> Result<u32, NetExtError> {
     let s = CString::new(name)?;
-    let idx = unsafe { libc::if_nametoindex(s.as_ptr()) };
-    if idx == 0 { Err(NetExtError::InvalidInterfaceName(name.to_string())) } else { Ok(idx) }
+    nix::net::if_::if_nametoindex(s.as_c_str())
+        .map_err(|_| NetExtError::InvalidInterfaceName(name.to_string()))
 }
 
 /// Takes a string and attempts to parse it into the relevant parts of an address.
@@ -626,6 +644,35 @@ mod tests {
 
     fn sockaddr(s: &str) -> SockaddrStorage {
         std::net::SocketAddr::from_str(s).unwrap().into()
+    }
+
+    #[test]
+    fn test_name_to_scope_id_rejects_interior_nul() {
+        for (name, nul_position) in [("\0", 0), ("lo\0", 2), ("lo\0suffix", 2)] {
+            for result in [name_to_scope_id_checked(name), get_verified_scope_id(name)] {
+                let NetExtError::CString(error) = result.unwrap_err() else {
+                    panic!("expected a CString error");
+                };
+                assert_eq!(error.nul_position(), nul_position);
+                assert_eq!(error.into_vec(), name.as_bytes());
+            }
+            assert_eq!(name_to_scope_id(name), 0);
+        }
+    }
+
+    #[test]
+    fn test_name_to_scope_id_rejects_invalid_names() {
+        // IF_NAMESIZE includes the terminating NUL, so this cannot name an interface.
+        let too_long = "x".repeat(libc::IF_NAMESIZE);
+        for name in ["", too_long.as_str()] {
+            for result in [name_to_scope_id_checked(name), get_verified_scope_id(name)] {
+                let NetExtError::InvalidInterfaceName(rejected_name) = result.unwrap_err() else {
+                    panic!("expected an InvalidInterfaceName error");
+                };
+                assert_eq!(rejected_name, name);
+            }
+            assert_eq!(name_to_scope_id(name), 0);
+        }
     }
 
     #[test]

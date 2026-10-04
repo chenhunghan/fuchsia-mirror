@@ -30,6 +30,7 @@ from openwrt_access_point.lib.access_point_config import (
     AccessPointConfig,
     Band,
     BssSettings,
+    CapabilitySelection,
     SecurityOpen,
     SecurityOweTransition,
     SecurityWep,
@@ -78,6 +79,9 @@ def destroy(objects: List[OpenWrtAP]) -> None:
         ap.reset_wifi_config()
         ap.dhcp.reset_dhcp_config()
         ap.iperf_server.stop()
+        # iperf_server.stop() only terminates the remote iperf3 process and does
+        # not close IPerfServerOverSsh's SSH connection, so close it explicitly.
+        ap.iperf_server.close_ssh()
         ap.ssh.close()
 
 
@@ -344,6 +348,7 @@ class OpenWrtAP:
             ssh_settings=self.ssh_settings,
             port=5201,
             test_interface=InterfaceName.lan,
+            use_killall=True,
         )
 
     @property
@@ -544,32 +549,11 @@ class OpenWrtAP:
             self.ssh.run(
                 f"uci set wireless.{radio}.htmode='{radio_config.channel.phy_mode.uci_htmode}'"
             )
-            n_sel = radio_config.n_capabilities
-            ac_sel = radio_config.ac_capabilities
-
-            provided_caps: list[str] | None = None
-
-            match n_sel.mode:
-                case "DEFAULT":
-                    pass
-                case "DISABLED":
-                    provided_caps = []
-                case "CUSTOM":
-                    provided_caps = [c for c in n_sel.capabilities if c]
-
-            match ac_sel.mode:
-                case "DEFAULT":
-                    pass
-                case "DISABLED":
-                    if provided_caps is None:
-                        provided_caps = []
-                case "CUSTOM":
-                    if provided_caps is None:
-                        provided_caps = []
-                    provided_caps.extend(c for c in ac_sel.capabilities if c)
-
-            if provided_caps is not None:
-                self._set_capabilities(radio, provided_caps)
+            self._set_capabilities(
+                radio,
+                radio_config.n_capabilities,
+                radio_config.ac_capabilities,
+            )
 
             country = radio_config.country
             if str(radio_config.channel.number) in ["12", "13", "14"]:
@@ -613,20 +597,30 @@ class OpenWrtAP:
         for radio_config in config.radios:
             self._verify_wifi_status(radio_config.channel.band)
 
-    def _set_capabilities(self, radio: str, provided_caps: list[str]) -> None:
+    def _set_capabilities(
+        self,
+        radio: str,
+        n_sel: CapabilitySelection,
+        ac_sel: CapabilitySelection,
+    ) -> None:
         """Applies the Wi-Fi capabilities to the specified radio.
 
         For a list of available OpenWrt UCI capabilities, refer to:
         https://openwrt.org/docs/guide-user/network/wifi/basic#ht_high_throughput_capabilities
         """
+        uci_options: dict[str, int] = {}
+        provided_caps: list[str] = []
 
-        # Start from a clean, controlled state by setting all known capabilities
-        # to their default values.
-        uci_options = {
-            k: v
-            for k, v in capabilities.UCI_OPTION_DEFAULTS.items()
-            if v is not None
-        }
+        for sel, disabled_options in (
+            (n_sel, capabilities.UCI_N_DISABLED_OPTIONS),
+            (ac_sel, capabilities.UCI_AC_DISABLED_OPTIONS),
+        ):
+            if sel.mode in ("DISABLED", "CUSTOM"):
+                uci_options.update(disabled_options)
+                provided_caps.extend(c for c in sel.capabilities if c)
+
+        if not uci_options:
+            return
 
         for cap in provided_caps:
             cap_info = capabilities.to_openwrt_capability(cap)

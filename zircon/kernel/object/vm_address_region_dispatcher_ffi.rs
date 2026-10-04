@@ -6,11 +6,25 @@
 
 use super::handle::KernelHandle;
 use super::vm_address_region_dispatcher::VmAddressRegionDispatcher;
+use crate::vm::vm_address_region::VmAddressRegion;
 use crate::vm::vm_object::VmObject;
 use core::mem::MaybeUninit;
 use zx_types::{zx_rights_t, zx_status_t, zx_vaddr_t};
 
 unsafe extern "C" {
+    /// Calls into C++ implementation to create a `VmAddressRegionDispatcher`.
+    ///
+    /// # Safety
+    ///
+    /// `vmar` must be a valid raw pointer exported via `RefPtr::into_raw`.
+    /// `handle_out` and `rights_out` must point to valid writable stack memory.
+    pub fn cpp_vmar_dispatcher_create(
+        vmar: *mut VmAddressRegion,
+        base_arch_mmu_flags: u32,
+        handle_out: *mut MaybeUninit<KernelHandle<VmAddressRegionDispatcher>>,
+        rights_out: *mut MaybeUninit<zx_rights_t>,
+    ) -> zx_status_t;
+
     /// Calls into C++ implementation to set the memory priority of a VMAR.
     ///
     /// # Safety

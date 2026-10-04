@@ -217,6 +217,29 @@ pub static STANDARD_SERVICE_CONFIGS: phf::Map<&'static str, ServiceBindConfig> =
         ],
         ..DEFAULT_SERVICE_BIND_CONFIG
     },
+    "fuchsia.hardware.pci.Service" => ServiceBindConfig {
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PCI_VID",
+                sources: &[ValueSource::ConstraintKey("vid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PCI_DID",
+                sources: &[ValueSource::ConstraintKey("did")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PCI_TOPO",
+                sources: &[ValueSource::ConstraintKey("topo")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::BindRules,
+            },
+        ],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
 };
 
 pub const DEFAULT_DML_PARSER_CONFIG: DmlParserConfig =
@@ -785,4 +808,58 @@ async fn register_iommus(
         .collect::<Result<Vec<_>, _>>()?;
     try_join_all(futures).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pci_service_parent_spec() {
+        let res = ResourceEntry {
+            name: Some("pci".to_string()),
+            node: Some("mali-gpu".to_string()),
+            constraint: Some(fdr::Dictionary {
+                entries: Some(vec![
+                    fdr::DictionaryEntry {
+                        key: "vid".to_string(),
+                        value: fdr::DictionaryValue::Int64(0x13b5),
+                    },
+                    fdr::DictionaryEntry {
+                        key: "did".to_string(),
+                        value: fdr::DictionaryValue::Int64(0x7212),
+                    },
+                    fdr::DictionaryEntry {
+                        key: "topo".to_string(),
+                        value: fdr::DictionaryValue::Int64(256),
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (parent, key) = generate_parent_spec_generic(
+            "pcie-c500000",
+            0,
+            "fuchsia.hardware.pci.Service",
+            &res,
+            &DEFAULT_DML_PARSER_CONFIG,
+        )
+        .expect("should succeed")
+        .expect("should return parent spec");
+
+        assert_eq!(key, "pci");
+        assert!(parent.bind_rules.iter().any(|r| r.key == "fuchsia.BIND_PCI_VID"
+            && r.values == vec![fdf_framework::NodePropertyValue::IntValue(0x13b5)]));
+        assert!(parent.bind_rules.iter().any(|r| r.key == "fuchsia.BIND_PCI_DID"
+            && r.values == vec![fdf_framework::NodePropertyValue::IntValue(0x7212)]));
+        assert!(parent.bind_rules.iter().any(|r| r.key == "fuchsia.BIND_PCI_TOPO"
+            && r.values == vec![fdf_framework::NodePropertyValue::IntValue(256)]));
+        assert!(parent.properties.iter().any(|p| p.key == "fuchsia.BIND_PCI_VID"
+            && p.value == fdf_framework::NodePropertyValue::IntValue(0x13b5)));
+        assert!(parent.properties.iter().any(|p| p.key == "fuchsia.BIND_PCI_DID"
+            && p.value == fdf_framework::NodePropertyValue::IntValue(0x7212)));
+        assert!(!parent.properties.iter().any(|p| p.key == "fuchsia.BIND_PCI_TOPO"));
+    }
 }

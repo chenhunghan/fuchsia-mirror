@@ -31,6 +31,15 @@ CRATE_ANNOTATIONS = {
             ],
         ),
     ],
+    "alloca": [
+        crate.annotation(
+            version = "*",
+            deps = [
+                "//third_party/rust_crates/compat/alloca-0.4.0:alloca-c",
+            ],
+            gen_build_script = False,
+        ),
+    ],
     "anyhow": [
         crate.annotation(
             version = "1.0.104",
@@ -110,6 +119,14 @@ CRATE_ANNOTATIONS = {
             rustc_env = {
                 "CARGO_PKG_NAME": "getrandom",
                 "CARGO_PKG_VERSION": "0.4.3",
+            },
+        ),
+    ],
+    "hickory-resolver": [
+        crate.annotation(
+            version = "0.26.3",
+            rustc_env = {
+                "CARGO_PKG_VERSION": "0.26.3",
             },
         ),
     ],
@@ -248,36 +265,11 @@ CRATE_ANNOTATIONS = {
             ),
         ),
     ],
-    "num-bigint": [
-        crate.annotation(
-            version = "0.4.6",
-            rustc_flags = crate.select(
-                common = [
-                    "--cfg=u64_digit",
-                    "--cfg=has_try_from",
-                ],
-                selects = {
-                    "@platforms//cpu:x86_64": [
-                        "--cfg=use_addcarry",
-                    ],
-                },
-            ),
-        ),
-    ],
     "num-bigint-dig": [
         crate.annotation(
             version = "0.8.6",
             rustc_flags = [
                 "--cfg=has_i128",
-            ],
-        ),
-    ],
-    "num-complex": [
-        crate.annotation(
-            version = "0.4.6",
-            rustc_flags = [
-                "--cfg=has_i128",
-                "--cfg=has_const_fn",
             ],
         ),
     ],

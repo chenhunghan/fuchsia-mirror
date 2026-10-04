@@ -216,27 +216,13 @@ impl SigSet {
 
 impl From<sigset_t> for SigSet {
     fn from(value: sigset_t) -> Self {
-        // `transmute()` is safe here because this is a POD value of the same size (see
-        // assert above).
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        SigSet(unsafe { std::mem::transmute(value) })
+        SigSet(zerocopy::transmute!(value))
     }
 }
 
 impl From<SigSet> for sigset_t {
     fn from(val: SigSet) -> Self {
-        // `transmute()` is safe here because this is a POD value of the same size (see
-        // assert above).
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        unsafe {
-            std::mem::transmute(val.0)
-        }
+        zerocopy::transmute!(val.0)
     }
 }
 
@@ -277,4 +263,22 @@ pub fn sigaltstack_contains_pointer(stack: &uapi::sigaltstack, ptr: u64) -> bool
     let min = stack.ss_sp.addr as u64;
     let max = (stack.ss_sp.addr as u64).saturating_add(stack.ss_size as u64);
     ptr >= min && ptr <= max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sigset_conversions_preserve_bits() {
+        let patterns = [0, std::os::raw::c_ulong::MAX]
+            .into_iter()
+            .chain((0..std::os::raw::c_ulong::BITS).map(|bit| 1 << bit));
+        for bits in patterns {
+            let bytes = bits.to_ne_bytes();
+            let raw = sigset_t::read_from_bytes(&bytes).unwrap();
+            assert_eq!(SigSet::from(raw), SigSet(bits));
+            assert_eq!(sigset_t::from(SigSet(bits)).as_bytes(), bytes);
+        }
+    }
 }

@@ -44,6 +44,19 @@ const MAX_CONCURRENT_CLIENTS: usize = 20;
 // Minimum interval for logging to syslog.
 const MIN_INTERVAL_FOR_SYSLOG_MS: u32 = 500;
 
+// Number of decimal places for floating-point values logged to syslog.
+const SYSLOG_DECIMAL_PLACES: i32 = 3;
+
+/// Rounds `value` to `SYSLOG_DECIMAL_PLACES` decimal places for logging to syslog.
+///
+/// Log viewers like `ffx log` print as many digits as are needed to round-trip a double, e.g.
+/// 1/3 as 0.3333333333333333. Floating-point log values are stored as f64, so 0.483 as an f32 is
+/// shown as 0.4830000102519989. Rounding is done in f64 so the extra digits don't come back.
+fn round_for_syslog(value: impl Into<f64>) -> f64 {
+    let scale = 10_f64.powi(SYSLOG_DECIMAL_PLACES);
+    (value.into() * scale).round() / scale
+}
+
 const CONFIG_PATH: &'static str = "/config/data/config.json";
 
 const STANDALONE_SAMPLING_INTERVAL: u32 = 1000; // 1 sec.
@@ -2019,5 +2032,15 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[fuchsia::test]
+    fn test_round_for_syslog() {
+        // f32 values don't keep the extra digits from their conversion to f64.
+        assert_eq!(round_for_syslog(0.483_f32).to_string(), "0.483");
+        assert_eq!(round_for_syslog(55.36_f32).to_string(), "55.36");
+        assert_eq!(round_for_syslog(106.0_f32).to_string(), "106");
+        assert_eq!(round_for_syslog(1.0_f64 / 3.0).to_string(), "0.333");
+        assert_eq!(round_for_syslog(-12.3456_f64).to_string(), "-12.346");
     }
 }

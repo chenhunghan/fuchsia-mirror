@@ -4,6 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::Array;
+use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 use kalloc::{AllocError, Allocator, Box, DefaultAllocator};
 
@@ -247,7 +249,7 @@ impl<T, A: Allocator> Vector<T, A> {
 
     fn grow_for_new_element(&mut self) -> Result<(), AllocError> {
         if self.size == self.buf.len() {
-            let new_capacity = if self.buf.len() == 0 {
+            let new_capacity = if self.buf.is_empty() {
                 CAPACITY_MINIMUM
             } else {
                 self.buf.len() * CAPACITY_GROWTH_FACTOR
@@ -261,7 +263,8 @@ impl<T, A: Allocator> Vector<T, A> {
     fn consider_shrinking(&mut self) {
         if self.size * CAPACITY_SHRINK_FACTOR < self.buf.len() && self.buf.len() > CAPACITY_MINIMUM
         {
-            let new_capacity = self.buf.len() / CAPACITY_SHRINK_FACTOR;
+            let new_capacity =
+                core::cmp::max(CAPACITY_MINIMUM, self.buf.len() / CAPACITY_SHRINK_FACTOR);
             // If reallocation fails, we just keep the old capacity.
             let _ = self.reallocate(new_capacity);
         }
@@ -288,6 +291,25 @@ impl<T, A: Allocator> Vector<T, A> {
         }
         Ok(v)
     }
+
+    /// Converts the vector into an [`Array`].
+    ///
+    /// If the capacity of the vector is larger than its length, then the buffer
+    /// is reallocated in order to shrink it, which may fail. In that case the
+    /// vector and its elements are dropped.
+    pub fn try_into_array(mut self) -> Result<Array<T, A>, AllocError> {
+        if self.size < self.buf.len() {
+            // SAFETY: Vector maintains the invariant that elements above `self.size` are
+            // uninitialized.
+            unsafe { Box::try_shrink(&mut self.buf, self.size)? };
+        }
+
+        let this = ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped, so `buf` is moved out of it exactly once.
+        let buf = unsafe { core::ptr::read(&this.buf) };
+        // SAFETY: All `size` elements are initialized, and `buf.len() == size`.
+        Ok(Array::from_box(unsafe { buf.assume_init() }))
+    }
 }
 
 impl<T, A: Allocator> Deref for Vector<T, A> {
@@ -308,7 +330,8 @@ impl<T, A: Allocator> DerefMut for Vector<T, A> {
 
 impl<T, A: Allocator> Drop for Vector<T, A> {
     fn drop(&mut self) {
-        self.clear();
+        // SAFETY: Vector maintains the invariant that elements from 0 to self.size are initialized.
+        unsafe { core::ptr::drop_in_place(self.buf[..self.size].assume_init_mut()) }
     }
 }
 
@@ -727,5 +750,78 @@ mod tests {
         assert_eq!(v[0], 1);
         assert_eq!(v[1], 2);
         assert_eq!(v[2], 3);
+    }
+
+    #[test]
+    fn test_try_into_array() {
+        let mut v: Vector<u32> = Vector::new();
+        v.reserve(3).unwrap();
+        v.push_back(1).unwrap();
+        v.push_back(2).unwrap();
+        v.push_back(3).unwrap();
+        assert_eq!(v.capacity(), 3);
+
+        let ptr = v.as_ptr();
+        let a = v.try_into_array().unwrap();
+        assert_eq!(&a[..], &[1, 2, 3]);
+        assert_eq!(a.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn test_try_into_array_shrinks() {
+        let mut v: Vector<u32> = Vector::new();
+        v.push_back(1).unwrap();
+        v.push_back(2).unwrap();
+        assert!(v.capacity() > v.len());
+
+        let a = v.try_into_array().unwrap();
+        assert_eq!(&a[..], &[1, 2]);
+    }
+
+    #[test]
+    fn test_try_into_array_empty() {
+        let v: Vector<u32> = Vector::new();
+        let a = v.try_into_array().unwrap();
+        assert!(a.is_empty());
+
+        let mut v: Vector<u32> = Vector::new();
+        v.reserve(4).unwrap();
+        let a = v.try_into_array().unwrap();
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn test_try_into_array_drop_behavior() {
+        let state = TestState::default();
+        {
+            let mut v: Vector<TestObject<'_>, TestAllocator<'_>> =
+                Vector::new_in(TestAllocator { state: &state });
+            v.push_back(TestObject::new(1, &state)).unwrap();
+            v.push_back(TestObject::new(2, &state)).unwrap();
+
+            let a = v.try_into_array().unwrap();
+            assert_eq!(state.live_obj_count.get(), 2);
+            assert_eq!(state.dtor_count.get(), 0);
+            assert_eq!(a[0].val, 1);
+            assert_eq!(a[1].val, 2);
+        }
+        assert_eq!(state.live_obj_count.get(), 0);
+        assert_eq!(state.dtor_count.get(), 2);
+    }
+
+    #[test]
+    fn test_try_into_array_shrink_failure() {
+        let state = TestState::default();
+        {
+            let mut v: Vector<TestObject<'_>, TestAllocator<'_>> =
+                Vector::new_in(TestAllocator { state: &state });
+            v.push_back(TestObject::new(1, &state)).unwrap();
+
+            // Fail the allocation when shrinking the buffer.
+            state.fail_threshold.set(state.alloc_count.get());
+            assert!(v.try_into_array().is_err());
+        }
+        assert_eq!(state.live_obj_count.get(), 0);
+        assert_eq!(state.dtor_count.get(), 1);
     }
 }

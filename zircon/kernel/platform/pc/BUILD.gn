@@ -46,13 +46,13 @@ source_set("pc") {
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/pow2_range_allocator",
     "//zircon/kernel/lib/root_resource_filter",
+    "//zircon/kernel/lib/smbios",
     "//zircon/kernel/lib/topology",
     "//zircon/kernel/phys:handoff",
     "//zircon/kernel/phys/lib/memalloc:range",
     "//zircon/kernel/platform:headers",
     "//zircon/system/ulib/explicit-memory",
     "//zircon/system/ulib/ram-crashlog",
-    "//zircon/system/ulib/smbios",
     "//zircon/system/ulib/uart",
     "//zircon/third_party/ulib/cksum",
   ]
@@ -63,7 +63,7 @@ library_headers("headers") {
 
   public_deps = [
     # <platform/pc/smbios.h> has #include <lib/smbios/smbios.h>.
-    "//zircon/system/ulib/smbios:headers",
+    "//zircon/kernel/lib/smbios:headers",
 
     # <ktl/optional.h> in uart.h.
     "//zircon/kernel/lib/ktl:headers",
@@ -106,11 +106,11 @@ kernel_rust_mod("platform_pc") {
     "//zircon/kernel/lib/acpi_lite/rust:acpi_lite",
     "//zircon/kernel/lib/acpi_lite/rust/zircon",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/smbios/rust:smbios",
     "//zircon/kernel/phys:handoff-rs",
     "//zircon/system/ulib/affine/rust:affine",
     "//zircon/system/ulib/bitmap/rust:bitmap",
     "//zircon/system/ulib/fbl/rust:fbl",
-    "//zircon/system/ulib/smbios/rust:smbios",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }

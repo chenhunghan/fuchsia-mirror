@@ -62,6 +62,7 @@ async fn handle_token_requests(
 
 async fn handle_inline_encryption_requests(
     client: fidl_next::Client<fidl_next_fuchsia_hardware_inlineencryption::DriverDevice>,
+    partition_server: Arc<PartitionServer>,
     mut stream: finlineencryption::DeviceRequestStream,
 ) -> Result<(), anyhow::Error> {
     while let Some(request) = stream.next().await {
@@ -70,8 +71,11 @@ async fn handle_inline_encryption_requests(
                 wrapped_key,
                 data_unit_size,
                 responder,
-            } => match client.program_key(wrapped_key, data_unit_size).await? {
-                Ok(response) => responder.send(Ok(response.slot))?,
+            } => match client.program_key_slot(wrapped_key, data_unit_size).await? {
+                Ok(response) => match partition_server.server.register_key_slot(response.slot) {
+                    Ok(key_token) => responder.send(Ok(key_token))?,
+                    Err(status) => responder.send(Err(status.into_raw()))?,
+                },
                 Err(Err(status)) => responder.send(Err(status.into_raw()))?,
                 Err(Ok(())) => responder.send(Err(zx::Status::INTERNAL.into_raw()))?,
             },
@@ -367,10 +371,17 @@ impl Driver for CqhciDriver {
                                 }
                             }
                             fvolume::ServiceRequest::InlineEncryption(requests) => {
-                                if let Some(inline_crypto) = inline_crypto_clone.clone() {
-                                    if let Err(error) =
-                                        handle_inline_encryption_requests(inline_crypto, requests)
-                                            .await
+                                let partition =
+                                    partitions_clone.lock().get(&partition_name).cloned();
+                                if let (Some(inline_crypto), Some(partition_server)) =
+                                    (inline_crypto_clone.clone(), partition)
+                                {
+                                    if let Err(error) = handle_inline_encryption_requests(
+                                        inline_crypto,
+                                        partition_server,
+                                        requests,
+                                    )
+                                    .await
                                     {
                                         error!(
                                             error:?;

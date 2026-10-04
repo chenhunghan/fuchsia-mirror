@@ -119,7 +119,7 @@ uint64_t pmm_count_loan_cancelled_pages();
 uint64_t pmm_count_total_bytes();
 
 // Return the PageQueues.
-PageQueues* pmm_page_queues();
+inline PageQueues* pmm_page_queues() { return Pmm::Node().GetPageQueues(); }
 
 // Return the Evictor.
 Evictor* pmm_evictor();

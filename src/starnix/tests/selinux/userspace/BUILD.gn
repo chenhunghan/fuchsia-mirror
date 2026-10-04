@@ -156,6 +156,7 @@ test_names = [
   "selinuxfs",
   "socket",
   "sys_power",
+  "sysfs",
   "syslog",
   "task",
   "timerslack",
@@ -225,6 +226,7 @@ policy_files = [
   "policies/prebuilt/sched_policy",
   "policies/prebuilt/selinuxfs_policy",
   "policies/prebuilt/socket_policy",
+  "policies/prebuilt/sysfs_policy",
   "policies/prebuilt/syslog_policy",
   "policies/prebuilt/task_policy",
   "policies/prebuilt/timerslack_policy",
@@ -243,8 +245,8 @@ resource("policies") {
 # Merge the audit expectations with skipped and expected failures.
 json_merge("audit_expectations.json") {
   sources = [
-    "expectations/audit_failure.json",
-    "expectations/audit_skip.json",
+    "expectations/audit_failure.json5",
+    "expectations/audit_skip.json5",
     "expectations/audit_success.json",
   ]
   minify = true

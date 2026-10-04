@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "src/developer/debug/zxdb/client/async_task.h"
+#include "src/developer/debug/zxdb/client/mock_async_task.h"
 #include "src/developer/debug/zxdb/client/mock_frame.h"
 #include "src/developer/debug/zxdb/client/process.h"
 #include "src/developer/debug/zxdb/client/thread.h"
@@ -37,67 +37,6 @@ class AsyncBacktraceSubscriptionTest : public DebugAdapterContextTest {
   }
 };
 
-class FakeAsyncTask : public AsyncTask {
- public:
-  FakeAsyncTask(Session* session, uint64_t id, std::string name, Location loc = Location())
-      : AsyncTask(session), id_(id), name_(std::move(name)), loc_(std::move(loc)) {}
-
-  uint64_t GetId() const override { return id_; }
-  Type GetType() const override { return Type::kFuture; }
-  const Location& GetLocation() const override { return loc_; }
-  const Identifier& GetIdentifier() const override {
-    if (ident_.empty()) {
-      ident_ = Identifier(IdentifierComponent(name_));
-    }
-    return ident_;
-  }
-  std::string GetState() const override { return "Pending"; }
-  const std::vector<NamedValue>& GetValues() const override { return values_; }
-  std::vector<Ref> GetChildren() const override {
-    std::vector<Ref> refs;
-    for (const auto& child : children_) {
-      refs.push_back(*child);
-    }
-    return refs;
-  }
-
-  void AddChild(std::unique_ptr<FakeAsyncTask> child) { children_.push_back(std::move(child)); }
-
- private:
-  uint64_t id_;
-  std::string name_;
-  std::vector<std::unique_ptr<FakeAsyncTask>> children_;
-  Location loc_;
-  mutable Identifier ident_;
-  std::vector<NamedValue> values_;
-};
-
-class FakeAsyncTaskProvider : public AsyncTaskProvider {
- public:
-  explicit FakeAsyncTaskProvider(std::string fake_file_path)
-      : fake_file_path_(std::move(fake_file_path)) {}
-
-  bool CanHandle(Frame* frame) const override { return true; }
-
-  void GetTasks(
-      Frame* frame,
-      fit::callback<void(const Err&, std::vector<std::unique_ptr<AsyncTask>>)> cb) override {
-    std::vector<std::unique_ptr<AsyncTask>> tasks;
-    Location loc(0x1234, FileLine(fake_file_path_, 42), 0, SymbolContext::ForRelativeAddresses());
-    auto root = std::make_unique<FakeAsyncTask>(frame->session(), 1, "root", std::move(loc));
-    auto child = std::make_unique<FakeAsyncTask>(frame->session(), 2, "child");
-    child->AddChild(std::make_unique<FakeAsyncTask>(frame->session(), 3, "grandchild"));
-    root->AddChild(std::move(child));
-    tasks.push_back(std::move(root));
-    auto zero_id_task = std::make_unique<FakeAsyncTask>(frame->session(), 0, "zero_id_task");
-    tasks.push_back(std::move(zero_id_task));
-    cb(Err(), std::move(tasks));
-  }
-
- private:
-  std::string fake_file_path_;
-};
-
 class RaceConditionAsyncTaskProvider : public AsyncTaskProvider {
  public:
   bool CanHandle(Frame* frame) const override { return true; }
@@ -126,7 +65,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, SingleThreadLifecycle) {
 
   Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
   process->AddAsyncTaskProviderForTesting(ExprLanguage::kRust,
-                                          std::make_unique<FakeAsyncTaskProvider>(fake_file_path_));
+                                          std::make_unique<MockAsyncTaskProvider>(fake_file_path_));
   RunClient();
 
   InjectThread(kProcessKoid, kThreadKoid);
@@ -227,7 +166,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, NestedAsyncTaskStructure) {
 
   Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
   process->AddAsyncTaskProviderForTesting(ExprLanguage::kRust,
-                                          std::make_unique<FakeAsyncTaskProvider>(fake_file_path_));
+                                          std::make_unique<MockAsyncTaskProvider>(fake_file_path_));
 
   Thread* thread = InjectThread(kProcessKoid, kThreadKoid);
 
@@ -338,7 +277,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, ConcurrentBacktracesSameThread) {
   // Execute the first callback. It shouldn't emit an update because it was cancelled.
   auto cb1 = std::move(provider_ptr->callbacks_[0]);
   std::vector<std::unique_ptr<AsyncTask>> tasks1;
-  tasks1.push_back(std::make_unique<FakeAsyncTask>(cb1.session, 10, "task_1"));
+  tasks1.push_back(std::make_unique<MockAsyncTask>(cb1.session, 10, "task_1"));
   cb1.cb(Err(), std::move(tasks1));
 
   context().OnStreamReadable();
@@ -350,7 +289,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, ConcurrentBacktracesSameThread) {
   // Execute the second callback. It should emit an update.
   auto cb2 = std::move(provider_ptr->callbacks_[1]);
   std::vector<std::unique_ptr<AsyncTask>> tasks2;
-  tasks2.push_back(std::make_unique<FakeAsyncTask>(cb2.session, 11, "task_2"));
+  tasks2.push_back(std::make_unique<MockAsyncTask>(cb2.session, 11, "task_2"));
   cb2.cb(Err(), std::move(tasks2));
 
   context().OnStreamReadable();
@@ -425,12 +364,12 @@ TEST_F(AsyncBacktraceSubscriptionTest, GateBacktraceOnProcessStop) {
   // Execute the callbacks and expect updates for both stopped threads.
   auto cb1 = std::move(provider_ptr->callbacks_[0]);
   std::vector<std::unique_ptr<AsyncTask>> tasks1;
-  tasks1.push_back(std::make_unique<FakeAsyncTask>(cb1.session, 101, "task_1"));
+  tasks1.push_back(std::make_unique<MockAsyncTask>(cb1.session, 101, "task_1"));
   cb1.cb(Err(), std::move(tasks1));
 
   auto cb2 = std::move(provider_ptr->callbacks_[1]);
   std::vector<std::unique_ptr<AsyncTask>> tasks2;
-  tasks2.push_back(std::make_unique<FakeAsyncTask>(cb2.session, 102, "task_2"));
+  tasks2.push_back(std::make_unique<MockAsyncTask>(cb2.session, 102, "task_2"));
   cb2.cb(Err(), std::move(tasks2));
 
   context().OnStreamReadable();
@@ -574,7 +513,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, ResumingThreadCancelsPendingBacktracesFor
   // Executing the pending callback for thread2 should NOT emit an async backtrace update.
   auto cb2 = std::move(provider_ptr->callbacks_[1]);
   std::vector<std::unique_ptr<AsyncTask>> tasks2;
-  tasks2.push_back(std::make_unique<FakeAsyncTask>(cb2.session, 102, "task_2"));
+  tasks2.push_back(std::make_unique<MockAsyncTask>(cb2.session, 102, "task_2"));
   cb2.cb(Err(), std::move(tasks2));
 
   context().OnStreamReadable();

@@ -13,16 +13,15 @@
 #include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
-#include <variant>
-
 namespace fdf_testing {
 // This provides a helper to quickly create an MmioBuffer for use in tests.
 // TODO(https://fxbug.dev/42067247): This use of mmio_buffer_t is temporary to ease the
 // transition of clients over to MmioBuffer, and can be switched over once we
 // have no unmigrated users touching MmioBufferOps.
-[[maybe_unused]] static fdf::MmioBuffer CreateMmioBuffer(
+inline fdf::MmioBuffer CreateMmioBuffer(
     size_t size, uint32_t cache_policy = ZX_CACHE_POLICY_UNCACHED_DEVICE,
-    const ::fdf::MmioBufferOps* ops = &::fdf::internal::kDefaultOps, void* ctx = nullptr) {
+    const ::fdf::MmioBufferOps* ops = ::fdf::MmioBuffer::GetDefaultOps(),
+    const void* ctx = nullptr) {
   zx::vmo vmo;
   ZX_ASSERT(zx::vmo::create(/*size=*/size, 0, &vmo) == ZX_OK);
   mmio_buffer_t mmio{};
@@ -30,9 +29,10 @@ namespace fdf_testing {
   return fdf::MmioBuffer(mmio, ops, ctx);
 }
 
-[[maybe_unused]] static fdf::MmioBuffer CreateMmioBuffer(
+inline fdf::MmioBuffer CreateMmioBuffer(
     zx::vmo vmo, uint32_t cache_policy = ZX_CACHE_POLICY_UNCACHED_DEVICE,
-    const ::fdf::MmioBufferOps* ops = &::fdf::internal::kDefaultOps, void* ctx = nullptr) {
+    const ::fdf::MmioBufferOps* ops = ::fdf::MmioBuffer::GetDefaultOps(),
+    const void* ctx = nullptr) {
   zx_info_vmo_t info{};
   ZX_ASSERT(vmo.get_info(ZX_INFO_VMO, &info, sizeof(info), /*actual_count=*/0, /*avail_count=*/0) ==
             ZX_OK);

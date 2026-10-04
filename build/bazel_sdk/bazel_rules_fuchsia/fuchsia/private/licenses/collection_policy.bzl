@@ -46,18 +46,14 @@ ignore_policy = struct(
             "@rules_fuchsia",  # TODO(https://fxbug.dev/42081016): sdk rules should provide licenses.
         ]
     ]) | bool_dict([
-        # NOTE: with Bzlmod enabled, these check against canonical repo names,
-        # which might not be intended. However, we can't just pass these
-        # through `Label()` as these repo names are not actually known to
-        # `rules_fuchsia` (this module).
-        #
-        # Canonical names encode the position of a `use_repo_rule()` in the
-        # root module's `MODULE.bazel`, so reordering that file silently
-        # invalidates these entries. Matching on the apparent name (the text
-        # after the last `+`) would be stable.
-        # TODO(https://fxbug.dev/566262167): Stop matching canonical repo names.
-        "+_repo_rules+internal_sdk",  # TODO(https://fxbug.dev/42081016): sdk atoms should provide licenses.
-        "+_repo_rules6+assembly_developer_overrides",  # Local development overrides don't provide licenses.
+        # These repositories are created by the root module (via
+        # `use_repo_rule()`), whose repo mapping `rules_fuchsia` (this module)
+        # can't see, so they can't be resolved via `Label()` here. They are
+        # matched by apparent name instead, which doesn't depend on their
+        # declaration order in the root `MODULE.bazel`.
+        "internal_sdk",  # TODO(https://fxbug.dev/42081016): sdk atoms should provide licenses.
+        "fuchsia_prebuilt_rust",  # TODO(https://fxbug.dev/564889889): rust prebuilts should provide licenses.
+        "assembly_developer_overrides",  # Local development overrides don't provide licenses.
     ]),
 
     # Anything within these packages will be ignored:

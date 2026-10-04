@@ -6,7 +6,7 @@
     "requests": {
         "$defs": {
             "AsyncBacktraceRequest": {
-                "description": "Request asynchronous backtrace (cached async task tree) for a process.",
+                "description": "Request asynchronous backtrace (async task tree) for a process.",
                 "properties": {
                     "command": {
                         "const": "async-backtrace",
@@ -1050,7 +1050,7 @@
     "responses": {
         "$defs": {
             "AsyncBacktraceResponse": {
-                "description": "Response containing cached async tasks for a process.",
+                "description": "Response containing async tasks for a process.",
                 "properties": {
                     "process_id": {
                         "title": "Process Id",

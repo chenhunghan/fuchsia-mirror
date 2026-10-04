@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_library(
+    name = "far",
+    srcs = [
+        "archive_entry.cc",
+        "archive_reader.cc",
+        "archive_writer.cc",
+        "far.cc",
+        "file_operations.cc",
+        "manifest.cc",
+    ],
+    hdrs = [
+        "alignment.h",
+        "archive_entry.h",
+        "archive_reader.h",
+        "archive_writer.h",
+        "far.h",
+        "file_operations.h",
+        "format.h",
+        "manifest.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl",
+    ],
+    visibility = ["//src/sys/pkg/bin/far:__pkg__"],
+    deps = ["@com_google_googletest//:gtest_prod"],
+    alwayslink = True,
+)

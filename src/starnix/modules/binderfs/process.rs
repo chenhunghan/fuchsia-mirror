@@ -30,6 +30,7 @@ use starnix_types::ownership::{
     DropGuard, OwnedRef, Releasable, ReleaseGuard, Share, TempRef, WeakRef, release_after,
 };
 use starnix_uapi::arc_key::ArcKey;
+use starnix_uapi::auth::Credentials;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::user_address::UserAddress;
 use starnix_uapi::{
@@ -362,6 +363,9 @@ pub struct BinderProcess {
     /// case of a local process.
     pub remote_resource_accessor: Option<Arc<RemoteResourceAccessor>>,
 
+    /// The credentials of the process when it opened the binder device.
+    pub creds: Arc<Credentials>,
+
     // The mutable state of `BinderProcess` is protected by 3 locks. For ordering purpose, locks
     // must be taken in the order they are defined in this class, even across `BinderProcess`
     // instances.
@@ -407,6 +411,7 @@ impl BinderProcess {
         identifier: u64,
         key: Pid,
         remote_resource_accessor: Option<Arc<RemoteResourceAccessor>>,
+        creds: Arc<Credentials>,
     ) -> OwnedRef<BinderProcess> {
         log_trace!("new BinderProcess id={}", identifier);
         OwnedRef::new_cyclic(|weak_self| Self {
@@ -414,6 +419,7 @@ impl BinderProcess {
             identifier,
             key,
             remote_resource_accessor,
+            creds,
             shared_memory: Default::default(),
             freeze_state: Default::default(),
             state: Default::default(),

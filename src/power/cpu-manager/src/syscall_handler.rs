@@ -113,8 +113,7 @@ pub struct SyscallHandler {
 
 impl SyscallHandler {
     fn handle_get_num_cpus(&self) -> MessageResult {
-        // There are no assumptions made by this unsafe block; it is only unsafe due to FFI.
-        let num_cpus = unsafe { sys::zx_system_get_num_cpus() };
+        let num_cpus = zx::system_get_num_cpus();
 
         Ok(MessageReturn::GetNumCpus(num_cpus))
     }
@@ -242,6 +241,18 @@ mod tests {
             zx::NullableHandle::invalid().as_handle_ref(),
             handler.cpu_resource.as_handle_ref()
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_get_num_cpus() {
+        let resource = zx::NullableHandle::invalid().into();
+        let handler =
+            SyscallHandlerBuilder::new().with_cpu_resource(resource).build().await.unwrap();
+
+        match handler.handle_message(&Message::GetNumCpus).await.unwrap() {
+            MessageReturn::GetNumCpus(count) => assert_eq!(count, zx::system_get_num_cpus()),
+            response => panic!("Expected GetNumCpus; received {:?}", response),
+        }
     }
 
     // Tests that errors are logged to Inspect as expected.

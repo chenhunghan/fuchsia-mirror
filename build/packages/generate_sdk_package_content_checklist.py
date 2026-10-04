@@ -16,7 +16,9 @@ import sys
 import tempfile
 
 
-def get_meta_far_contents(ffx_bin, far_bin, meta_far_source_path):
+def get_meta_far_contents(
+    ffx_bin: str, far_bin: str, meta_far_source_path: str
+) -> list[tuple[str, str]]:
     """
     Takes a path to a meta far file, and returns a list
     of tuples of form: (file_path, content_hash)
@@ -75,7 +77,7 @@ def get_meta_far_contents(ffx_bin, far_bin, meta_far_source_path):
     return meta_far_paths_and_merkles
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--manifest", help="Path to the package manifest.", required=True
@@ -133,7 +135,7 @@ def main():
         )
         return 1
 
-    depfile_collection = {args.output: []}
+    depfile_collection: dict[str, list[str]] = {args.output: []}
     manifest = {}
     with open(args.manifest, "r") as manifest_file:
         manifest = json.load(manifest_file)

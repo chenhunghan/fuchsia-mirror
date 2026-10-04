@@ -49,6 +49,7 @@
 #include "src/graphics/display/lib/api-types/cpp/image-tiling-type.h"
 #include "src/graphics/display/lib/api-types/cpp/layer-id.h"
 #include "src/graphics/display/lib/api-types/cpp/mode.h"
+#include "src/graphics/display/lib/api-types/cpp/power-mode.h"
 #include "src/graphics/display/lib/api-types/cpp/vsync-ack-cookie.h"
 #include "src/graphics/display/lib/driver-utils/post-task.h"
 #include "src/graphics/display/lib/fake-display-stack/fake-display.h"
@@ -299,6 +300,7 @@ class TestFidlClient {
   zx::result<> CommitConfig(display::ConfigStamp config_stamp);
   zx::result<> AcknowledgeVsync(display::VsyncAckCookie vsync_ack_cookie);
   zx::result<> SetMinimumRgb(uint8_t minimum_rgb);
+  zx::result<> SetDisplayPowerMode(display::DisplayId display_id, display::PowerMode power_mode);
   zx::result<display::ConfigStamp> GetLastCommittedConfigStamp();
 
   zx::result<fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>>
@@ -645,6 +647,26 @@ zx::result<> TestFidlClient::SetMinimumRgb(uint8_t minimum_rgb) {
   fit::result<zx_status_t>& fidl_domain_result = fidl_transport_result.value();
   if (fidl_domain_result.is_error()) {
     fdf::warn("SetMinimumRgb failed: {}", zx::make_result(fidl_domain_result.error_value()));
+    return zx::error(fidl_domain_result.error_value());
+  }
+  return zx::ok();
+}
+
+zx::result<> TestFidlClient::SetDisplayPowerMode(display::DisplayId display_id,
+                                                 display::PowerMode power_mode) {
+  ZX_ASSERT(coordinator_fidl_client_.is_valid());
+
+  fidl::WireResult<fuchsia_hardware_display::Coordinator::SetDisplayPowerMode>
+      fidl_transport_result =
+          coordinator_fidl_client_->SetDisplayPowerMode(display_id.ToFidl(), power_mode.ToFidl());
+  if (!fidl_transport_result.ok()) {
+    fdf::error("FIDL error calling SetDisplayPowerMode: {}", fidl_transport_result.error());
+    return zx::error(fidl_transport_result.status());
+  }
+
+  fit::result<zx_status_t>& fidl_domain_result = fidl_transport_result.value();
+  if (fidl_domain_result.is_error()) {
+    fdf::warn("SetDisplayPowerMode failed: {}", zx::make_result(fidl_domain_result.error_value()));
     return zx::error(fidl_domain_result.error_value());
   }
   return zx::ok();
@@ -2201,6 +2223,19 @@ TEST_F(IntegrationTest, CommitConfigSkipsConfigWithWaitingImage) {
   WaitUntil([&]() { return primary_client->state().vsync_count() >= 5; });
   EXPECT_EQ(kImageWithFence2ConfigStamp, primary_client->state().last_vsync_config_stamp());
   EXPECT_EQ(5u, primary_client->state().vsync_count());
+}
+
+TEST_F(IntegrationTest, SetDisplayPowerModeWithUnknownDisplayFails) {
+  std::unique_ptr<TestFidlClient> primary_client = OpenCoordinatorTestFidlClient(
+      &sysmem_client_, DisplayProviderClient(), display::ClientPriority::kCompositor);
+  WaitUntil([&]() { return primary_client->state().has_display_ownership(); });
+
+  const display::DisplayId unknown_display_id(primary_client->state().display_id().value() + 1);
+  EXPECT_STATUS(zx::error(ZX_ERR_NOT_FOUND),
+                primary_client->SetDisplayPowerMode(unknown_display_id, display::PowerMode::kOn));
+
+  // The Coordinator must remain responsive.
+  EXPECT_OK(primary_client->GetLastCommittedConfigStamp());
 }
 
 // TODO(https://fxbug.dev/42171874): Currently the fake-display driver only supports one

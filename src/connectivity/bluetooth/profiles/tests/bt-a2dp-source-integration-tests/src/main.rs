@@ -9,7 +9,7 @@ use fidl_fuchsia_sysmem2::AllocatorMarker;
 use fidl_fuchsia_tracing_provider::RegistryMarker;
 use fixture::fixture;
 use fuchsia_bluetooth::types::Uuid;
-use fuchsia_component_test::{Capability, RealmInstance};
+use fuchsia_component_test::{Capability, RealmInstance, Ref, Route};
 use futures::stream::StreamExt;
 use mock_piconet_client::{BtProfileComponent, PiconetHarness, PiconetMember};
 
@@ -80,6 +80,40 @@ async fn setup_piconet_with_a2dp_source_and_mock_peer() -> A2dpSourceIntegration
         )
         .await
         .expect("can add profile");
+
+    test_harness
+        .builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.EnableSink".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(false)),
+        }))
+        .await
+        .expect("can add config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableSink"))
+                .from(Ref::self_())
+                .to(Ref::child(A2DP_SOURCE_MONIKER)),
+        )
+        .await
+        .expect("can route config capability");
+    test_harness
+        .builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.Domain"))
+                .capability(Capability::configuration("fuchsia.bluetooth.SourceType"))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableAvrcpTarget"))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnableAac"))
+                .capability(Capability::configuration("fuchsia.bluetooth.InitiatorDelay"))
+                .capability(Capability::configuration("fuchsia.bluetooth.ChannelMode"))
+                .from(Ref::void())
+                .to(Ref::child(A2DP_SOURCE_MONIKER)),
+        )
+        .await
+        .expect("can route optional config capabilities from void");
 
     let test_realm = test_harness.build().await.expect("test topology should build");
     let test_driven_peer =

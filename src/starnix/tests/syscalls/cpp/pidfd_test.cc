@@ -3,12 +3,17 @@
 // found in the LICENSE file.
 
 #include <lib/fit/defer.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/poll.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <thread>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -449,6 +454,113 @@ TEST(PidFdTest, WaitidWNOHANGZeroesSiginfo) {
   // Unblock child and wait for the child to exit.
   sync.poker.poke();
   ASSERT_TRUE(helper.WaitForChildren());
+}
+
+// Verify that opening a reaped process returns ESRCH rather than EINVAL.
+TEST(PidFdTest, ReapedProcessCannotBeOpened) {
+  test_helper::ForkHelper helper;
+  pid_t pid = helper.RunInForkedProcess([] { _exit(0); });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  auto pid_fd = DoPidFdOpen(pid);
+  ASSERT_FALSE(pid_fd.is_valid());
+  EXPECT_EQ(errno, ESRCH);
+}
+
+// Opens pidfds for processes that are concurrently exiting. Creating a pidfd
+// looks up the target's process entry and the drop notifier of its memory
+// manager, both of which are torn down by the exit, so the lookup and the
+// teardown must never observe each other half-updated and a pidfd taken before
+// the exit must still report it.
+TEST(PidFdTest, ConcurrentExitAndPidFdOpenRace) {
+  const unsigned int kReaderCount = std::clamp(std::thread::hardware_concurrency(), 2u, 4u);
+  constexpr int kIterations = 50;
+  constexpr int kPollTimeoutMs = 10000;
+
+  std::atomic<bool> stop{false};
+  // The most recently forked child, or 0 before the first fork. Readers skip 0
+  // so that every result below describes a child racing through exit.
+  std::atomic<pid_t> latest_pid{0};
+  std::atomic<int> unexpected{0};
+  std::atomic<int> unexpected_errno{0};
+
+  std::vector<std::thread> readers;
+  readers.reserve(kReaderCount);
+  for (unsigned int i = 0; i < kReaderCount; ++i) {
+    readers.emplace_back([&] {
+      while (!stop.load(std::memory_order_relaxed)) {
+        pid_t pid = latest_pid.load(std::memory_order_relaxed);
+        if (pid == 0) {
+          sched_yield();
+          continue;
+        }
+
+        fbl::unique_fd fd = DoPidFdOpen(pid);
+        if (!fd.is_valid() && errno != ESRCH && errno != EINVAL) {
+          // A pidfd lookup on an exiting or reaped process may return ESRCH or
+          // EINVAL (if the freed PID was recycled or observed during teardown).
+          // Any other error indicates an unexpected failure.
+          unexpected_errno.store(errno, std::memory_order_relaxed);
+          unexpected.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+
+  // The readers capture stack state by reference, so they have to be stopped on
+  // every path out of here, including an ASSERT below returning early.
+  auto join_readers = fit::defer([&] {
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& t : readers) {
+      t.join();
+    }
+  });
+
+  for (int i = 0; i < kIterations; ++i) {
+    int clone_pidfd = -1;
+    clone_args args = {
+        .flags = CLONE_PIDFD,
+        .pidfd = reinterpret_cast<uint64_t>(&clone_pidfd),
+        .exit_signal = SIGCHLD,
+    };
+    pid_t pid = ForkUsingClone3(&args, sizeof(args));
+    ASSERT_THAT(pid, SyscallSucceeds());
+    if (pid == 0) {
+      sched_yield();
+      _exit(0);
+    }
+
+    // Taken while the child was still alive, so it is not subject to the race.
+    fbl::unique_fd pidfd(clone_pidfd);
+    ASSERT_TRUE(pidfd.is_valid());
+
+    // Published only now, so that a reader that fails to open a pidfd for this
+    // pid is racing with an exit rather than with the fork.
+    latest_pid.store(pid, std::memory_order_relaxed);
+
+    fbl::unique_fd racing_pidfd_1 = DoPidFdOpen(pid);
+    fbl::unique_fd racing_pidfd_2 = DoPidFdOpen(pid);
+
+    // Clear latest_pid before reaping the child so readers do not race on an already-reaped PID.
+    latest_pid.store(0, std::memory_order_relaxed);
+
+    ASSERT_THAT(HANDLE_EINTR(waitpid(pid, nullptr, 0)), SyscallSucceedsWithValue(pid));
+
+    // A pidfd left unsignalled here means the monitor missed the teardown it
+    // was waiting for.
+    pollfd pfd = {.fd = pidfd.get(), .events = POLLIN};
+    ASSERT_THAT(HANDLE_EINTR(poll(&pfd, 1, kPollTimeoutMs)), SyscallSucceedsWithValue(1))
+        << "pidfd never reported the exit of child " << pid << " (iteration " << i << ")";
+    ASSERT_EQ(static_cast<uint32_t>(pfd.revents) & static_cast<uint32_t>(POLLIN),
+              static_cast<uint32_t>(POLLIN));
+  }
+
+  join_readers.call();
+
+  EXPECT_EQ(unexpected.load(), 0) << "pidfd_open() failed " << unexpected.load()
+                                  << " time(s) with an unreachable error, last: "
+                                  << strerror(unexpected_errno.load()) << " ("
+                                  << unexpected_errno.load() << ")";
 }
 
 }  // namespace

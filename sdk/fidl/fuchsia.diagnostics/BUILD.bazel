@@ -22,6 +22,7 @@ fidl_library(
         "sample.fidl",
         "selector.fidl",
         "severity.fidl",
+        "system_activity_monitor.fidl",
     ],
     api_area = "Diagnostics",
     category = "partner",

@@ -2,17 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-///! Demonstrates building an animation using a double-buffer swapchain.
-use {
-    anyhow::{Context, Result},
-    display_utils::{Coordinator, DisplayInfo, PixelFormat},
-    std::cmp::min,
-};
+//! Demonstrates building an animation using a double-buffer swapchain.
+
+use anyhow::{Context, Result};
+use display_utils::{Coordinator, DisplayInfo, PixelFormat};
+use std::cmp::min;
+use std::time::Duration;
 
 use crate::draw::{Frame, MappedImage};
-use crate::runner::DoubleBufferedFenceLoop;
-
-use crate::runner::Scene;
+use crate::runner::{DoubleBufferedFenceLoop, PowerCycle, Scene};
 
 struct BouncingSquare {
     color: [u8; 4],
@@ -106,7 +104,17 @@ impl Scene for BouncingSquaresScene {
     }
 }
 
-pub async fn run(coordinator: &Coordinator, display: &DisplayInfo) -> Result<()> {
+/// Runs the bouncing squares animation loop on `display`.
+///
+/// # Outcome
+///
+/// Allocates swapchain buffers and runs the animation until interrupted or an error occurs.
+pub async fn run(
+    coordinator: &Coordinator,
+    display: &DisplayInfo,
+    power_cycle: PowerCycle,
+    vsync_timeout: Duration,
+) -> Result<()> {
     // Obtain the display resolution based on the display's preferred mode.
     let (width, height) = {
         let mode = &display.0.modes[0];
@@ -123,6 +131,8 @@ pub async fn run(coordinator: &Coordinator, display: &DisplayInfo) -> Result<()>
         scene,
     )
     .await?;
+    double_buffered_fence_loop.set_power_cycle(power_cycle);
+    double_buffered_fence_loop.set_vsync_timeout(vsync_timeout);
 
     double_buffered_fence_loop.run().await?;
     Ok(())

@@ -41,6 +41,11 @@ python_host_test("check_header_guards_test") {
   sources = [ "//scripts/shac/check_header_guards.py" ]
 }
 
+python_host_test("clang_tidy_test") {
+  main_source = "clang_tidy_test.py"
+  sources = [ "//scripts/shac/clang_tidy.py" ]
+}
+
 python_host_test("commit_msg_checker_test") {
   main_source = "commit_msg_checker_test.py"
   sources = [ "//scripts/shac/commit_msg_checker.py" ]
@@ -51,6 +56,7 @@ group("tests") {
   deps = [
     ":bazel_root_package_labels_test",
     ":check_header_guards_test",
+    ":clang_tidy_test",
     ":commit_msg_checker_test",
     ":python_format_test",
   ]

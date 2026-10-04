@@ -15,6 +15,9 @@ toc:
 - title: "Support new languages"
   section:
   - include: /docs/development/languages/new/_toc.yaml
+- title: "Bazel"
+  section:
+  - include: /docs/development/languages/bazel/_toc.yaml
 - title: "C/C++"
   section:
   - include: /docs/development/languages/c-cpp/_toc.yaml

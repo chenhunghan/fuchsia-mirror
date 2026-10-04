@@ -129,7 +129,6 @@ inline constexpr std::string_view kCreateThreadSymbolsDriversAllowlist[] = {
     "#meta/ot-radio-sherlock-mfg.cm",
     "#meta/ot-radio-sherlock.cm",
     "#meta/pc-ps2.cm",
-    "#meta/pci_protocol_test_driver.cm",
     "#meta/platform-bus-x86.cm",
     "#meta/qemu-arm64.cm",
     "#meta/qemu-audio-codec.cm",

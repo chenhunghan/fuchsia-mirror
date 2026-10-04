@@ -16,8 +16,6 @@ extern "C" {
 // Implemented in Rust (arch.rs); backs ArchIdlePowerThread::EnterIdleState().
 void arch_enter_idle_state();
 
-bool cpp_boot_options_riscv64_enable_asid();
-
 zx_status_t cpp_riscv64_get_general_regs(zx_thread_state_general_regs_t* regs);
 zx_status_t cpp_riscv64_set_general_regs(const zx_thread_state_general_regs_t* regs);
 

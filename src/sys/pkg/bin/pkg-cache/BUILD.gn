@@ -53,6 +53,7 @@ rustc_binary("bin") {
     "//src/lib/versioning/version-history/rust",
     "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
     "//src/storage/lib/vfs/rust:vfs",
+    "//src/sys/lib/fidl-connector",
     "//src/sys/lib/fidl-fuchsia-component-abi-ext",
     "//src/sys/lib/fidl-fuchsia-pkg-ext",
     "//src/sys/lib/fuchsia_backoff",

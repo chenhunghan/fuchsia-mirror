@@ -43,7 +43,7 @@ impl<const N: usize> StringBuffer<N> {
 
     /// Creates an empty string buffer.
     pub const fn new() -> Self {
-        let _ = Self::ASSERT_N_POSITIVE;
+        const { Self::ASSERT_N_POSITIVE };
 
         let data = [0; N];
         Self { length: 0, data }

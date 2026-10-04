@@ -104,7 +104,7 @@ fn loopback_sends_ethernet<I: TestIpExt + IpExt>() {
         bindings_ctx,
         &device,
         destination,
-        DeviceIpLayerMetadata::default(),
+        DeviceIpLayerMetadata::empty(),
         body,
     )
     .expect("can send");

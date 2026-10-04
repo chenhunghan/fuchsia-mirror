@@ -91,9 +91,11 @@ FlatlandPresenterImpl::GetFuturePresentationInfos() {
 }
 
 void FlatlandPresenterImpl::RemoveSession(scheduling::SessionId session_id,
-                                          std::optional<zx::event> release_fence) {
+                                          std::vector<zx::event> release_fences,
+                                          std::vector<zx::counter> release_counters) {
   async::PostTask(main_dispatcher_, [thiz = shared_from_this(), session_id,
-                                     release_fence = std::move(release_fence)]() mutable {
+                                     release_fences = std::move(release_fences),
+                                     release_counters = std::move(release_counters)]() mutable {
     TRACE_DURATION("gfx", "FlatlandPresenterImpl::RemoveSession[task]");
     // Remove any registered fences for the removed session.
     {
@@ -104,13 +106,11 @@ void FlatlandPresenterImpl::RemoveSession(scheduling::SessionId session_id,
 
     scheduling::SchedulingIdPair id_pair{session_id, scheduling::GetNextPresentId()};
 
-    // If provided, add one final release fence for cleanup.
-    if (release_fence.has_value()) {
-      FX_DCHECK(release_fence.value());
-      std::vector<zx::event> release_fences;
-      release_fences.emplace_back(std::move(*release_fence));
-      thiz->pending_fences_.emplace(
-          id_pair, Fences{.release_fences = std::move(release_fences), .present_fences = {}});
+    // If provided, add release fences and counters for cleanup.
+    if (!release_fences.empty() || !release_counters.empty()) {
+      thiz->pending_fences_.emplace(id_pair, Fences{.release_fences = std::move(release_fences),
+                                                    .release_counters = std::move(release_counters),
+                                                    .present_fences = {}});
     }
 
     // Ensure that in case no client is currently rendering we'll still produce a new frame to clean

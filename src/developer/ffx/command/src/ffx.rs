@@ -355,7 +355,7 @@ enum StrictCheckErrorEnum {
         "ffx strict requires that the target be explicitly specified. Specify `--target <target>`."
     )]
     MustHaveTarget,
-    #[error("ffx strict requires that the Target be specified by address or have the prefix \"id:<serial-number>\", \"usb:cid:\" or \"vsock:cid\". Actually passed: \"{}\"", .0)]
+    #[error("ffx strict requires that the Target be specified by address or have the prefix \"id:<serial-number>\", \"usb:cid:\", \"vsock:cid:\", or \"uart:\". Actually passed: \"{}\"", .0)]
     TargetSpecificationInvalid(String),
     #[error("ffx strict requires that the Target be a valid IP address. Invalid scope ID: \"{}\"", .0)]
     TargetAddressMustHaveValidScopeId(String),
@@ -378,6 +378,8 @@ fn format_strict_check_error_enums(errors: &Vec<StrictCheckErrorEnum>) -> String
     "\n\t".to_owned() + &error_string
 }
 
+const VALID_STRICT_PREFIXES: &[&str] = &["id:", "serial:", "usb:cid:", "vsock:cid:", "uart:"];
+
 /// When a tool is run in "strict" mode there are certain constraints on passed
 /// arguments. This ensures they are all satisfied
 pub fn check_strict_constraints(
@@ -392,13 +394,12 @@ pub fn check_strict_constraints(
 
     let mut errors = vec![];
 
-    match (ffx.strict, &ffx.isolate_dir) {
-        (true, Some(isolate_dir)) => {
-            errors.push(StrictCheckErrorEnum::StrictAndIsolateMutuallyExclusive(
-                isolate_dir.to_path_buf(),
-            ));
-        }
-        _ => {}
+    if ffx.strict
+        && let Some(isolate_dir) = &ffx.isolate_dir
+    {
+        errors.push(StrictCheckErrorEnum::StrictAndIsolateMutuallyExclusive(
+            isolate_dir.to_path_buf(),
+        ));
     }
 
     if ffx.machine.is_none() {
@@ -411,37 +412,42 @@ pub fn check_strict_constraints(
     }
 
     if requires_target {
-        match &ffx.target {
-            None => errors.push(StrictCheckErrorEnum::MustHaveTarget),
-            Some(t) => match netext::parse_address_parts(t.as_str()) {
-                Err(_) => {
-                    let valid_prefix = t.starts_with("id:")
-                        || t.starts_with("serial:")
-                        || t.starts_with("usb:cid:")
-                        || t.starts_with("vsock:cid:");
-                    if !valid_prefix {
-                        errors.push(StrictCheckErrorEnum::TargetSpecificationInvalid(t.clone()));
-                    }
-                }
-                Ok((_, scope, _)) => {
-                    if let Some(scope) = scope {
-                        match netext::get_verified_scope_id(scope) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                errors.push(
-                                    StrictCheckErrorEnum::TargetAddressMustHaveValidScopeId(
-                                        scope.to_string(),
-                                    ),
-                                );
-                            }
-                        };
-                    };
-                }
-            },
-        };
+        validate_strict_target(ffx.target.as_deref(), &mut errors);
     }
 
-    for potential_config in ffx.config.iter() {
+    validate_strict_configs(&ffx.config, &mut errors);
+
+    if !errors.is_empty() {
+        return_user_error!(StrictCheckError::User(errors));
+    }
+
+    Ok(())
+}
+
+fn validate_strict_target(target: Option<&str>, errors: &mut Vec<StrictCheckErrorEnum>) {
+    match target {
+        None => errors.push(StrictCheckErrorEnum::MustHaveTarget),
+        Some(t) => match netext::parse_address_parts(t) {
+            Err(_) => {
+                if !VALID_STRICT_PREFIXES.iter().any(|&p| t.starts_with(p) && t != p) {
+                    errors.push(StrictCheckErrorEnum::TargetSpecificationInvalid(t.to_string()));
+                }
+            }
+            Ok((_, scope, _)) => {
+                if let Some(scope) = scope {
+                    if netext::get_verified_scope_id(scope).is_err() {
+                        errors.push(StrictCheckErrorEnum::TargetAddressMustHaveValidScopeId(
+                            scope.to_string(),
+                        ));
+                    }
+                }
+            }
+        },
+    }
+}
+
+fn validate_strict_configs(configs: &[String], errors: &mut Vec<StrictCheckErrorEnum>) {
+    for potential_config in configs {
         if ffx_config::runtime::try_parse_json(potential_config).is_err()
             && ffx_config::runtime::try_split_name_value_pairs(potential_config).is_err()
         {
@@ -450,12 +456,6 @@ pub fn check_strict_constraints(
             ));
         }
     }
-
-    if errors.len() > 0 {
-        return_user_error!(StrictCheckError::User(errors));
-    }
-
-    Ok(())
 }
 
 impl Ffx {
@@ -848,6 +848,22 @@ mod test {
                     "echo",
                 ],
                 name: "serial prefix is okay".into(),
+                expected_errors: vec![],
+            },
+            TestCase {
+                inputs: vec![
+                    "ffx",
+                    "--strict",
+                    "--log-output",
+                    "/tmp/out.log",
+                    "--target",
+                    "uart:user",
+                    "--machine",
+                    "json",
+                    "target",
+                    "echo",
+                ],
+                name: "uart prefix is okay".into(),
                 expected_errors: vec![],
             },
             TestCase {

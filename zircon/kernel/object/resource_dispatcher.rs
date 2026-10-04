@@ -28,27 +28,14 @@ use range_check::{RangeExt, from_offset_len};
 use region_alloc::{AllowOverlap, Region, RegionAllocator, RegionPool, RegionSpan};
 use zx_status::Status;
 use zx_types::{
-    ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_RESOURCE, ZX_RIGHT_DUPLICATE, ZX_RIGHT_GET_PROPERTY,
-    ZX_RIGHT_INSPECT, ZX_RIGHT_TRANSFER, ZX_RIGHT_WRITE, ZX_RSRC_FLAG_EXCLUSIVE,
-    ZX_RSRC_KIND_IOPORT, ZX_RSRC_KIND_IRQ, ZX_RSRC_KIND_MMIO, ZX_RSRC_KIND_SMC,
-    ZX_RSRC_KIND_SYSTEM, zx_info_resource_t, zx_rights_t, zx_rsrc_kind_t,
+    ZX_DEFAULT_RESOURCE_RIGHTS, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_RESOURCE, ZX_RSRC_FLAG_EXCLUSIVE,
+    ZX_RSRC_FLAGS_MASK, ZX_RSRC_KIND_COUNT, ZX_RSRC_KIND_IOPORT, ZX_RSRC_KIND_IRQ,
+    ZX_RSRC_KIND_MMIO, ZX_RSRC_KIND_SMC, ZX_RSRC_KIND_SYSTEM, zx_info_resource_t, zx_rights_t,
+    zx_rsrc_kind_t,
 };
 
 use super::KernelHandle;
 use super::resource_dispatcher_ffi::cpp_resource_dispatcher_create;
-
-/// Total number of valid resource kinds.
-const ZX_RSRC_KIND_COUNT: u32 = ZX_RSRC_KIND_SYSTEM + 1;
-
-/// Mask of valid resource flags.
-pub const ZX_RSRC_FLAGS_MASK: u32 = ZX_RSRC_FLAG_EXCLUSIVE;
-
-/// Default rights for `ResourceDispatcher` handles.
-const DEFAULT_RIGHTS: zx_rights_t = ZX_RIGHT_TRANSFER
-    | ZX_RIGHT_DUPLICATE
-    | ZX_RIGHT_INSPECT
-    | ZX_RIGHT_WRITE
-    | ZX_RIGHT_GET_PROPERTY;
 
 /// Maximum size for the global region pool (64 KiB).
 const MAX_REGION_POOL_SIZE: usize = 64 << 10;
@@ -297,7 +284,6 @@ impl PinnedDrop for ResourceDispatcherState {
 }
 
 crate::object::dispatcher::impl_dispatcher_facade_with_state!(
-    #[repr(align(8))]
     pub struct ResourceDispatcher,
     ResourceDispatcherState,
     ZX_OBJ_TYPE_RESOURCE,
@@ -321,7 +307,7 @@ struct ResourceParams<'a> {
 impl ResourceDispatcher {
     /// Default rights for resources.
     pub fn default_rights() -> zx_rights_t {
-        DEFAULT_RIGHTS
+        ZX_DEFAULT_RESOURCE_RIGHTS
     }
 
     /// Creates a ResourceDispatcher object representing access rights to a given region of address
@@ -471,7 +457,7 @@ impl ResourceDispatcher {
             handle
         };
 
-        Ok((handle, DEFAULT_RIGHTS))
+        Ok((handle, ZX_DEFAULT_RESOURCE_RIGHTS))
     }
 
     /// Initializes the bookkeeping allocator for a specified resource kind.

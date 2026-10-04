@@ -123,7 +123,7 @@ group("tests") {
   testonly = true
   deps = [
     ":pci_bind_test",
-    "test:pci-driver-test",
     "test:pci-unit-test",
+    "test:pci_driver_test",
   ]
 }

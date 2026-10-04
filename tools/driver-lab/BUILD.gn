@@ -1,0 +1,129 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/python/python_binary.gni")
+import("//build/python/python_host_test.gni")
+import("//build/python/python_library.gni")
+
+# Transport-neutral host tooling for the driver-lab driver workflow:
+# models, operator read grants, and plan canonicalization. The
+# fuchsia-controller transport adapter over //src/devices/driver-lab/fidl
+# layers on top of this library.
+python_library("driver_lab") {
+  library_name = "driver_lab"
+  source_root = "driver_lab"
+  sources = [
+    "__init__.py",
+    "api.py",
+    "cli.py",
+    "consent.py",
+    "discovery.py",
+    "evidence.py",
+    "fidl_transport.py",
+    "models.py",
+    "permissions.py",
+    "plans.py",
+    "policy.py",
+    "recovery.py",
+    "session.py",
+    "transport.py",
+  ]
+  library_deps = [
+    "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_python",
+    "//src/developer/ffx/lib/fuchsia-controller:fidl_bindings",
+    "//src/developer/ffx/lib/fuchsia-controller:fuchsia_controller_py",
+    "//src/devices/driver-lab/fidl:fuchsia.driver.lab_python",
+  ]
+}
+
+if (is_host) {
+  python_host_test("driver_lab_permissions_test") {
+    main_source = "tests/permissions_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_plans_test") {
+    main_source = "tests/plans_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_evidence_test") {
+    main_source = "tests/evidence_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_api_test") {
+    main_source = "tests/api_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_fidl_transport_test") {
+    main_source = "tests/fidl_transport_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_consent_test") {
+    main_source = "tests/consent_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_cli_test") {
+    main_source = "tests/cli_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_discovery_test") {
+    main_source = "tests/discovery_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_policy_test") {
+    main_source = "tests/policy_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_recovery_test") {
+    main_source = "tests/recovery_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_session_test") {
+    main_source = "tests/session_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_host_test("driver_lab_in_situ_conformance_test") {
+    main_source = "tests/in_situ_conformance_test.py"
+    libraries = [ ":driver_lab" ]
+  }
+
+  python_binary("driver_lab_cli") {
+    main_source = "driver_lab/cli.py"
+    main_callable = "main"
+    output_name = "driver-lab.pyz"
+    deps = [ ":driver_lab" ]
+  }
+}
+
+group("host") {
+  deps = [ ":driver_lab_cli($host_toolchain)" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":driver_lab_api_test($host_toolchain)",
+    ":driver_lab_cli_test($host_toolchain)",
+    ":driver_lab_consent_test($host_toolchain)",
+    ":driver_lab_discovery_test($host_toolchain)",
+    ":driver_lab_evidence_test($host_toolchain)",
+    ":driver_lab_fidl_transport_test($host_toolchain)",
+    ":driver_lab_in_situ_conformance_test($host_toolchain)",
+    ":driver_lab_permissions_test($host_toolchain)",
+    ":driver_lab_plans_test($host_toolchain)",
+    ":driver_lab_policy_test($host_toolchain)",
+    ":driver_lab_recovery_test($host_toolchain)",
+    ":driver_lab_session_test($host_toolchain)",
+  ]
+}

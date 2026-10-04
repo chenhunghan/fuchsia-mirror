@@ -21,7 +21,10 @@ declare_args() {
   #
   # For more information, see
   # https://fuchsia-review.googlesource.com/c/fuchsia/+/929995.
+  # LINT.IfChange(starnix_enable_trace_and_debug_logs_in_release)
   starnix_enable_trace_and_debug_logs_in_release = false
+
+  # LINT.ThenChange(//build/bazel/BUILD.gn:starnix_enable_trace_and_debug_logs_in_release)
 
   # Whether to default the RUST_BACKTRACE environment variable to 1 for the
   # Starnix kernel. This is useful for identifying the stacks that acquired a

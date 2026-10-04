@@ -87,8 +87,20 @@ LintingTreeCallbacks::LintingTreeCallbacks() {
           callback(*element);
         }
       }
+
       DeclarationOrderTreeVisitor::OnProtocolMethod(element);
+
       ProcessGaps(element->end_token);
+    }
+    void OnProtocolMethodErrorEnter() override {
+      for (auto& callback : callbacks_.enter_method_error_callbacks_) {
+        callback();
+      }
+    }
+    void OnProtocolMethodErrorExit() override {
+      for (auto& callback : callbacks_.exit_method_error_callbacks_) {
+        callback();
+      }
     }
     void OnAttribute(const std::unique_ptr<RawAttribute>& element) override {
       for (auto& callback : callbacks_.attribute_callbacks_) {

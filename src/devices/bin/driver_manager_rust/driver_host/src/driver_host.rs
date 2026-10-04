@@ -4,7 +4,7 @@
 
 use crate::runtime_dir::{CachedProcessInfo, create_runtime_dir};
 use async_trait::async_trait;
-use driver_manager_types::to_deprecated_property;
+
 use driver_manager_utils::{open_lib_dir, open_pkg_file};
 use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_component_runner as frunner;
@@ -237,22 +237,12 @@ impl DriverHost for DriverHostComponent {
         let config = set_encoded_config(&mut start_info)?;
 
         let node_properties_2 = Some(start_args.properties);
-        let node_properties = node_properties_2.as_ref().map(|props2| {
-            props2
-                .iter()
-                .map(|entry2| fdf::NodePropertyEntry {
-                    name: entry2.name.clone(),
-                    properties: entry2.properties.iter().map(to_deprecated_property).collect(),
-                })
-                .collect::<Vec<_>>()
-        });
 
         let fidl_start_args = fdf::DriverStartArgs {
             node: Some(start_args.node),
             node_name: Some(start_args.node_name),
             symbols: start_args.symbols,
             node_offers: Some(start_args.offers),
-            node_properties,
             node_properties_2,
             node_token: Some(start_args.component_instance),
             url: start_info.resolved_url.take(),

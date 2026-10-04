@@ -1,0 +1,467 @@
+// Copyright 2019 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// See LICENSE for licensing information.
+//
+// This build.rs script tries to generate low-level rust bindings for the current ICU library.
+// Please refer to README.md for instructions on how to build the library for
+// your use.
+
+/// This is all a no-op if `use-bindgen` disabled.
+#[cfg(feature = "use-bindgen")]
+mod inner {
+    use {
+        anyhow::{Context, Ok, Result},
+        bindgen,
+        lazy_static::lazy_static,
+        std::env,
+        std::fs::File,
+        std::io::Write,
+        std::path::Path,
+    };
+    use rust_icu_release::ICUConfig;
+
+    lazy_static! {
+        // The modules for which bindings will be generated.  Add more if you need them.  The list
+        // should be topologicaly sorted based on the inclusion relationship between the respective
+        // headers.  Any of these will fail if the required binaries are not present in $PATH.
+        static ref BINDGEN_SOURCE_MODULES: Vec<&'static str> = vec![
+            "ubrk",
+            "ucal",
+            "uclean",
+            "ucnv",
+            "ucol",
+            "ucsdet",
+            "udat",
+            "udatpg",
+            "udata",
+            "uenum",
+            "ufieldpositer",
+            "uformattable",
+            "ulistformatter",
+            "umisc",
+            "umsg",
+            "unum",
+            "unumberformatter",
+            "upluralrules",
+            "ures",
+            "uset",
+            "ustring",
+            "utext",
+            "utrans",
+            "unorm2",
+            "ucptrie",
+            "umutablecptrie",
+        ];
+
+        // C functions that will be made available to rust code.  Add more to this list if you want to
+        // bring in more types.
+        static ref BINDGEN_ALLOWLIST_FUNCTIONS: Vec<&'static str> = vec![
+            "u_.*",
+            "ubrk_.*",
+            "ucal_.*",
+            "ucnv_.*",
+            "ucol_.*",
+            "ucsdet_.*",
+            "udat_.*",
+            "udatpg_.*",
+            "udata_.*",
+            "uenum_.*",
+            "ufieldpositer_.*",
+            "ufmt_.*",
+            "ulistfmt_.*",
+            "uloc_.*",
+            "umsg_.*",
+            "unum_.*",
+            "unumf_.*",
+            "uplrules_.*",
+            "ures_.*",
+            "utext_.*",
+            "utrans_.*",
+            "unorm2_.*",
+            "usrc_.*",
+            "umutablecp.*",
+            "ucp.*",
+            "ures_.*",
+        ];
+
+        // Functions that take a C va_list argument cannot be called from Rust, so we
+        // blocklist them to avoid generating platform-dependent va_list type definitions
+        // (e.g. __va_list_tag on Linux x86_64 vs char* on macOS) in the output.
+        // This list is intended to be kept in sync with the static variable by the same
+        // name in run_bindgen.sh.
+        static ref BINDGEN_BLOCKLIST_FUNCTIONS: Vec<&'static str> = vec![
+            "u_vformatMessage.*",
+            "u_vparseMessage.*",
+            "umsg_vformat.*",
+            "umsg_vparse.*",
+        ];
+
+        // Types leaked from system headers (<stdarg.h>) that are not needed in the
+        // output and would otherwise vary across platforms.
+        // This list is intended to be kept in sync with the static variable by the same
+        // name in run_bindgen.sh.
+        static ref BINDGEN_BLOCKLIST_TYPES: Vec<&'static str> = vec![
+            "va_list",
+            "__builtin_va_list",
+            "__gnuc_va_list",
+            "__va_list_tag",
+        ];
+
+        // C types that will be made available to rust code.  Add more to this list if you want to
+        // generate more bindings.
+        static ref BINDGEN_ALLOWLIST_TYPES: Vec<&'static str> = vec![
+            "UAcceptResult",
+            "UBool",
+            "UBreakIterator",
+            "UBreakIteratorType",
+            "UCalendar.*",
+            "UCharsetDetector",
+            "UCharsetMatch",
+            "UChar.*",
+            "UCol.*",
+            "UCollation.*",
+            "UCollator",
+            "UConverter.*",
+            "UData.*",
+            "UDate.*",
+            "UDateFormat.*",
+            "UDisplayContext.*",
+            "UEnumeration.*",
+            "UErrorCode",
+            "UField.*",
+            "UFormat.*",
+            "UFormattedList.*",
+            "ULineBreakTag",
+            "UListFormatter.*",
+            "ULoc.*",
+            "ULOC.*",
+            "UMessageFormat",
+            "UNUM.*",
+            "UNumber.*",
+            "UParseError",
+            "UPlural.*",
+            "UResourceBundle",
+            "UResType",
+            "USentenceBreakTag",
+            "USet",
+            "UText",
+            "UTransDirection",
+            "UTransPosition",
+            "UTransliterator",
+            "UWordBreak",
+            "UNorm.*",
+            "UCPTrie.*",
+            "UCPTrieType",
+            "UCPTRIE.*",
+            "UPRV.*",
+        ];
+    }
+
+
+    /// Returns true if the ICU library was compiled with renaming enabled.
+    fn has_renaming() -> Result<bool> {
+        let cpp_flags = ICUConfig::new().cppflags()?;
+        let found = cpp_flags.find("-DU_DISABLE_RENAMING=1");
+        Ok(found.is_none())
+    }
+
+    /// Generates a wrapper header that includes all headers of interest for binding.
+    ///
+    /// This is the recommended way to bind complex libraries at the moment.  Returns
+    /// the relative path of the generated wrapper header file with respect to some
+    /// path from the include dir path (`-I`).
+    fn generate_wrapper_header(out_dir_path: &Path, bindgen_source_modules: &[&str]) -> String {
+        let wrapper_path = out_dir_path.join("wrapper.h");
+        let mut wrapper_file = File::create(&wrapper_path).unwrap();
+        wrapper_file
+            .write_all(
+                concat!(
+                    "/* Generated file, do not edit. */ \n",
+                    "/* Assumes correct -I flag to the compiler is passed. */\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let includes = bindgen_source_modules
+            .iter()
+            .copied()
+            .map(|f| {
+                std::path::PathBuf::new()
+                    .join("unicode")
+                    .join(format!("{}.h", f))
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .map(|f| {
+                let file_path_str = format!("#include \"{}\"\n", f);
+                println!("include-file: '{}'", f);
+                file_path_str
+            })
+            .collect::<String>();
+        wrapper_file.write_all(&includes.into_bytes()).unwrap();
+        String::from(wrapper_path.to_str().unwrap())
+    }
+
+    fn run_bindgen(header_file: &str, out_dir_path: &Path) -> Result<()> {
+        let mut builder = bindgen::Builder::default()
+            .header(header_file)
+            .default_enum_style(bindgen::EnumVariation::Rust {
+                non_exhaustive: false,
+            })
+            // Bindings are pretty much unreadable without rustfmt.
+            .formatter(bindgen::Formatter::Rustfmt)
+            // These attributes are useful to have around for generated types.
+            .derive_default(true)
+            .derive_hash(true)
+            .derive_partialord(true)
+            .derive_partialeq(true)
+            // These structs contain function pointers; comparing them is meaningless
+            // and triggers a compiler warning since Rust 1.85.
+            .no_partialeq("UTextFuncs")
+            .no_partialeq("UReplaceableCallbacks")
+            .no_partialeq("UCharIterator");
+
+        // Add all types that should be exposed to rust code.
+        for bindgen_type in BINDGEN_ALLOWLIST_TYPES.iter() {
+            builder = builder.allowlist_type(bindgen_type);
+        }
+
+        // Add all functions that should be exposed to rust code.
+        for bindgen_function in BINDGEN_ALLOWLIST_FUNCTIONS.iter() {
+            builder = builder.allowlist_function(bindgen_function);
+        }
+
+        // Blocklist functions that take a C va_list argument, as they cannot be
+        // called from Rust and their signatures produce platform-dependent type
+        // definitions in the output.
+        for blocklist_function in BINDGEN_BLOCKLIST_FUNCTIONS.iter() {
+            builder = builder.blocklist_function(blocklist_function);
+        }
+
+        // Blocklist va_list types leaked from system headers; they are not needed
+        // and vary across platforms.
+        for blocklist_type in BINDGEN_BLOCKLIST_TYPES.iter() {
+            builder = builder.blocklist_type(blocklist_type);
+        }
+
+        // Add the correct clang settings.
+        let renaming_arg =
+            match has_renaming().with_context(|| "could not prepare bindgen builder")? {
+                true => "",
+                // When renaming is disabled, the functions will have a suffix that
+                // represents the library version in use, for example funct_64 for ICU
+                // version 64.
+                false => "-DU_DISABLE_RENAMING=1",
+            };
+        let builder = builder.clang_arg(renaming_arg);
+        let ld_flags = ICUConfig::new()
+            .ldflags()
+            .with_context(|| "could not prepare bindgen builder")?;
+        let builder = builder.clang_arg(ld_flags);
+        let cpp_flags = ICUConfig::new()
+            .cppflags()
+            .with_context(|| "could not prepare bindgen builder")?;
+        let builder = builder.clang_arg(cpp_flags);
+        let builder = builder.detect_include_paths(true);
+
+        let bindings = builder
+            .generate()
+            .map_err(|_| anyhow::anyhow!("could not generate bindings"))?;
+
+        let output_file_path = out_dir_path.join("lib.rs");
+        let output_file = output_file_path.to_str().unwrap();
+        bindings
+            .write_to_file(output_file)
+            .with_context(|| "while writing output")?;
+        Ok(())
+    }
+
+    // Generates the library renaming macro: this allows us to use renamed function
+    // names in the resulting low-level bindings library.
+    fn run_renamegen(out_dir_path: &Path) -> Result<()> {
+        let output_file_path = out_dir_path.join("macros.rs");
+        let mut macro_file = File::create(&output_file_path)
+            .with_context(|| format!("while opening {:?}", output_file_path))?;
+        if has_renaming()? {
+            println!("renaming: true");
+            // The library names have been renamed, need to generate a macro that
+            // converts the call of `foo()` into `foo_64()`.
+            let icu_major_version = ICUConfig::version_major()?;
+            let to_write = format!(
+                r#"
+// Macros for changing function names.
+// Automatically generated by build.rs.
+
+// This library was build with version renaming, so rewrite every function name
+// with its name with version number appended.
+
+// The macro below will rename a symbol `foo::bar` to `foo::bar_{0}` (where "{0}")
+// may be some other number depending on the ICU library in use.
+#[cfg(feature="renaming")]
+#[macro_export]
+macro_rules! versioned_function {{
+    ($i:ident) => {{
+      $crate::__private_do_not_use::paste::expr! {{
+        $crate::[< $i _{0} >]
+      }}
+    }}
+}}
+// This allows the user to override the renaming configuration detected from
+// icu-config.
+#[cfg(not(feature="renaming"))]
+#[macro_export]
+macro_rules! versioned_function {{
+    ($func_name:ident) => {{
+        $crate::$func_name
+    }}
+}}
+"#,
+                icu_major_version
+            );
+            macro_file
+                .write_all(&to_write.into_bytes())
+                .with_context(|| "while writing macros.rs with renaming")
+        } else {
+            // The library names have not been renamed, generating an empty macro
+            println!("renaming: false");
+            macro_file
+                .write_all(
+                    &r#"
+// Macros for changing function names.
+// Automatically generated by build.rs.
+
+// There was no renaming in this one, so just short-circuit this macro.
+#[macro_export]
+macro_rules! versioned_function {
+    ($func_name:path) => {
+        $func_name
+    }
+}
+"#
+                    .to_string()
+                    .into_bytes(),
+                )
+                .with_context(|| "while writing macros.rs without renaming")
+        }
+    }
+
+    /// Copies the featuers set in `Cargo.toml` into the build script.  Not sure
+    /// why, but the features seem *ignored* when `build.rs` is used.
+    pub fn copy_features() -> Result<()> {
+        if env::var_os("CARGO_FEATURE_RENAMING").is_some() {
+            println!("cargo:rustc-cfg=feature=\"renaming\"");
+        }
+        if env::var_os("CARGO_FEATURE_USE_BINDGEN").is_some() {
+            println!("cargo:rustc-cfg=feature=\"use-bindgen\"");
+        }
+        if env::var_os("CARGO_FEATURE_ICU_CONFIG").is_some() {
+            println!("cargo:rustc-cfg=feature=\"icu_config\"");
+        }
+        if env::var_os("CARGO_FEATURE_ICU_VERSION_IN_ENV").is_some() {
+            println!("cargo:rustc-cfg=feature=\"icu_version_in_env\"");
+            // Bazel sets this environment variable. We can skip checking pkg-config.
+            return Ok(());
+        }
+        let icu_major_version = ICUConfig::version_major_int()?;
+        println!("icu-version-major: {}", icu_major_version);
+        Ok(())
+    }
+
+    pub fn icu_config_autodetect() -> Result<()> {
+        println!("icu-version: {}", ICUConfig::new().version()?);
+        println!("icu-cppflags: {}", ICUConfig::new().cppflags()?);
+        println!("icu-ldflags: {}", ICUConfig::new().ldflags()?);
+        println!("icu-has-renaming: {}", has_renaming()?);
+
+        // The path to the directory where cargo will add the output artifacts.
+        let out_dir = env::var("OUT_DIR").unwrap();
+        let out_dir_path = Path::new(&out_dir);
+
+        let header_file = generate_wrapper_header(&out_dir_path, &BINDGEN_SOURCE_MODULES);
+        run_bindgen(&header_file, out_dir_path).with_context(|| "while running bindgen")?;
+        run_renamegen(out_dir_path).with_context(|| "while running renamegen")?;
+
+        println!("cargo:install-dir={}", ICUConfig::new().install_dir()?);
+
+        let lib_dir = ICUConfig::new().libdir()?;
+        println!("cargo:rustc-link-search=native={}", lib_dir);
+        // When static linking is requested, rustc_link_libs() emits the
+        // individual cargo:rustc-link-lib=static=... directives.  Emitting
+        // cargo:rustc-flags with the dynamic -l flags from icu-config at the
+        // same time causes rustc to reject the conflicting link modifiers, so
+        // skip it here and let rustc_link_libs() handle everything.
+        if env::var_os("CARGO_FEATURE_STATIC").is_none() {
+            println!("cargo:rustc-flags={}", ICUConfig::new().ldflags()?);
+        }
+
+        Ok(())
+    }
+}
+
+fn rustc_link_libs() {
+    let (icuuc, icui18n, icudata) = if cfg!(target_os = "windows") {
+        ("icuuc", "icuin", "icudt")
+    } else {
+        ("icuuc", "icui18n", "icudata")
+    };
+
+    if cfg!(feature = "static") {
+        println!("cargo:rustc-link-lib=static={icuuc}");
+        println!("cargo:rustc-link-lib=static={icui18n}");
+        println!("cargo:rustc-link-lib=static:+whole-archive,-bundle={icudata}");
+        // On systems such as macOS, libc++ is the default library
+        if cfg!(target_vendor = "apple") {
+            println!("cargo:rustc-link-lib=dylib=c++");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
+    } else {
+        println!("cargo:rustc-link-lib=dylib={icuuc}");
+        println!("cargo:rustc-link-lib=dylib={icui18n}");
+        println!("cargo:rustc-link-lib=dylib={icudata}");
+    }
+}
+
+#[cfg(feature = "use-bindgen")]
+fn main() -> Result<(), anyhow::Error> {
+    use anyhow::Context;
+
+    std::env::set_var("RUST_BACKTRACE", "full");
+    inner::copy_features().context("while copying features")?;
+    if std::env::var_os("CARGO_FEATURE_ICU_CONFIG").is_none() {
+        return Ok(());
+    }
+    inner::icu_config_autodetect().context("while autodetecting ICU")?;
+    rustc_link_libs();
+    println!("done:true");
+    Ok(())
+}
+
+/// No-op if use-bindgen is disabled.
+#[cfg(not(feature = "use-bindgen"))]
+fn main() {
+    // can be used to provide an extra path to find libicuuc, libicui18n and libicudata
+    if let Ok(lib_dir) = std::env::var("RUST_ICU_LINK_SEARCH_DIR") {
+        println!("cargo:rustc-link-search=native={}", lib_dir);
+    }
+    
+    // When compiling under Bazel (or when ICU is packaged into the Bazel deps), 
+    // Bazel's rust_library handles static linking through its cc_library targets.
+    // If we're using raw Cargo via crates.io, we need to instruct cargo to link the libraries.
+    if std::env::var("BAZEL").is_err() {
+        rustc_link_libs();
+    }
+}

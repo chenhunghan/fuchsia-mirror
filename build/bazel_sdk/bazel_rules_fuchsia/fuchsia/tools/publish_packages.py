@@ -10,11 +10,24 @@ import subprocess
 import tempfile
 from pathlib import Path
 from shutil import rmtree
+from typing import TypedDict
 
-from fuchsia.tools.fuchsia_task_lib import *
+from fuchsia.tools.fuchsia_task_lib import (
+    ArgumentScope,
+    FuchsiaTask,
+    ScopedArgumentParser,
+    TaskExecutionException,
+)
 
 
-def run(*command):
+class RepoServerInfo(TypedDict, total=False):
+    """The fields of an `ffx repository server list` entry used here."""
+
+    name: str
+    repo_path: dict[str, str]
+
+
+def run(*command: str | Path) -> str:
     try:
         # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
         # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE
@@ -34,7 +47,7 @@ def run(*command):
 
 
 class FuchsiaTaskPublish(FuchsiaTask):
-    def __init(self):
+    def __init(self) -> None:
         self.prompt_repo_cleanup = True
 
     def parse_args(self, parser: ScopedArgumentParser) -> argparse.Namespace:
@@ -88,7 +101,7 @@ class FuchsiaTaskPublish(FuchsiaTask):
         )
         return parser.parse_args()
 
-    def ensure_target_device(self, args):
+    def ensure_target_device(self, args: argparse.Namespace) -> None:
         if args.publish_only:
             return
         args.target = args.target or run(args.ffx, "target", "default", "get")
@@ -99,13 +112,13 @@ class FuchsiaTaskPublish(FuchsiaTask):
         ffx_cmd += ["target", "wait", "-t", "60"]
         run(*ffx_cmd)
 
-    def resolve_repo(self, args):
+    def resolve_repo(self, args: argparse.Namespace) -> None:
         if args.publish_only:
             return
 
         # Determine the repo name we want to use, in this order:
         # 1. User specified argument.
-        def user_specified_repo_name():
+        def user_specified_repo_name() -> str | None:
             if args.repo_name:
                 print(f"Using manually specified --repo_name: {args.repo_name}")
                 # We shouldn't ask to delete a user specified --repo_name.
@@ -113,7 +126,7 @@ class FuchsiaTaskPublish(FuchsiaTask):
             return args.repo_name
 
         # 2. ffx default repository.
-        def ffx_default_repo():
+        def ffx_default_repo() -> str:
             default = run(
                 args.ffx,
                 "repository",
@@ -127,7 +140,7 @@ class FuchsiaTaskPublish(FuchsiaTask):
             return default
 
         # 3. A user prompt.
-        def prompt_repo():
+        def prompt_repo() -> str:
             print(
                 "--repo_name was not specified and there is no default ffx repository set."
             )
@@ -147,7 +160,9 @@ class FuchsiaTaskPublish(FuchsiaTask):
             user_specified_repo_name() or ffx_default_repo() or prompt_repo()
         )
 
-    def _get_running_repo(self, args):
+    def _get_running_repo(
+        self, args: argparse.Namespace
+    ) -> RepoServerInfo | None:
         """Returns the repository server information that matches args.repo_name or None."""
         # Determine the package repo path (use the existing one from ffx, or create a new one).
         #  {
@@ -191,7 +206,7 @@ class FuchsiaTaskPublish(FuchsiaTask):
                 return repo
         return None
 
-    def ensure_repo(self, args):
+    def ensure_repo(self, args: argparse.Namespace) -> None:
         """Ensures that the repository is initialized and starts the repo server if needed."""
         if args.publish_only:
             return
@@ -272,7 +287,7 @@ class FuchsiaTaskPublish(FuchsiaTask):
                 args.repo_name,
             )
 
-    def publish_packages(self, args):
+    def publish_packages(self, args: argparse.Namespace) -> None:
         print(f"Publishing packages: {args.packages}")
         cmd = [
             args.ffx,
@@ -289,7 +304,7 @@ class FuchsiaTaskPublish(FuchsiaTask):
         run(*cmd)
         print(f"Published {len(args.packages)} packages")
 
-    def teardown(self, args):
+    def teardown(self, args: argparse.Namespace) -> None:
         if args.publish_only:
             return
         if self.prompt_repo_cleanup:

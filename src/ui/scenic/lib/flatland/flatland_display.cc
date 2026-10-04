@@ -75,7 +75,7 @@ void FlatlandDisplay::Bind(fidl::ServerEnd<fuchsia_ui_composition::FlatlandDispl
 FlatlandDisplay::~FlatlandDisplay() {
   // Unlike Flatland, FlatlandDisplay doesn't manage any client images, therefore doesn't need to
   // pass a release fence to RemoveSession().
-  flatland_presenter_->RemoveSession(session_id_, std::nullopt);
+  flatland_presenter_->RemoveSession(session_id_, /*release_fences=*/{}, /*release_counters=*/{});
 
   FX_LOGS(INFO) << "FlatlandDisplay DESTROYED session_id=" << session_id_;
 }
@@ -121,14 +121,17 @@ void FlatlandDisplay::SetContent(
   const auto device_pixel_ratio = display_->device_pixel_ratio();
   FX_LOGS(INFO) << "Device Pixel Ratio: " << device_pixel_ratio.x << "x" << device_pixel_ratio.y;
 
+  // To calculate the logical size, we need to divide the physical pixel size by the DPR.
+  const uint32_t logical_width =
+      static_cast<uint32_t>(static_cast<float>(display_->width_in_px()) / device_pixel_ratio.x);
+  const uint32_t logical_height =
+      static_cast<uint32_t>(static_cast<float>(display_->height_in_px()) / device_pixel_ratio.y);
+
   fuchsia_ui_composition::ViewportProperties properties;
   {
-    // To calculate the logical size, we need to divide the physical pixel size by the DPR.
     properties.logical_size(fuchsia_math::SizeU{{
-        .width = static_cast<uint32_t>(static_cast<float>(display_->width_in_px()) /
-                                       device_pixel_ratio.x),
-        .height = static_cast<uint32_t>(static_cast<float>(display_->height_in_px()) /
-                                        device_pixel_ratio.y),
+        .width = logical_width,
+        .height = logical_height,
     }});
     properties.inset(fuchsia_math::Inset{{.top = 0, .right = 0, .bottom = 0, .left = 0}});
   }
@@ -175,11 +178,14 @@ void FlatlandDisplay::SetContent(
 
   uber_struct->local_topology = std::move(data.sorted_transforms);
 
+  // The viewport's logical size, as `Flatland::SetViewportProperties()` sets for any viewport.
+  // The transform's matrix scales it by the device pixel ratio, so it bounds content to the
+  // physical display, and `ComputeBoundingBox()` reads it as the root view's bounds.
   uber_struct->local_clip_regions[link_to_child_->parent_transform_handle] = TransformClipRegion({
       .x = 0,
       .y = 0,
-      .width = static_cast<int32_t>(display_->width_in_px()),
-      .height = static_cast<int32_t>(display_->height_in_px()),
+      .width = static_cast<int32_t>(logical_width),
+      .height = static_cast<int32_t>(logical_height),
   });
 
   // By scaling the local matrix of the uberstruct here by the device pixel ratio, we ensure that

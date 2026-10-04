@@ -14,7 +14,9 @@ import sys
 try:
     from build.auth import apt
 except ImportError:
-    import apt
+    # Whether mypy considers this a redefinition depends on whether
+    # `build.auth` is resolvable in the context it's checked in.
+    import apt  # type: ignore[no-redef, unused-ignore]
 
 # Standard relative subpath for gcloud's Application Default Credentials (ADC).
 ADC_SUBPATH = pathlib.Path(

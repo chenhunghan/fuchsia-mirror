@@ -71,7 +71,7 @@ type IsochResult = struct {
 closed protocol Device {
     /// Resets the device to firmware loader mode.
     strict SetModeFwloader() -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Performs a data loopback on the bulk endpoint of the test device.
@@ -81,7 +81,7 @@ closed protocol Device {
         out_ep_sg box<SgList>;
         in_ep_sg box<SgList>;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
     });
 
     /// Performs a data loopback on the isochronous endpoint of the test device.
@@ -90,7 +90,7 @@ closed protocol Device {
     strict IsochLoopback(struct {
         params IsochTestParams;
     }) -> (struct {
-        s zx.Status;
+        s zx.Result;
         result IsochResult;
     });
 

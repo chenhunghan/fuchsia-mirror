@@ -17,9 +17,11 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <type_traits>
 #include <variant>
 
 #include <fbl/auto_lock.h>
+#include <usb/descriptors.h>
 #include <usb/request-cpp.h>
 
 #include "fidl/fuchsia.hardware.vsockbridge/cpp/wire_types.h"
@@ -30,6 +32,55 @@
 namespace fendpoint = fuchsia_hardware_usb_endpoint;
 namespace ffunction = fuchsia_hardware_usb_function;
 namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
+namespace {
+
+template <typename ErrorType>
+bool IsExpectedFidlDisconnect(const ErrorType& error) {
+  constexpr auto is_disconnect_status = [](zx_status_t status) {
+    return status == ZX_ERR_PEER_CLOSED || status == ZX_ERR_CANCELED ||
+           status == ZX_ERR_IO_NOT_PRESENT;
+  };
+
+  if constexpr (requires {
+                  error.is_framework_error();
+                  error.framework_error().status();
+                  error.is_domain_error();
+                  error.domain_error();
+                }) {
+    if (error.is_framework_error()) {
+      return is_disconnect_status(error.framework_error().status());
+    }
+    if (error.is_domain_error()) {
+      return is_disconnect_status(error.domain_error());
+    }
+    return false;
+  } else if constexpr (requires {
+                         error.is_framework_error();
+                         error.framework_error().status();
+                       }) {
+    if (error.is_framework_error()) {
+      return is_disconnect_status(error.framework_error().status());
+    }
+    return false;
+  } else if constexpr (requires {
+                         error.is_domain_error();
+                         error.domain_error();
+                       }) {
+    if (error.is_domain_error()) {
+      return is_disconnect_status(error.domain_error());
+    }
+    return false;
+  } else if constexpr (requires { error.status(); }) {
+    return is_disconnect_status(error.status());
+  } else if constexpr (std::is_integral_v<ErrorType>) {
+    return is_disconnect_status(error);
+  } else {
+    return false;
+  }
+}
+
+}  // namespace
 
 zx::result<> VsockUsb::Start(fdf::DriverContext context) {
   inspector_ = context.CreateInspector(this);
@@ -185,8 +236,9 @@ void VsockUsb::Control(ControlRequest& request, ControlCompleter::Sync& complete
       setup.bm_request_type(), setup.b_request(), w_value, w_value, w_index, w_index, w_length,
       w_length);
 
-  if (setup.bm_request_type() == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
-      setup.b_request() == USB_REQ_CLEAR_FEATURE && setup.w_value() == USB_ENDPOINT_HALT) {
+  if (setup.bm_request_type() == kStandardEndpointOut &&
+      setup.b_request() == fdescriptor::StandardRequest::kClearFeature &&
+      setup.w_value() == fidl::ToUnderlying(fdescriptor::FeatureSelector::kEndpointHalt)) {
     FDF_LOG(INFO, "clearing endpoint-halt");
     completer.Reply(zx::ok(std::vector<uint8_t>{}));
     return;
@@ -203,6 +255,9 @@ zx_status_t VsockUsb::ConfigureEndpoints() {
 
   if (endpoints_configured_) {
     FDF_LOG(DEBUG, "ConfigureEndpoints: endpoints already configured");
+    if (std::holds_alternative<Unconfigured>(state_)) {
+      return StartSocketSession();
+    }
     return ZX_OK;
   }
 
@@ -218,12 +273,20 @@ zx_status_t VsockUsb::ConfigureEndpoints() {
     if (result.is_error()) {
       FDF_SLOG(ERROR, "ConfigureEndpoint failed",
                KV("status", result.error_value().FormatDescription()));
+      if (ep_desc == &descriptors_.out_ep) {
+        (void)function_->DisableEndpoint({descriptors_.in_ep.b_endpoint_address});
+      }
       return result.error_value().is_framework_error()
                  ? result.error_value().framework_error().status()
                  : result.error_value().domain_error();
     }
   }
 
+  endpoints_configured_ = true;
+  return StartSocketSession();
+}
+
+zx_status_t VsockUsb::StartSocketSession() {
   FDF_LOG(TRACE, "Setting state to Running");
   zx::socket socket;
   peer_socket_ = zx::socket();
@@ -239,32 +302,32 @@ zx_status_t VsockUsb::ConfigureEndpoints() {
   HandleSocketAvailable();
   ProcessReadsFromSocket();
 
-  endpoints_configured_ = true;
-
   std::vector<fuchsia_hardware_usb_request::Request> requests;
   while (auto req = bulk_out_ep_.GetRequest()) {
     req->reset_buffers(bulk_out_ep_.GetMapped());
-    zx_status_t status = req->CacheFlushInvalidate(bulk_out_ep_.GetMapped());
-    if (status != ZX_OK) {
-      FDF_SLOG(ERROR, "Cache flush failed", KV("status", zx_status_get_string(status)));
+    zx_status_t cache_status = req->CacheFlushInvalidate(bulk_out_ep_.GetMapped());
+    if (cache_status != ZX_OK) {
+      FDF_SLOG(ERROR, "Cache flush failed", KV("status", zx_status_get_string(cache_status)));
     }
 
     requests.emplace_back(req->take_request());
   }
-  FDF_SLOG(TRACE, "Queueing read requests", KV("count", requests.size()));
-  auto result = bulk_out_ep_->QueueRequests(std::move(requests));
-  if (result.is_error()) {
-    FDF_SLOG(ERROR, "Failed to QueueRequests",
-             KV("status", result.error_value().FormatDescription()));
-    // Note: `requests` was moved into QueueRequests and consumed by the FIDL transport.
-    // If QueueRequests fails, these requests cannot be reclaimed at this layer.
-    return result.error_value().status();
+  if (!requests.empty()) {
+    FDF_SLOG(TRACE, "Queueing read requests", KV("count", requests.size()));
+    auto result = bulk_out_ep_->QueueRequests(std::move(requests));
+    if (result.is_error()) {
+      FDF_SLOG(ERROR, "Failed to QueueRequests",
+               KV("status", result.error_value().FormatDescription()));
+      // Note: `requests` was moved into QueueRequests and consumed by the FIDL transport.
+      // If QueueRequests fails, these requests cannot be reclaimed at this layer.
+      return result.error_value().status();
+    }
   }
 
   return ZX_OK;
 }
 
-zx_status_t VsockUsb::UnconfigureEndpoints() {
+zx_status_t VsockUsb::UnconfigureEndpoints(bool disable_immediately) {
   // Defense-in-depth: If the driver is shutting down, unconfiguration is already
   // in progress and endpoints are being torn down. Return ZX_OK without
   // clobbering the ShuttingDown state (which holds completion callbacks). While
@@ -281,42 +344,104 @@ zx_status_t VsockUsb::UnconfigureEndpoints() {
 
   endpoints_configured_ = false;
 
+  // Transition state to Unconfigured before disabling endpoints. As endpoints
+  // are disabled, cancelled in-flight requests trigger ReadComplete(). Setting
+  // Unconfigured first ensures ReadComplete() sees !Online() and returns
+  // requests to the free pool rather than re-queueing them.
   FDF_LOG(TRACE, "UnconfigureEndpoints: Setting endpoint state to unconfigured");
   state_ = Unconfigured();
   SyncInspectState();
 
   CancelAllEndpoints();
 
-  for (const uint8_t ep_addr : {BulkInAddress(), BulkOutAddress()}) {
+  return disable_immediately ? DisableEndpoints() : ZX_OK;
+}
+
+zx_status_t VsockUsb::DisableEndpoints() {
+  zx_status_t first_error = ZX_OK;
+  // Disable Bulk OUT (RX) before Bulk IN (TX) to halt host-driven DMA ingress
+  // before tearing down the transmit path and freeing request buffers.
+  for (const uint8_t ep_addr : {BulkOutAddress(), BulkInAddress()}) {
     fidl::Result result = function_->DisableEndpoint({ep_addr});
     if (result.is_error()) {
-      FDF_SLOG(ERROR, "DisableEndpoint failed", KV("endpoint", static_cast<uint32_t>(ep_addr)),
-               KV("status", result.error_value().FormatDescription()));
-      return result.error_value().is_framework_error()
-                 ? result.error_value().framework_error().status()
-                 : result.error_value().domain_error();
+      if (IsExpectedFidlDisconnect(result.error_value())) {
+        FDF_SLOG(DEBUG, "DisableEndpoint failed (expected during disconnect/teardown)",
+                 KV("endpoint", static_cast<uint32_t>(ep_addr)),
+                 KV("error", result.error_value().FormatDescription()));
+      } else {
+        FDF_SLOG(ERROR, "DisableEndpoint failed", KV("endpoint", static_cast<uint32_t>(ep_addr)),
+                 KV("error", result.error_value().FormatDescription()));
+        if (first_error == ZX_OK) {
+          first_error = result.error_value().is_framework_error()
+                            ? result.error_value().framework_error().status()
+                            : result.error_value().domain_error();
+        }
+      }
     }
   }
-  return ZX_OK;
+  return first_error;
 }
 
 void VsockUsb::CancelAllEndpoints() {
+  bulk_out_cancelled_ = false;
+  bulk_in_cancelled_ = false;
   if (bulk_out_ep_.client().is_valid()) {
-    bulk_out_ep_->CancelAll().Then([](fidl::Result<fendpoint::Endpoint::CancelAll>& result) {
+    bulk_out_ep_->CancelAll().Then([this](fidl::Result<fendpoint::Endpoint::CancelAll>& result) {
+      bulk_out_cancelled_ = true;
       if (result.is_error()) {
-        FDF_LOG(WARNING, "Failed to cancel all for bulk out endpoint: %s",
-                result.error_value().FormatDescription().c_str());
+        if (IsExpectedFidlDisconnect(result.error_value())) {
+          FDF_SLOG(
+              DEBUG,
+              "Failed to cancel all for bulk out endpoint (expected during disconnect/teardown)",
+              KV("error", result.error_value().FormatDescription()));
+        } else {
+          FDF_LOG(WARNING, "Failed to cancel all for bulk out endpoint: %s",
+                  result.error_value().FormatDescription().c_str());
+        }
+      }
+      CheckUnconfigureComplete();
+      if (std::holds_alternative<ShuttingDown>(state_) && !HasPendingRequests()) {
+        ShutdownComplete();
       }
     });
+  } else {
+    bulk_out_cancelled_ = true;
   }
   if (bulk_in_ep_.client().is_valid()) {
-    bulk_in_ep_->CancelAll().Then([](fidl::Result<fendpoint::Endpoint::CancelAll>& result) {
+    bulk_in_ep_->CancelAll().Then([this](fidl::Result<fendpoint::Endpoint::CancelAll>& result) {
+      bulk_in_cancelled_ = true;
       if (result.is_error()) {
-        FDF_LOG(WARNING, "Failed to cancel all for bulk in endpoint: %s",
-                result.error_value().FormatDescription().c_str());
+        if (IsExpectedFidlDisconnect(result.error_value())) {
+          FDF_SLOG(
+              DEBUG,
+              "Failed to cancel all for bulk in endpoint (expected during disconnect/teardown)",
+              KV("error", result.error_value().FormatDescription()));
+        } else {
+          FDF_LOG(WARNING, "Failed to cancel all for bulk in endpoint: %s",
+                  result.error_value().FormatDescription().c_str());
+        }
+      }
+      CheckUnconfigureComplete();
+      if (std::holds_alternative<ShuttingDown>(state_) && !HasPendingRequests()) {
+        ShutdownComplete();
       }
     });
+  } else {
+    bulk_in_cancelled_ = true;
   }
+}
+
+void VsockUsb::CheckUnconfigureComplete() {
+  if (!unconfigure_completer_.has_value()) {
+    return;
+  }
+  if (!bulk_out_cancelled_ || !bulk_in_cancelled_ || HasPendingRequests()) {
+    return;
+  }
+  zx_status_t status = DisableEndpoints();
+  auto completer = std::move(*unconfigure_completer_);
+  unconfigure_completer_.reset();
+  completer.Reply(zx::make_result(status));
 }
 
 void VsockUsb::SetConfigured(SetConfiguredRequest& request,
@@ -330,10 +455,27 @@ void VsockUsb::SetConfigured(SetConfiguredRequest& request,
     return;
   }
 
-  fuchsia_hardware_usb_descriptor::UsbSpeed speed = request.speed();
+  fdescriptor::UsbSpeed speed = request.speed();
   FDF_LOG(TRACE, "SetConfigured(%d, %d)", configured, static_cast<uint32_t>(speed));
-  zx_status_t status = configured ? ConfigureEndpoints() : UnconfigureEndpoints();
-  completer.Reply(zx::make_result(status));
+  if (unconfigure_completer_.has_value()) {
+    zx_status_t status = DisableEndpoints();
+    unconfigure_completer_->Reply(zx::make_result(status));
+    unconfigure_completer_.reset();
+  }
+  if (configured) {
+    zx_status_t status = ConfigureEndpoints();
+    completer.Reply(zx::make_result(status));
+    return;
+  }
+
+  if (!endpoints_configured_) {
+    completer.Reply(zx::ok());
+    return;
+  }
+
+  UnconfigureEndpoints(/*disable_immediately=*/false);
+  unconfigure_completer_.emplace(completer.ToAsync());
+  CheckUnconfigureComplete();
 }
 
 void VsockUsb::SetInterface(SetInterfaceRequest& request, SetInterfaceCompleter::Sync& completer) {
@@ -352,7 +494,7 @@ void VsockUsb::SetInterface(SetInterfaceRequest& request, SetInterfaceCompleter:
     completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
     return;
   }
-  completer.Reply(zx::ok());
+  completer.Reply(zx::make_result(ConfigureEndpoints()));
 }
 
 void VsockUsb::handle_unknown_method(
@@ -377,7 +519,7 @@ std::optional<usb::FidlRequest> VsockUsb::PrepareTx() {
 }
 
 void VsockUsb::HandleSocketReadable(async_dispatcher_t*, async::WaitBase*, zx_status_t status,
-                                    const zx_packet_signal_t*) {
+                                    const zx_packet_signal_t* signal) {
   FDF_LOG(TRACE, "HandleSocketReadable(..., %d, ...)", status);
   if (status != ZX_OK) {
     if (status != ZX_ERR_CANCELED) {
@@ -385,6 +527,13 @@ void VsockUsb::HandleSocketReadable(async_dispatcher_t*, async::WaitBase*, zx_st
                KV("status", zx_status_get_string(status)));
     }
 
+    return;
+  }
+
+  if (signal != nullptr && (signal->observed & ZX_SOCKET_PEER_CLOSED) &&
+      !(signal->observed & ZX_SOCKET_READABLE)) {
+    FDF_LOG(INFO, "Client socket closed, returning to ready state");
+    ResetState();
     return;
   }
 
@@ -441,7 +590,11 @@ void VsockUsb::HandleSocketReadable(async_dispatcher_t*, async::WaitBase*, zx_st
       }
     }
   } else {
-    FDF_LOG(WARNING, "SendData failed, returning request to pool");
+    if (status == ZX_ERR_PEER_CLOSED) {
+      FDF_LOG(DEBUG, "SendData peer closed, returning request to pool");
+    } else {
+      FDF_LOG(WARNING, "SendData failed, returning request to pool");
+    }
     ZX_ASSERT(!bulk_in_ep_.RequestsFull());
     bulk_in_ep_.PutRequest(std::move(*request));
   }
@@ -531,7 +684,16 @@ void VsockUsb::SetCallback(fuchsia_hardware_vsockbridge::wire::UsbSetCallbackReq
                                                   callback_ = std::nullopt;
                                                 }
                                               })));
-  HandleSocketAvailable();
+  if (endpoints_configured_ && !peer_socket_.has_value() &&
+      !std::holds_alternative<ShuttingDown>(state_)) {
+    zx_status_t status = StartSocketSession();
+    if (status != ZX_OK) {
+      FDF_SLOG(ERROR, "Failed to start socket session on SetCallback",
+               KV("status", zx_status_get_string(status)));
+    }
+  } else {
+    HandleSocketAvailable();
+  }
 
   completer.Reply();
 }
@@ -561,7 +723,12 @@ void VsockUsb::Callback::operator()(zx::socket socket) {
       .Then([](fidl::WireUnownedResult<fuchsia_hardware_vsockbridge::Callback::NewLink>& result) {
         if (!result.ok()) {
           auto res = result.FormatDescription();
-          FDF_SLOG(ERROR, "Failed to share socket with component", KV("status", res));
+          if (IsExpectedFidlDisconnect(result.error())) {
+            FDF_SLOG(DEBUG, "Failed to share socket with disconnecting component",
+                     KV("status", res));
+          } else {
+            FDF_SLOG(ERROR, "Failed to share socket with component", KV("status", res));
+          }
         }
       });
 }
@@ -569,7 +736,11 @@ void VsockUsb::Callback::operator()(zx::socket socket) {
 VsockUsb::State VsockUsb::Unconfigured::ReceiveData(uint8_t*, size_t len,
                                                     std::optional<zx::socket>*,
                                                     VsockUsb* owner) && {
-  FDF_SLOG(WARNING, "Dropped incoming data (device not configured)", KV("bytes", len));
+  if (owner->endpoints_configured_) {
+    FDF_SLOG(DEBUG, "Dropped incoming data (no client socket connected)", KV("bytes", len));
+  } else {
+    FDF_SLOG(WARNING, "Dropped incoming data (device not configured)", KV("bytes", len));
+  }
   return std::move(*this);
 }
 
@@ -633,6 +804,7 @@ void VsockUsb::ReadComplete(fendpoint::Completion completion) {
     ZX_ASSERT(!bulk_out_ep_.RequestsFull());
     bulk_out_ep_.PutRequest(std::move(request));
     bulk_out_inspect_.UpdateRxQueue(bulk_out_ep_.GetInFlightCount());
+    CheckUnconfigureComplete();
     if (std::holds_alternative<ShuttingDown>(state_)) {
       if (!HasPendingRequests()) {
         ShutdownComplete();
@@ -696,6 +868,7 @@ void VsockUsb::ReadComplete(fendpoint::Completion completion) {
   } else {
     ZX_ASSERT(!bulk_out_ep_.RequestsFull());
     bulk_out_ep_.PutRequest(std::move(request));
+    CheckUnconfigureComplete();
     if (std::holds_alternative<ShuttingDown>(state_)) {
       FDF_LOG(DEBUG, "Shutting down from ReadComplete");
       bulk_out_inspect_.UpdateRxQueue(bulk_out_ep_.GetInFlightCount());
@@ -727,6 +900,7 @@ void VsockUsb::WriteComplete(fendpoint::Completion completion) {
   }
   ZX_ASSERT(!bulk_in_ep_.RequestsFull());
   bulk_in_ep_.PutRequest(std::move(request));
+  CheckUnconfigureComplete();
   if (std::holds_alternative<ShuttingDown>(state_)) {
     FDF_LOG(DEBUG, "Shutting down from WriteComplete");
     bulk_in_inspect_.UpdateTxQueue(bulk_in_ep_.GetInFlightCount());
@@ -750,6 +924,12 @@ void VsockUsb::Shutdown(fit::function<void()> callback) {
   if (throughput_tracker_) {
     throughput_tracker_->Stop();
   }
+
+  if (unconfigure_completer_.has_value()) {
+    unconfigure_completer_->Reply(zx::ok());
+    unconfigure_completer_.reset();
+  }
+
   // Transition to ShuttingDown before canceling endpoints so any completions delivered
   // as a result of CancelAll observe the ShuttingDown state and drain into the pool.
   state_ = ShuttingDown(std::move(callback));
@@ -763,6 +943,10 @@ void VsockUsb::Shutdown(fit::function<void()> callback) {
 
 void VsockUsb::ShutdownComplete() {
   if (auto state = std::get_if<ShuttingDown>(&state_)) {
+    if (state->IsFinished() || !bulk_out_cancelled_ || !bulk_in_cancelled_ ||
+        HasPendingRequests()) {
+      return;
+    }
     bulk_in_ep_.Close();
     bulk_out_ep_.Close();
     state->FinishWithCallback();

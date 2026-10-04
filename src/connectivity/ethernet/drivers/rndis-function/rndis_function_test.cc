@@ -27,6 +27,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <usb-inspect/usb-inspect-test-helper.h>
+#include <usb/descriptors.h>
 
 #include "src/devices/usb/lib/usb-endpoint/testing/fake-usb-endpoint-server.h"
 #include "src/lib/testing/predicates/status.h"
@@ -321,8 +322,8 @@ class RndisFunctionTest : public ::testing::Test {
     const uint8_t* data_u8 = reinterpret_cast<const uint8_t*>(data);
     fidl::Result result = function_interface_client_->Control({{
         .setup = fdescriptor::UsbSetup{{
-            .bm_request_type = USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-            .b_request = USB_CDC_SEND_ENCAPSULATED_COMMAND,
+            .bm_request_type = kClassInterfaceOut,
+            .b_request = fidl::ToUnderlying(fdescriptor::CdcRequest::kSendEncapsulatedCommand),
             .w_value = 0,
             .w_index = 0,
             .w_length = 0,
@@ -336,8 +337,8 @@ class RndisFunctionTest : public ::testing::Test {
   void ReadResponse(void* data, size_t length) {
     fidl::Result result = function_interface_client_->Control({{
         .setup = fdescriptor::UsbSetup{{
-            .bm_request_type = USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-            .b_request = USB_CDC_GET_ENCAPSULATED_RESPONSE,
+            .bm_request_type = kClassInterfaceIn,
+            .b_request = fidl::ToUnderlying(fdescriptor::CdcRequest::kGetEncapsulatedResponse),
             .w_value = 0,
             .w_index = 0,
             .w_length = static_cast<uint16_t>(length),
@@ -1046,6 +1047,47 @@ TEST_F(RndisFunctionTest, OidVendorDescription) {
   size_t actual;
   QueryOid(OID_GEN_VENDOR_DESCRIPTION, &description, sizeof(description), &actual);
   EXPECT_STREQ(description, "Google");
+}
+
+TEST_F(RndisFunctionTest, QueryOutOfBoundsBuffer) {
+  rndis_query query{
+      .msg_type = RNDIS_QUERY_MSG,
+      .msg_length = static_cast<uint32_t>(sizeof(rndis_query)),
+      .request_id = 42,
+      .oid = OID_GEN_VENDOR_DESCRIPTION,
+      .info_buffer_length = 10,
+      .info_buffer_offset = sizeof(rndis_query),
+      .reserved = 0,
+  };
+  WriteCommand(&query, sizeof(query));
+
+  rndis_query_complete response;
+  ReadResponse(&response, sizeof(response));
+
+  EXPECT_EQ(response.msg_type, static_cast<uint32_t>(RNDIS_QUERY_CMPLT));
+  EXPECT_EQ(response.request_id, 42u);
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_NOT_SUPPORTED));
+  EXPECT_EQ(response.info_buffer_length, 0u);
+}
+
+TEST_F(RndisFunctionTest, SetOutOfBoundsBuffer) {
+  rndis_set set{
+      .msg_type = RNDIS_SET_MSG,
+      .msg_length = static_cast<uint32_t>(sizeof(rndis_set)),
+      .request_id = 42,
+      .oid = OID_GEN_CURRENT_PACKET_FILTER,
+      .info_buffer_length = 4,
+      .info_buffer_offset = sizeof(rndis_set),
+      .reserved = 0,
+  };
+  WriteCommand(&set, sizeof(set));
+
+  rndis_set_complete response;
+  ReadResponse(&response, sizeof(response));
+
+  EXPECT_EQ(response.msg_type, static_cast<uint32_t>(RNDIS_SET_CMPLT));
+  EXPECT_EQ(response.request_id, 42u);
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_INVALID_DATA));
 }
 
 }  // namespace

@@ -154,7 +154,7 @@ def consolidate_crate_specs(
         # Prefer proc macro paths with an opt-exec component in the path.
         crate_dylib_path = crate.get("proc_macro_dylib_path")
         if crate_dylib_path:
-            if "-opt-exec-" in crate_dylib_path:
+            if "-opt-exec" in crate_dylib_path:
                 current["proc_macro_dylib_path"] = crate_dylib_path
 
     return list(id_to_spec.values())
